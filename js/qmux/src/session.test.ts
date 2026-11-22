@@ -1000,6 +1000,11 @@ describe("Session integration (scripted peer)", () => {
 		);
 	});
 
+	test("maxStreams past 2^60 is refused up front, as no stream ID can name it", () => {
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
+		expect(() => new Session("https://example/test", { config: { maxStreams: (1n << 60n) + 1n } })).toThrow("2^60");
+	});
+
 	test("a failed write closes the session even if the socket never reports closing", async () => {
 		const { session, peer } = connect();
 		peer.send({ type: "transport_parameters", params: peerParams() });
@@ -1045,6 +1050,70 @@ describe("Session integration (scripted peer)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("never opened");
+	});
+
+	// RFC 9000 §19: each stream frame names a half it acts on, which must exist.
+	const client = (index: bigint, dir: Stream.DirType) => Stream.Id.create(index, dir, false);
+	const server = (index: bigint, dir: Stream.DirType) => Stream.Id.create(index, dir, true);
+	const illegal: Array<[string, Frame.Any, number]> = [
+		[
+			"MAX_STREAM_DATA on the peer's uni stream",
+			{ type: "max_stream_data", id: server(0n, Stream.Dir.Uni), max: 1n },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"STOP_SENDING on the peer's uni stream",
+			{ type: "stop_sending", id: server(0n, Stream.Dir.Uni), code: VarInt.from(0) },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"STREAM_DATA_BLOCKED on our uni stream",
+			{ type: "stream_data_blocked", id: client(0n, Stream.Dir.Uni), limit: 0n },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"MAX_STREAM_DATA on a bidi stream we never opened",
+			{ type: "max_stream_data", id: client(0n, Stream.Dir.Bi), max: 1n },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"STREAM_DATA_BLOCKED on a bidi stream we never opened",
+			{ type: "stream_data_blocked", id: client(0n, Stream.Dir.Bi), limit: 0n },
+			TransportCode.STREAM_STATE_ERROR,
+		],
+		[
+			"STREAM_DATA_BLOCKED past the stream limit",
+			{ type: "stream_data_blocked", id: server(100n, Stream.Dir.Uni), limit: 0n },
+			TransportCode.STREAM_LIMIT_ERROR,
+		],
+		[
+			"MAX_STREAMS past 2^60",
+			{ type: "max_streams_bidi", max: (1n << 60n) + 1n },
+			TransportCode.FRAME_ENCODING_ERROR,
+		],
+		[
+			"STREAMS_BLOCKED past 2^60",
+			{ type: "streams_blocked_uni", limit: (1n << 60n) + 1n },
+			TransportCode.FRAME_ENCODING_ERROR,
+		],
+	];
+	for (const [name, frame, code] of illegal) {
+		test(`${name} closes the session`, async () => {
+			const { session, peer } = connect();
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+
+			peer.send(frame);
+			await expectSessionFailure(session);
+			await waitFor(() => sentCloseCode(peer) === code);
+		});
+	}
+
+	test("a peer advertising more than 2^60 streams is refused", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams({ initialMaxStreamsUni: (1n << 60n) + 1n }) });
+		await expectSessionFailure(session);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.TRANSPORT_PARAMETER_ERROR);
 	});
 
 	test("a late STREAM frame on a bidi stream we opened and stopped reading is dropped", async () => {

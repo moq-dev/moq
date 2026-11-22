@@ -61,25 +61,8 @@ window.runRecovery = async (packets) => {
 	const origin = new Moq.Origin.Producer();
 	const name = Moq.Path.from("open-gop");
 	const route = origin.route(name);
-	// Every group is written before the decoder reads from the first, so none may go stale.
 	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
 	if (!track) throw new Error("the track already exists");
-	let group: Moq.Group.Producer | undefined;
-	for (const packet of packets) {
-		if (group?.start !== BigInt(packet.group)) {
-			group?.finish();
-			group = track.createGroup(BigInt(packet.group));
-		}
-		const timestamp = Duration.micros(packet.timestamp);
-		const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));
-		group.writeFrame({
-			payload: Container.Legacy.encodeFrame(payload, timestamp),
-			timestamp: Moq.Time.Timestamp.fromMicros(packet.timestamp),
-		});
-	}
-	group?.finish();
-	track.finish();
-	track.close();
 	const config = Catalog.VideoConfigSchema.parse({
 		codec: "avc1.64001f",
 		container: { kind: "legacy" },
@@ -102,6 +85,27 @@ window.runRecovery = async (packets) => {
 	const sync = new Sync({ delay: Duration.millis(0), lookahead: Duration.millis(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {
+		// The player joins live, reading only groups written after it subscribes, so publish once it asks
+		// for a first group, as a live publisher does. Group 1 is then the join and group 4 the later gap.
+		const demand = track.demand();
+		while (!demand.refresh.peek() && !failed) await Promise.race([demand.refresh.changed(), inputDone]);
+		// Every group is written before the decoder reads past the first, so none may go stale.
+		let group: Moq.Group.Producer | undefined;
+		for (const packet of packets) {
+			if (group?.start !== BigInt(packet.group)) {
+				group?.finish();
+				group = track.createGroup(BigInt(packet.group));
+			}
+			const timestamp = Duration.micros(packet.timestamp);
+			const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));
+			group.writeFrame({
+				payload: Container.Legacy.encodeFrame(payload, timestamp),
+				timestamp: Moq.Time.Timestamp.fromMicros(packet.timestamp),
+			});
+		}
+		group?.finish();
+		track.finish();
+		track.close();
 		await inputDone;
 		if (failed) throw failed;
 		for (const codec of codecs) await codec.flush();

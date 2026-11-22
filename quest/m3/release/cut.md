@@ -234,11 +234,34 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 Decided 2026-11-20 (maintainer, /quest-plan of the pre-cut flow-control
 audit): ✅ the cut waits on the credit model (`verify-credit`),
 [#9210](https://github.com/moq-dev/moq/pull/9210)'s
-[paused-stream allowance](/quest/m1/paused-allowance.md), which merges once
-the model passes on it, and a bounded relay cache by default. Rejected: cutting with flow
+paused-stream allowance, which merges once the model passes on it, and a bounded relay cache by
+default. Rejected: cutting with flow
 control unverified; landing #9210 after the cut. The
-[JS frame cap](/quest/m1/js-frame-cap.md) ships with the cut only if it
+[JS frame cap](https://github.com/moq-dev/moq/pull/9283) ships with the cut only if it
 lands first.
+
+Decided 2026-11-21 (maintainer, /quest-plan of the main → release
+flow-control review): ✅ the cut waits on
+send-credit stalls (landed: `credit_stalls` and `credit_stalled` in session
+stats, and in the relay's `Presence`), so the release that
+ships the flow-control rework ships a counter for its failure mode, a
+connection blocked on its peer's credit (rejected: the cut not waiting;
+leaving it in m3). The peer window default
+([#9329](https://github.com/moq-dev/moq/pull/9329)) ships with the cut only if it lands first
+(rejected: the cut waiting on it). If it does, rewrite the
+[#7624](https://github.com/moq-dev/moq/pull/7624) entries in moq-relay's, moq-tokio's, and
+moq-uring's `MIGRATE.md` from its Impact section: the peer windows stay at release's 64 MiB, not 16 MiB,
+and every connection's stream window stays at release's 4 MiB, not 1 MiB. `@moq/net`'s
+"WebSocket receive windows match Rust" entry then says 4 MiB per stream.
+
+Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
+full-codebase audit): ✅ the cut waits on the release-pipeline and packaging
+bugs found in m0: simultaneous apt/rpm/brew tag cancellation and npm publish
+propagation retries, while
+[crates-trusted-publisher](/quest/m3/crates-trusted-publisher.md) adds
+`moq-vaapi` after the cut first-publishes it by token (rejected: putting all
+pipeline fixes in m1 without gating the cut; fixing only 3 publish-breaking
+bugs and dropping the rest).
 
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
@@ -278,5 +301,4 @@ candidate:
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
-- [Paused-stream allowance](/quest/m1/paused-allowance.md) - #9210 merges with its design checked
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

@@ -159,6 +159,64 @@ async fn reading_returns_flow_control_credit() {
 	}
 }
 
+/// A writer the peer gives no more credit counts one stall, timed while the peer holds it back,
+/// with nothing else on the wire but pings, and ended by the credit reading returns. The
+/// reader, which never ran out of credit, counts none, and counts its window held by a reader
+/// that has not looked for the same time.
+#[tokio::test(start_paused = true)]
+async fn a_writer_out_of_credit_counts_one_stall() {
+	for &version in Version::ALL {
+		let window = moq_net::transport::MIN_RECEIVE_WINDOW;
+		let mut small = config(version);
+		small.limits.receive_window = std::num::NonZeroU64::new(window);
+		small.limits.stream_receive_window = std::num::NonZeroU64::new(window);
+		let (client, server) = pair(config(version), small).await;
+		let (sent, received) = (client.wire().unwrap(), server.wire().unwrap());
+
+		// One byte past the credit.
+		let data = payload(window as usize + 1, 7);
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		let writer = tokio::spawn(async move {
+			write_all(&mut send, data).await;
+			send
+		});
+		let mut recv = server.accept_uni().await.unwrap();
+		kio::clock::sleep(Duration::from_secs(5)).await;
+		assert_eq!(sent.credit_stalls(), 1, "{version:?}");
+		// Draft-00 has no pings, so nothing steps its connection until the credit arrives.
+		if version.uses_records() {
+			let held = sent.credit_stalled();
+			assert!(
+				held >= Duration::from_secs(4),
+				"{version:?}: accrued {held:?} by the pings"
+			);
+		}
+
+		read_exact(&mut recv, window as usize).await.unwrap();
+		read_exact(&mut recv, 1).await.unwrap();
+		let _send = writer.await.unwrap();
+		kio::clock::sleep(Duration::from_secs(5)).await;
+		assert_eq!(sent.credit_stalls(), 1, "{version:?}");
+		let stalled = sent.credit_stalled();
+		assert!(
+			(Duration::from_secs(5)..Duration::from_secs(6)).contains(&stalled),
+			"{version:?}: stalled {stalled:?}, until the read at 5s"
+		);
+		assert_eq!(
+			(received.credit_stalls(), received.credit_stalled()),
+			(0, Duration::ZERO)
+		);
+		// The reader looked only at 5s, so until then the receiver's window was held by it.
+		let held = received.credit_held_readers();
+		assert!(
+			(Duration::from_secs(5)..Duration::from_secs(6)).contains(&held),
+			"{version:?}: held {held:?}, until the read at 5s"
+		);
+		assert_eq!(received.credit_held_evicted(), Duration::ZERO, "{version:?}");
+		assert_eq!(sent.credit_held_readers(), Duration::ZERO, "{version:?}");
+	}
+}
+
 /// Lease `want` bytes, returning how many were leased and handing them back unread, so they
 /// keep their credit.
 async fn lease(recv: &mut RecvStream, want: usize) -> Result<usize, Error> {
@@ -731,7 +789,6 @@ async fn an_oversized_record_is_a_frame_encoding_error() {
 			raw.write_all(&record).await.unwrap();
 			let err = session.closed().await;
 			assert!(matches!(err, Error::FrameEncoding), "got {err:?}");
-			assert_eq!(session.wire().unwrap().received_bytes(), max_record_size);
 			let mut sent = Vec::new();
 			raw.read_to_end(&mut sent).await.unwrap();
 			assert!(
@@ -777,8 +834,168 @@ async fn an_oversized_websocket_message_is_a_frame_encoding_error() {
 	}
 }
 
+/// A socket whose counts a test sets, and which tallies how often they are read.
+#[derive(Default)]
+struct CountedSocket {
+	counts: Mutex<crate::SocketBytes>,
+	reads: std::sync::atomic::AtomicU64,
+}
+
+impl CountedSocket {
+	fn set(&self, sent: u64, received: u64) {
+		*self.counts.lock().unwrap() = crate::SocketBytes { sent, received };
+	}
+
+	fn reads(&self) -> u64 {
+		self.reads.load(std::sync::atomic::Ordering::Relaxed)
+	}
+}
+
+impl crate::SocketStats for CountedSocket {
+	fn bytes(&self) -> Option<crate::SocketBytes> {
+		self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		Some(*self.counts.lock().unwrap())
+	}
+}
+
+/// The wire counters are the socket's, not the records' bytes: read at most once per
+/// `WIRE_INTERVAL` however many records move, again when the interval ends on a burst's last
+/// bytes with nothing else to wake the driver, and once more when the session ends.
 #[tokio::test(start_paused = true)]
-async fn the_wire_counters_track_both_directions() {
+async fn the_wire_counters_follow_the_socket() {
+	let socket = Arc::new(CountedSocket::default());
+	socket.set(100, 200);
+	// Nothing but traffic may step the driver, so only it reads the socket.
+	let mut quiet = config(Version::QMux02);
+	quiet.rtt_interval = None;
+	quiet.idle_timeout = None;
+	let (client, server) = tokio::io::duplex(PIPE);
+	let client = Session::connect(
+		Stream::new(client).with_socket_stats(socket.clone() as crate::SharedSocketStats),
+		quiet.clone(),
+	);
+	let server = Session::accept(Stream::new(server), quiet);
+	let (client, server) = tokio::join!(client, server);
+	let (client, driver) = client.expect("client handshake");
+	let driver = tokio::spawn(driver);
+	let server = spawn(server.expect("server handshake"));
+	let wire = client.wire().unwrap();
+	assert_eq!(
+		(wire.sent_bytes(), wire.received_bytes()),
+		(100, 200),
+		"the handshake read"
+	);
+	let reads = socket.reads();
+
+	// A burst of records inside one interval reads nothing, and shows the earlier count.
+	socket.set(300, 400);
+	for seed in 0..20 {
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		write_all(&mut send, payload(100, seed)).await;
+		send.finish().unwrap();
+		let mut recv = server.accept_uni().await.unwrap();
+		read_all(&mut recv).await.unwrap();
+	}
+	assert_eq!(socket.reads(), reads, "a read per record");
+	assert_eq!((wire.sent_bytes(), wire.received_bytes()), (100, 200));
+
+	// The interval ends with nothing to wake the driver but the read it owes.
+	kio::clock::sleep(crate::driver::WIRE_INTERVAL + Duration::from_millis(1)).await;
+	assert_eq!(socket.reads(), reads + 1);
+	assert_eq!((wire.sent_bytes(), wire.received_bytes()), (300, 400));
+
+	// An idle connection owes none.
+	kio::clock::sleep(crate::driver::WIRE_INTERVAL * 4).await;
+	assert_eq!(socket.reads(), reads + 1);
+
+	// Ending the session keeps the last count, even from inside an interval.
+	socket.set(500, 600);
+	client.close(0, "done");
+	driver.await.unwrap();
+	assert_eq!((wire.sent_bytes(), wire.received_bytes()), (500, 600));
+}
+
+/// A byte stream that only reaches its socket when flushed, as TLS and WebSocket buffers do,
+/// and the socket that counts what it flushed.
+struct Buffered {
+	inner: Stream<DuplexStream>,
+	queued: u64,
+	socket: Arc<CountedSocket>,
+}
+
+impl Transport for Buffered {
+	fn bind(&mut self, config: &Config) {
+		self.inner.bind(config);
+	}
+
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		self.inner.poll_recv(waiter)
+	}
+
+	fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.inner.poll_ready(waiter)
+	}
+
+	fn send(&mut self, record: Bytes) -> Result<(), Error> {
+		self.queued += record.len() as u64;
+		self.inner.send(record)
+	}
+
+	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let flushed = self.inner.poll_flush(waiter);
+		if flushed.is_ready() {
+			let sent = self.socket.counts.lock().unwrap().sent;
+			self.socket.set(sent + std::mem::take(&mut self.queued), 0);
+		}
+		flushed
+	}
+
+	fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.inner.poll_close(waiter)
+	}
+
+	fn socket_stats(&self) -> Option<crate::SharedSocketStats> {
+		Some(self.socket.clone())
+	}
+}
+
+/// A burst after an idle interval is counted once the transport flushed it, not at the step
+/// that only handed it to the transport's buffer, with nothing later to correct the count.
+#[tokio::test(start_paused = true)]
+async fn the_wire_counters_wait_for_the_flush() {
+	let socket = Arc::new(CountedSocket::default());
+	let mut quiet = config(Version::QMux02);
+	quiet.rtt_interval = None;
+	quiet.idle_timeout = None;
+	let (client, server) = tokio::io::duplex(PIPE);
+	let client = Session::connect(
+		Buffered {
+			inner: Stream::new(client),
+			queued: 0,
+			socket: socket.clone(),
+		},
+		quiet.clone(),
+	);
+	let server = Session::accept(Stream::new(server), quiet);
+	let (client, server) = tokio::join!(client, server);
+	let client = spawn(client.expect("client handshake"));
+	let server = spawn(server.expect("server handshake"));
+
+	kio::clock::sleep(crate::driver::WIRE_INTERVAL * 2).await;
+	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut send, payload(100, 1)).await;
+	send.finish().unwrap();
+	read_all(&mut server.accept_uni().await.unwrap()).await.unwrap();
+
+	let flushed = socket.counts.lock().unwrap().sent;
+	assert!(flushed >= 100, "flushed {flushed}");
+	assert_eq!(client.wire().unwrap().sent_bytes(), flushed);
+}
+
+/// A session over a byte stream with no kernel behind it counts nothing, rather than an
+/// estimate from its records.
+#[tokio::test(start_paused = true)]
+async fn a_session_without_a_socket_counts_no_wire_bytes() {
 	let (client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
 	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
 	write_all(&mut send, payload(100_000, 1)).await;
@@ -787,10 +1004,8 @@ async fn the_wire_counters_track_both_directions() {
 	read_all(&mut recv).await.unwrap();
 	send.closed().await.unwrap();
 
-	let sent = client.wire().unwrap().sent_bytes();
-	let received = server.wire().unwrap().received_bytes();
-	assert!(sent >= 100_000, "sent {sent}");
-	assert!(received >= 100_000, "received {received}");
+	let wire = client.wire().unwrap();
+	assert_eq!((wire.sent_bytes(), wire.received_bytes()), (0, 0));
 }
 
 /// A local close keeps reading the peer until it finishes, since closing a TCP socket with

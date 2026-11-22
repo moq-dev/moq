@@ -20,8 +20,9 @@
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
 //! so a returning reader still finds the cache) and no consumer holds its broadcast,
-//! it ends, and the next request mints a fresh one. A front waiting for a route is
-//! not idle.
+//! it ends, and the next request mints a fresh one. That includes a front still asking
+//! a route, so the request it held learns nobody waits on it; a front waiting for a
+//! route to appear is not idle.
 //!
 //! Sources and tracks are named by ids and names, never handles, so a
 //! transition can be checked in a unit test by comparing the actions it emits.
@@ -306,6 +307,11 @@ impl Front {
 		!self.orphans.is_empty()
 	}
 
+	/// The route an upstream request is in flight through, if any.
+	pub(super) fn asking(&self) -> Option<u64> {
+		self.upstream.map(|upstream| upstream.route)
+	}
+
 	/// The route the attached source came through, if any.
 	pub(super) fn serving_route(&self) -> Option<u64> {
 		self.serving.map(|(_, candidate)| candidate.route)
@@ -428,9 +434,10 @@ impl Front {
 	}
 
 	/// Whether nothing needs the front: no track is left, even a lingering one, no
-	/// consumer holds its broadcast, and it serves from a source with no route pending.
+	/// consumer holds its broadcast, and it serves from a source or asks a route for one.
+	/// Ending one that asks drops its request, so the route's claimant learns nobody waits.
 	fn idle(&self) -> bool {
-		!self.held && self.tracks.is_empty() && self.serving.is_some() && self.upstream.is_none()
+		!self.held && self.tracks.is_empty() && (self.serving.is_some() || self.upstream.is_some())
 	}
 
 	fn selected(&mut self, best: Option<Candidate>, serving_closing: bool, actions: &mut Vec<Action>) {
@@ -2576,24 +2583,10 @@ mod tests {
 		assert_actions(front.step(Event::Unheld), &[Action::Retire]);
 	}
 
-	/// A front waiting for a route is not idle, though nobody holds it: neither one
-	/// still resolving nor one whose source died while it asks another route.
+	/// A front nobody holds stays while it waits to learn a route, and retires once it asks
+	/// one, rather than waiting on an answer nobody will read.
 	#[test]
-	fn a_front_waiting_for_a_route_stays() {
-		let mut front = Front::new(LINGER);
-		front.step(Event::Selected {
-			best: Some(remote(1)),
-			serving_closing: false,
-		});
-		assert_actions(front.step(Event::Unheld), &[]);
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 1,
-				result: Ok(100),
-			}),
-			&[Action::Resolve, Action::Retire],
-		);
-
+	fn an_unheld_front_retires_once_it_asks() {
 		let mut front = serving(local(1), 100);
 		front.step(Event::Unwanted {
 			track: name("video"),
@@ -2616,15 +2609,16 @@ mod tests {
 				best: Some(remote(2)),
 				serving_closing: false,
 			}),
-			&[Action::Request { route: 2 }],
+			&[Action::Request { route: 2 }, Action::Retire],
 		);
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 2,
-				result: Ok(200),
-			}),
-			&[Action::Retire],
-		);
+
+		// Still resolving its first route.
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(remote(1)),
+			serving_closing: false,
+		});
+		assert_actions(front.step(Event::Unheld), &[Action::Retire]);
 	}
 
 	/// A request that joined before the driver could retire the front keeps it: the

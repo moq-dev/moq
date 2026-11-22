@@ -138,15 +138,26 @@ impl<O: Output> Video<O> {
 	}
 
 	/// A subscription's budget with `held` on top of its own.
-	fn budget(&self, held: Duration) -> moq_net::track::Delay {
-		moq_net::track::Delay {
+	fn budget(&self, held: Duration) -> moq_mux::container::Delay {
+		moq_mux::container::Delay {
 			min: Some(self.min_delay + held),
 			max: Some(self.max_delay + held),
 		}
 	}
 
 	/// Play `track` through `decoder`.
-	pub async fn run<D: Decoder>(self, mut track: Track, mut decoder: D) -> anyhow::Result<()> {
+	#[cfg(test)]
+	pub async fn run<D: Decoder>(self, track: Track, decoder: D) -> anyhow::Result<()> {
+		self.resume(None, track, decoder).await
+	}
+
+	/// Play `track` through `decoder`, starting with `first`, already read from it.
+	pub async fn resume<D: Decoder>(
+		self,
+		mut first: Option<Read>,
+		mut track: Track,
+		mut decoder: D,
+	) -> anyhow::Result<()> {
 		let closed = std::sync::atomic::AtomicBool::new(false);
 		// One segment per encoder between declared ends, oldest first.
 		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
@@ -207,7 +218,10 @@ impl<O: Output> Video<O> {
 						}
 					}
 				}
-				let read = tokio::select! {
+				let read = if let Some(read) = first.take() {
+					Some(read)
+				} else {
+					tokio::select! {
 					read = track.read() => read?,
 					Ok(()) = encoder.changed() => {
 						target(*encoder.borrow_and_update());
@@ -217,6 +231,7 @@ impl<O: Output> Video<O> {
 						shared = delay;
 						follow(&mut track, &mut held, shared);
 						continue;
+					}
 					}
 				};
 				let mut buffers = buffers.lock().unwrap();
@@ -519,6 +534,7 @@ mod tests {
 			playhead: Default::default(),
 			drained: Default::default(),
 			output: Recorder::default(),
+			viewport: tokio::sync::watch::channel(None).1,
 		}
 	}
 
@@ -650,10 +666,11 @@ mod tests {
 		let subscriber = source
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay {
+				moq_mux::container::Delay {
 					min: Some(min),
 					max: Some(max),
-				}),
+				}
+				.subscription(moq_net::track::Subscription::default()),
 			)
 			.await
 			.unwrap();
@@ -683,13 +700,16 @@ mod tests {
 		assert_eq!(picture, 0, "the first picture was kept until it was due");
 		assert!((5_000..5_100).contains(&at), "played in sync with audio: {at}");
 		let held = shared - min;
+		// The live join resolved once, so only the budget follows the shared delay.
 		assert_eq!(
-			source.subscription().map(|subscription| subscription.delay),
-			Some(moq_net::track::Delay {
-				min: Some(min + held),
-				max: Some(max + held),
-			}),
-			"the subscription's budgets grow with the shared delay"
+			source
+				.subscription()
+				.map(|subscription| (subscription.delay, subscription.ranges)),
+			Some((
+				moq_net::track::Delay::default().with_max(max + held),
+				vec![moq_net::track::Range::from(moq_net::track::Start::Live(min))],
+			)),
+			"the subscription's budget grows with the shared delay"
 		);
 		let _finished = producer.finish().unwrap();
 		task.await.unwrap().unwrap();
@@ -1288,8 +1308,10 @@ mod tests {
 		let subscriber = published
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay)),
+				moq_mux::container::Delay::default()
+					.with_min(delay)
+					.with_max(delay)
+					.subscription(moq_net::track::Subscription::default()),
 			)
 			.await
 			.unwrap();

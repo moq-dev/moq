@@ -269,44 +269,53 @@ function extractDescription(entry: Box): Uint8Array | undefined {
  * Extract AudioSpecificConfig from an esds box payload.
  * The esds contains nested descriptors: ES_Descriptor (0x03) → DecoderConfigDescriptor (0x04)
  * → DecoderSpecificInfo (0x05). The DecoderSpecificInfo payload is the AudioSpecificConfig
- * that AudioDecoder.configure() expects.
+ * that AudioDecoder.configure() expects. Undefined when there is none, as for MP3.
  */
 function extractAudioSpecificConfig(esds: Uint8Array): Uint8Array | undefined {
-	// Skip version + flags (4 bytes)
-	let offset = 4;
+	// Skip version + flags (4 bytes).
+	const es = descriptor(esds.subarray(4), 0x03);
+	if (!es) return undefined;
 
-	// Scan for DecoderSpecificInfo tag (0x05)
-	while (offset < esds.length) {
-		const tag = esds[offset++];
+	// ISO/IEC 14496-1 §7.2.6.5: ES_ID (2), then flags that each add an optional field.
+	const flags = es[2];
+	if (flags === undefined) throw new Error("Truncated ES_Descriptor");
+	let offset = 3;
+	if (flags & 0x80) offset += 2; // streamDependenceFlag: dependsOn_ES_ID
+	if (flags & 0x40) {
+		// URL_Flag: URLlength, then URLstring.
+		const length = es[offset];
+		if (length === undefined) throw new Error("Truncated ES_Descriptor");
+		offset += 1 + length;
+	}
+	if (flags & 0x20) offset += 2; // OCRstreamFlag: OCR_ES_Id
+	if (offset > es.length) throw new Error("Truncated ES_Descriptor");
 
-		// Parse variable-length size (up to 4 bytes, high bit = continuation)
+	const config = descriptor(es.subarray(offset), 0x04);
+	if (!config) return undefined;
+	// objectTypeIndication (1) + streamType (1) + bufferSizeDB (3) + maxBitrate (4) + avgBitrate (4)
+	if (config.length < 13) throw new Error("Truncated DecoderConfigDescriptor");
+	return descriptor(config.subarray(13), 0x05);
+}
+
+/** The payload of the first descriptor tagged `tag` among the descriptors packed in `data`. */
+function descriptor(data: Uint8Array, tag: number): Uint8Array | undefined {
+	let offset = 0;
+	while (offset < data.length) {
+		const found = data[offset++];
+
+		// Variable-length size: up to 4 bytes, high bit = continuation.
 		let size = 0;
-		for (let i = 0; i < 4 && offset < esds.length; i++) {
-			const b = esds[offset++];
+		for (let i = 0; ; i++) {
+			const b = data[offset++];
+			if (b === undefined || i === 4) throw new Error("Truncated descriptor size");
 			size = (size << 7) | (b & 0x7f);
 			if ((b & 0x80) === 0) break;
 		}
+		if (offset + size > data.length) throw new Error("Truncated descriptor");
 
-		if (tag === 0x05) {
-			// Found DecoderSpecificInfo - payload is the AudioSpecificConfig
-			if (offset + size <= esds.length) {
-				return new Uint8Array(esds.buffer, esds.byteOffset + offset, size);
-			}
-			return undefined;
-		}
-
-		// For container descriptors (0x03, 0x04), skip their fixed header fields
-		// but continue scanning their children (don't skip the full size).
-		if (tag === 0x03) {
-			offset += 3; // ES_ID (2) + flags (1)
-		} else if (tag === 0x04) {
-			offset += 13; // objectTypeIndication (1) + streamType (1) + bufferSizeDB (3) + maxBitrate (4) + avgBitrate (4)
-		} else {
-			// Unknown tag - skip its payload entirely
-			offset += size;
-		}
+		if (found === tag) return data.subarray(offset, offset + size);
+		offset += size;
 	}
-
 	return undefined;
 }
 

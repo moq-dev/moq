@@ -2,7 +2,11 @@
 //! [`NVENCSTATUS`](crate::sys::nvEncodeAPI::NVENCSTATUS) to provide ergonomic
 //! error handling.
 
-use std::{error::Error, ffi::CStr, fmt};
+use std::{
+	error::Error,
+	ffi::{c_char, CStr},
+	fmt,
+};
 
 use super::encoder::Encoder;
 use crate::sys::nvEncodeAPI::NVENCSTATUS;
@@ -210,6 +214,19 @@ impl From<NVENCSTATUS> for ErrorKind {
 	}
 }
 
+/// Copy the driver's last error message; the driver has none for an encoder it
+/// cannot describe, and answers with a null pointer.
+///
+/// # Safety
+///
+/// A non-null `ptr` must point at a NUL-terminated string that outlives the call.
+unsafe fn last_error_string(ptr: *const c_char) -> Option<String> {
+	if ptr.is_null() {
+		return None;
+	}
+	Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+}
+
 impl NVENCSTATUS {
 	/// Convert an [`NVENCSTATUS`] to a [`Result`].
 	///
@@ -250,11 +267,7 @@ impl NVENCSTATUS {
 					None
 				}
 				// Otherwise allocate an owned `String` with the error.
-				_ => Some(
-					unsafe { CStr::from_ptr((encoder.api.get_last_error_string)(encoder.ptr)) }
-						.to_string_lossy()
-						.to_string(),
-				),
+				_ => unsafe { last_error_string((encoder.api.get_last_error_string)(encoder.ptr)) },
 			}
 			.and_then(|s| if s.is_empty() { None } else { Some(s) });
 			err
@@ -284,5 +297,26 @@ impl NVENCSTATUS {
 				cleanup: None,
 			}),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::ffi::CString;
+
+	use super::*;
+
+	#[test]
+	fn missing_error_string_is_none() {
+		assert_eq!(unsafe { last_error_string(std::ptr::null()) }, None);
+	}
+
+	#[test]
+	fn error_string_is_copied() {
+		let message = CString::new("EncodeAPI Internal Error.").unwrap();
+		assert_eq!(
+			unsafe { last_error_string(message.as_ptr()) }.as_deref(),
+			Some("EncodeAPI Internal Error.")
+		);
 	}
 }

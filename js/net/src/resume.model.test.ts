@@ -16,6 +16,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import * as cache from "./cache.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -24,7 +25,6 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
-import { routeFailed } from "./resume.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -113,6 +113,11 @@ interface Case {
 	ops: Op[];
 	/** Every live route declares the end once it has caught up. */
 	finish: boolean;
+	/**
+	 * The routes are local publishers rather than received copies: only for a regression of a local
+	 * track's own rules, which no JS track test covers.
+	 */
+	local?: boolean;
 }
 
 const range: fc.Arbitrary<Range> = fc.option(
@@ -307,6 +312,16 @@ interface Reader {
 	parked: boolean;
 	/** What every live route carried in full when the track ended cleanly. */
 	carried: Set<number>;
+	/**
+	 * Where an ordered read that ran out of its bounded range passed every key below for good: a
+	 * range edit reads on only above it, so below it the read owes what it owed then.
+	 */
+	passed?: number;
+	/**
+	 * The group holding the range's start time when an arrival read first placed the range, as the
+	 * routes wrote groups then: what it owes starts there. See {@link Model.place}.
+	 */
+	holding?: number;
 }
 
 /**
@@ -315,6 +330,11 @@ interface Reader {
  */
 function capped(reader: Reader): boolean {
 	return (reader.cursor?.[1] ?? GROUPS) < GROUPS;
+}
+
+/** Whether `group` lies below the end the reader's ordered read passed for good. */
+function passedBelow(reader: Reader, group: number): boolean {
+	return reader.passed !== undefined && group < reader.passed;
 }
 
 function intersect(a: Range, b: Range): Range {
@@ -326,8 +346,18 @@ function within(range: Range, group: number): boolean {
 	return range === undefined || (range[0] <= group && group < range[1]);
 }
 
+/**
+ * The subscription's group range as a plain reader of the route places it: from the group holding
+ * its start time. Mirrors the Rust model's `Reader::owes`.
+ */
+function owedRange(reader: Reader): Range {
+	const range = reader.ranges;
+	if (range === undefined || reader.holding === undefined) return range;
+	return [Math.min(reader.holding, range[0]), range[1]];
+}
+
 function covers(reader: Reader, group: number): boolean {
-	return within(reader.cursor, group);
+	return within(intersect(owedRange(reader), reader.local), group);
 }
 
 /**
@@ -382,8 +412,12 @@ class Model {
 	/** Bumped by every frame read, so settling sees progress no reader flag shows. */
 	progress = 0;
 
-	constructor(clock: Manual) {
+	/** See {@link Case.local}. */
+	local: boolean;
+
+	constructor(clock: Manual, local = false) {
 		this.clock = clock;
+		this.local = local;
 		this.consumer = this.origin.consume();
 	}
 
@@ -471,12 +505,13 @@ class Model {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
 				reader.ranges = op.range;
+				reader.holding = undefined;
 				reader.cursor = intersect(op.range, reader.local);
 				reader.sub.update(subscription(reader.spec.budget, op.range));
 				// A read that ended at its range's end reads on once the range widens.
 				if (reader.end === null && !this.instances[reader.instance].ended) {
 					reader.end = undefined;
-					reader.carried = new Set();
+					reader.carried = new Set([...reader.carried].filter((group) => passedBelow(reader, group)));
 				}
 				this.poll(op.reader);
 				break;
@@ -508,6 +543,14 @@ class Model {
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
 		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		if (!this.local) {
+			// Nothing drives a Rust route's pool, so its cache never expires: idle groups stay here too.
+			hooks.poolTrack(producer, new cache.Pool());
+			// The route's live feed, received from its publisher over a wire that reports no range's
+			// start, so its readers place starts against what it holds: the Rust model's `received()`.
+			hooks.receiveTrack(producer);
+			hooks.dropAnchors(producer);
+		}
 		void (async () => {
 			for await (const request of serving.requested()) {
 				request.serve(Upstream.of(broadcast, (key, local) => this.fill(instance, slot, key, local)));
@@ -669,7 +712,6 @@ class Model {
 		reader.request.close();
 	}
 
-	/** Read everything `index` has ready, checking each step against the model. */
 	/**
 	 * The read ended cleanly, with the track or, for a bounded range, once that range is read and a
 	 * local cap holds nothing back: a group landing below the end afterwards is not owed, since a
@@ -680,13 +722,23 @@ class Model {
 		if (!instance.ended && reader.ranges === undefined) {
 			throw fail(index, "the track ended cleanly though no route declared an end");
 		}
-		const covered = (group: number) => (instance.ended ? covers(reader, group) : within(reader.ranges, group));
-		reader.carried = new Set();
+		// Where the range placed decides what it owes, so record it before the snapshot.
+		this.#place(reader);
+		// An ordered read passes what its floor keeps out, as `owed` judges a read that ended.
+		const covered = (group: number) =>
+			instance.ended
+				? covers(reader, group)
+				: within(owedRange(reader), group) &&
+					(!reader.spec.ordered || reader.local === undefined || group >= reader.local[0]);
+		// Below an end an ordered read passed, it still owes what it owed when it passed it.
+		reader.carried = new Set([...reader.carried].filter((group) => passedBelow(reader, group)));
 		for (let group = 0; group < GROUPS; group++) {
+			if (passedBelow(reader, group)) continue;
 			if (covered(group) && instance.live().every((copy) => complete(copy, group))) reader.carried.add(group);
 		}
 	}
 
+	/** Read everything `index` has ready, checking each step against the model. */
 	poll(index: number): void {
 		const reader = this.readers[index];
 		if (!reader) return;
@@ -732,6 +784,9 @@ class Model {
 			} else if (recv.kind === "done") {
 				if (!reader.parked) this.#endClean(index, reader);
 				reader.end = null;
+				// An ordered read passes every key below its bounded range's end, or its cap when lower.
+				const end = reader.ranges && Math.min(reader.ranges[1], reader.local?.[1] ?? GROUPS);
+				if (reader.spec.ordered && end !== undefined) reader.passed = Math.max(reader.passed ?? end, end);
 			} else if (recv.kind === "error") {
 				if (!reader.doomed) throw fail(index, `the track failed while its instance had a route: ${recv.error}`);
 				reader.end = recv.error;
@@ -823,9 +878,39 @@ class Model {
 				}
 			}
 			quiet = woken ? 0 : quiet + 1;
-			if (quiet === 2) return;
+			if (quiet === 2) {
+				this.place();
+				return;
+			}
 		}
 		throw new Error("readers never settled: something keeps waking them");
+	}
+
+	/**
+	 * Record, for each arrival reader whose range just placed, the group holding its start time:
+	 * the newest group at or before it the instance wrote, when every live route holds it and none
+	 * between was written or given up anywhere, so whichever route places the range starts it
+	 * there. Otherwise its start time stands, owing only from there. Mirrors the Rust `Model::place`.
+	 */
+	place(): void {
+		for (const reader of this.readers) {
+			if (reader) this.#place(reader);
+		}
+	}
+
+	#place(reader: Reader): void {
+		if (reader.spec.ordered || reader.ranges === undefined || reader.holding !== undefined) return;
+		if (hooks.servingResolved(reader.sub)[0] === undefined) return;
+		const publisher = this.instances[reader.instance];
+		const start = reader.ranges[0];
+		let holding = start;
+		for (let group = start; group >= 0; group--) {
+			if (!publisher.written.has(group) && !publisher.givenUp.has(group)) continue;
+			const held = publisher.live().every((copy) => copy.groups.has(group) && !copy.givenUp.has(group));
+			if (held) holding = group;
+			break;
+		}
+		reader.holding = holding;
 	}
 
 	/**
@@ -879,7 +964,7 @@ class Model {
 		const readRange = reader.end === null && !instance.ended;
 		const owes = (group: number) =>
 			readRange
-				? within(reader.ranges, group) &&
+				? within(owedRange(reader), group) &&
 					(!reader.spec.ordered || reader.local === undefined || group >= reader.local[0])
 				: covers(reader, group);
 		let owed: number[] = [];
@@ -889,6 +974,7 @@ class Model {
 		}
 		if (reader.spec.ordered && before !== undefined) owed = owed.filter((group) => group > before);
 		if (ended) owed = owed.filter((group) => reader.carried.has(group));
+		else owed = owed.filter((group) => !passedBelow(reader, group) || reader.carried.has(group));
 		if (reader.spec.budget === "short") owed = owed.filter((group) => group === GROUPS - 1);
 		const missing = owed.filter((group) => !reader.reading.has(group));
 		let problems = "";
@@ -900,8 +986,6 @@ class Model {
 				// or from the route it would continue from.
 				const gone = reading.end instanceof TooFarBehind || reading.end instanceof NotFound;
 				if (gone && instance.expired !== undefined && key <= instance.expired) continue;
-				// Unlike Rust, an ended JS reader follows no route, so a route failure ends a group still read.
-				if (ended && reading.end instanceof Error && routeFailed(reading.end)) continue;
 				problems += `group ${key} stopped at frame ${reading.frames} (${reading.end}); `;
 			}
 		}
@@ -937,7 +1021,7 @@ class Model {
 async function run(c: Case): Promise<void> {
 	const clock = new Manual();
 	const installed = clock.install();
-	const model = new Model(clock);
+	const model = new Model(clock, c.local);
 	try {
 		model.up(0, 0);
 		for (const op of c.ops) {
@@ -1005,6 +1089,33 @@ test("regressions", async () => {
 		drops,
 	});
 	const regressions: Case[] = [
+		// A range moved under the serving copy's resume point starts at the group holding its start
+		// time, which only a backfill from below that point places. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [8, 12], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 3 },
+				{ kind: "write", instance: 0, slot: 0, group: 6, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 6, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 8, frames: 3 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "ranges", reader: 0, range: [7, 12] },
+			],
+			finish: false,
+		},
+		// A copy resumed at group 0 is asked from there, its ranges clamped where the reader's window
+		// placed them, as any other resume point: the group holding a time start reads on through it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [2, 3], false) },
+				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "down", instance: 1, slot: 1 },
+			],
+			finish: false,
+		},
 		// A group the serving route closes short as it fails reads on from the route that
 		// replaces it, which holds the rest. Mirrors the Rust case.
 		{
@@ -1323,6 +1434,7 @@ test("regressions", async () => {
 				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: true,
+			local: true,
 		},
 		// A local floor holds a read open only for a group the cache holds under it, so a range whose
 		// groups never arrived ends.
@@ -1348,6 +1460,7 @@ test("regressions", async () => {
 				{ kind: "up", instance: 0, slot: 1 },
 			],
 			finish: true,
+			local: true,
 		},
 		// A replaced copy is waited on only for groups the reader's window names.
 		{
@@ -1404,6 +1517,130 @@ test("regressions", async () => {
 				{ kind: "down", instance: 1, slot: 1 },
 				{ kind: "ranges", reader: 1, range: [1, 7] },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+			],
+			finish: false,
+		},
+		// A group the local floor keeps out of where an earlier copy placed a range, below where the
+		// serving copy places it: the read runs without a stall. The oracle owes nothing below the
+		// serving copy's placement, so it does not check that group yet; see
+		// quest/m0/nightly/resume-model-placement.md. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },
+				{ kind: "bounds", reader: 2, range: [1, 9] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// An ordered read of a received route waits for a key below a group landing past its range,
+		// since the feed may still land it, then ends with the range. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "ranges", reader: 3, range: [0, 1] },
+				{ kind: "advance", ms: 1 },
+			],
+			finish: false,
+		},
+		// The same across a route switch, with the range widened past the range's end.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(true, "hour", [0, 1], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "close", instance: 0, slot: 0, group: undefined, down: true },
+				{ kind: "ranges", reader: 2, range: undefined },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+			],
+			finish: false,
+		},
+		// The same once the route it waits on fails, with the group below landing on the next route.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
+				{ kind: "write", instance: 0, slot: 2, group: 1, frames: 1 },
+				{ kind: "down", instance: 0, slot: 2 },
+				{ kind: "ranges", reader: 3, range: undefined },
+				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+			],
+			finish: false,
+		},
+		// A received route places a time start at the newest group it holds at or before it, so the
+		// group holding it is handed out before a switch, not placed later at the time's own key.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "ranges", reader: 0, range: [1, 2] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "down", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// The same with the switch's route closing the group as it fails.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
+				{ kind: "write", instance: 1, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "close", instance: 1, slot: 1, group: 0, down: true },
+				{ kind: "up", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// A route's give-up outlives an expiry, as a Rust route's does, so an ordered read joining
+		// after it is not held on the group given up.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "short", [2, 3], false) },
+				{ kind: "giveUp", instance: 0, slot: 0, group: 1 },
+				{ kind: "expire" },
+				{ kind: "join", reader: 1, spec: spec(true, "hour", undefined, false) },
+				{ kind: "advance", ms: 1 },
+			],
+			finish: false,
+		},
+		// An ordered read waiting below a group its route then closes short and fails takes that
+		// group from the failed copy, still buffered for it, and reads on from the next route.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 5], false) },
+				{ kind: "write", instance: 1, slot: 1, group: 4, frames: 1 },
+				{ kind: "close", instance: 1, slot: 1, group: undefined, down: true },
+			],
+			finish: false,
+		},
+		// Once the track ended, a group still read that its route closes short and then fails
+		// continues from the copy the front serves next, as the Rust front's reader does.
+		{
+			ops: [
+				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 1 },
+				{ kind: "end", instance: 0, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "close", instance: 0, slot: 0, group: undefined, down: true },
+				{ kind: "up", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// The same once a route that closed the group short ends the track and then fails.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "write", instance: 1, slot: 2, group: 11, frames: 1 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", [5, 12], false) },
+				{ kind: "close", instance: 1, slot: 2, group: undefined, down: false },
+				{ kind: "end", instance: 1, slot: 2 },
+				{ kind: "down", instance: 1, slot: 2 },
 			],
 			finish: false,
 		},

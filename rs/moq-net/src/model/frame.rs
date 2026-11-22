@@ -1349,7 +1349,13 @@ impl Producer {
 	/// segment is the rest of the frame.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn unsealed(&self) -> usize {
-		let written = self.buf.written(Ordering::Acquire);
+		self.unsealed_after(0)
+	}
+
+	/// [`Self::unsealed`] once `more` bytes are written.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn unsealed_after(&self, more: usize) -> usize {
+		let written = self.buf.written(Ordering::Acquire) + more;
 		let end = (written / SEGMENT + 1).saturating_mul(SEGMENT).min(self.buf.size());
 		end - written
 	}
@@ -1388,6 +1394,15 @@ impl Producer {
 	pub(crate) fn poll_ready(&self, waiter: &kio::Waiter, window: u64) -> Poll<()> {
 		self.group()
 			.poll_paced(waiter, self.buf.written(Ordering::Acquire) as u64, window)
+	}
+
+	/// How many more bytes of this frame the group's writer may take before
+	/// [`Self::poll_ready`] holds it at `window`, or `None` while nothing would, once `more`
+	/// bytes are written.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn room(&self, window: u64, more: usize) -> Option<u64> {
+		self.group()
+			.room((self.buf.written(Ordering::Acquire) + more) as u64, window)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
@@ -1807,7 +1822,7 @@ mod tests {
 	#[test]
 	fn activating_shared_content_transfers_payload_without_recording_it_twice() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut delivery = account.charge();
 		delivery.add(8);
 		let before = pool.used();
@@ -2063,7 +2078,7 @@ mod tests {
 	#[test]
 	fn canonical_and_delivery_charges_follow_their_last_owners() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let a = FrameBuf::growing(8);
@@ -2112,7 +2127,7 @@ mod tests {
 	#[test]
 	fn admission_allocates_nothing_and_completed_payload_needs_none() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let a = FrameBuf::new(8);

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
+import { settle } from "./propagation.ts";
 
 const dryRun = process.argv.includes("--dry-run") || process.env.DRY_RUN === "true";
 
@@ -52,7 +53,7 @@ const manifest = JSON.parse(await Bun.file("dist/package.json").text()) as {
 	dependencies?: Record<string, string>;
 	peerDependencies?: Record<string, string>;
 };
-checkDependencies(
+await checkDependencies(
 	[...Object.entries(manifest.dependencies ?? {}), ...Object.entries(manifest.peerDependencies ?? {})]
 		.filter(([name]) => name.startsWith("@moq/"))
 		.map(([name, range]) => `${name}@${range}`),
@@ -72,31 +73,34 @@ if (dryRun) {
 	execFileSync("npm", ["publish", "--access", "public"], { stdio: "inherit", cwd: "dist" });
 }
 
-function checkDependencies(specs: string[]) {
-	const missing = [...new Set(specs)].filter((spec) => {
-		let found = false;
+// Whether the registry serves a version satisfying `spec`. Only a missing version is "no":
+// a broken registry must not masquerade as an unpublished sibling and give the gate a pass.
+function registryHas(spec: string): boolean {
+	try {
+		const output = execFileSync("npm", ["view", spec, "version", "--json"], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		}).trim();
+		const versions = output ? JSON.parse(output) : [];
+		return typeof versions === "string" ? versions.length > 0 : Array.isArray(versions) && versions.length > 0;
+	} catch (error) {
+		const command = error as { stdout?: string; stderr?: string };
+		let code: string | undefined;
 		try {
-			const output = execFileSync("npm", ["view", spec, "version", "--json"], {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "pipe"],
-			}).trim();
-			const versions = output ? JSON.parse(output) : [];
-			found = typeof versions === "string" ? versions.length > 0 : Array.isArray(versions) && versions.length > 0;
-		} catch (error) {
-			const command = error as { stdout?: string; stderr?: string };
-			// Only a missing version can be supplied by this release. A broken registry
-			// must not masquerade as an unpublished sibling and give the gate a pass.
-			let code: string | undefined;
-			try {
-				code = JSON.parse(command.stdout ?? "").error?.code;
-			} catch {
-				/* Preserve the original failure below. */
-			}
-			if (code !== "E404")
-				throw new Error(`Cannot resolve ${spec}: ${command.stderr ?? error}`, { cause: error });
+			code = JSON.parse(command.stdout ?? "").error?.code;
+		} catch {
+			/* Preserve the original failure below. */
 		}
-		return !found;
-	});
+		if (code !== "E404") throw new Error(`Cannot resolve ${spec}: ${command.stderr ?? error}`, { cause: error });
+		return false;
+	}
+}
+
+async function checkDependencies(specs: string[]) {
+	let missing = [...new Set(specs)].filter((spec) => !registryHas(spec));
+	// A sibling published moments ago by this run's earlier wave is missing from npm's CDN
+	// for a while, so wait for it rather than fail the wave. Dry runs never publish.
+	if (!dryRun) missing = await settle(missing, registryHas);
 	const unresolved = missing.filter((spec) => {
 		const split = spec.lastIndexOf("@");
 		const version = siblings.get(spec.slice(0, split));

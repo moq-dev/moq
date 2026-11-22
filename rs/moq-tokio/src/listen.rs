@@ -120,6 +120,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "listen-version",
+		delimiter = ',',
 		long = "listen-version",
 		env = "MOQ_LISTEN_VERSION",
 		setting = "listen.version",

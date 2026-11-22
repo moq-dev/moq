@@ -765,7 +765,7 @@ mod tests {
 		config.coded_width = Some(64);
 		config.coded_height = Some(64);
 		source_catalog
-			.modify()
+			.modify(source_catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -790,7 +790,7 @@ mod tests {
 			.unwrap();
 		let mut export =
 			moq_mux::container::fmp4::Export::new(moq_mux::Source::new(origin.consume(), broadcast), catalog)
-				.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
+				.with_delay(moq_mux::container::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 

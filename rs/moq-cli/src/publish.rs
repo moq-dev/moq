@@ -639,19 +639,23 @@ impl Publish {
 	pub fn with_echo(mut self, echo: hang::catalog::Echo) -> anyhow::Result<Self> {
 		match &mut self.source {
 			Source::Stream { decoder, catalog } => match (decoder, catalog) {
-				(_, PublishCatalog::Media(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
-				(_, PublishCatalog::Passthrough(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+				(_, PublishCatalog::Media(catalog)) => {
+					catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?
+				}
+				(_, PublishCatalog::Passthrough(catalog)) => {
+					catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?
+				}
 				(PublishDecoder::Ts(republish), _) => {
 					self.sections.echo = Some(echo.clone());
-					republish
-						.catalog()
-						.clone()
-						.mutate(|catalog| catalog.echo = Some(echo))?;
+					republish.catalog().clone().mutate(
+						|catalog| catalog.echo = Some(echo),
+						republish.catalog().next_timestamp(),
+					)?;
 				}
 				_ => anyhow::bail!("`import ts --program all` builds a catalog per program"),
 			},
 			#[cfg(feature = "capture")]
-			Source::Capture { catalog, .. } => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+			Source::Capture { catalog, .. } => catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?,
 		}
 		Ok(self)
 	}
@@ -913,10 +917,10 @@ impl Sections {
 	/// they ride its first catalog, returning its report.
 	fn apply(&self, republish: &ts::Republish) -> anyhow::Result<Option<crate::report::Stats>> {
 		if let Some(echo) = &self.echo {
-			republish
-				.catalog()
-				.clone()
-				.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
+			republish.catalog().clone().mutate(
+				|catalog| catalog.echo = Some(echo.clone()),
+				republish.catalog().next_timestamp(),
+			)?;
 		}
 		self.report
 			.as_ref()
@@ -1640,7 +1644,7 @@ pub(crate) mod tests {
 		let mut section_track = tscat::Track::new(SECTION_PID);
 		section_track.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.ext
 			.mpegts
@@ -1668,7 +1672,7 @@ pub(crate) mod tests {
 		let mut pes_track = tscat::Track::new(PES_PID);
 		pes_track.pes_packet = Some(tscat::PesPacket::new(0x06));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.ext
 			.mpegts
@@ -2172,7 +2176,11 @@ pub(crate) mod tests {
 			.value;
 		let clock = catalog.sync.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
-		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+		// The import already finished, so the default zero budget would age its last group out
+		// as the wall clock passes its span: reach back for the whole clip instead.
+		let history =
+			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
+		let track = consumer.track(name).unwrap().subscribe(history).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 		let first = next_frame(&mut Consumer::new(track, container)).await.timestamp;
 		assert!(

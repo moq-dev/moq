@@ -24,6 +24,9 @@ pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Writes stop sooner at the transport's unsent bound, when it has one.
 const BATCH_BYTES: usize = 64 * 1024;
 
+/// The shortest time between reads of the socket's byte counts, which cost a syscall each.
+pub(crate) const WIRE_INTERVAL: Duration = Duration::from_millis(250);
+
 /// Rounds of reading and writing in one poll before the driver yields to its executor.
 const ROUNDS: usize = 16;
 
@@ -63,8 +66,8 @@ impl<T: Transport> Driver<T> {
 			unflushed: false,
 			room: true,
 			phase: Phase::Open,
-			sent_bytes: 0,
-			received_bytes: 0,
+			wire_read: None,
+			wire_stale: false,
 			socket,
 			batch: BATCH_BYTES,
 		};
@@ -148,6 +151,7 @@ impl Recv<'_> {
 impl<T> Drop for Driver<T> {
 	fn drop(&mut self) {
 		if !matches!(self.run.phase, Phase::Done) {
+			self.run.read_wire(kio::clock::now());
 			finish(&self.run.inner, Err(Error::Closed));
 		}
 		// The socket statistics hold a duplicate of the descriptor, which would keep the
@@ -212,9 +216,11 @@ struct Run<T> {
 	/// The transport took everything and flushed it, so the connection may hand over more.
 	room: bool,
 	phase: Phase,
-	sent_bytes: u64,
-	received_bytes: u64,
-	/// The connection underneath, which bounds what it holds unsent.
+	/// When the socket's byte counts were last copied to the session's wire counters.
+	wire_read: Option<Instant>,
+	/// Records moved since that read, so the counts it holds are behind.
+	wire_stale: bool,
+	/// The connection underneath, which counts its bytes and bounds what it holds unsent.
 	socket: Option<crate::SharedSocketStats>,
 	/// The most bytes queued for writing in one step: [`BATCH_BYTES`], or less to stay
 	/// within the socket's unsent bound, since what the transport has taken can no longer be
@@ -288,10 +294,9 @@ impl<T: Transport> Run<T> {
 		}
 		let now = kio::clock::now();
 		let mut state = self.inner.lock();
+		let mut received = false;
 		for record in self.inbound.drain(..) {
-			if let Ok(record) = &record {
-				self.received_bytes += record.len() as u64;
-			}
+			received |= record.is_ok();
 			deliver(&mut state, record, now);
 			// Publish what this record did before the next one: a close followed by the
 			// transport ending must report the close.
@@ -341,11 +346,11 @@ impl<T: Transport> Run<T> {
 		}
 		let drained = state.conn.is_drained();
 		let deadline = state.conn.poll_timeout();
+		let credit = state.conn.send_credit_stats();
+		let held = state.conn.credit_stats().held;
 		drop(state);
-
-		self.inner.wire.set_received_bytes(self.received_bytes);
-		self.sent_bytes += written as u64;
-		self.inner.wire.set_sent_bytes(self.sent_bytes);
+		self.inner.wire.set_credit_stalls(credit.stalls, credit.stalled);
+		self.inner.wire.set_credit_held(held.readers, held.evicted);
 
 		// Flush what this step queued, what an earlier flush left, and what the transport may
 		// have queued on its own while receiving, such as a WebSocket Pong. Skipping it
@@ -359,6 +364,16 @@ impl<T: Transport> Run<T> {
 			false => true,
 		};
 		self.unflushed = !flushed;
+		// Count only what reached the socket: the transport may hold records until its flush
+		// finishes, which then steps the driver again to publish them.
+		let moved = written > 0 || received;
+		let wire_due = match flushed {
+			true => self.publish_wire(now, moved),
+			false => {
+				self.wire_stale |= moved;
+				None
+			}
+		};
 		if blocked || !flushed {
 			// The window may have moved since the socket's bound was last set. Setting it
 			// before parking lets a raised bound wake the flush that just went pending sooner.
@@ -381,10 +396,7 @@ impl<T: Transport> Run<T> {
 		if more_to_read || (self.room && (written >= self.batch || !had_room)) {
 			return Step::Progress;
 		}
-		let deadline = match (deadline, closing) {
-			(Some(a), Some(b)) => Some(a.min(b)),
-			(a, b) => a.or(b),
-		};
+		let deadline = [deadline, closing, wire_due].into_iter().flatten().min();
 		match self.timer.poll(waiter, deadline) {
 			true => Step::Progress,
 			false => Step::Idle,
@@ -398,6 +410,24 @@ impl<T: Transport> Run<T> {
 		}
 	}
 
+	/// Copy the socket's byte counts to the session's wire counters, at most once per
+	/// [`WIRE_INTERVAL`] since reading them is a syscall. Returns when the next read is due if
+	/// records moved since the last one: the driver wakes then even if nothing else would, so
+	/// the last bytes of a burst are counted and an idle connection runs no timer.
+	fn publish_wire(&mut self, now: Instant, moved: bool) -> Option<Instant> {
+		self.socket.as_ref()?;
+		self.wire_stale |= moved;
+		if !self.wire_stale {
+			return None;
+		}
+		let due = self.wire_read.map(|at| at.saturating_add(WIRE_INTERVAL));
+		if let Some(due) = due.filter(|due| now < *due) {
+			return Some(due);
+		}
+		self.read_wire(now);
+		None
+	}
+
 	/// Track whether writes are stalled on the transport. The peer is evidently there but slow,
 	/// which defers the idle timeout.
 	fn set_stalled(&mut self, stalled: bool) {
@@ -409,7 +439,21 @@ impl<T: Transport> Run<T> {
 
 	fn finish(&mut self, result: Result<(), Error>) {
 		self.phase = Phase::Done;
+		// The last count, which the stats keep after the session closes.
+		self.read_wire(kio::clock::now());
 		finish(&self.inner, result);
+	}
+}
+
+impl<T> Run<T> {
+	/// Copy the socket's byte counts to the session's wire counters now.
+	fn read_wire(&mut self, now: Instant) {
+		self.wire_read = Some(now);
+		self.wire_stale = false;
+		if let Some(bytes) = self.socket.as_ref().and_then(|socket| socket.bytes()) {
+			self.inner.wire.set_sent_bytes(bytes.sent);
+			self.inner.wire.set_received_bytes(bytes.received);
+		}
 	}
 }
 

@@ -220,6 +220,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-interop" = rec {
+      packageId = "moq-interop";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-interop";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-json" = rec {
       packageId = "moq-json";
       build = internal.buildRustCrateWithFeatures {
@@ -12743,11 +12753,6 @@ rec {
             name = "thiserror";
             packageId = "thiserror 2.0.21";
           }
-          {
-            name = "url";
-            packageId = "url";
-            features = [ "serde" ];
-          }
         ];
         devDependencies = [
           {
@@ -17977,10 +17982,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "bitstream-io";
-            packageId = "bitstream-io 4.10.0";
-          }
-          {
             name = "block2";
             packageId = "block2 0.6.2";
             optional = true;
@@ -18048,6 +18049,7 @@ rec {
             features = [
               "CMSampleBuffer"
               "CMBlockBuffer"
+              "CMFormatDescription"
               "CMSync"
               "objc2-core-audio-types"
             ];
@@ -18926,10 +18928,6 @@ rec {
             target = { target, features }: (target."unix" or false);
           }
           {
-            name = "moq-audio";
-            packageId = "moq-audio";
-          }
-          {
             name = "moq-relay";
             packageId = "moq-relay";
             usesDefaultFeatures = false;
@@ -19746,6 +19744,83 @@ rec {
           "server"
         ];
       };
+      "moq-interop" = rec {
+        crateName = "moq-interop";
+        version = "0.0.0";
+        edition = "2024";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-interop;
+        };
+        dependencies = [
+          {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "futures";
+            packageId = "futures";
+          }
+          {
+            name = "hang";
+            packageId = "hang";
+            features = [ "async" ];
+          }
+          {
+            name = "kio";
+            packageId = "kio";
+            features = [ "runtime" ];
+          }
+          {
+            name = "moq-audio";
+            packageId = "moq-audio";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "moq-json";
+            packageId = "moq-json";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-mux";
+            packageId = "moq-mux";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-net";
+            packageId = "moq-net";
+          }
+          {
+            name = "moq-tokio";
+            packageId = "moq-tokio";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "full" ];
+          }
+          {
+            name = "url";
+            packageId = "url";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
+          }
+        ];
+
+      };
       "moq-json" = rec {
         crateName = "moq-json";
         version = "0.5.8";
@@ -20044,10 +20119,6 @@ rec {
           {
             name = "tracing";
             packageId = "tracing";
-          }
-          {
-            name = "url";
-            packageId = "url";
           }
           {
             name = "webm-iterable";
@@ -22194,6 +22265,10 @@ rec {
             packageId = "rind-rustls";
           }
           {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
             name = "socket2";
             packageId = "socket2 0.6.5";
             features = [ "all" ];
@@ -22201,6 +22276,10 @@ rec {
           {
             name = "tempfile";
             packageId = "tempfile";
+          }
+          {
+            name = "test-env";
+            packageId = "test-env";
           }
           {
             name = "tokio";

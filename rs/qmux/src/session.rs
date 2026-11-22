@@ -731,6 +731,13 @@ impl poll::RecvStream for RecvStream {
 		self.inner.lock().conn.recv_stream(self.id).set_priority(priority);
 	}
 
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		if self.end != RecvEnd::Open {
+			return Some(0);
+		}
+		Some(self.inner.lock().conn.recv_stream(self.id).set_window(window))
+	}
+
 	fn stop(&mut self, code: u32) {
 		if self.end != RecvEnd::Open {
 			return;
@@ -826,6 +833,10 @@ impl poll::Lease for RecvLease<'_> {
 
 	fn is_fin(&self) -> bool {
 		self.lease().is_fin()
+	}
+
+	fn set_window(&mut self, window: u64) {
+		self.lease_mut().set_window(window);
 	}
 
 	fn release(mut self) {

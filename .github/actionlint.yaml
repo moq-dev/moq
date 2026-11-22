@@ -5,6 +5,6 @@ self-hosted-runner:
 paths:
   # GitHub's `queue: max` on serialized publishing jobs. actionlint learns it in
   # https://github.com/rhysd/actionlint/pull/661, unreleased after 1.7.12.
-  .github/workflows/{gstreamer-ci,interop,nightly,smoke,release-remeasure}.yml:
+  .github/workflows/{apt-repo,gstreamer-ci,interop,nightly,release-brew,release-kt-ffi,release-remeasure,release-swift-ffi,rpm-repo,smoke}.yml:
     ignore:
       - 'unexpected key "queue" for "concurrency" section'

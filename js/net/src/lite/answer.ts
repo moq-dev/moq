@@ -167,9 +167,6 @@ export class Answer {
 				}
 				const request = this.#request;
 				if (request) {
-					// Let go before its answer is written: the peer may send its next edit the
-					// moment it reads the answer, which can be before the write returns here.
-					this.#request = undefined;
 					await this.#edit(request);
 					continue;
 				}
@@ -205,6 +202,10 @@ export class Answer {
 		}
 		for (const [id, prefix] of request.add) this.#prefixes.set(id, prefix);
 
+		// Held until now, so an edit sent before this answer is refused rather than checked
+		// against stale prefixes. Let go before the answer is written: the peer may send its
+		// next edit the moment it reads it, which can be before the write returns here.
+		this.#request = undefined;
 		await this.#publish.stream.send({ status: "ok" });
 		await this.#sync();
 		const synced = request.add.map(([prefix]) => ({ status: "synced", prefix }) as const);
@@ -227,11 +228,11 @@ export class Answer {
 		// The claims the peer is shown, by their path from the session's root: the table under each
 		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
-		// A claim is shown where some path it covers is served by the claim's own scope and the
-		// handle's, and our grant, if any, lets us publish it, as one at `a` serves `a/b` though `a`
-		// itself is not granted.
-		const shows = (snap: Advertised, path: Path.Valid) => {
-			const served = within(path, [snap.claim, origin?.allowed]);
+		// A claim is filed where its route serves the whole subtree, so it is shown where some path it
+		// covers is in the handle's scope and our grant, if any, lets us publish it, as one at `a` serves
+		// `a/b` though `a` itself is not granted.
+		const shows = (_: Advertised, path: Path.Valid) => {
+			const served = within(path, [origin?.allowed]);
 			if (!grant) return served === undefined || served.size > 0;
 			if (served === undefined) return grant.publish.overlaps(path);
 			return served.toArray().some((prefix) => grant.publish.overlaps(prefix.text));
@@ -280,7 +281,12 @@ export class Answer {
 		for (const [path, snap] of latest) {
 			const { instance, epoch, cost } = snap.route;
 			if (instance === undefined) continue;
-			const claim = { ...ownClaim(epoch ?? 0n, snap.route.above ?? 0n), cost };
+			// A claim above the session's root covers all of what the peer sees, so it is no more
+			// above the path than the path is deep.
+			const depth = BigInt(Path.parts(path).length);
+			const above = snap.route.above ?? 0n;
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
+			const claim = { ...ownClaim(epoch ?? 0n, above < depth ? above : depth), cost };
 			const sent = this.#live.get(path);
 			if (!sent || !sameInstance(sent.snap, snap)) {
 				this.#live.set(path, { id: this.#nextAnnounce++, snap, claim });

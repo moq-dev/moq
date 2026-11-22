@@ -36,9 +36,6 @@ impl Datagrams<'_> {
 	/// # Panics
 	/// - when `options.group` was opened on another connection
 	pub fn send(&mut self, data: impl Buf, options: send::Options<'_>) -> Result<(), send::Error> {
-		if self.conn.config.datagram.receive_buffer.is_none() {
-			return Err(send::Error::Unsupported);
-		}
 		let max = self.max_size().ok_or(send::Error::Unsupported)?;
 		let budget = self.conn.config.datagram.send_buffer;
 		// Checked before taking the payload, which copies whatever is not already `Bytes`.
@@ -71,6 +68,8 @@ impl Datagrams<'_> {
 	///
 	/// Not necessarily the maximum size of received datagrams.
 	pub fn max_size(&self) -> Option<usize> {
+		// Disabling datagrams locally disables both directions.
+		self.conn.config.datagram.receive_buffer?;
 		// We use the conservative overhead bound for any packet number, reducing the budget by at
 		// most 3 bytes, so that PN size fluctuations don't cause users sending maximum-size
 		// datagrams to suffer avoidable packet loss.

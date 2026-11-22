@@ -926,11 +926,14 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 			let Some((t, g, step)) = event else {
 				let snapshot = snapshot.clone();
 				catalog
-					.mutate(|catalog| {
-						catalog.video = snapshot.video;
-						catalog.audio = snapshot.audio;
-						catalog.ext = snapshot.ext;
-					})
+					.mutate(
+						|catalog| {
+							catalog.video = snapshot.video;
+							catalog.audio = snapshot.audio;
+							catalog.ext = snapshot.ext;
+						},
+						catalog.next_timestamp(),
+					)
 					.unwrap();
 				continue;
 			};

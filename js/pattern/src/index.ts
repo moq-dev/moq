@@ -1315,12 +1315,6 @@ function wildcard(text: string): InvalidPrefix {
 	);
 }
 
-// Whether the path `path` is `prefix` or beneath it. A valid prefix never ends inside an
-// escape, so the character after it separates exactly when it is a `/`.
-function beneath(path: string, prefix: string): boolean {
-	return prefix === "" || (path.startsWith(prefix) && (path.length === prefix.length || path[prefix.length] === "/"));
-}
-
 /**
  * One grant member: a path covering itself and every path beneath it. The empty prefix
  * covers every path.
@@ -1390,14 +1384,15 @@ export class Prefix {
 		return this.text === "";
 	}
 
-	/** Whether `path`, spelled as a broadcast path, is this prefix or beneath it. */
+	/** Whether `path`, normalized like a broadcast path, is this prefix or beneath it. */
 	matches(path: string): boolean {
-		return beneath(path, this.text);
+		return startsWith(this.segments, splitPath(path));
 	}
 
-	/** Whether `path`, spelled as a broadcast path, and this prefix share a path: one lies beneath the other. */
+	/** Whether `path`, normalized like a broadcast path, and this prefix share a path: one lies beneath the other. */
 	overlaps(path: string): boolean {
-		return beneath(path, this.text) || beneath(this.text, path);
+		const segments = splitPath(path);
+		return startsWith(this.segments, segments) || startsWith(segments, this.segments);
 	}
 
 	/**
@@ -1481,16 +1476,16 @@ export class Prefixes implements Iterable<Prefix> {
 	}
 
 	/**
-	 * Whether some member covers `path`, spelled as a broadcast path. A member covering a path
-	 * covers its whole subtree, so this also says whether the set grants everything beneath it.
+	 * Whether some member covers `path`, normalized like a broadcast path. A member covering a
+	 * path covers its whole subtree, so this also says whether the set grants everything beneath it.
 	 */
 	matches(path: string): boolean {
-		return this.#covering(parts(path));
+		return this.#covering(splitPath(path));
 	}
 
-	/** Whether some member lies at, above, or beneath `path`, spelled as a broadcast path. */
+	/** Whether some member lies at, above, or beneath `path`, normalized like a broadcast path. */
 	overlaps(path: string): boolean {
-		const segments = parts(path);
+		const segments = splitPath(path);
 		if (this.#covering(segments)) return true;
 		// Anything beneath the path sorts right after it.
 		const next = this.#members[this.#after(segments)];

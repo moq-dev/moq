@@ -356,6 +356,7 @@ impl Config {
 		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
 		self.cluster.check_dials()?;
+		self.cluster.listen.check()?;
 		self.check_lan()?;
 
 		self.quic
@@ -442,6 +443,12 @@ impl Config {
 		anyhow::ensure!(
 			!self.cluster.dials_statics() || self.connect.resolve().bind.port() == 0,
 			"handoff.socket cannot hand on the cluster's dial socket: give --connect-bind port 0"
+		);
+		// Its socket is bound outside the handed-on groups, so a successor could not
+		// bind it beside the relay it replaces.
+		anyhow::ensure!(
+			self.cluster.listen.bind.is_none(),
+			"handoff.socket cannot hand on --cluster-listen's socket"
 		);
 		// The QUIC port is handed on as a reuseport group with room for a successor,
 		// which only a worker group binds.
@@ -574,7 +581,14 @@ mod tests {
 
 	#[test]
 	fn session_limits_merge_without_crossing_peer_policy() {
-		if !test_env::Env::without(&["MOQ_LIMITS_CLIENT_ANNOUNCES", "MOQ_LIMITS_PEER_ANNOUNCES"]).isolate() {
+		if !test_env::Env::without(&[
+			"MOQ_LIMITS_CLIENT_ANNOUNCES",
+			"MOQ_LIMITS_PEER_ANNOUNCES",
+			"MOQ_LIMITS_CLIENT_LIVE_EDGES",
+			"MOQ_LIMITS_PEER_LIVE_EDGES",
+		])
+		.isolate()
+		{
 			return;
 		}
 		let dir = tempfile::tempdir().unwrap();
@@ -583,14 +597,21 @@ mod tests {
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 7);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
+		// Clients are bounded by default; a peer link carrying every publisher is not.
+		assert_eq!(config.limits.client.resolve().live_edges, Some(256 << 20));
+		assert_eq!(config.limits.peer.resolve().live_edges, None);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
 			"--limits-client-announces=0".into(),
+			"--limits-client-live-edges=0".into(),
+			"--limits-peer-live-edges=1024".into(),
 		])
 		.unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 0);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
+		assert_eq!(config.limits.client.resolve().live_edges, None);
+		assert_eq!(config.limits.peer.resolve().live_edges, Some(1024));
 	}
 
 	/// `[limits.peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.
@@ -996,6 +1017,8 @@ max_streams = 64
 			resolve(cluster);
 		}
 		resolve("[stats]\nenabled = true\n");
+		refuse("[stats]\nroots = true\n", "--stats-roots requires --stats-enabled");
+		resolve("[stats]\nenabled = true\nroots = true\n");
 
 		// A setting only a dialed peer or API reads is refused with none to read it.
 		refuse(
@@ -1025,6 +1048,12 @@ max_streams = 64
 			.expect("an unnamed clustered stats node must be refused")
 			.to_string();
 		assert!(err.contains("--stats-node"), "{err}");
+
+		// A cluster listener admitting clients without a certificate is refused.
+		refuse(
+			"[cluster.listen]\nbind = \"127.0.0.1:0\"\ncert = \"c.pem\"\nkey = \"k.pem\"\n",
+			"needs --cluster-listen-root",
+		);
 
 		// The io_uring workers need an explicit bind, whatever the build.
 		refuse(
@@ -1063,6 +1092,13 @@ max_streams = 64
 			resolve(&format!(
 				"{quic}[cluster]\nnode = \"https://a.example\"\nconnect = [\"https://a.example\"]\n[connect]\nbind = \"0.0.0.0:4444\"\n"
 			));
+			// The cluster listener's socket is in no handed-on group.
+			refuse(
+				&format!(
+					"{quic}[cluster.listen]\nbind = \"127.0.0.1:0\"\ncert = \"c.pem\"\nkey = \"k.pem\"\nroot = \"ca.pem\"\n"
+				),
+				"cannot hand on --cluster-listen's socket",
+			);
 		}
 		#[cfg(not(target_os = "linux"))]
 		refuse(

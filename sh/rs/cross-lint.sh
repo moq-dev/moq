@@ -23,11 +23,17 @@ fi
 export RUSTC="$sysroot/bin/rustc"
 
 # A build script's C and C++ for a foreign target go through zig, which
-# carries every target's libc headers.
+# carries every target's libc headers. Put sh/rs on PATH and export bare names
+# so the compiler environment does not embed $PWD and bust mbx across checkouts.
+export PATH="$PATH:$PWD/sh/rs"
 for target in "${targets[@]}"; do
     var=${target//-/_}
-    export "CC_$var=$PWD/sh/rs/zig-cc.sh" "CXX_$var=$PWD/sh/rs/zig-c++.sh" "AR_$var=$PWD/sh/rs/zig-ar.sh"
+    export "CC_$var=zig-cc.sh" "CXX_$var=zig-c++.sh" "AR_$var=zig-ar.sh"
 done
 
+# Keep cross artifacts in their own target dir inside target/ so check rs_cross
+# does not hold target/.cargo-lock while check rs runs in parallel.
+target_dir="${CARGO_TARGET_DIR:-$PWD/target}/cross"
+
 # Both targets in one build share its host build scripts and proc macros.
-cargo clippy --locked "${targets[@]/#/--target=}" --all-targets "$@" -- -D warnings
+cargo clippy --locked --target-dir "$target_dir" "${targets[@]/#/--target=}" --all-targets "$@" -- -D warnings

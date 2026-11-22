@@ -28,11 +28,16 @@ pub(super) async fn load<S: ObjectStore>(store: &Store<S>) -> Result<Option<Hash
 	let scope = (!prefix.as_ref().is_empty()).then_some(prefix);
 	let listed = store.inner().list_with_delimiter(scope).await?;
 
-	if let Some(object) = listed.objects.first() {
+	// Any object beside the broadcast's `.end` is foreign, wherever the listing puts it.
+	let mut ended = false;
+	for object in &listed.objects {
 		match object.location.filename() {
-			Some(layout::BROADCAST_END) => return Ok(None),
+			Some(layout::BROADCAST_END) => ended = true,
 			_ => return Err(Error::Path(object.location.to_string())),
 		}
+	}
+	if ended {
+		return Ok(None);
 	}
 
 	let mut tracks = HashMap::new();

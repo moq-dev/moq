@@ -191,11 +191,16 @@ mod test {
 
 		// The media pipeline sets a base section (flat field); the app adds its own extension.
 		// Sequential locks compose because each starts from the producer's retained catalog.
-		producer.modify().unwrap().audio.renditions.insert(
-			"audio0".to_string(),
-			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
-		);
-		producer.modify().unwrap().ext.scte35 = Some(Scte35 { splice_id: 42 });
+		producer
+			.modify(producer.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(
+				"audio0".to_string(),
+				hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+			);
+		producer.modify(producer.next_timestamp()).unwrap().ext.scte35 = Some(Scte35 { splice_id: 42 });
 
 		let waiter = kio::Waiter::noop();
 		let mut latest = None;
@@ -216,24 +221,32 @@ mod test {
 		let mut consumer = producer.consume().unwrap();
 
 		// A media section (flat field) coexists with an arbitrary untyped application section.
-		producer.modify().unwrap().audio.renditions.insert(
-			"audio0".to_string(),
-			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
-		);
 		producer
-			.modify()
+			.modify(producer.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(
+				"audio0".to_string(),
+				hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+			);
+		producer
+			.modify(producer.next_timestamp())
 			.unwrap()
 			.set_section("transcript", serde_json::json!({ "track": "transcript.json" }))
 			.unwrap();
 
 		// Reserved media keys can't be smuggled in as application sections.
 		assert!(matches!(
-			producer.modify().unwrap().set_section("video", serde_json::json!({})),
+			producer
+				.modify(producer.next_timestamp())
+				.unwrap()
+				.set_section("video", serde_json::json!({})),
 			Err(crate::Error::ReservedSection(_))
 		));
 		assert!(matches!(
 			producer
-				.modify()
+				.modify(producer.next_timestamp())
 				.unwrap()
 				.set_section("timeline", serde_json::json!({})),
 			Err(crate::Error::ReservedSection(_))
@@ -241,7 +254,10 @@ mod test {
 		for name in ["sync", "media", "clock", "stats", "echo", "include"] {
 			assert!(
 				matches!(
-					producer.modify().unwrap().set_section(name, serde_json::json!({})),
+					producer
+						.modify(producer.next_timestamp())
+						.unwrap()
+						.set_section(name, serde_json::json!({})),
 					Err(crate::Error::ReservedSection(_))
 				),
 				"{name} must be refused",
@@ -253,7 +269,10 @@ mod test {
 		for name in ["version", "generatedAt", "isComplete", "tracks", "initDataList"] {
 			assert!(
 				matches!(
-					producer.modify().unwrap().set_section(name, serde_json::json!("nope")),
+					producer
+						.modify(producer.next_timestamp())
+						.unwrap()
+						.set_section(name, serde_json::json!("nope")),
 					Err(crate::Error::ReservedSection(_))
 				),
 				"{name} must be refused",

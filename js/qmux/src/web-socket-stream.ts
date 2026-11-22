@@ -201,13 +201,18 @@ export class WebSocketStream implements WebSocketStreamLike {
 		// doesn't keep every closed socket reachable.
 		const cleanup = new AbortController();
 
+		// Cleared once the readable ends, since a closing socket still delivers frames
+		// already in flight and enqueueing into a closed controller throws.
 		let controller: ReadableStreamDefaultController<WebSocketStreamData> | undefined;
 		let writer: WritableStreamDefaultController | undefined;
 		const readable = new ReadableStream<WebSocketStreamData>({
 			start: (c) => {
 				controller = c;
 			},
-			cancel: () => ws.close(),
+			cancel: () => {
+				controller = undefined;
+				ws.close();
+			},
 		});
 
 		// Bytes written to the writable but not yet handed to the socket, and each queued
@@ -273,6 +278,7 @@ export class WebSocketStream implements WebSocketStreamLike {
 					if (clean) controller?.close();
 					else controller?.error(error);
 				} catch {}
+				controller = undefined;
 			}
 			// `closed` settles before the writable errors, so a consumer racing both
 			// sees the close code and reason first.

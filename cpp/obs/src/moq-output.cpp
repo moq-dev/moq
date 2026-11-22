@@ -894,11 +894,11 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	// with inline parameter sets, which is what OBS hands us.
 	moq::VideoInit config{};
 	if (strcmp(codec, "h264") == 0) {
-		config.format = moq::VideoFormat::kH264;
+		config.format = moq::VideoFormat::h264();
 	} else if (strcmp(codec, "hevc") == 0) {
-		config.format = moq::VideoFormat::kH265;
+		config.format = moq::VideoFormat::h265();
 	} else if (strcmp(codec, "av1") == 0) {
-		config.format = moq::VideoFormat::kAv01;
+		config.format = moq::VideoFormat::av01();
 	} else {
 		LOG_ERROR("Unsupported video codec: %s", codec);
 		video_tracks[encoder] = Track{};
@@ -1028,11 +1028,11 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 	// failing on it deep inside.
 	moq::AudioInit config{};
 	if (strcmp(codec, "opus") == 0) {
-		config.format = moq::AudioFormat::kOpus;
+		config.format = moq::AudioFormat::opus();
 	} else if (strcmp(codec, "aac") == 0) {
-		config.format = moq::AudioFormat::kAac;
+		config.format = moq::AudioFormat::aac();
 	} else if (strcmp(codec, "flac") == 0) {
-		config.format = moq::AudioFormat::kFlac;
+		config.format = moq::AudioFormat::flac();
 	} else {
 		LOG_ERROR("Unsupported audio codec: %s", codec);
 		audio_tracks[encoder] = Track{};

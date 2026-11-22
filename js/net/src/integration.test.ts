@@ -13,7 +13,7 @@ import {
 	type Session,
 } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
-import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
+import { FrameTooLarge, SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
@@ -31,6 +31,7 @@ import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Position, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
+import { MAX_FRAME_BYTES, SEGMENT_BYTES } from "./util/limits.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -213,7 +214,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
 		// The negotiated lite-06 cannot state a minimum.
-		delay: { min: null, max: Duration.millis(250) },
+		delay: { max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: 1n, end: 8n }],
 	});
@@ -226,7 +227,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	});
 	expect(await updated).toEqual({
 		priority: 8,
-		delay: { min: null, max: Duration.millis(500) },
+		delay: { max: Duration.millis(500) },
 		order: "descending",
 		ranges: [{ start: 2n, end: 11n }],
 	});
@@ -463,9 +464,12 @@ test("integration: lite-07 serves sparse ranges and a live join", async () => {
 			.track("video")
 			.subscribe({
 				// The join starts 2 ms behind the newest group, which starts at 9 ms.
-				delay: { min: Duration.millis(2), max: null },
+				delay: { max: null },
 				order: "ascending",
-				ranges: [{ start: 1n, end: 2n }, { end: 8n }],
+				ranges: [
+					{ start: 1n, end: 2n },
+					{ start: { live: Duration.millis(2) }, end: 8n },
+				],
 			})
 			.ordered();
 		// Covering the ranges ends the subscription upstream, and the read with its window.
@@ -507,7 +511,7 @@ test("integration: lite-07 starts an ordered read at a live join over a frameles
 	const newest = hooks.appendNext(producer);
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscription = { delay: { min: Duration.ZERO, max: null }, ranges: [{}] };
+	const subscription = { delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] };
 	const reader = remote.track("video").subscribe(subscription).ordered();
 	const sibling = remote.track("video").subscribe(subscription);
 	try {
@@ -544,7 +548,7 @@ test("integration: lite-07 joins a late live join at the live edge", async () =>
 	hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscription = { delay: { min: Duration.ZERO, max: null }, ranges: [{}] };
+	const subscription = { delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] };
 	const first = remote.track("video").subscribe(subscription);
 	let late: ReturnType<typeof first.ordered> | undefined;
 	try {
@@ -2983,10 +2987,10 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 });
 
 test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
-	"integration: %s streams a frame larger than any whole-frame limit",
+	"integration: %s streams a frame across segments",
 	async (protocol) => {
-		const MiB = 1024 * 1024;
-		const size = 80 * MiB + 7;
+		const MiB = SEGMENT_BYTES;
+		const size = 3 * MiB + 7;
 		const byte = (offset: number) => (offset * 7 + 3) % 251;
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
@@ -3035,6 +3039,52 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 		server.abort();
 	},
 	30_000,
+);
+
+// A local writer may create a frame of any size, but a receiver refuses one past the cap at its
+// header instead of holding every chunk until the frame joins.
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
+	"integration: %s refuses a received frame larger than 32 MiB",
+	async (protocol) => {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		// A whole group first, so the oversized one arrives live rather than through a join's head.
+		const live = Promise.withResolvers<void>();
+		const broadcast = publish(origin, Path.from("test"));
+		const serving = (async () => {
+			const request = await wireOf(broadcast).requested();
+			if (!request) return;
+			const track = request.accept({ timescale: Timescale.MILLI });
+			const head = hooks.appendNext(track);
+			head.writeFrame(textFrame("head", Timestamp.fromMillis(1)));
+			head.finish();
+			await live.promise;
+			// Only the header and one chunk: the receiver must refuse before the rest arrives.
+			const group = hooks.appendNext(track);
+			const frame = group.createFrame({ size: MAX_FRAME_BYTES + 1, timestamp: Timestamp.fromMillis(5) });
+			frame.write(new Uint8Array(SEGMENT_BYTES));
+		})();
+
+		const remote = wireOf(client).consume(Path.from("test"));
+		const subscriber = remote.track("video").subscribe();
+		expect(await (await subscriber.recvGroup())?.readString()).toBe("head");
+		live.resolve();
+		const group = await subscriber.recvGroup();
+		await expect(Promise.resolve(group?.readFrame())).rejects.toBeInstanceOf(FrameTooLarge);
+
+		await serving;
+		subscriber.close();
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	},
+	10_000,
 );
 
 // A qmux session pair negotiating `protocol` over an in-memory socket, the client letting the server
