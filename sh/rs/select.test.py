@@ -345,6 +345,34 @@ class SelectTest(unittest.TestCase):
         calls = self.selected(bench, "rs/moq-stats/src/lib.rs", action="test")
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
 
+    def selected_crates(self, *paths):
+        """The crates the test build holds for a diff, by directory name."""
+        (call,) = [call for call in self.selected(*paths, action="test") if call.startswith("rs test ")]
+        return set(re.findall(r"/rs/([^/#]+)#", call))
+
+    def test_a_target_change_selects_only_its_crate(self):
+        # No crate depends on another's tests or examples, so their changes stop there.
+        for path, crate in (
+            ("rs/moq-net/tests/added.rs", "moq-net"),
+            ("rs/moq-net/examples/added.rs", "moq-net"),
+            # A read from a target, here moq-tokio's integration tests, is a target change too.
+            ("rs/moq-net/tests/range-table.json", "moq-tokio"),
+        ):
+            with self.subTest(path=path):
+                crates = self.selected_crates(path)
+                self.assertIn(crate, crates)
+                self.assertNotIn("moq-relay", crates)
+        # A library that reads its own tests/ still reaches its dependents.
+        self.assertIn("moq-relay", self.selected_crates("rs/moq-json/tests/vectors.json"))
+
+    def test_a_dev_dependency_stops_at_its_dependent(self):
+        # hang's tests run on moq-tokio, but hang's library and its dependents do not.
+        crates = self.selected_crates("rs/moq-tokio/src/lib.rs")
+        self.assertIn("hang", crates)
+        self.assertIn("moq-relay", crates)
+        self.assertNotIn("moq-mux", crates)
+        self.assertIn("moq-mux", self.selected_crates("rs/hang/src/lib.rs"))
+
     def test_a_bench_alone_enables_its_required_features(self):
         # Alone in the selection, no dependent turns these on, and cargo would
         # skip the targets without a word.
