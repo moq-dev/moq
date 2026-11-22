@@ -4144,16 +4144,28 @@ impl Consumer {
 	/// Carry this group across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover) -> Self {
 		Idle::disarm(&mut self.idle);
-		let index = self.cursor.index;
+		let index = self.position();
 		let carry = self.carry.get_or_insert_default();
 		carry.recover = Some(recover);
 		carry.unread = 0..index;
 		self
 	}
 
-	/// Note that the cursor moved from `from` to where it is without reading the frames between.
+	/// The frame this reader reads next: the cursor, plus the frames a compressed flight it
+	/// boarded still inflates and drops to get back there.
+	fn position(&self) -> usize {
+		let skip = self
+			.carry
+			.as_ref()
+			.and_then(|carry| carry.ride.as_ref())
+			.map_or(0, |ride| ride.skip);
+		self.cursor.index.saturating_add(skip)
+	}
+
+	/// Note that the read moved from position `from` to where it is without reading the frames
+	/// between.
 	fn skipped(&mut self, from: usize) {
-		let to = self.cursor.index;
+		let to = self.position();
 		if let Some(carry) = self.carry.as_mut().filter(|carry| carry.recover.is_some())
 			&& to > from
 		{
@@ -4444,7 +4456,7 @@ impl Consumer {
 	pub fn with_range(mut self, frames: impl RangeBounds<u64>) -> Self {
 		Idle::disarm(&mut self.idle);
 		let (start, end) = super::subscription::key_bounds(frames);
-		let from = self.cursor.index;
+		let from = self.position();
 		self.cursor.start_at(start);
 		self.skipped(from);
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
@@ -4472,7 +4484,7 @@ impl Consumer {
 	/// handlers, and surfaces as [`Error::Lagged`] when neither can serve them.
 	pub fn skip_to(&mut self, index: u64) {
 		Idle::disarm(&mut self.idle);
-		let from = self.cursor.index;
+		let from = self.position();
 		self.cursor.skip_to(index);
 		self.skipped(from);
 	}
@@ -4832,7 +4844,7 @@ impl Consumer {
 	/// Whether the copy read closed the group short below a frame this reader read, from the
 	/// copy before it: not only below frames it skipped.
 	fn closed_past(&self) -> bool {
-		let index = self.cursor.index;
+		let index = self.position();
 		let unread = self.carry.as_ref().map_or(0..0, |carry| carry.unread.clone());
 		self.cursor
 			.state
