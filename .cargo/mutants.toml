@@ -72,16 +72,11 @@ exclude_re = [
     # A backfill fails only with its route's track, so asking that route again for what it
     # refused fails at once too and is let go: skipping the ask only saves the subscribe.
     # `poll_lowest` records that refusal for the skip.
-    ':\d+:16: replace == with != in Reader::backfill$',
     ':\d+:19: replace <= with > in Reader::backfill$',
     ':\d+:30: replace == with != in Reader::poll_lowest$',
     # With no resume point `raised` names no start, and a settled window has no unsettled
     # range: each guard only skips the walk.
     'replace \|\| with && in Reader::raised$',
-    # Every reader of a front shares its serving copy, and a replaced copy holding more of
-    # the boundary group stays with each reader that has yet to read past it, so the readers
-    # resume at the same position and the fold keeps either.
-    'replace (match guard at <= next with (true|false)|<= with >) in Resume::add$',
     # Dead: every write of `until` also writes `since`, so the superseded check
     # never runs. `ResumeReader.tla` models it, so it goes with the model.
     'replace >= with < in Copy::retains$',

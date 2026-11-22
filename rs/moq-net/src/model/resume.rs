@@ -11374,6 +11374,81 @@ mod test {
 		drop(reading);
 	}
 
+	/// A group one route refused to backfill is still asked of the next route, though the
+	/// reader's preferences never changed.
+	#[test]
+	fn a_group_one_route_refused_is_backfilled_by_the_next() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		for key in 0..=4 {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4]);
+		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
+		open.write_frame(ts(5), b"x".as_ref()).unwrap();
+		let reading = recv(&mut sub);
+		let b = received_copy();
+		routes.serve(b.consume());
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		write(&a, 6);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		// c's backfill of group 6 fails with its route.
+		let c = received_copy();
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		c.abort(Error::Cancel).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let d = received_copy();
+		routes.serve(d.consume());
+		write(&d, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		drop(reading);
+	}
+
+	/// A front asks its next route from the lowest boundary among its readers, though only one
+	/// still keeps a replaced copy holding a group past that copy's cap.
+	#[test]
+	fn the_fronts_subscription_resumes_at_the_lowest_boundary_when_one_reader_keeps_a_replaced_copy() {
+		for keeper_first in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = received_copy();
+			routes.serve(a.consume());
+			let mut first = subscribe(&front, HOUR);
+			let mut second = subscribe(&front, HOUR);
+			for key in 0..=4 {
+				write(&a, key);
+			}
+			assert_eq!(drain(&mut first, false), [0, 1, 2, 3, 4]);
+			assert_eq!(drain(&mut second, false), [0, 1, 2, 3, 4]);
+			let mut open = a.create_group(group::Info { start: 5 }).unwrap();
+			open.write_frame(ts(5), b"x".as_ref()).unwrap();
+			let (keeper, other) = match keeper_first {
+				true => (&mut first, &mut second),
+				false => (&mut second, &mut first),
+			};
+			// Only the keeper still reads group 5, so only it keeps `a` after the switch.
+			let reading = recv(keeper);
+			drop(recv(other));
+			let b = received_copy();
+			routes.serve(b.consume());
+			write(&b, 7);
+			assert_eq!(drain(keeper, false), [7]);
+			assert_eq!(drain(other, false), [7]);
+			// Past a's cap: only the keeper's boundary sees it.
+			write(&a, 8);
+			assert_eq!(drain(keeper, false), Vec::<u64>::new());
+			assert_eq!(drain(other, false), Vec::<u64>::new());
+			let resume = routes.subscription(front.subscription().unwrap(), 2).resume;
+			assert_eq!(resume, Some(Position::new(7, 1)), "keeper_first={keeper_first}");
+			drop(reading);
+		}
+	}
+
 	/// A stalled read still waiting for the new route to continue it is judged within the
 	/// reader's window too: the new route's groups in it expire the read, though its
 	/// subscription starts past them.
