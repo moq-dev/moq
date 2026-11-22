@@ -121,7 +121,13 @@ dispatch2 = { workspace = true, optional = true }
 objc2 = { workspace = true, optional = true }
 objc2-av-foundation = { workspace = true, optional = true }
 objc2-core-audio-types = { version = "0.3.2", optional = true }
-objc2-core-media = { workspace = true, features = ["CMSampleBuffer", "CMBlockBuffer", "CMFormatDescription", "CMSync", "objc2-core-audio-types"], optional = true }
+objc2-core-media = { workspace = true, features = [
+    "CMSampleBuffer",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSync",
+    "objc2-core-audio-types",
+], optional = true }
 objc2-foundation = { workspace = true, optional = true }
 objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCShareableContent"], optional = true }
 

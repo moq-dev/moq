@@ -1606,10 +1606,10 @@ pub mod apple {
 	use objc2_core_video::{
 		CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
 		CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount,
-		CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
-		CVPixelBufferUnlockBaseAddress, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-		kCVImageBufferYCbCrMatrixKey, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
-		kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+		CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool, CVPixelBufferUnlockBaseAddress,
+		kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrixKey,
+		kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferPixelFormatTypeKey,
+		kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
 	};
 	use objc2_video_toolbox::VTPixelTransferSession;
@@ -1961,7 +1961,9 @@ pub mod apple {
 			let stride = CVPixelBufferGetBytesPerRowOfPlane(self.buffer, index);
 			let height = CVPixelBufferGetHeightOfPlane(self.buffer, index);
 			if base.is_null() {
-				return Err(Error::codec(anyhow::anyhow!("pixel buffer plane {index} has no base address")));
+				return Err(Error::codec(anyhow::anyhow!(
+					"pixel buffer plane {index} has no base address"
+				)));
 			}
 			if stride < row_bytes || height < rows {
 				return Err(Error::codec(anyhow::anyhow!(

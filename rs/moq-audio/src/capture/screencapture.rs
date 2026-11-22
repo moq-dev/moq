@@ -257,7 +257,8 @@ fn samples(sample_buffer: &CMSampleBuffer) -> Option<Buffer> {
 
 	let count = unsafe { (*list).mNumberBuffers } as usize;
 	// The list CoreMedia filled has to fit the storage it was sized for.
-	let end = std::mem::offset_of!(AudioBufferList, mBuffers).checked_add(count.checked_mul(size_of::<AudioBuffer>())?)?;
+	let end =
+		std::mem::offset_of!(AudioBufferList, mBuffers).checked_add(count.checked_mul(size_of::<AudioBuffer>())?)?;
 	if count == 0 || end > needed {
 		return None;
 	}
@@ -447,7 +448,9 @@ mod tests {
 	/// byte-swapped, or compressed audio is refused rather than misread.
 	#[test]
 	fn reads_only_native_f32() {
-		use objc2_core_audio_types::{kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked, kAudioFormatMPEG4AAC};
+		use objc2_core_audio_types::{
+			kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked, kAudioFormatMPEG4AAC,
+		};
 
 		let float = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
 		assert!(is_f32(&asbd(kAudioFormatLinearPCM, float, 32)));
@@ -459,7 +462,11 @@ mod tests {
 		assert!(!is_f32(&asbd(kAudioFormatLinearPCM, kAudioFormatFlagIsPacked, 32)));
 		assert!(!is_f32(&asbd(kAudioFormatLinearPCM, float, 64)));
 		assert!(!is_f32(&asbd(kAudioFormatLinearPCM, float, 16)));
-		assert!(!is_f32(&asbd(kAudioFormatLinearPCM, float | kAudioFormatFlagIsBigEndian, 32)));
+		assert!(!is_f32(&asbd(
+			kAudioFormatLinearPCM,
+			float | kAudioFormatFlagIsBigEndian,
+			32
+		)));
 		assert!(!is_f32(&asbd(kAudioFormatMPEG4AAC, float, 32)));
 	}
 
