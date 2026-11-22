@@ -37,16 +37,6 @@ None is the exhaustion check that PR rewrote:
   case should fail when the kept-out check in `Reader::accounts` is
   disabled.
 
-- JS places a time start lower than Rust when the local floor keeps out the
-  group holding it (found on
-  [moq-dev/moq#9435](https://github.com/moq-dev/moq/pull/9435)). A resumed
-  reader at local floor 10 has its window moved from time 10 to time 9, and the
-  serving route holds groups 0 to 9 and 12. JS then asks that route for
-  `[0,10)`, where Rust asks for `[9,10)`, so JS owes groups below the window
-  that one cursor does not. With the floor admitting group 9, JS hands out only
-  9. JS `exhausted` reads the window from `window.floor() ?? 0n`, so a start
-  no copy has placed is read as group 0.
-
 Start from seed 33. A copy's resolution of a time end it cannot prove, like
 a time start ([moq-dev/moq#9307](https://github.com/moq-dev/moq/pull/9307)),
 should not narrow what the next copy is asked for. Decide per case whether
