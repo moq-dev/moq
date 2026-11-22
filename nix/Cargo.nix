@@ -18043,6 +18043,7 @@ rec {
             features = [
               "CMSampleBuffer"
               "CMBlockBuffer"
+              "CMFormatDescription"
               "CMSync"
               "objc2-core-audio-types"
             ];
