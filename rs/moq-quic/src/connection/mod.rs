@@ -2092,6 +2092,14 @@ impl Connection {
 			_ => 2,
 		};
 		self.spaces[space].loss_probes = self.spaces[space].loss_probes.saturating_add(count);
+		if space != SpaceId::Data {
+			// The whole unacknowledged handshake flight goes in the probe, both spaces coalesced
+			// (RFC 9002 §6.2.4), rather than the fired space's oldest packet padded out: a server
+			// held to three times what it heard otherwise spends that budget on a padded
+			// ServerHello and a Handshake flight apart, and has none left when one is lost again.
+			self.requeue_crypto(SpaceId::Initial);
+			self.requeue_crypto(SpaceId::Handshake);
+		}
 		self.probe_when_heard = space == SpaceId::Data
 			&& self.spaces[space].time_of_last_ack_eliciting_packet.is_some()
 			&& !self.heard_since_sent;

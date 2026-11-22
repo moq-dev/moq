@@ -4262,6 +4262,36 @@ fn client_requests_lost_server_hello() {
 	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
 }
 
+/// A server's handshake PTO carries its whole lost flight, Initial and Handshake coalesced, so the
+/// probe's first datagram alone completes the client's handshake
+#[test]
+fn handshake_pto_coalesces_lost_flight() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let client_ch = pair.begin_connect(client_config());
+	pair.drive_client();
+	pair.drive_server();
+	// The server's whole flight is lost, up to its PTO's probe, a padded Initial
+	pair.client.inbound.clear();
+	loop {
+		pair.time = pair.server.next_wakeup().unwrap();
+		pair.server.drive(pair.time, pair.client.addr);
+		if pair
+			.server
+			.outbound
+			.front()
+			.is_some_and(|(t, _)| t.size >= MIN_INITIAL_SIZE as usize)
+		{
+			break;
+		}
+		pair.server.outbound.clear();
+	}
+	pair.server.outbound.truncate(1);
+	pair.drive_server();
+	pair.drive_client();
+	assert!(is_connected(pair.client_conn_mut(client_ch)));
+}
+
 /// CRYPTO recovered early goes ahead of a flight the anti-amplification limit still holds back,
 /// since a client buffers only so far past the offset it is missing
 #[test]
