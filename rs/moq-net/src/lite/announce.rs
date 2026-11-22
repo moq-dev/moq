@@ -254,7 +254,9 @@ fn encode_claim(w: &mut Encoder<'_>, claim: &Claim) -> Result<(), EncodeError> {
 /// Decode a claim of `epoch`. A chain at the hop limit, or naming Node ID 0, and a
 /// flag this version does not define fail the stream: no sender builds one.
 fn decode_claim(r: &mut Decoder<'_>, epoch: u64) -> Result<Claim, DecodeError> {
-	let cost = r.varint()?;
+	// A cost saturates at the ceiling, so one above it reads as the ceiling and is never
+	// forwarded raw.
+	let cost = r.varint()?.min(route::MAX_COST);
 	let above = r.varint()?;
 	let flags = r.u8()?;
 	if flags & !(UNAVAILABLE | DRAINING | CLAIM_MARKED) != 0 {
@@ -607,8 +609,7 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 					ANNOUNCE_START if version.has_routes() => {
 						let suffix = PathRef::decode(&mut body, version)?;
 						// Every lite-07 claim names its instance.
-						let (instance, epoch) =
-							super::instance::decode_forwarded(&mut body)?.ok_or(DecodeError::InvalidValue)?;
+						let (instance, epoch) = super::instance::decode_forwarded(&mut body)?;
 						let claim = decode_claim(&mut body, epoch)?;
 						Self::Start {
 							suffix,
@@ -955,5 +956,31 @@ mod chain_tests {
 		buf.extend(1..=route::MAX_HOPS as u8);
 		let refused = decode_claim(&mut Decoder::new(&buf, form), 0);
 		assert!(matches!(refused, Err(DecodeError::TooMany)), "{refused:?}");
+	}
+
+	/// A cost above the draft's ceiling, which lite-07's varint can still carry, reads as
+	/// the ceiling, so this node never forwards it raw.
+	#[test]
+	fn a_claim_cost_saturates_at_the_ceiling() {
+		let form = Version::Lite07.into();
+		for (sent, read) in [
+			(route::MAX_COST, route::MAX_COST),
+			(route::MAX_COST + 1, route::MAX_COST),
+			(u64::MAX, route::MAX_COST),
+		] {
+			let claim = Claim {
+				item: route::node::Attr { epoch: 0, above: 0 },
+				cost: sent,
+				priority: i8::MAX,
+				draining: false,
+				unavailable: false,
+				chain: Vec::new(),
+				marked: false,
+			};
+			let mut buf = Vec::new();
+			encode_claim(&mut Encoder::new(&mut buf, form), &claim).unwrap();
+			let decoded = decode_claim(&mut Decoder::new(&buf, form), 0).unwrap();
+			assert_eq!(decoded.cost, read, "{sent}");
+		}
 	}
 }

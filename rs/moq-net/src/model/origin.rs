@@ -2952,7 +2952,7 @@ impl Producer {
 	/// hidden from the mounted handle.
 	///
 	/// Returns [`Error::Unauthorized`] unless this producer reaches all of
-	/// `target`, so a mount never widens a scope, and [`Error::Duplicate`] when
+	/// `target`, none of it [excluded](Self::exclude), so a mount never widens a scope, and [`Error::Duplicate`] when
 	/// `at` or `target` overlaps a mount point this producer already has, or `at`
 	/// overlaps an existing target or its own: mounts never chain, in whatever order they are added,
 	/// so a target is always read as the origin holds it. Mounts may share a target.
@@ -2970,13 +2970,16 @@ impl Producer {
 		}
 		// A mount point no pattern can spell could never be announced or authorized.
 		Pattern::literal(at.as_str())?;
-		if !self.scope.allowed.matches(target.as_str()) {
+		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
+		// An excluded subtree at, above, or beneath the target would be read under `at`.
+		if !self.scope.allowed.matches(target.as_str())
+			|| self.scope.excluded.iter().any(|excluded| overlaps(&target, excluded))
+		{
 			return Err(Error::Unauthorized);
 		}
 		// Symmetric, so the order mounts are added never changes which sets are accepted:
 		// no mount point overlaps any mount's point or target, its own included.
 		// Targets may overlap.
-		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
 		if overlaps(&at, &target)
 			|| self
 				.scope
@@ -5205,9 +5208,16 @@ impl kio::Task for FrontServe {
 								self.events.push_back(Event::Resolved { route, result: Ok(id) });
 								continue;
 							}
-							let pending = match serve.requests.join(&self.path) {
-								Some(producer) => producer.consume(),
-								None => {
+							// A request nobody waits on any more is final: its claimant may
+							// already be skipping it, so ask afresh rather than revive it.
+							// `join` refuses atomically, since its last reader leaves outside
+							// this lock.
+							let pending = match serve.requests.join(&self.path).map(|producer| producer.join()) {
+								Some(Some(consumer)) => consumer,
+								stale => {
+									if stale.is_some() {
+										serve.requests.take(&self.path);
+									}
 									let producer = kio::Producer::<PendingBroadcast>::default();
 									let consumer = producer.consume();
 									match serve.requests.insert(self.path.clone(), producer) {
@@ -5493,6 +5503,15 @@ impl kio::Task for FrontServe {
 							return Poll::Ready(in_flight);
 						}
 					}
+				}
+				// The machine stopped asking the route this request went to, by asking another or
+				// giving the switch up: drop it, so its claimant learns nobody waits on it.
+				if self
+					.upstream
+					.as_ref()
+					.is_some_and(|asked| self.front.asking() != Some(asked.route))
+				{
+					self.upstream = None;
 				}
 				// A staged copy the machine did not splice was refused or is no longer wanted:
 				// let it go, or its source stays subscribed for nobody.
@@ -7327,6 +7346,15 @@ impl Request {
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Err(err));
+	}
+
+	/// Ready once no requester waits on the answer any more: each left, or the relay
+	/// moved it to another route. Final: a later requester gets a new request.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		// A front adds a requester only through `kio::Producer::join`, which never takes
+		// the count from zero, so once unwanted it stays so.
+		self.producer.poll_wanted_changed(waiter, true).map(|_| ())
 	}
 }
 
@@ -10115,6 +10143,29 @@ mod tests {
 				"{at} -> {target}"
 			);
 		}
+	}
+
+	/// A mount never reads a subtree the handle was excluded from: not the target
+	/// itself, nor one above or beneath it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn mount_never_reaches_an_excluded_subtree() {
+		let producer = origin(1).produce();
+		let _secret = producer.route(".stats/node", RouteOptions::default()).unwrap();
+		let excluded = producer.exclude(".stats").unwrap();
+		for target in [".stats", ".stats/node", ""] {
+			assert!(
+				matches!(excluded.mount("view", target), Err(Error::Unauthorized)),
+				"{target}"
+			);
+		}
+		let partly = producer.exclude(".stats/node").unwrap();
+		assert!(matches!(partly.mount("view", ".stats"), Err(Error::Unauthorized)));
+
+		// A target beside the excluded subtree mounts, and the exclusion still holds.
+		let mounted = excluded.mount("view", "public").unwrap();
+		let err = mounted.consume().request(".stats/node", None).await.err().unwrap();
+		assert!(matches!(err, Error::Unauthorized), "{err:?}");
 	}
 
 	/// A mount point no pattern can spell could never be announced or authorized.
@@ -13997,6 +14048,122 @@ mod tests {
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
 	}
 
+	/// Whether a held request reports nobody waits on it, without waiting.
+	#[cfg(feature = "async")]
+	fn unwanted(request: &Request) -> bool {
+		request.poll_unwanted(&kio::Waiter::noop()).is_ready()
+	}
+
+	/// A held request is unwanted once its only requester leaves, and stays so: a new
+	/// requester gets a new request rather than reviving the skipped one.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_requester_leaves() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&claim).await;
+		assert!(!unwanted(&request));
+
+		drop(pending);
+		settle(|| unwanted(&request)).await;
+
+		let pending = consumer.request("room/alice", None);
+		let fresh = queued(&claim).await;
+		assert!(unwanted(&request), "a new requester never revives it");
+		assert!(!unwanted(&fresh));
+		drop(request);
+		fresh.serve(broadcast::Info::new().produce());
+		pending.await.expect("the fresh request answers");
+	}
+
+	/// Coalesced requesters share one request: it is unwanted only once the last leaves.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_coalesced_request_is_unwanted_once_the_last_requester_leaves() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
+		let first = consumer.request("room/alice", None);
+		let second = consumer.request("room/alice", None);
+		let request = queued(&claim).await;
+
+		drop(first);
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert!(!unwanted(&request), "the second requester still waits");
+		assert!(
+			claim.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"one request for both"
+		);
+
+		drop(second);
+		settle(|| unwanted(&request)).await;
+	}
+
+	/// A front moving to a cheaper route leaves the request it held unwanted, while its
+	/// requester resolves through the new route.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_front_moves_to_another_route() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let pool = producer.claim("room", RouteOptions::default().with_cost(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&pool).await;
+
+		let node = producer.claim("room", RouteOptions::default().with_cost(1)).unwrap();
+		let moved = queued(&node).await;
+		settle(|| unwanted(&request)).await;
+		assert!(!unwanted(&moved));
+
+		let served = broadcast::Info::new().produce();
+		moved.serve(&served);
+		pending.await.expect("resolves through the cheaper route");
+	}
+
+	/// A front moving to a route that serves at once, such as a local broadcast, also
+	/// leaves the request it held unwanted.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_a_direct_route_takes_over() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let pool = producer.claim("room", RouteOptions::default().with_cost(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&pool).await;
+
+		let _direct = producer
+			.route("room/alice", RouteOptions::default().with_cost(1))
+			.unwrap();
+		settle(|| unwanted(&request)).await;
+		pending.await.expect("resolves through the direct route");
+	}
+
+	/// A front that gives up a switch without asking anew, because its serving route is
+	/// the best again, leaves the switch's request unwanted.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_front_gives_up_the_switch() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let options = |cost: u64| RouteOptions::default().with_instance(instance(), 0).with_cost(cost);
+		let serving = producer.claim("room", options(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let source = broadcast::Info::new().produce();
+		queued(&serving).await.serve(&source);
+		let _resolved = pending.await.expect("resolves through the serving claim");
+
+		let cheaper = producer.claim("room", options(1)).unwrap();
+		let switch = queued(&cheaper).await;
+		assert!(!unwanted(&switch));
+
+		cheaper.set_cost(10).unwrap();
+		settle(|| unwanted(&switch)).await;
+	}
+
 	/// An answer prepared for a claim that went away is refused, never announced.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -16601,7 +16768,7 @@ mod tests {
 		let mut later = video
 			.subscribe(crate::track::Subscription {
 				ranges: vec![crate::track::Range {
-					start: Some(3),
+					start: crate::track::Start::Time(3),
 					end: None,
 				}],
 				..Default::default()

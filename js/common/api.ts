@@ -27,7 +27,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import {
 	Application,
@@ -933,12 +933,34 @@ function declare(dir: string, out: string, manifest: Manifest) {
 	writeFileSync(join(out, "package.json"), JSON.stringify({ ...manifest, exports }));
 }
 
+async function checkAll(dirs: string[]): Promise<string[]> {
+	if (dirs.length <= 1) return dirs.length === 1 ? checkReports(dirs[0]) : [];
+	const limit = Math.min(dirs.length, Math.max(1, availableParallelism()));
+	const results: string[][] = new Array(dirs.length);
+	let next = 0;
+	const worker = async () => {
+		while (next < dirs.length) {
+			const i = next++;
+			const proc = Bun.spawn([process.execPath, import.meta.path, "check-one", dirs[i]], {
+				stdout: "pipe",
+				stderr: "inherit",
+			});
+			const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			if (code !== 0) throw new Error(`api report check failed for ${dirs[i]} (exit ${code})`);
+			results[i] = JSON.parse(out) as string[];
+		}
+	};
+	await Promise.all(Array.from({ length: limit }, worker));
+	return results.flat();
+}
+
 if (import.meta.main) {
 	const [command, ...args] = process.argv.slice(2);
 	const [checkout, out] = args;
-	if (command === "check" && args.length > 0) {
-		const stale: string[] = [];
-		for (const dir of args) stale.push(...(await checkReports(dir)));
+	if (command === "check-one" && args.length === 1) {
+		process.stdout.write(JSON.stringify(await checkReports(args[0])));
+	} else if (command === "check" && args.length > 0) {
+		const stale = await checkAll(args);
 		if (stale.length > 0) {
 			console.error("The public API no longer matches its committed report; run `just fix` and review the diff:");
 			for (const file of stale) console.error(`  ${file}`);

@@ -5,8 +5,8 @@
  * Time ranges count as runs of group starts in a {@link Cover}, so a change touches two boundaries
  * and asks one range-minimum question, whatever else the audience holds. A start between groups
  * stands for the group containing it, which a range starting at or before it covers too, so spans
- * merge as they do over starts. Ranges with no start can't be placed on that line and are counted
- * by value instead.
+ * merge as they do over starts. Ranges with no time start can't be placed on that line and are
+ * counted by value instead.
  *
  * @module
  */
@@ -14,23 +14,24 @@
 import { Cover } from "./cover.ts";
 import type { Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
-import { compare, isEmpty, rangeKey } from "./window.ts";
+import { compare, isEmpty, rangeKey, rangeTime } from "./window.ts";
 
 /** How {@link Ranges} counts one range. */
 type Shape =
 	| { kind: "empty" }
-	/** The open range with no start. */
+	/** From the oldest group, following the live edge. */
 	| { kind: "open" }
 	/** A time range, as the exclusive span of starts it covers, {@link UNBOUNDED} when open. */
 	| { kind: "time"; start: bigint; end: bigint }
-	/** A range with no start and an end. */
-	| { kind: "until" };
+	/** The rest: a live join, or a range from the oldest group with an end. */
+	| { kind: "other" };
 
 function shapeOf(range: Range): Shape {
 	if (isEmpty(range)) return { kind: "empty" };
-	const { start, end } = range;
-	if (start === undefined) return end === undefined ? { kind: "open" } : { kind: "until" };
-	return { kind: "time", start, end: end === undefined ? UNBOUNDED : end + 1n };
+	const start = rangeTime(range);
+	const end = range.end;
+	if (start !== undefined) return { kind: "time", start, end: end === undefined ? UNBOUNDED : end + 1n };
+	return range.start === undefined && end === undefined ? { kind: "open" } : { kind: "other" };
 }
 
 /**
@@ -38,14 +39,12 @@ function shapeOf(range: Range): Shape {
  * module's `union` folds them.
  */
 export class Ranges {
-	// Holders of the open range with no start.
+	// Holders of a range from the oldest group following the live edge, which covers every other.
 	#open = 0;
 	// Time ranges, as spans of starts.
 	#time = new Cover();
-	// Ranges with no start and an end, kept as they are.
-	#until = new Map<string, { range: Range; count: number }>();
-	// Whether a range with no start is a live join, which reaches back to no time span.
-	#joins = false;
+	// The rest, live joins and ranges from the oldest group with an end, kept as they are.
+	#others = new Map<string, { range: Range; count: number }>();
 	// The last union read, until a change moves it.
 	#union?: Range[];
 
@@ -62,14 +61,14 @@ export class Ranges {
 			case "time": {
 				const uncovered = this.#time.least(shape.start, shape.end) <= 0;
 				this.#time.add(shape.start, shape.end, 1);
-				changed = uncovered && !this.#covers();
+				changed = uncovered && this.#open === 0;
 				break;
 			}
-			case "until": {
+			case "other": {
 				const key = rangeKey(range);
-				const held = this.#until.get(key);
+				const held = this.#others.get(key);
 				if (held) held.count++;
-				else this.#until.set(key, { range, count: 1 });
+				else this.#others.set(key, { range, count: 1 });
 				changed = !held && this.#open === 0;
 				break;
 			}
@@ -89,35 +88,19 @@ export class Ranges {
 				break;
 			case "time":
 				this.#time.add(shape.start, shape.end, -1);
-				changed = !this.#covers() && this.#time.least(shape.start, shape.end) <= 0;
+				changed = this.#open === 0 && this.#time.least(shape.start, shape.end) <= 0;
 				break;
-			case "until": {
+			case "other": {
 				const key = rangeKey(range);
-				const held = this.#until.get(key);
+				const held = this.#others.get(key);
 				if (!held) break;
 				const last = --held.count === 0;
-				if (last) this.#until.delete(key);
+				if (last) this.#others.delete(key);
 				changed = last && this.#open === 0;
 				break;
 			}
 		}
 		return this.#moved(changed);
-	}
-
-	/**
-	 * Set whether the ranges with no start are live joins (the aggregate Min Age is stated), which
-	 * reach back to no time span, rather than reaching back to the oldest group. Returns whether
-	 * the union changed.
-	 */
-	joins(joins: boolean): boolean {
-		if (this.#joins === joins) return false;
-		this.#joins = joins;
-		return this.#moved(this.#open > 0);
-	}
-
-	// Whether the open range with no start reaches back to the oldest group, covering every other.
-	#covers(): boolean {
-		return this.#open > 0 && !this.#joins;
 	}
 
 	// Drop the cached union when `changed`, passing it through.
@@ -133,13 +116,11 @@ export class Ranges {
 	}
 
 	#fold(): Range[] {
-		if (this.#covers()) return [{}];
+		if (this.#open > 0) return [{}];
 		const union: Range[] = this.#time
 			.runs()
 			.map((run) => (run.end === UNBOUNDED ? { start: run.start } : { start: run.start, end: run.end - 1n }));
-		// Every range with no start begins at the same group, so the open one covers the rest.
-		if (this.#open > 0) union.push({});
-		else for (const { range } of this.#until.values()) union.push(range);
+		for (const { range } of this.#others.values()) union.push(range);
 		return union.sort(compare);
 	}
 }

@@ -140,6 +140,48 @@ describe("Prefixes", () => {
 		expect(Prefixes.all().matches("anything/at/all")).toBe(true);
 	});
 
+	test("normalizes a path it is asked about", () => {
+		const grant = set("é", "a/ü");
+		for (const path of ["é", "/é", "é/", "//é//x", "é//x/"]) {
+			expect(Prefix.parse("é").matches(path), path).toBe(true);
+			expect(grant.matches(path), path).toBe(true);
+			expect(grant.overlaps(path), path).toBe(true);
+		}
+		for (const path of ["/a", "a/", "//a//"]) {
+			expect(grant.matches(path), path).toBe(false);
+			expect(grant.overlaps(path), path).toBe(true);
+			expect(Prefix.parse("a/ü").overlaps(path), path).toBe(true);
+		}
+		expect(grant.matches("/a//ü/")).toBe(true);
+		expect(grant.overlaps("/ü")).toBe(false);
+		// Slashes collapse, but an escaped `/` still never splits a segment.
+		expect(Prefix.parse("a").matches("/a\\/b")).toBe(false);
+		expect(Prefix.parse("a\\/b").overlaps("a\\")).toBe(false);
+		expect(Prefix.parse("a\\/b").overlaps("/a\\/b//")).toBe(true);
+	});
+
+	test("agrees with patterns and each member on any short path", () => {
+		const pieces = ["", "/", "a", "é", "\\/", "\\\\", "\\"];
+		let paths = [""];
+		for (let i = 0; i < 4; i++) paths = [...paths, ...paths.flatMap((path) => pieces.map((piece) => path + piece))];
+		paths = [...new Set(paths)];
+		const members = ["", "a", "é", "a/é", "é/a", "a\\/é", "\\\\", "é/é"].map((text) => Prefix.parse(text));
+		const sets: Prefixes[] = [];
+		for (let mask = 0; mask < 1 << members.length; mask += 7) {
+			sets.push(new Prefixes(members.filter((_, bit) => mask & (1 << bit))));
+		}
+		for (const path of paths) {
+			for (const member of members) {
+				expect(member.matches(path), `${member.text} ${path}`).toBe(member.pattern().matches(path));
+			}
+			for (const grant of sets) {
+				const all = grant.toArray();
+				expect(grant.matches(path), path).toBe(all.some((member) => member.matches(path)));
+				expect(grant.overlaps(path), path).toBe(all.some((member) => member.overlaps(path)));
+			}
+		}
+	});
+
 	test("covers", () => {
 		expect(set("a", "b").covers(set("a/x", "b"))).toBe(true);
 		expect(set("a/x").covers(set("a"))).toBe(false);

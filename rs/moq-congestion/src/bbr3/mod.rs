@@ -96,6 +96,10 @@ const DELAY_BETA: f64 = 0.85;
 /// can be used by cross traffic (the value is 0.15).
 const HEADROOM: f64 = 0.15;
 
+/// How far above BBR.min_rtt a congested, application-limited window's lowest RTT may sit and
+/// still skip ProbeRTT: QUICHE's kSimilarMinRttThreshold.
+const SIMILAR_MIN_RTT: f64 = 1.125;
+
 /// equivalent to BBR.MinRTTFilterLen: A constant specifying the length of the BBR.min_rtt min
 /// filter window, BBR.MinRTTFilterLen is 10 secs.
 const MIN_RTT_FILTER_LEN: Duration = Duration::from_secs(10);
@@ -418,14 +422,15 @@ pub(crate) struct Bbr3 {
     /// moved, which lets the due ProbeRTT be skipped. A flow that never ran out of data keeps
     /// entering ProbeRTT, where competing BBR flows converge.
     probe_rtt_skip_app_limited: bool,
-    /// Whether loss or CE signalled congestion since BBR.min_rtt_stamp last moved, which denies
-    /// a skip. The flow then shares a full queue whose delay only ProbeRTT re-measures: beside a
-    /// loss-based flow, skipping would hold BBR.min_rtt below the queue that flow keeps and yield
-    /// to it. Persistent loss thus never postpones ProbeRTT.
-    probe_rtt_skip_congested: bool,
-    /// `probe_rtt_skip_congested` when the current recovery episode began, restored if the
-    /// episode is declared spurious: a loss that never happened was not congestion.
-    undo_probe_rtt_skip_congested: bool,
+    /// Set once loss or CE signalled congestion since BBR.min_rtt_stamp last moved, holding the
+    /// lowest RTT sample since the latest signal. Above [`SIMILAR_MIN_RTT`] of BBR.min_rtt, it
+    /// denies a skip: the flow shares a full queue whose delay only ProbeRTT re-measures, and
+    /// beside a loss-based flow, skipping would hold BBR.min_rtt below the queue that flow keeps
+    /// and yield to it. Persistent loss with a queue thus never postpones ProbeRTT.
+    probe_rtt_congested: Option<Duration>,
+    /// `probe_rtt_congested` when the current recovery episode began, restored if the episode is
+    /// declared spurious: a loss that never happened was not congestion.
+    undo_probe_rtt_congested: Option<Duration>,
     /// equivalent to RS: Per-ACK Rate Sample State, from the last ACK that delivered a packet
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-2.3>
     rs: Option<Sample>,
@@ -631,8 +636,8 @@ impl Bbr3 {
             probe_rtt_duration: Duration::from_millis(PROBE_RTT_DURATION_MS),
             probe_rtt_cwnd: u64::MAX,
             probe_rtt_skip_app_limited: false,
-            probe_rtt_skip_congested: false,
-            undo_probe_rtt_skip_congested: false,
+            probe_rtt_congested: None,
+            undo_probe_rtt_congested: None,
             rs: None,
             ack_rs: None,
             rounds_since_bw_probe: 0,
@@ -1220,6 +1225,12 @@ impl Bbr3 {
     /// An application-limited flow without congestion since the stamp skips the due ProbeRTT,
     /// as QUICHE BBRv1's kBBR8 does, which spares media its periodic window cut. Its near-floor
     /// kBBR7 also requires an application-limited interval, so kBBR8 covers it.
+    /// Congestion denies the skip only while the lowest sample since its latest signal sits
+    /// above [`SIMILAR_MIN_RTT`] of BBR.min_rtt, as QUICHE's `probe_rtt_skipped_if_similar_rtt_`
+    /// does: a flow beside a full queue measures that queue, while one whose samples returned to
+    /// BBR.min_rtt has none to drain. A one-off overflow, such as a startup overshoot, would
+    /// otherwise cut a media flow below its own rate for a round and leave it a backlog that it
+    /// drains only at its application-limited estimate, seconds behind live.
     /// <https://quiche.googlesource.com/quiche.git/+/59748eb0effcf74602957379bf5a8ce0f5aec770/quic/core/congestion_control/bbr_sender.cc>
     /// A skip adopts the expired window's lowest sample after the one that set BBR.min_rtt, so a
     /// base RTT that rose is learned without ProbeRTT: an application-limited flow keeps little
@@ -1235,10 +1246,13 @@ impl Bbr3 {
         let Some(rate_sample) = self.rs else {
             return;
         };
-        if self.min_rtt_expired
-            && !self.idle_restart
-            && self.probe_rtt_skip_app_limited
-            && !self.probe_rtt_skip_congested
+        if let Some(congested) = &mut self.probe_rtt_congested {
+            *congested = Ord::min(*congested, rate_sample.rtt);
+        }
+        let queued = self.probe_rtt_congested.is_some_and(|congested| {
+            congested.as_secs_f64() > self.min_rtt.as_secs_f64() * SIMILAR_MIN_RTT
+        });
+        if self.min_rtt_expired && !self.idle_restart && self.probe_rtt_skip_app_limited && !queued
         {
             self.min_rtt_expired = false;
             self.min_rtt = Ord::min(self.later_min_rtt, rate_sample.rtt);
@@ -1257,8 +1271,8 @@ impl Bbr3 {
         self.min_rtt_stamp = Some(now);
         self.later_min_rtt = Duration::from_secs(u64::MAX);
         self.probe_rtt_skip_app_limited = false;
-        self.probe_rtt_skip_congested = false;
-        self.undo_probe_rtt_skip_congested = false;
+        self.probe_rtt_congested = None;
+        self.undo_probe_rtt_congested = None;
     }
 
     /// equivalent to BBRCheckProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.4.3>
@@ -1632,7 +1646,8 @@ impl Bbr3 {
                 marks.loss_round = true;
             }
         }
-        self.probe_rtt_skip_congested = true;
+        // Infinity, as for `min_rtt`, until a sample after this signal arrives.
+        self.probe_rtt_congested = Some(Duration::from_secs(u64::MAX));
     }
 
     /// Responds to newly reported CE marks as classic ECN: congestion that the bottleneck
@@ -1686,7 +1701,7 @@ impl Bbr3 {
             _ => self.cwnd,
         };
         self.undo_state = None;
-        self.undo_probe_rtt_skip_congested = self.probe_rtt_skip_congested;
+        self.undo_probe_rtt_congested = self.probe_rtt_congested;
         self.undo_prev_probe_too_high = self.prev_probe_too_high;
         self.undo_prev_probe_precautionary = self.prev_probe_precautionary;
         self.undo_bw_shortterm = self.bw_shortterm;
@@ -2030,7 +2045,10 @@ impl Controller for Bbr3 {
         self.bound_cwnd_for_probe_rtt();
         self.loss_in_round = false;
         self.loss_events_in_round = 0;
-        self.probe_rtt_skip_congested = self.undo_probe_rtt_skip_congested;
+        // An earlier signal still stands, and the samples since this episode began followed it.
+        self.probe_rtt_congested = self
+            .undo_probe_rtt_congested
+            .map(|undo| Ord::min(undo, self.probe_rtt_congested.unwrap_or(undo)));
         self.reset_full_bw();
         self.prev_probe_too_high = self.undo_prev_probe_too_high;
         // A precautionary stop still waiting for its feedback round waits again; once that
@@ -8026,20 +8044,30 @@ mod test {
         assert!(sim.bbr.min_rtt_stamp.unwrap() > sim.at(20_000 * MS));
     }
 
-    /// Loss or CE in the interval means the flow shares a full queue, so an application-limited
-    /// flow enters ProbeRTT, and BBR.min_rtt expires into the higher RTT it measured.
+    /// Loss or CE in the interval, with every later sample above [`SIMILAR_MIN_RTT`] of
+    /// BBR.min_rtt, means the flow shares a full queue, so an application-limited flow enters
+    /// ProbeRTT, and BBR.min_rtt expires into the higher RTT it measured. Samples within it
+    /// show no queue to drain, so the flow skips and adopts the window's lowest sample.
     #[test]
     fn congested_interval_enters_probe_rtt() {
         for ce in [false, true] {
-            let mut sim = probed();
-            sim.send(10 * MS, 1);
-            match ce {
-                true => sim.ack_ce(20 * MS, [sim.pn - 1]),
-                false => sim.lose(20 * MS, sim.pn - 1),
+            for (rtt_us, entries) in [(20_000, 1), (11_300, 1), (11_200, 0), (10_000, 0)] {
+                let mut sim = probed();
+                sim.send(10 * MS, 1);
+                match ce {
+                    true => sim.ack_ce(20 * MS, [sim.pn - 1]),
+                    false => sim.lose(20 * MS, sim.pn - 1),
+                }
+                let got = pipeline(&mut sim, 20 * MS, 12_000 * MS, |_| rtt_us * 1000, true);
+                assert_eq!(got, entries, "ce={ce} rtt={rtt_us}us");
+                // A skip adopts the window's lowest sample, which the CE-marked packet's is.
+                let min_us = if ce && entries == 0 { 10_000 } else { rtt_us };
+                assert_eq!(
+                    sim.bbr.min_rtt,
+                    Duration::from_micros(min_us),
+                    "ce={ce} rtt={rtt_us}us"
+                );
             }
-            let entries = pipeline(&mut sim, 20 * MS, 12_000 * MS, |_| 20 * MS, true);
-            assert_eq!(entries, 1, "ce={ce}");
-            assert_eq!(sim.bbr.min_rtt, Duration::from_millis(20), "ce={ce}");
         }
     }
 
@@ -8056,7 +8084,7 @@ mod test {
             // A packet sent after any earlier episode began opens a new one.
             sim.send(25 * MS, 1);
             sim.lose(30 * MS, sim.pn - 1);
-            assert!(sim.bbr.probe_rtt_skip_congested);
+            assert!(sim.bbr.probe_rtt_congested.is_some());
             if restart {
                 // A lower RTT sample restarts the min_rtt filter, and the interval with it.
                 sim.send(40 * MS, 1);
@@ -8064,7 +8092,8 @@ mod test {
                 assert_eq!(sim.bbr.min_rtt, Duration::from_millis(5));
             }
             sim.bbr.on_spurious_loss();
-            let got = pipeline(&mut sim, 50 * MS, 12_000 * MS, |_| 10 * MS, true);
+            // Queued samples, so only the skip's congestion evidence decides.
+            let got = pipeline(&mut sim, 50 * MS, 12_000 * MS, |_| 20 * MS, true);
             assert_eq!(got, entries, "earlier={earlier} restart={restart}");
         }
     }

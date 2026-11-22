@@ -1440,11 +1440,15 @@ async fn two_legs_pad_the_same_slots_at_a_fractional_rate() {
 /// Whatever follows the source's clock has to follow it identically on both legs, though they
 /// joined at different points on it.
 #[tokio::test(start_paused = true)]
-async fn two_legs_render_a_drifting_source_the_same_way() {
-	for scale in [0.9996, 1.0004] {
-		let (a, b, from) = pair(scale, 0, 180_000_000 / VIDEO_US, |_| false).await;
-		assert_same_packets(&a, &b, from);
-	}
+async fn two_legs_render_a_slow_drifting_source_the_same_way() {
+	let (a, b, from) = pair(0.9996, 0, 180_000_000 / VIDEO_US, |_| false).await;
+	assert_same_packets(&a, &b, from);
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_legs_render_a_fast_drifting_source_the_same_way() {
+	let (a, b, from) = pair(1.0004, 0, 180_000_000 / VIDEO_US, |_| false).await;
+	assert_same_packets(&a, &b, from);
 }
 
 // A receiver locks its decoder's clock to the PCR, so the output's system clock is held to

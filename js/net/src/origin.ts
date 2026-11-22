@@ -3162,6 +3162,8 @@ export class Request {
 	// Answered by the application, or withdrawn by the origin before it was.
 	#state: "pending" | "answered" | "withdrawn" = "pending";
 	#publisher?: Producer;
+	// Settled once the origin withdraws it: nobody waits on its answer any more.
+	#unwanted = new Once<true>();
 
 	private constructor(path: Path.Valid, server: ServeState) {
 		this.path = path;
@@ -3189,8 +3191,19 @@ export class Request {
 		requestHandoff = (request) => request.#server.handoff;
 		finishRequest = (request, err) => {
 			request.#state = "withdrawn";
+			if (request.#unwanted.peek() === undefined) request.#unwanted.set(true);
 			void err;
 		};
+	}
+
+	/**
+	 * Resolves once no requester waits on the answer any more: each left, or the origin moved
+	 * them to another route. Final: a later requester gets a new request.
+	 */
+	// Public API for a claimant's owner, such as an orchestrator deciding whether to launch work.
+	// fallow-ignore-next-line unused-class-member
+	async unwanted(): Promise<void> {
+		await this.#unwanted;
 	}
 
 	/**
