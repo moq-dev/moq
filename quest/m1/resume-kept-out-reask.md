@@ -40,7 +40,3 @@ as a unit test in both languages.
   which deletes `Reader::skipped` and this quest's backfill, but lets a read
   end before a group its window covers is known. An agent cannot pick this:
   it changes what a subscription's bounded read promises.
-
-## Related
-
-- [Resume model placement](/quest/m0/nightly/resume-model-placement.md) - the oracle owing a kept-out group below the serving placement
