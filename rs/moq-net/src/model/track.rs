@@ -25,7 +25,7 @@ use crate::ledger::{self, Ledger};
 use super::subscription;
 pub(crate) use super::subscription::Resolved;
 use super::subscription::{Accounted, Budget, Containing, Cover, Found, Holdings, Join, Unplaced, Window, minus};
-pub(crate) use super::subscription::{JoinAsk, live_millis};
+pub(crate) use super::subscription::{JoinAsk, budget, live_millis};
 pub use super::subscription::{Order, Position, Range, Start, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -611,9 +611,12 @@ impl Anchors {
 /// How a received lite-07 copy's publisher answered the newest range asking one live join.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct JoinAnswer {
-	/// The group the join starts at, `None` for nothing to deliver, whatever `max` it was
-	/// asked under: a join lands where its lag does.
+	/// The group the join starts at, `None` for nothing to deliver.
 	start: Option<u64>,
+	/// The narrowest `max` the range was asked under before its answer, as a budget: the
+	/// publisher starts a join past the groups its `max` expired, so the start holds only for a
+	/// reader within it.
+	budget: Duration,
 	/// When it was recorded, by the join tick (see [`demand::Prefs::since`]): a reader that
 	/// began waiting later takes only a newer answer, since the live edge moved on.
 	tick: u64,
@@ -1231,8 +1234,9 @@ impl Holdings for TrackState {
 	/// on a scale-less track, by arrival on this hop's clock, as expiry measures it.
 	///
 	/// A received lite-07 copy places it only where its upstream answered a range asking the
-	/// same join, recorded after `since`: the live edge is the upstream's, which no group held
-	/// here measures. Otherwise it waits on
+	/// same join, recorded after `since`, under a budget at least as wide as the reader's: the
+	/// live edge is the upstream's, which no group held here measures, and a start past groups a
+	/// narrower `max` expired would skip groups this reader still wants. Otherwise it waits on
 	/// its upstream, which its session asks with a range of its own. Another copy whose wire
 	/// reports where its ranges start places it only where the groups it holds prove, and waits
 	/// otherwise, until its end is declared and settled: then the join resolves as a time start.
@@ -1244,7 +1248,9 @@ impl Holdings for TrackState {
 		// measure it, as its upstream's would, holding the same final groups.
 		if self.joins_answered() {
 			return match self.join_answers.get(&(min, end)) {
-				Some(answer) if answer.tick > since => answer.start.map_or(Join::Empty, Join::Group),
+				Some(answer) if answer.tick > since && budget <= answer.budget => {
+					answer.start.map_or(Join::Empty, Join::Group)
+				}
 				_ => Join::Unknown,
 			};
 		}
@@ -5229,18 +5235,20 @@ impl Producer {
 
 	/// Record how the upstream publisher answered a range of this lite-07 copy asking the live
 	/// join `min` behind the live edge through `end`: at group `start`, or `None` for nothing
-	/// to deliver. It replaces the join's earlier answer, and places every reader of that join
-	/// that began waiting before now, whatever `max` each asks. Returns the tick it was
-	/// recorded at.
+	/// to deliver, asked under at most `budget`. It replaces the join's earlier answer, and
+	/// places every reader of that join that began waiting before now, within the budget.
+	/// Returns the tick it was recorded at.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn answer_join(&self, min: Duration, end: Option<u64>, start: Option<u64>) -> u64 {
+	pub(crate) fn answer_join(&self, min: Duration, end: Option<u64>, start: Option<u64>, budget: Duration) -> u64 {
 		// Ticked first: a range added once the tick moved takes no answer recorded at it, and
 		// asks again.
 		let tick = demand::answered();
 		let Ok(mut state) = self.modify() else {
 			return tick;
 		};
-		state.join_answers.insert((min, end), JoinAnswer { start, tick });
+		state
+			.join_answers
+			.insert((min, end), JoinAnswer { start, budget, tick });
 		// A reader's join waiting on the upstream's answer places now.
 		state.placing += 1;
 		tick
@@ -17596,8 +17604,8 @@ mod test {
 		);
 
 		// Upstream answers each join where its live edge was.
-		producer.answer_join(Duration::ZERO, None, Some(9));
-		producer.answer_join(Duration::from_millis(2), None, Some(7));
+		producer.answer_join(Duration::ZERO, None, Some(9), Duration::MAX);
+		producer.answer_join(Duration::from_millis(2), None, Some(7), Duration::MAX);
 		write_group(&producer, 7);
 		assert_eq!((placed(&mut live), placed(&mut behind)), (Some(9), Some(7)));
 		let mut groups = drain_groups(&mut behind);
@@ -17610,7 +17618,7 @@ mod test {
 		let mut later = producer.subscribe(join(2));
 		assert_eq!(placed(&mut later), None);
 		assert_eq!(asked(&producer), [(Duration::from_millis(2), None)]);
-		producer.answer_join(Duration::from_millis(2), None, Some(9));
+		producer.answer_join(Duration::from_millis(2), None, Some(9), Duration::MAX);
 		assert_eq!(placed(&mut later), Some(9));
 		assert_eq!(placed(&mut behind), Some(7), "an earlier reader stays where it started");
 	}
@@ -17631,7 +17639,7 @@ mod test {
 
 		// The reader added its join, then the copy's upstream answered it.
 		let added = demand::join_tick();
-		producer.answer_join(lag, None, Some(9));
+		producer.answer_join(lag, None, Some(9), Duration::MAX);
 		let edit = Edit {
 			retire: Vec::new(),
 			add: vec![(1, Range::from(Start::Live { min: lag, max: None }))],
@@ -17670,11 +17678,12 @@ mod test {
 		assert_eq!(asked(&producer), 0, "no reader waits on it");
 	}
 
-	/// Readers waiting on the same join share its answer whatever `max` each asks, since where a
-	/// join lands depends only on its lag. The copy asks it upstream once, under the widest.
+	/// Readers waiting on the same join share its answer within the `max` it was asked under,
+	/// since the publisher starts a join past the groups its `max` expired: a wider reader asks
+	/// again. The copy asks it upstream once, under the widest.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_received_copy_shares_a_join_answer_whatever_its_max() {
+	fn a_received_copy_shares_a_join_answer_within_its_budget() {
 		let join = |max| {
 			Subscription::default().with_ranges([Range::from(Start::Live {
 				min: Duration::from_millis(2),
@@ -17682,26 +17691,34 @@ mod test {
 			})])
 		};
 		let placed = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
+		let second_budget = Duration::from_secs(1);
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
 		producer.answers_joins();
 		write_group(&producer, 7);
 
-		let mut first = producer.subscribe(join(Some(Duration::from_secs(1))));
-		let mut second = producer.subscribe(join(Some(Duration::from_secs(1))));
+		let mut first = producer.subscribe(join(Some(Duration::from_millis(500))));
+		let mut second = producer.subscribe(join(Some(second_budget)));
 		let mut wider = producer.subscribe(join(None));
 		assert_eq!(placed(&mut first), None);
 		let budgets = producer.subscription().unwrap_or_default().joins;
 		assert_eq!(
 			budgets.iter().map(|join| join.budget).collect::<Vec<_>>(),
-			[Duration::MAX]
+			[Duration::MAX],
+			"asked under the widest waiting"
 		);
-		producer.answer_join(Duration::from_millis(2), None, Some(7));
+
+		// An answer judged under a narrower max places only the readers within it.
+		producer.answer_join(Duration::from_millis(2), None, Some(7), second_budget);
 		assert_eq!(
 			[placed(&mut first), placed(&mut second), placed(&mut wider)],
-			[Some(7); 3]
+			[Some(7), Some(7), None]
 		);
+		let budgets = producer.subscription().unwrap_or_default().joins;
+		assert_eq!(budgets.iter().map(|join| join.budget).collect::<Vec<_>>(), [Duration::MAX]);
+		producer.answer_join(Duration::from_millis(2), None, Some(7), Duration::MAX);
+		assert_eq!(placed(&mut wider), Some(7));
 	}
 
 	/// A declared end may arrive before the groups below it, so a live join the held groups
@@ -17760,7 +17777,7 @@ mod test {
 			.with_max(None);
 		let mut reader = producer.subscribe(join);
 		assert!(reader.resolved_range(0).is_none());
-		producer.answer_join(min, Some(500), None);
+		producer.answer_join(min, Some(500), None, Duration::MAX);
 		assert!(reader.resolved_range(0).is_some());
 		assert!(reader.poll_start(&kio::Waiter::noop()).is_ready());
 		assert_eq!(drain_groups(&mut reader), Vec::<u64>::new());

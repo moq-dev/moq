@@ -3241,6 +3241,7 @@ mod tests {
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -3456,6 +3457,7 @@ mod tests {
 				parked: false,
 				starts: Default::default(),
 				join_ticks: Default::default(),
+				join_budgets: Default::default(),
 				declared: None,
 				end: None,
 				wanted: None,
@@ -3939,6 +3941,7 @@ mod tests {
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -3987,6 +3990,7 @@ mod tests {
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
@@ -4105,6 +4109,7 @@ mod tests {
 			parked: false,
 			starts: [(0, Some(4))].into(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -4174,6 +4179,7 @@ mod tests {
 			parked: false,
 			starts: [(0, Some(4))].into(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
@@ -5794,6 +5800,7 @@ mod tests {
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -5870,7 +5877,7 @@ mod tests {
 				max: Some(budget),
 			}),
 		]));
-		serving.serving.answer_join(lag, None, Some(0));
+		serving.serving.answer_join(lag, None, Some(0), Duration::MAX);
 		let waiter = kio::Waiter::noop();
 		let old = |groups: std::ops::Range<u64>| {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &crate::StreamError::Old, version))
@@ -10419,6 +10426,10 @@ struct SubStream {
 	/// The tick the copy recorded each live join range's answer at, by Range ID (see
 	/// [`track::Producer::answer_join`]): one with none is still unanswered.
 	join_ticks: std::collections::BTreeMap<u64, u64>,
+	/// The narrowest max age each live join range was asked under before its answer, by Range
+	/// ID, beside the one it asks now: its publisher starts it past the groups that max
+	/// expired, so the answer places only readers within it.
+	join_budgets: std::collections::BTreeMap<u64, Duration>,
 	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
 	/// again: each declaration restarts the grace of the gaps above it.
 	declared: Option<(Option<u64>, bool)>,
@@ -10478,11 +10489,13 @@ impl SubStream {
 			let asked = match range.start {
 				Some(lite::Anchor::Absolute(time)) => time.group,
 				None => 0,
-				Some(lite::Anchor::Live { min, .. }) => {
+				Some(lite::Anchor::Live { min, max }) => {
 					// Recorded once, as it arrives: a reader that began waiting since takes only a
 					// newer answer.
 					if let std::collections::btree_map::Entry::Vacant(entry) = self.join_ticks.entry(id) {
-						entry.insert(serving.answer_join(min, through(range.end), start));
+						let asked = self.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
+						let budget = asked.min(crate::track::budget(max));
+						entry.insert(serving.answer_join(min, through(range.end), start, budget));
 					}
 					continue;
 				}
@@ -10628,8 +10641,9 @@ impl SubStream {
 	/// `fills` of which are the held fills', forgetting the starts of those retired. A fill or
 	/// probe asking for what a demand range does still takes a range of its own, so each Range
 	/// ID stays the demand's, a probe, or a fill's. A live join asked under another max age
-	/// alone is retuned in place, keeping its answer. Returns the edit, and whether it changed
-	/// the demand's or the fills' ranges.
+	/// alone is retuned in place, keeping its answer, and an unanswered one remembers the
+	/// narrowest it was asked under. Returns the edit, and whether it changed the demand's or
+	/// the fills' ranges.
 	///
 	/// `reasked` retires each of those live probes and adds it afresh: a live join answered
 	/// before a reader began waiting on it.
@@ -10664,10 +10678,20 @@ impl SubStream {
 			(_, true) => Kind::Probe,
 			_ => Kind::Demand,
 		};
+		// Before a retune moves it: the publisher may answer under the max age asked until then.
+		for (id, range) in self.live.iter() {
+			if let Some(lite::Anchor::Live { max, .. }) = range.start
+				&& !self.join_ticks.contains_key(&id)
+			{
+				let asked = self.join_budgets.entry(id).or_insert(Duration::MAX);
+				*asked = (*asked).min(crate::track::budget(max));
+			}
+		}
 		let (edit, added) = self.live.edit_keyed(&keyed, |id| (kind_of(id), stale.contains(&id)))?;
 		let live = &self.live;
 		self.starts.retain(|id, _| live.get(*id).is_some());
 		self.join_ticks.retain(|id, _| live.get(*id).is_some());
+		self.join_budgets.retain(|id, _| live.get(*id).is_some());
 		if self.started.is_some() {
 			self.fill_ids.retain(|id| live.get(*id).is_some());
 			self.probe_ids.retain(|id| live.get(*id).is_some());
@@ -10723,14 +10747,22 @@ fn join_probes(
 	let mut reasked = std::collections::BTreeSet::new();
 	for join in joins {
 		let key = Some((join.min, join.end));
-		// Each live range asking the join, with whether it is a probe and whether it answers.
+		// Each live range asking the join, with whether it is a probe and whether it answers:
+		// answered after every waiting reader began, under a max age as wide as theirs, or still
+		// to answer under one.
 		let answers = |id: u64| {
 			let Some(active) = active else {
 				return false;
 			};
+			let asked = active.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
+			let now = match active.live.get(id).and_then(|range| range.start) {
+				Some(lite::Anchor::Live { max, .. }) => crate::track::budget(max),
+				_ => Duration::ZERO,
+			};
+			let wide = asked.min(now) >= join.budget;
 			match active.join_ticks.get(&id) {
-				Some(tick) => *tick > join.since,
-				None => !active.starts.contains_key(&id),
+				Some(tick) => *tick > join.since && wide,
+				None => !active.starts.contains_key(&id) && now >= join.budget,
 			}
 		};
 		let live: Vec<(u64, bool)> = active
@@ -11831,6 +11863,7 @@ impl Establish {
 			parked: self.parked,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
