@@ -1801,7 +1801,8 @@ fn json_window_refuses_an_untimed_track() {
 	assert!(track.demand().is_ok(), "a refused track stays open");
 }
 
-/// The window producer reports subscriber demand, and drops it once finished.
+/// The window producer reports subscriber demand. Its finish hands the track to the broadcast,
+/// so the demand ends when the broadcast does.
 #[tokio::test]
 async fn json_window_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -1827,7 +1828,11 @@ async fn json_window_demand() {
 
 	producer.finish().unwrap();
 	assert!(matches!(producer.demand(), Err(MoqError::Closed)));
-	assert!(matches!(demand.until_wanted().await, Err(MoqError::Closed)));
+	broadcast.close().unwrap();
+	let ended = kio::clock::timeout(TIMEOUT, demand.until_wanted())
+		.await
+		.expect("timed out waiting for the finished window");
+	assert!(matches!(ended, Err(MoqError::Closed)), "{ended:?}");
 }
 
 /// A demand handle waits without the producer, and fails once the track is gone.
