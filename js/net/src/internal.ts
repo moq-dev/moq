@@ -1788,7 +1788,7 @@ export function superseded(route: WireRoute, others: Iterable<WireRoute>): boole
  * every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net, whose routes
  * are all of one prefix here.
  */
-export class Epochs {
+class Epochs {
 	readonly #highest = new Map<Instance.Valid | undefined, Map<bigint, bigint>>();
 	readonly #claim: (route: WireRoute) => bigint;
 

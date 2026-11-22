@@ -976,7 +976,18 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 }
 
 /// The key [`route_order`] ranks an entry by: lower wins.
-type RouteOrder = (bool, bool, bool, Reverse<Priority>, bool, Cost, bool, usize, (u64, u64), Reverse<u64>);
+type RouteOrder = (
+	bool,
+	bool,
+	bool,
+	Reverse<Priority>,
+	bool,
+	Cost,
+	bool,
+	usize,
+	(u64, u64),
+	Reverse<u64>,
+);
 
 /// The `(hops, cost, source, instance, epoch, auth, node, available, above, standing)`
 /// metadata an announce cursor delivers alongside a prefix.
