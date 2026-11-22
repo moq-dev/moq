@@ -741,6 +741,33 @@ mod tests {
 		);
 	}
 
+	/// A refusal is asked again once a covering claim takes over from the refusing one, even when
+	/// the two announce alike.
+	#[kio::test]
+	async fn announced_retries_a_refusal_on_a_covering_claim_announced_alike() {
+		let origin = Hop::new(1).unwrap().produce();
+		let instance = Instance::random();
+		let above = origin.claim("", options(&instance)).unwrap();
+		let exact = origin.claim("live", options(&instance)).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async {
+				requested(&exact).await.reject(Error::Unroutable);
+			}
+		);
+		assert!(matches!(
+			result.expect("the refusal must answer"),
+			Err(Error::Unroutable)
+		));
+
+		drop(exact);
+		let served = broadcast::Info::new().produce();
+		let (_again, ()) = futures::join!(available(&mut announced), async {
+			requested(&above).await.serve(&served);
+		});
+	}
+
 	/// A refusal is reported once, and the follower then waits for the serving route to change
 	/// rather than asking the refusing handler again.
 	#[kio::test]

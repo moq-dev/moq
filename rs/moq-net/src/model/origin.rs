@@ -1886,9 +1886,11 @@ struct TableCursor {
 	current: HashMap<Path, CursorRoute>,
 	/// Whether the cursor delivers each route's [`Standing`], and a change to it.
 	ranked: bool,
-	/// Whether the cursor reports what each route captures. A lookup ignores captures, so
-	/// without them a claim filed above its root takes over from one filed there in place.
-	capturing: bool,
+	/// Whether the cursor serves a path lookup ([`Consumer::path_routes`]), which reads only
+	/// what serves its root: it reports no captures, so a claim filed above the root takes over
+	/// from one filed there in place, and it reports any change of the prefix serving the root,
+	/// which a refused request asks again.
+	lookup: bool,
 }
 
 impl TableCursor {
@@ -1911,7 +1913,7 @@ impl TableCursor {
 	/// What the cursor's most specific matching scope member captures from an
 	/// exact announced prefix. An overlap-only route does not pin every wildcard.
 	fn captures(&self, prefix: &Path) -> Option<Vec<Pattern>> {
-		if !self.capturing {
+		if self.lookup {
 			return None;
 		}
 		let (literal, allowed) = match &self.named {
@@ -2014,8 +2016,12 @@ impl TableCursor {
 			// between routes of one instance and epoch is invisible, which is the point).
 			// A servability flip is delivered: a request that failed Unroutable
 			// under an advertise-only route retries on the update, and hiding
-			// it would park that waiter forever.
-			Some(previous) if previous.meta == meta && previous.served == served => {}
+			// it would park that waiter forever. So is a lookup's serving prefix
+			// changing, for a refusal by the one before.
+			Some(previous)
+				if previous.meta == meta
+					&& previous.served == served
+					&& !(self.lookup && previous.prefix != entry.prefix) => {}
 			_ => {
 				if let Ok(mut state) = self.state.write() {
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
@@ -8153,11 +8159,11 @@ impl Consumer {
 	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`Routes`] to unregister.
 	pub fn routes(&self) -> Routes {
-		self.listing(true)
+		self.listing(false)
 	}
 
-	/// [`Self::routes`], reporting what each route captures only when `capturing`.
-	fn listing(&self, capturing: bool) -> Routes {
+	/// [`Self::routes`], for a path lookup when `lookup`; see [`TableCursor::lookup`].
+	fn listing(&self, lookup: bool) -> Routes {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let cursor =
 			|root: Path, allowed: Patterns, hidden: Hidden, mount: Option<&Mount>, under: Path, holes: Vec<Path>| {
@@ -8175,7 +8181,7 @@ impl Consumer {
 					interested: self.interested,
 					current: HashMap::new(),
 					ranked: self.horizon.node == NodeFilter::Own,
-					capturing,
+					lookup,
 				}
 			};
 
@@ -8329,7 +8335,7 @@ impl Consumer {
 		// Untagged: this is a lookup, not egress announce forwarding, so it must not drive
 		// the announce guards. Hiding narrows discovery, not lookup, so a hidden path
 		// follows like any other.
-		let announced = consumer.untagged().with_hidden(true).covering().listing(false);
+		let announced = consumer.untagged().with_hidden(true).covering().listing(true);
 		Ok(Follow::new(announced))
 	}
 
