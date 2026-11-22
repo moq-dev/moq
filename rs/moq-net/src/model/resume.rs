@@ -2300,23 +2300,19 @@ impl Reader {
 				}
 			}
 		});
-		// A skip is final, and only that copy may know it: keep what it skipped of each gap's
-		// start and end under its bound.
+		// A skip is final, and only that copy may know it: keep what it skipped of each gap
+		// under its bound, merged with what earlier copies skipped.
 		let lacking = self.lacking(delivered);
 		for (track, end) in gone {
 			let end = end.unwrap_or(u64::MAX);
 			for gap in &lacking {
-				let skipped = track.skipped_in(gap.start..gap.end.min(end));
-				if let Some(first) = skipped.iter().next().filter(|run| run.start == gap.start) {
-					self.skipped.insert(first.clone());
-				}
-				if let Some(last) = skipped.iter().next_back().filter(|run| run.end == gap.end) {
-					self.skipped.insert(last.clone());
-				}
+				self.skipped
+					.extend(track.skipped_in(gap.start..gap.end.min(end)).iter().cloned());
 			}
 		}
-		// Only what still starts or ends a gap the reader lacks: a range edit, a hand-out, or a
-		// later switch leaves the rest unneeded.
+		// Only the skipped start and end of each gap the reader lacks: the floor and cap keep
+		// out nothing else, and a range edit, a hand-out, or a later switch leaves the rest
+		// unneeded.
 		if !self.skipped.is_empty() {
 			let mut kept = RangeSet::new();
 			for gap in &lacking {

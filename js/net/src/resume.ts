@@ -1704,17 +1704,15 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Keep what `copy` skipped of the start and end of each gap in `lacking` under its bound, as it
-	 * is let go: a skip is final, and only that copy may know it. Mirrors the Rust `Reader::let_go`.
+	 * Keep what `copy` skipped of each gap in `lacking` under its bound, as it is let go, merged with
+	 * what earlier copies skipped: a skip is final, and only that copy may know it. The caller then
+	 * prunes to each gap's skipped start and end. Mirrors the Rust `Reader::let_go`.
 	 */
 	#keepSkips(copy: Copy, lacking: readonly Run[]): void {
 		const bound = copyEnd(copy);
 		for (const gap of lacking) {
-			const skipped = hooks.skippedIn(copy.sub, gap.start, bound === undefined ? gap.end : min(gap.end, bound));
-			const first = skipped[0];
-			if (first?.start === gap.start) this.#skipped.addRun(first.start, first.end);
-			const last = skipped.at(-1);
-			if (last?.end === gap.end) this.#skipped.addRun(last.start, last.end);
+			const end = bound === undefined ? gap.end : min(gap.end, bound);
+			for (const skip of hooks.skippedIn(copy.sub, gap.start, end)) this.#skipped.addRun(skip.start, skip.end);
 		}
 	}
 
