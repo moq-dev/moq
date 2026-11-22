@@ -7562,6 +7562,16 @@ async fn server_listen_dropped_mid_start_rolls_back() {
 	})
 	.unwrap();
 
+	// Hold the FFI runtime's one background driver, so the accept loop cannot report its address
+	// before the listen is dropped.
+	let (entered, held) = std::sync::mpsc::channel();
+	let (release, released) = std::sync::mpsc::channel::<()>();
+	let _blocker = crate::ffi::spawn(async move {
+		entered.send(()).unwrap();
+		let _ = released.recv();
+	});
+	held.recv().unwrap();
+
 	let waker = std::task::Waker::noop();
 	let mut listen = Box::pin(server.listen());
 	assert!(
@@ -7572,6 +7582,7 @@ async fn server_listen_dropped_mid_start_rolls_back() {
 	);
 	drop(listen);
 	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Bind { .. })));
+	drop(release);
 
 	let rebound = kio::clock::timeout(TIMEOUT, server.listen())
 		.await
