@@ -2382,12 +2382,12 @@ impl Producer {
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let fin = state.next_index;
 		state.outcome = Outcome::Finished(fin, end);
-		state.charge.finish();
+		// No frame follows to compress.
+		let original_fin = state.range_end.is_none().then_some(fin);
+		state.charge.finish(original_fin.is_some());
 		if let Some(content) = &state.content {
 			content.siblings.update(&state.charge);
 		}
-		// No frame follows to compress.
-		let original_fin = state.range_end.is_none().then_some(fin);
 		if let Some(flate) = &mut state.flate {
 			flate.finish(original_fin);
 		}

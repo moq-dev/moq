@@ -1191,6 +1191,7 @@ impl Track {
 			}),
 			content: 0,
 			edge: false,
+			whole: false,
 		}
 	}
 
@@ -1483,11 +1484,6 @@ impl Footprint {
 		}
 	}
 
-	/// Whether its group finished.
-	fn finished(&self) -> bool {
-		self.content.load(Ordering::Relaxed) & FINAL != 0
-	}
-
 	/// The group finished, so its content no longer grows.
 	fn finish(&self, track: &Track) {
 		let prior = self.content.fetch_or(FINAL, Ordering::Relaxed);
@@ -1542,7 +1538,8 @@ impl Footprint {
 ///
 /// So they bill the session together: while one copy is itself its track's cached live
 /// edge, they all do, a copy that aborted included, since its frames may still be what the
-/// live copy holds; once none is, none does. Once one finished, they are all whole.
+/// live copy holds; once none is, none does. Once one finished the whole group, they are all
+/// whole.
 #[derive(Default)]
 pub(super) struct Siblings(Mutex<Vec<Sibling>>);
 
@@ -1551,6 +1548,8 @@ struct Sibling {
 	footprint: Arc<Footprint>,
 	// Whether this copy is itself the live edge, not billed for a sibling.
 	edge: bool,
+	// Whether this copy finished the whole group, not just a range a transport bound cut.
+	whole: bool,
 }
 
 impl Siblings {
@@ -1565,11 +1564,15 @@ impl Siblings {
 			.iter_mut()
 			.find(|sibling| Arc::ptr_eq(&sibling.footprint, &charge.footprint))
 		{
-			Some(sibling) => sibling.edge = charge.edge,
+			Some(sibling) => {
+				sibling.edge = charge.edge;
+				sibling.whole = charge.whole;
+			}
 			None => siblings.push(Sibling {
 				track: track.clone(),
 				footprint: charge.footprint.clone(),
 				edge: charge.edge,
+				whole: charge.whole,
 			}),
 		}
 		Self::bill(&mut siblings);
@@ -1586,12 +1589,12 @@ impl Siblings {
 	}
 
 	/// Bill every copy while any is the live edge, and pin every copy's content once any
-	/// finished, since a copy's frames may be what a finished sibling holds. Forgets copies
-	/// nothing bills any more.
+	/// finished the whole group, since a copy's frames may be what that sibling holds. Forgets
+	/// copies nothing bills any more.
 	fn bill(siblings: &mut Vec<Sibling>) {
 		siblings.retain(|sibling| Arc::strong_count(&sibling.footprint) > 1);
 		let edge = siblings.iter().any(|sibling| sibling.edge);
-		if siblings.iter().any(|sibling| sibling.footprint.finished()) {
+		if siblings.iter().any(|sibling| sibling.whole) {
 			for sibling in siblings.iter() {
 				sibling.footprint.finish(&sibling.track);
 			}
@@ -1634,6 +1637,8 @@ pub(super) struct Charge {
 	// Whether this group is itself its track's cached live edge, as opposed to billing the
 	// session only for a sibling that is: see [`Siblings`].
 	edge: bool,
+	// Whether this copy finished the whole group, which makes its siblings whole too.
+	whole: bool,
 }
 
 /// The tick of one cached group's last cache access: its creation, every write, and
@@ -1811,11 +1816,13 @@ impl Charge {
 		}
 	}
 
-	/// The group finished: pin its content while it is the live edge, which no longer grows.
-	pub(super) fn finish(&self) {
+	/// This copy finished, the `whole` group or only a range a transport bound cut: pin its
+	/// content while it is the live edge, which no longer grows.
+	pub(super) fn finish(&mut self, whole: bool) {
 		if let Some(track) = &self.track {
 			self.footprint.finish(track);
 		}
+		self.whole |= whole;
 	}
 
 	/// Record a cache read: a delivered or fetched group, a frame read, or a
@@ -2406,7 +2413,7 @@ mod test {
 		extra.add(500);
 		extra.add_state(100);
 		assert_eq!(pool.pinned(), ENTRY_OVERHEAD + 100);
-		charge.finish();
+		charge.finish(true);
 		assert_eq!(pool.pinned(), ENTRY_OVERHEAD + 1_600);
 		assert_eq!(pool.pinned(), pool.used());
 		assert_eq!(pool.excess(), None, "held past its capacity by pins alone");
@@ -2434,8 +2441,8 @@ mod test {
 		assert_eq!(pool.pinned(), 0);
 	}
 
-	/// A copy's content pins once any sibling sharing it finished, since its frames may be what
-	/// the finished copy holds.
+	/// A copy's content pins once any sibling sharing it finished the whole group, since its
+	/// frames may be what the finished copy holds; a copy a transport bound cut does not.
 	#[test]
 	fn a_finished_sibling_pins_the_shared_content() {
 		let pool = bounded(0);
@@ -2445,10 +2452,17 @@ mod test {
 		live.add(1_000);
 		live.promote();
 		siblings.update(&live);
-		let head = track.charge();
+		let mut head = track.charge();
 		siblings.update(&head);
 		assert_eq!(pool.pinned(), 2 * ENTRY_OVERHEAD, "the shared frames still grow");
-		head.finish();
+		head.finish(false);
+		siblings.update(&head);
+		assert_eq!(
+			pool.pinned(),
+			2 * ENTRY_OVERHEAD,
+			"a copy a transport bound cut finished only its range"
+		);
+		head.finish(true);
 		siblings.update(&head);
 		assert_eq!(pool.pinned(), 2 * ENTRY_OVERHEAD + 1_000);
 		assert_eq!(pool.excess(), None);

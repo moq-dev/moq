@@ -168,10 +168,10 @@ impl Record {
 	}
 }
 
-/// Where a reader stands, which bounds what its record's fold may settle.
+/// Where a reader stands, which shapes what its record's fold settles.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Standing {
-	/// The lowest key the reader's ranges name: nothing below it is owed any more.
+	/// The lowest key the reader's ranges name now.
 	pub from: u64,
 	/// The group this read hands out, which its publisher has yet to tell its wire of.
 	pub handed: Option<u64>,
@@ -252,9 +252,12 @@ impl Record {
 	/// not final. Final are the groups handed out, every report, and this reader's own stale
 	/// skips, which a wider budget would offer again only while the pool still held their
 	/// groups. Not final are the runs given up and not reported yet, and the keys nothing
-	/// settled at or above where the reader's ranges start: below it, nothing ever will.
+	/// settled.
+	///
+	/// A reader that started above its floor, as at a sparse-key track's live edge, never
+	/// settles the keys below its start, so the final stretch from its start folds too, into
+	/// one handed-out and reported run. The keys below stay owed, should its ranges widen.
 	fn fold(&mut self, reader: Standing) {
-		let Standing { from, handed } = reader;
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
@@ -269,62 +272,68 @@ impl Record {
 			}
 			self.rescan = true;
 		}
-		let mut floor = self.floor;
+		let floor = self.final_end(self.floor, reader.handed);
+		if floor > self.floor {
+			self.floor = floor;
+			self.delivered.forget_below(floor);
+			self.skipped.forget(0..floor);
+			self.written_off.remove(0..floor);
+			self.pending.remove(0..floor);
+			self.reported.remove(0..floor);
+		}
+		let from = reader.from;
+		if from > self.floor {
+			let end = self.final_end(from, reader.handed);
+			if end > from {
+				let stretch = from..end;
+				self.delivered.insert_run(stretch.clone());
+				self.skipped.forget(stretch.clone());
+				self.written_off.remove(stretch.clone());
+				self.reported.insert(stretch, Report::Settled);
+			}
+		}
+	}
+
+	/// One past the final stretch starting at `start`: `start` itself when its key is not
+	/// final, or is the group this read hands out.
+	fn final_end(&self, start: u64, handed: Option<u64>) -> u64 {
+		let mut end = start;
 		loop {
-			let next = match self.reported.get_key_value(&floor) {
+			let next = match self.reported.get_key_value(&end) {
 				Some((run, _)) => run.end,
-				None if self.pending.contains_key(&floor) => break,
+				None if self.pending.contains_key(&end) => break,
 				None => {
 					let local = [
-						self.delivered.run_end(floor),
-						self.written_off.get(&floor).map(|run| run.end),
-						self.skipped.run_end(floor),
+						self.delivered.run_end(end),
+						self.written_off.get(&end).map(|run| run.end),
+						self.skipped.run_end(end),
 					];
-					let Some(end) = local.into_iter().flatten().max() else {
-						// Nothing settled this key. Below the reader's start nothing will, so it
-						// folds up to that start, or to the first run still to report.
-						if floor >= from {
-							break;
-						}
-						let pending = self.pending.overlapping(&(floor..from)).next();
-						let next = pending.map_or(from, |(run, _)| run.start.max(floor));
-						if next <= floor {
-							break;
-						}
-						floor = next;
-						continue;
+					let Some(run_end) = local.into_iter().flatten().max() else {
+						break;
 					};
 					// A report or a run given up inside it is judged on its own.
-					let span = floor..end;
+					let span = end..run_end;
 					[
 						self.reported.overlapping(&span).next().map(|(run, _)| run.start),
 						self.pending.overlapping(&span).next().map(|(run, _)| run.start),
 					]
 					.into_iter()
 					.flatten()
-					.fold(end, |end, start| end.min(start.max(floor)))
+					.fold(run_end, |run_end, start| run_end.min(start.max(end)))
 				}
 			};
 			// The group this read hands out stays above: its publisher has yet to tell its wire
 			// of it, and would take one below the floor as told already.
 			let next = match handed {
-				Some(handed) if floor <= handed && handed < next => handed,
+				Some(handed) if end <= handed && handed < next => handed,
 				_ => next,
 			};
-			if next <= floor {
+			if next <= end {
 				break;
 			}
-			floor = next;
+			end = next;
 		}
-		if floor == self.floor {
-			return;
-		}
-		self.floor = floor;
-		self.delivered.forget_below(floor);
-		self.skipped.forget_below(floor);
-		self.written_off.remove(0..floor);
-		self.pending.remove(0..floor);
-		self.reported.remove(0..floor);
+		end
 	}
 
 	/// End this reader: forget every run, releasing its bill against the debt.
@@ -402,42 +411,42 @@ mod test {
 		assert_eq!(record.untold(0..u64::MAX / 2 + 3), untold);
 	}
 
-	/// A reader that joined above key 0, as at a sparse-key track's live edge, folds the keys
-	/// below its start, which nothing will ever settle, and so everything final above them. A
-	/// run still to report below its start stops the fold all the same.
+	/// A reader that joined above key 0, as at a sparse-key track's live edge, folds the final
+	/// stretch from its start, though nothing settled the keys below it, which stay owed should
+	/// its ranges widen.
 	#[test]
-	fn a_debt_folds_below_where_the_reader_starts() {
+	fn a_debt_folds_from_where_the_reader_starts() {
 		let (pool, track) = account();
 		let mut record = Record::default();
 		for key in [1_000, 2_000, 3_000] {
 			record.delivered.insert(key);
 			record.reported.insert(key + 1..key + 1_000, Report::Dropped);
 		}
+		record
+			.pending
+			.insert(4_000..4_001, Pending::own(Hole::drop(StreamError::NotFound)));
 		let unstarted = Standing::default();
 		record.settle(|| track.clone(), &mut (), unstarted).unwrap();
 		owe(&track, pool.used());
 		record.settle(|| track.clone(), &mut (), unstarted).unwrap();
-		assert!(pool.used() > 0, "a reader owed key 0 folds nothing");
+		assert_eq!(pool.used(), 6 * RUN_OVERHEAD, "a reader owed key 0 folds nothing");
 
 		let started = Standing {
 			from: 1_000,
 			handed: None,
 		};
 		record.settle(|| track.clone(), &mut (), started).unwrap();
-		assert_eq!(pool.used(), 0, "all of it folded");
-		assert!(record.delivered.contains(2_000));
-
-		let mut record = Record::default();
-		record
-			.pending
-			.insert(500..501, Pending::own(Hole::drop(StreamError::NotFound)));
-		record.delivered.insert(1_000);
-		record.delivered.insert(2_000);
-		record.settle(|| track.clone(), &mut (), started).unwrap();
-		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), started).unwrap();
-		assert!(!record.told(500), "the run still to report stays");
-		assert!(record.told(499));
+		assert_eq!(
+			pool.used(),
+			2 * RUN_OVERHEAD,
+			"the stretch, and the run still to report"
+		);
+		assert!(record.delivered.contains(2_500) && record.told(2_500));
+		assert!(
+			!record.delivered.contains(999) && !record.told(999),
+			"below its start stays owed"
+		);
+		assert!(!record.told(4_000), "the run still to report stays");
 	}
 
 	/// The group a read hands out stays above the fold: its publisher has yet to tell its wire
@@ -525,7 +534,7 @@ mod test {
 		let mut edge = track.charge();
 		edge.add(1 << 20);
 		edge.promote();
-		edge.finish();
+		edge.finish(true);
 		let mut record = record_with_promise();
 		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		owe(&track, pool.used());
