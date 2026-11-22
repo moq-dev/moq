@@ -9452,6 +9452,33 @@ mod test {
 		drop(first);
 	}
 
+	/// A copy continuing a group that closes it below only frames the reader skipped ends the
+	/// read cleanly, as an empty range does: it read nothing the close takes back.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_close_below_skipped_frames_ends_the_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let mut first = a.create_group(group::Info { start: 1 }).unwrap();
+		first.write_frame(ts(1), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		reading.skip_to(2);
+		assert!(reading.poll_read_frame(&kio::Waiter::noop()).is_pending());
+
+		let b = copy();
+		routes.serve(b.consume());
+		let mut second = b.create_group(group::Info { start: 1 }).unwrap();
+		second.write_frame(ts(1), b"a".as_ref()).unwrap();
+		a.clone().abort(Error::Dropped).unwrap();
+		assert!(reading.poll_read_frame(&kio::Waiter::noop()).is_pending());
+		second.finish().unwrap();
+		assert_eq!(read(&mut reading), None);
+		drop(first);
+	}
+
 	/// A group read past where the copy continuing it closes it short fails with the verdict
 	/// of the route that took over from that copy, when that route gave the group up.
 	#[test]

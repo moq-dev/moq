@@ -3849,6 +3849,9 @@ struct Carry {
 	// What ended the read once a copy closed the group below the frames already read: no
 	// route change after undoes it.
 	failed: Option<Error>,
+	// The frames up to the cursor this reader skipped rather than read: where it started, or
+	// where a skip moved it, until it reads on. A copy closing inside them took no frame back.
+	unread: std::ops::Range<usize>,
 }
 
 impl Clone for Carry {
@@ -3862,6 +3865,7 @@ impl Clone for Carry {
 			}),
 			finishing: None,
 			failed: self.failed.clone(),
+			unread: self.unread.clone(),
 		}
 	}
 }
@@ -4140,8 +4144,24 @@ impl Consumer {
 	/// Carry this group across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover) -> Self {
 		Idle::disarm(&mut self.idle);
-		self.carry.get_or_insert_default().recover = Some(recover);
+		let index = self.cursor.index;
+		let carry = self.carry.get_or_insert_default();
+		carry.recover = Some(recover);
+		carry.unread = 0..index;
 		self
+	}
+
+	/// Note that the cursor moved from `from` to where it is without reading the frames between.
+	fn skipped(&mut self, from: usize) {
+		let to = self.cursor.index;
+		if let Some(carry) = self.carry.as_mut().filter(|carry| carry.recover.is_some())
+			&& to > from
+		{
+			match carry.unread.end == from {
+				true => carry.unread.end = to,
+				false => carry.unread = from..to,
+			}
+		}
 	}
 
 	/// Run `read`, and once this copy fails with its route, stalls while a newer route serves,
@@ -4166,9 +4186,9 @@ impl Consumer {
 			let index = self.cursor.index;
 			let short = matches!(res, Poll::Ready(Ok(None))) && self.closed_short();
 			// A copy taken over mid-group may close it below the frames already read from the
-			// copy before it, so its close cannot be where this read ends. One the read started
-			// past on its own still ends it cleanly, as an empty range does.
-			let past = short && self.adopted && self.closed_past();
+			// copy before it, so its close cannot be where this read ends. One below only frames
+			// the read skipped still ends it cleanly, as an empty range does.
+			let past = short && self.closed_past();
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
@@ -4424,7 +4444,9 @@ impl Consumer {
 	pub fn with_range(mut self, frames: impl RangeBounds<u64>) -> Self {
 		Idle::disarm(&mut self.idle);
 		let (start, end) = super::subscription::key_bounds(frames);
+		let from = self.cursor.index;
 		self.cursor.start_at(start);
+		self.skipped(from);
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 		self
 	}
@@ -4450,7 +4472,9 @@ impl Consumer {
 	/// handlers, and surfaces as [`Error::Lagged`] when neither can serve them.
 	pub fn skip_to(&mut self, index: u64) {
 		Idle::disarm(&mut self.idle);
+		let from = self.cursor.index;
 		self.cursor.skip_to(index);
+		self.skipped(from);
 	}
 
 	/// The number of frames written so far (completed plus any in-flight), independent of
@@ -4805,14 +4829,17 @@ impl Consumer {
 			.is_some_and(|carry| carry.recover.is_some() || carry.failed.is_some())
 	}
 
-	/// Whether the copy read closed the group short below the frame this reader reads next.
+	/// Whether the copy read closed the group short below a frame this reader read, from the
+	/// copy before it: not only below frames it skipped.
 	fn closed_past(&self) -> bool {
+		let index = self.cursor.index;
+		let unread = self.carry.as_ref().map_or(0..0, |carry| carry.unread.clone());
 		self.cursor
 			.state
 			.read()
 			.outcome
 			.frames()
-			.is_some_and(|frames| self.cursor.index > frames)
+			.is_some_and(|frames| index > frames && !(unread.start <= frames && unread.end >= index))
 	}
 
 	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {
@@ -4832,6 +4859,7 @@ impl Consumer {
 					ride: Some(ride),
 					finishing: None,
 					failed: None,
+					unread: 0..0,
 				}))
 			}
 			(None, None) => {}
