@@ -713,9 +713,13 @@ impl<O: Output> Media<O> {
 				// live edge, never at a warm copy's backlog, so it names no cached group
 				// for the shared publisher subscription to rewind to.
 				let subscriber = track
-					.subscribe(playout.subscription(
-						moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video),
-					))
+					.subscribe(
+						playout.subscription(
+							moq_net::track::Subscription::default()
+								.with_priority(hang::catalog::PRIORITY.video)
+								.with_ranges([moq_net::track::Range::ALL]),
+						),
+					)
 					.await?;
 				let format = catalog::hang::Container::try_from(&config)?;
 				// The playout delay is the target latency, and the max how late a group may be.

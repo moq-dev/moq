@@ -263,7 +263,13 @@ impl Consumer {
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
 		// slow to take its first, and the publisher should never see a stated zero min first.
 		let mut subscriber = track
-			.subscribe(playout.subscription(moq_net::track::Subscription::default().with_priority(options.priority)))
+			.subscribe(
+				playout.subscription(
+					moq_net::track::Subscription::default()
+						.with_priority(options.priority)
+						.with_ranges([moq_net::track::Range::ALL]),
+				),
+			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
 		// start, like any other join. Move the local cursor, not Subscription::ranges: the
@@ -1059,6 +1065,19 @@ mod tests {
 	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
 
+	/// The staleness budget of `subscription`'s one live join.
+	fn live_max(subscription: &moq_net::track::Subscription) -> Option<Duration> {
+		match subscription.ranges.as_slice() {
+			[
+				moq_net::track::Range {
+					start: moq_net::track::Start::Live { max, .. },
+					..
+				},
+			] => *max,
+			ranges => panic!("expected one live join, got {ranges:?}"),
+		}
+	}
+
 	/// The first request already states the min and max delay, each plus the warmup: a latest
 	/// start waits for the live edge with its subscription open, before the container could
 	/// update it.
@@ -1092,13 +1111,11 @@ mod tests {
 			first = track.subscription_changed() => first.unwrap(),
 		};
 		assert_eq!(
-			first.map(|sub| (sub.delay, sub.ranges)),
-			Some((
-				moq_net::track::Delay::default().with_max(Duration::from_millis(600)),
-				vec![moq_net::track::Range::from(moq_net::track::Start::Live(
-					Duration::from_millis(400)
-				))],
-			))
+			first.map(|sub| sub.ranges),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Duration::from_millis(400),
+				max: Some(Duration::from_millis(600)),
+			})])
 		);
 	}
 
@@ -1127,7 +1144,7 @@ mod tests {
 		consumer.set_max_delay(Duration::from_secs(2));
 		let subscription = track.subscription().unwrap();
 		assert_eq!(subscription.priority, -20);
-		assert_eq!(subscription.delay.max, Some(Duration::from_secs(2)));
+		assert_eq!(live_max(&subscription), Some(Duration::from_secs(2)));
 	}
 
 	/// A moved max delay reaches the subscription, plus the warmup, clamped to the max age.
@@ -1161,7 +1178,7 @@ mod tests {
 		consumer.set_max_delay(Duration::from_secs(2));
 		assert_eq!(consumer.max_delay(), Duration::from_secs(2));
 		assert_eq!(
-			track.subscription().unwrap().delay.max,
+			live_max(&track.subscription().unwrap()),
 			Some(Duration::from_millis(2_100))
 		);
 
@@ -1684,7 +1701,7 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(
-			track.subscription().unwrap().delay.max,
+			live_max(&track.subscription().unwrap()),
 			Some(Duration::from_millis(10_080))
 		);
 
@@ -3502,7 +3519,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().delay.max, Some(max_delay));
+		assert_eq!(live_max(&observed.subscription().unwrap()), Some(max_delay));
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

@@ -196,7 +196,9 @@ impl MoqSubscription {
 	/// The subscription without its delay, each range with no start still from the oldest group,
 	/// and that delay, for a caller widening it before it subscribes.
 	pub(crate) fn resolve(self) -> Result<(moq_net::track::Subscription, moq_mux::container::Delay), MoqError> {
-		let mut subscription = moq_net::track::Subscription::default().with_priority(self.priority);
+		let mut subscription = moq_net::track::Subscription::default()
+			.with_priority(self.priority)
+			.with_ranges([moq_net::track::Range::ALL]);
 		if let Some(ranges) = self.ranges {
 			let ranges = ranges
 				.into_iter()

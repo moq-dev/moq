@@ -26,9 +26,9 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// Also declares [`MAX_AGE`], long enough for a segmented egress to serve a full playlist window,
 /// which is why every media track should start here rather than at `Info::default()`, whose max
 /// age is zero. It bounds how long a superseded group stays fresh and caps what a subscriber may
-/// ask to wait for, so it never makes anyone play further behind live: a subscriber's own
-/// [`Delay::max`](moq_net::track::Delay::max) defaults to
-/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip the moment a newer group arrives).
+/// ask to wait for, so it never makes anyone play further behind live: the default subscription
+/// joins at [`Start::LATEST`](moq_net::track::Start::LATEST), whose `max` is zero (skip the moment
+/// a newer group arrives).
 ///
 /// `priority` is the publisher's tie-break priority, and should come from
 /// [`PRIORITY`](crate::catalog::PRIORITY) so every publisher orders its kinds the

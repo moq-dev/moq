@@ -10559,10 +10559,12 @@ async fn a_subscription_states_the_whole_delay() {
 		.unwrap();
 	let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
 	let subscription = audio.track().subscription().unwrap();
-	assert_eq!(subscription.delay, moq_net::track::Delay::default().with_max(delay));
 	assert_eq!(
 		subscription.ranges,
-		[moq_net::track::Range::from(moq_net::track::Start::Live(delay))]
+		[moq_net::track::Range::from(moq_net::track::Start::Live {
+			min: delay,
+			max: Some(delay),
+		})]
 	);
 	drop((live, catalog));
 }

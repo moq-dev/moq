@@ -680,7 +680,7 @@ mod tests {
 					min: Some(min),
 					max: Some(max),
 				}
-				.subscription(moq_net::track::Subscription::default()),
+				.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
 			)
 			.await
 			.unwrap();
@@ -712,13 +712,11 @@ mod tests {
 		let held = shared - min;
 		// The live join resolved once, so only the budget follows the shared delay.
 		assert_eq!(
-			source
-				.subscription()
-				.map(|subscription| (subscription.delay, subscription.ranges)),
-			Some((
-				moq_net::track::Delay::default().with_max(max + held),
-				vec![moq_net::track::Range::from(moq_net::track::Start::Live(min))],
-			)),
+			source.subscription().map(|subscription| subscription.ranges),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
+				min,
+				max: Some(max + held),
+			})]),
 			"the subscription's budget grows with the shared delay"
 		);
 		let _finished = producer.finish().unwrap();
@@ -1360,7 +1358,7 @@ mod tests {
 				moq_mux::container::Delay::default()
 					.with_min(delay)
 					.with_max(delay)
-					.subscription(moq_net::track::Subscription::default()),
+					.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
 			)
 			.await
 			.unwrap();

@@ -610,7 +610,7 @@ struct Output<V> {
 ///
 /// A superseded group never goes stale on the publisher's say: a reader that needs every
 /// delta, such as one metering counters, waits for a group's finish even when the next
-/// group lands first, as its own [`Delay::max`](track::Delay::max) allows. A latest-only
+/// group lands first, as a history range or its live join's `max` allows. A latest-only
 /// reader still skips one the moment a newer one arrives.
 fn info() -> track::Info {
 	track::Info::default()
