@@ -22,6 +22,7 @@ import {
 	bestOfTier,
 	compareRouteCandidates,
 	compareRoutes,
+	compareTier,
 	coveringPrefixes,
 	type Filed,
 	firstEligible,
@@ -203,13 +204,14 @@ class Scope {
 			// prefix rank against each other wherever each is filed, then the deeper filing, then each
 			// filing's own order.
 			const ranked = covering.flatMap(([path, visible], filing) =>
-				visible.map((value, order) => ({ value, depth: Path.parts(path).length, filing, order })),
+				visible.map((value, order) => ({ value, path, depth: Path.parts(path).length, filing, order })),
 			);
+			// Hashed on the root, as a request for it resolves.
+			const tier = (entry: (typeof ranked)[number]) => ({ prefix: entry.path, route: entry.value.route });
 			ranked.sort(
 				(a, b) =>
 					Number((a.value.route.above ?? 0n) - (b.value.route.above ?? 0n)) ||
-					compareRoutes(a.value.route, b.value.route) ||
-					routeHops(a.value.route) - routeHops(b.value.route) ||
+					compareTier(this.root, tier(a), tier(b)) ||
 					b.depth - a.depth ||
 					a.filing - b.filing ||
 					a.order - b.order,
@@ -2641,10 +2643,8 @@ export class Consumer implements Reader {
 			if (!entry || !scope) continue;
 			next.set(relative, present(path, entry, scope.pattern));
 		}
-		const best = bestOfTier(
-			atRoot,
-			(a, b) => compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route),
-		);
+		// Hashed on the root, as a request for it resolves.
+		const best = bestOfTier(atRoot, (a, b) => compareTier(root, a, b));
 		if (best)
 			next.set(Path.empty(), present(best.candidate.path, best.candidate.candidate, best.candidate.pattern));
 		return next;

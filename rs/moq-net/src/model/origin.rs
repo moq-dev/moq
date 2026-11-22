@@ -2004,15 +2004,17 @@ impl TableCursor {
 		}
 	}
 
-	/// The visible entry among `candidates` that presents here: the most specific claim, then
-	/// the first eligible one in [`route_order`], wherever each claim of that tier is filed.
-	fn best<'a>(&self, candidates: impl Iterator<Item = &'a RouteEntry> + Clone) -> Option<&'a RouteEntry> {
+	/// The visible entry among `candidates` that presents at the absolute `at`: the most
+	/// specific claim, then the first eligible one in [`route_order`] resolving `at`, wherever
+	/// each claim of that tier is filed, so the stream advertises what a request for `at`
+	/// resolves to.
+	fn best<'a>(&self, at: &Path, candidates: impl Iterator<Item = &'a RouteEntry> + Clone) -> Option<&'a RouteEntry> {
 		let visible = candidates.filter(|entry| self.visible(entry));
 		let epochs = Epochs::of(visible.clone());
 		visible
 			.clone()
 			.filter(|entry| !epochs.superseded(entry))
-			.min_by_key(|entry| (Reverse(entry.specificity()), route_order(&entry.prefix, entry)))
+			.min_by_key(|entry| (Reverse(entry.specificity()), route_order(at, entry)))
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
@@ -6855,10 +6857,10 @@ impl OriginState {
 		// longest prefix wins outright, so the metadata a cursor advertises
 		// matches what a request through it actually resolves.
 		let best = match presented.is_empty() {
-			true => cursor.best(routes.covering(&cursor.root)),
+			true => cursor.best(&cursor.root, routes.covering(&cursor.root)),
 			false => {
 				let absolute = cursor.root.rejoin(presented);
-				cursor.best(routes.at(&absolute))
+				cursor.best(&absolute, routes.at(&absolute))
 			}
 		};
 
@@ -11297,6 +11299,52 @@ mod tests {
 				(last.announce.route.instance(), last.announce.route.epoch),
 				(&direct, 2)
 			);
+		}
+	}
+
+	/// Claims of one tier filed at different depths that tie through every rank hash on the path
+	/// a covering stream presents them at, as a request for that path does, so the stream
+	/// advertises what the request resolves to, for every pair of instances.
+	#[test]
+	fn a_covering_root_advertises_what_a_request_for_it_resolves() {
+		let route = |name: &str, node, above| {
+			RouteInfo::new()
+				.with_instance(name.parse().unwrap(), 0)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+		};
+		for i in 0..32 {
+			let producer = Config {
+				update_hold: Duration::ZERO,
+				..Config::from(origin(1))
+			}
+			.produce();
+			let mut announced = (producer.consume().scope("src/a", &Prefixes::all()).unwrap())
+				.covering()
+				.routes();
+			let peer = producer.clone().with_link(Link::Peer);
+			let _made = peer.forward("src", route(&format!("made{i}"), 10, 0)).unwrap();
+			let _filed = peer.forward("src/a", route(&format!("filed{i}"), 11, 1)).unwrap();
+
+			let table = producer.shared.read();
+			let resolved = table
+				.best_route(
+					&Path::new("src/a").unwrap(),
+					Horizon::default(),
+					&HashSet::new(),
+					|_| true,
+				)
+				.map(|entry| entry.instance.clone());
+			drop(table);
+			let mut advertised = None;
+			while let Some(event) = announced.try_next() {
+				advertised = Some(event.announce.route.instance().clone());
+			}
+			assert_eq!(advertised, resolved, "pair {i}");
 		}
 	}
 

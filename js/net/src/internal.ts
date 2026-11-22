@@ -144,10 +144,8 @@ export function presented(
 		const best = suffix !== null ? firstEligible(candidates, (candidate) => shows(candidate, covered)) : undefined;
 		if (suffix !== null && best) out.set(suffix, best);
 	}
-	const best = bestOfTier(
-		covering,
-		(a, b) => compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route),
-	);
+	// Hashed on the requested prefix, as a request for it resolves.
+	const best = bestOfTier(covering, (a, b) => compareTier(prefix, a, b));
 	if (best) {
 		const snap = best.candidate;
 		const above = BigInt(Path.parts(prefix).length - best.depth);
@@ -1851,10 +1849,10 @@ export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: 
 
 /**
  * Order two claims of one tier resolving `path`, each filed at its `prefix`: by preference, hop
- * count, then the hashes of {@link compareRouteCandidates}, which a tie between two filed at the
- * path itself skips.
+ * count, then the hashes of {@link compareRouteCandidates} keyed on `path` whatever each claim's
+ * filing, which a tie between two filed at the path itself skips.
  */
-function compareTier(
+export function compareTier(
 	path: Path.Valid,
 	a: { readonly prefix: Path.Valid; readonly route: WireRoute },
 	b: { readonly prefix: Path.Valid; readonly route: WireRoute },

@@ -2291,6 +2291,33 @@ test("a rooted announce stream ranks the whole tier of claims covering its root"
 	origin.close();
 });
 
+// Claims of one tier filed at different depths that tie through every rank hash on the path a
+// covering stream presents them at, as a request for it does, so the stream advertises what the
+// request resolves to, as `a_covering_root_advertises_what_a_request_for_it_resolves` in Rust.
+test("a covering root advertises what a request for it resolves", async () => {
+	const root = Path.from("src/a");
+	// Each pair in both orders, so a tie the hash settles goes to either filing.
+	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
+		const origin = new Producer();
+		const names = swap ? [`b${i}`, `a${i}`] : [`a${i}`, `b${i}`];
+		const made = { ...WireRoute.default, instance: Instance.parse(names[0]), hops: [PEER], claimed: true };
+		const filed = { ...made, instance: Instance.parse(names[1]), above: 1n };
+		const handles = [wireOf(origin).receive(Path.from("src"), made), wireOf(origin).receive(root, filed)];
+		const at = new Map<Path.Valid, WireRoute>([
+			[Path.from("src"), made],
+			[root, filed],
+		]);
+		const pick = (prefix: Path.Valid) => [at.get(prefix)].filter((route) => route !== undefined);
+		const resolved = mostSpecific(root, pick, (route) => route)?.instance;
+		const reader = origin.scope(root, Path.Prefixes.all()).consume();
+		const covering = await announcedView(reader, undefined, { covering: true });
+		expect(covering.peek().get(Path.empty())?.instance).toBe(resolved);
+		await covering.close();
+		for (const handle of handles) handle.close();
+		origin.close();
+	}
+});
+
 // A draining route still reaches its origin, so it outranks one held unavailable, however cheap.
 test("a draining route outranks an unavailable one", () => {
 	const draining = { ...WireRoute.default, draining: true, cost: 5n };
