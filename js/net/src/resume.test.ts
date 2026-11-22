@@ -3230,8 +3230,15 @@ test("a front's ordered reader holds a gap above a waiting time start", async ()
 // it asks the run again, and the gap waits for that answer. Mirrors the Rust
 // `a_widened_read_asks_its_own_stale_refusal_again`.
 test("a front's widened ordered read asks its copy's stale refusal again unless it returned the gap", async () => {
-	for (const returned of [false, true]) {
+	// An inner front holds the first gap back too, so only a single front returns it before widening.
+	for (const [returned, nested] of [
+		[false, false],
+		[true, false],
+		[false, true],
+	]) {
 		const front = new Front();
+		// Through another front as its copy, which carries the withdrawal to its own copy.
+		const inner = nested ? new Front() : undefined;
 		const a = new BroadcastProducer();
 		const ta = copy(a);
 		hooks.receiveTrack(ta.producer);
@@ -3240,7 +3247,12 @@ test("a front's widened ordered read asks its copy's stale refusal again unless 
 		ta.write(2000n);
 		if (returned) ta.producer.skipGroups(901n, 1000n);
 		hooks.dropTrackGroups(ta.producer, 1000n, 1500n, staleHole(10_000));
-		front.serve(a.consume());
+		if (inner) {
+			inner.serve(a.consume());
+			front.serve(inner.consumer);
+		} else {
+			front.serve(a.consume());
+		}
 		const subscriber = front.consumer
 			.track("seq")
 			.subscribe({ delay: { max: Duration.secs(1) } })
@@ -3278,15 +3290,18 @@ test("a front's widened ordered read asks its copy's stale refusal again unless 
 			again.dropGroups(1000n, 1200n);
 			again.dropGroups(1201n, 1500n);
 			await settle();
-			expect(read()).toEqual(["gap 1000..1200"]);
+			// Through an inner front the gap waits for the group above it (see
+			// quest/m1/front-ordered-gap-below-its-group.md), so the reads are judged together.
+			const before = read();
 			again.accept(1200n)?.finish();
 			await settle();
-			expect(read()).toEqual(["group 1200", "gap 1201..1500"]);
+			expect([...before, ...read()]).toEqual(["gap 1000..1200", "group 1200", "gap 1201..1500"]);
 		}
 
 		requests.close();
 		ordered.close();
 		front.consumer.close();
+		inner?.consumer.close();
 		a.close();
 	}
 });

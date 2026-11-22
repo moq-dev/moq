@@ -27,6 +27,10 @@ before every group, where a direct read returns only group 66. So the fix also
 needs a front to report only what its own window owes, as a plain cursor's
 window decides, not every run a copy gave up under its local floor and cap.
 
+JS through a nested front holds the same gap back further: with the drops
+answered and group 1200 not yet landed, the outer ordered read returns nothing
+until the group lands, where Rust and a single JS front return the gap at once.
+
 Reproduce with the reshaped end of `a_widened_read_asks_its_own_stale_refusal_again`
 in both languages: answer the fill with group 1200 before the drops, and expect
 `[gap 1000..1200, group 1200, gap 1201..1500]` for the front as for the plain

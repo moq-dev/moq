@@ -936,10 +936,11 @@ class Reader implements ResumeSource {
 			// New preferences may ask what a backfill failed to get.
 			this.#refused = undefined;
 			for (const copy of this.#copies) {
-				this.#update(copy);
 				// A widening judges the copy again, which may then take back a drop it reported that the
-				// reader's owner has yet to settle.
+				// reader's owner has yet to settle. Set first, so another front's reader as a copy carries
+				// it to its own copies as it follows the change.
 				if (this.#withdrawing) hooks.withdrawing(copy.sub);
+				this.#update(copy);
 			}
 			// A copy just resolved replaced ranges against its cache, before its failover cap raised
 			// them, so the reader takes that resolution now, the newest copy's first.

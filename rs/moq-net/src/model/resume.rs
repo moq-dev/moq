@@ -2198,14 +2198,15 @@ impl Reader {
 			// New preferences may ask what a backfill failed to get.
 			self.refused = None;
 			for copy in &mut self.copies {
-				copy.update(&self.mirrored, &change);
 				// A widening judges the copy again, which may then take back a drop it reported
-				// that the reader's owner has yet to settle.
+				// that the reader's owner has yet to settle. Set first: another front's reader
+				// as a copy mirrors the change into its own copies at once.
 				if self.withdrawing
 					&& let Sub::Ready(sub) = &mut copy.sub
 				{
 					sub.set_withdrawing();
 				}
+				copy.update(&self.mirrored, &change);
 			}
 			// A ready copy just resolved the changed ranges against its cache, before its
 			// failover cap raised them, so the reader takes that resolution now.
@@ -7631,9 +7632,8 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_widened_read_asks_its_own_stale_refusal_again() {
-		for routed in [false, true] {
-			let routes = Producer::new();
-			let logical = logical(&routes);
+		// How many fronts the read goes through.
+		for routed in 0..3 {
 			let a = copy();
 			a.received();
 			a.anchored();
@@ -7641,8 +7641,15 @@ mod test {
 			write(&a, 900);
 			write(&a, 2000);
 			a.give_up(1000..1500, track::Hole::stale(Duration::from_secs(10)));
-			routes.serve(a.consume());
-			let track = if routed { &logical } else { &a };
+			let mut track = a.clone();
+			let mut fronts = Vec::new();
+			for _ in 0..routed {
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				routes.serve(track.consume());
+				track = logical.clone();
+				fronts.push((routes, logical));
+			}
 			let mut ordered = track
 				.consume()
 				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))))
