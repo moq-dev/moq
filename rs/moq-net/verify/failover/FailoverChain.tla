@@ -203,13 +203,15 @@ Whole(e) ==
     /\ have # {}
     /\ \A g \in Groups : g >= Min(have) => cp[e].fr[g] = F \/ g \in cp[e].bad
 
-\* A held copy at u may still land g: it is live, asked for g, and is not done.
+\* A held copy at u may still land g: it is live, lacks g, and either its
+\* subscription asked for g and is not done or it fetched g, which lands after
+\* the end too.
 MayLand(u, g) ==
     \E s \in Up(u) :
         /\ Live(<<u, s>>)
-        /\ g \in cp[<<u, s>>].ask
         /\ cp[<<u, s>>].fr[g] = -1
-        /\ ~cp[<<u, s>>].fin
+        /\ \/ g \in cp[<<u, s>>].ask /\ ~cp[<<u, s>>].fin
+           \/ g \in cp[<<u, s>>].fetch
 
 \* The relay at u can still ask upstream for g: the copy its reads go to first is
 \* live and never asked for g, so its end proves nothing about g (`Fetching`).
