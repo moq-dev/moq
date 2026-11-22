@@ -4,13 +4,15 @@
 
 A lite-06 relay copy serving a SUBSCRIBE that starts inside a run of keys it holds no answer
 for (no group, no drop, gap not folded) asks upstream about that run and passes the answer on.
-Today it doesn't, so a reader two relays from the publisher with no max delay waits until the
-track ends. The copy answers from its cache only what it can prove upstream would answer, as
-`AGENTS.md` requires.
+This is the cache rule in `AGENTS.md`: a relay that can't prove an answer must ask upstream and
+wait for its answer. Today the relay neither proves nor asks, so a reader two relays from the
+publisher with no max delay waits until the track ends. The gap predates
+[moq-dev/moq#9377](https://github.com/moq-dev/moq/pull/9377): before it, the downstream copy walked
+the gap one FETCH per key instead (61,000 FETCHes in 600 s of simulated time, about 8 hours for
+3 s of media, in the test below).
 
 ## Plan
 
-Found on [moq-dev/moq#9377](https://github.com/moq-dev/moq/pull/9377).
 `lite06_fill_walk::a_relay_start_naming_no_group_costs_no_subscribe_per_key` has the scenario:
 publisher → relay A (keeps every group) → relay B (expires them). A reader on B asks from key 1
 with no max delay. B recovers each run between groups on a SUBSCRIBE of its own. A answers
