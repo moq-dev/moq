@@ -4,9 +4,9 @@
 
 A claimant holding a `Request` learns, through the request itself, when no
 requester waits on its answer any more: each one left, or the relay moved it
-to another route. Rust's `Request` gains `closed()` (and `poll_closed`), and
-JS's `Request` (`js/net/src/origin.ts`) the mirrored `closed()`, so a
-claimant skips or stops work no one will read.
+to another route. Rust's `Request` gains `unwanted()` (and `poll_unwanted`),
+named like `listing.rs`'s, and JS's `Request` (`js/net/src/origin.ts`) the
+mirrored `unwanted()`, so a claimant skips or stops work no one will read.
 
 Non-goals: any holding policy, launching, or autoscaling, which stay with
 the claimant's owner.
@@ -24,15 +24,17 @@ workers have the same waste when a viewer leaves before a job starts.
 
 Guidance:
 
-- The result channel is already a `kio::Producer<PendingBroadcast>`, whose
-  `poll_closed` fires when every consumer is gone. Check that each way a
-  requester stops waiting drops its consumer: a local `Consumer::request`
+- Base it on demand, not closure: the result channel is a
+  `kio::Producer<PendingBroadcast>`, and the request holds a producer, so
+  `poll_closed` never fires when consumers leave; its `wanted` and
+  `poll_wanted_changed` do. Check that each way a requester stops waiting
+  drops its consumer: a local `Consumer::request`
   future dropped, a remote SUBSCRIBE cancelled before its answer
   (`rs/moq-net/src/lite/publisher.rs` blocks on `poll_ok`), and a front
   re-routing to a better route. Fix whichever holds it, rather than adding a
   second signal.
-- Coalesced requesters share one request, so it closes only when the last
+- Coalesced requesters share one request, so it is unwanted only once the last
   leaves.
 
-Tests, with no sleeps: each of the three ways closes a held request; one of
+Tests, with no sleeps: each of the three ways makes a held request unwanted; one of
 two coalesced requesters leaving does not; the same in JS.
