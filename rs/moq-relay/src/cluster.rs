@@ -25,6 +25,7 @@ use crate::auth;
 /// Dynamic cluster peer-list configuration.
 pub mod api;
 mod key;
+pub mod listen;
 
 pub(crate) use key::PeerKey;
 
@@ -873,6 +874,12 @@ pub struct Config {
 		setting = "cluster.node"
 	)]
 	pub node: Option<String>,
+
+	/// The cluster's own QUIC listener (`[cluster.listen]`), requiring a client
+	/// certificate. Disabled unless `cluster.listen.bind` is set.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub listen: listen::Config,
 
 	/// LAN discovery over mDNS (`[cluster.lan]`).
 	#[usage(flatten)]
