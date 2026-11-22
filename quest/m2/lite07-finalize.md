@@ -67,7 +67,9 @@ The cut:
   final peer refuse each other by ALPN rather than misparse; no
   compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
-  passes.
+  passes. Fix `drafts/draft-lcurley-moq-lite.md:2380` (the lite-07 changelog
+  says `0 is malformed` instead of `0 is GROUP_END`, contradicting lines 2218,
+  2245, and 2376; found in the 2026-11-21 full-codebase audit).
 - SETUP keeps its stronger rule: #4820 put it under the general Message
   Length cap, which only permits rejection (MAY), while "a receiver MUST
   treat a longer SETUP as a protocol violation" stays. The lite-07 changelog
@@ -234,9 +236,18 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
   timestamp. A Min Age join that asks upstream is
   [moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)'s.
 
+Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
+full-codebase audit): ✅ the cut waits on deleting the temporary `raw_parts` /
+`base.split("/")` `Path Keep` migration in Rust and JS
+([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)) so lite-07 does
+not freeze with a wire-divergent migration hack, and this quest fixes the
+changelog typo at `drafts/draft-lcurley-moq-lite.md:2380` during the cut
+(rejected: leaving the temporary migration in place).
+
 ## Required
 
 - [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
+- [Count lite-07 Path Keep by Path::parts](/quest/m2/lite07-path-keep-parts.md) - removes the temporary `raw_parts` / `base.split("/")` migration before lite-07 freezes
 
 ## Related
 
