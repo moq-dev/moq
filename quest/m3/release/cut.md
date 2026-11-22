@@ -240,6 +240,14 @@ control unverified; landing #9210 after the cut. The
 [JS frame cap](https://github.com/moq-dev/moq/pull/9283) ships with the cut only if it
 lands first.
 
+Decided 2026-11-21 (maintainer, /quest-plan of the main → release
+flow-control review): ✅ the cut waits on
+[send-credit stalls](/quest/m1/send-credit-stalls.md), so the release that
+ships the flow-control rework ships a counter for its failure mode, a
+connection blocked on its peer's credit (rejected: the cut not waiting;
+leaving it in m3). The [peer window default](/quest/m1/peer-window-default.md)
+ships with the cut only if it lands first (rejected: the cut waiting on it).
+
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
 Repeat the two-relay smoke with the candidate and the last published relay. Put each binary upstream
@@ -279,3 +287,4 @@ candidate:
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
+- [Send-credit stalls](/quest/m1/send-credit-stalls.md) - session stats show a connection blocked on its peer's credit
