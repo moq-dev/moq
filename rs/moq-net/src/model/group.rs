@@ -4288,8 +4288,8 @@ impl Consumer {
 	/// once it does.
 	///
 	/// A publisher still writing the group polls this while it waits on its own transport,
-	/// which the group's reads cannot see: once the subscription's
-	/// [`Delay::max`](crate::track::Delay::max) expires the group, it abandons
+	/// which the group's reads cannot see: once the `max` of the live joins reaching it
+	/// ([`Start::Live`](crate::track::Start::Live)) expires the group, it abandons
 	/// the stream, even with every frame already read off. It abandons it too once
 	/// [`Self::poll_finished`] fails. Stays `true` once set.
 	#[cfg(any(feature = "async", test))]
