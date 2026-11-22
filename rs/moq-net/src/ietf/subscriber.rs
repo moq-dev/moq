@@ -14651,7 +14651,10 @@ mod filter_tests {
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), None), (Some(0), None));
 		// The oldest group reaches back only under a budget that keeps more than the latest.
 		let patient = track::Delay::default().with_max(None);
-		assert_eq!(wire_bounds(&live(None, 19).with_delay(patient), joined), (Some(0), None));
+		assert_eq!(
+			wire_bounds(&live(None, 19).with_delay(patient), joined),
+			(Some(0), None)
+		);
 		assert_eq!(wire_bounds(&live(None, 19), joined), (None, None));
 	}
 
@@ -14672,7 +14675,11 @@ mod filter_tests {
 				let subscription = reaching(&ranges, max);
 				assert_eq!(wire_start(&subscription), Some(0), "{ranges:?} {max:?}");
 				for joined in [None, Some(10)] {
-					assert_eq!(wire_bounds(&subscription, joined), (Some(0), None), "{ranges:?} {joined:?}");
+					assert_eq!(
+						wire_bounds(&subscription, joined),
+						(Some(0), None),
+						"{ranges:?} {joined:?}"
+					);
 				}
 			}
 		}
@@ -18223,7 +18230,13 @@ mod joining_fetch_tests {
 				super::stitch_tests::tail_stream(10, 0, &[b"live"]),
 				fetch_ok(version),
 			]);
-			let run = JoinRun::subscribe_to(version, Some(subscription.clone()), session.clone(), Control::new(false)).await;
+			let run = JoinRun::subscribe_to(
+				version,
+				Some(subscription.clone()),
+				session.clone(),
+				Control::new(false),
+			)
+			.await;
 			let mut reader = run._hold.1.subscribe(subscription).await.unwrap();
 
 			// A group past Largest makes the copy current, which is when its readers judge

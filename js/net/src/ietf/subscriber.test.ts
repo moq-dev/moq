@@ -1230,10 +1230,12 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 // the FETCH delivers the backlog it holds.
 test.each(
 	[Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22].flatMap((version) =>
-		[
-			["time 0", { start: 0n }],
-			["the oldest group", {}],
-		].map(([name, range]) => [name, version, range] as const),
+		(
+			[
+				["time 0", { start: 0n }],
+				["the oldest group", {}],
+			] as const satisfies readonly (readonly [string, track.Range])[]
+		).map(([name, range]) => [name, version, range as track.Range] as const),
 	),
 )(
 	"a start of group 0 joins live with no filter and fetches the groups below Largest (from %s, draft %d)",
