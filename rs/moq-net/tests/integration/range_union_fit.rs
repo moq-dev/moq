@@ -23,10 +23,11 @@ const VIEWERS: u64 = 3;
 const RANGES: u64 = 2_000;
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn write_group(track: &moq_net::track::Producer, key: u64) {
@@ -63,9 +64,11 @@ fn sparse(offset: u64) -> Vec<Range> {
 /// Whether `ranges` asks for every group `want` does.
 fn covers(ranges: &[Range], want: &[Range]) -> bool {
 	want.iter().all(|want| {
-		let Some(key) = want.start else { unreachable!() };
+		let moq_net::track::Start::Time(key) = want.start else {
+			unreachable!()
+		};
 		ranges.iter().any(|range| {
-			let start = range.start.is_some_and(|start| start <= key);
+			let start = matches!(range.start, moq_net::track::Start::Time(start) if start <= key);
 			let end = range.end.is_none_or(|end| key <= end);
 			start && end
 		})
@@ -144,7 +147,7 @@ async fn a_union_too_large_for_one_message_asks_a_covering_superset() {
 	assert!(
 		ranges
 			.iter()
-			.all(|range| range.start.is_some_and(|start| start >= BASE)),
+			.all(|range| matches!(range.start, moq_net::track::Start::Time(start) if start >= BASE)),
 		"nothing below the viewers' ranges"
 	);
 

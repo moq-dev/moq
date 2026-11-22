@@ -134,6 +134,18 @@ pub struct Config {
 	/// leaving each track's own window in force.
 	pub cache_duration: Option<Duration>,
 
+	/// Whether a moq-lite-07 session on this origin carries its peer's traffic to other
+	/// origins: off (the default), a peer is sent only the routes to this node's own
+	/// claims; on, the routes it learned from other peers too.
+	///
+	/// A relay turns it on. An application publishing its own broadcasts leaves it off,
+	/// so a peer never routes through it to reach anyone else. On a proxying origin, a
+	/// [`Link::Upstream`] session still gets routes learned from peers, just none from
+	/// other upstreams; a session that must forward nothing needs its own origin with
+	/// this off. Older versions advertise everything either way, since their hop chains
+	/// cannot tell this node's claims from what it forwards.
+	pub proxy: bool,
+
 	/// How long an announce cursor holds a changed route that arrived over a hop chain
 	/// before delivering it: a [`lite06_churn`] mitigation. A moq-lite-07 route and one
 	/// published here never wait.
@@ -191,6 +203,7 @@ impl Default for Config {
 			max_hops: MAX_HOP_LIMIT,
 			pool,
 			cache_duration: None,
+			proxy: false,
 			update_hold: DEFAULT_UPDATE_HOLD,
 		}
 	}
@@ -2361,7 +2374,7 @@ pub struct Producer {
 	// The rank of that link; see [`Self::with_priority`].
 	priority: Priority,
 
-	// Whether the consumers taken from this handle proxy; see [`Self::with_proxy`].
+	// Whether this origin forwards; see [`Config::proxy`].
 	proxy: bool,
 
 	// Submission handle to the origin's [`Driver`]: source watchers, fronts, and
@@ -2405,7 +2418,7 @@ impl Producer {
 			stats: stats::Session::default(),
 			link: Link::Local,
 			priority: Priority::default(),
-			proxy: false,
+			proxy: config.proxy,
 			tasks,
 			timers: timers.clone(),
 			frames: Default::default(),
@@ -2477,21 +2490,7 @@ impl Producer {
 		self
 	}
 
-	/// Whether a moq-lite-07 session publishing through a consumer of this handle (and
-	/// of any handle derived from it) carries its peer's traffic to other origins: off,
-	/// the peer is sent only the routes to this node's own claims; on, the routes it
-	/// learned from other peers too.
-	///
-	/// A relay turns it on for every session. An application publishing its own
-	/// broadcasts leaves it off, so a peer never routes through it to reach anyone
-	/// else. Older versions advertise everything either way, since their hop chains
-	/// cannot tell this node's claims from what it forwards.
-	pub fn with_proxy(mut self, proxy: bool) -> Self {
-		self.proxy = proxy;
-		self
-	}
-
-	/// Whether this handle forwards what it learns; see [`Self::with_proxy`].
+	/// Whether this origin forwards what it learns; see [`Config::proxy`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn proxy(&self) -> bool {
 		self.proxy
@@ -2524,6 +2523,7 @@ impl Producer {
 			max_hops: self.max_hops,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
+			proxy: self.proxy,
 			update_hold: shared.update_hold,
 		}
 	}
@@ -5239,9 +5239,16 @@ impl kio::Task for FrontServe {
 								self.events.push_back(Event::Resolved { route, result: Ok(id) });
 								continue;
 							}
-							let pending = match serve.requests.join(&self.path) {
-								Some(producer) => producer.consume(),
-								None => {
+							// A request nobody waits on any more is final: its claimant may
+							// already be skipping it, so ask afresh rather than revive it.
+							// `join` refuses atomically, since its last reader leaves outside
+							// this lock.
+							let pending = match serve.requests.join(&self.path).map(|producer| producer.join()) {
+								Some(Some(consumer)) => consumer,
+								stale => {
+									if stale.is_some() {
+										serve.requests.take(&self.path);
+									}
 									let producer = kio::Producer::<PendingBroadcast>::default();
 									let consumer = producer.consume();
 									match serve.requests.insert(self.path.clone(), producer) {
@@ -5527,6 +5534,15 @@ impl kio::Task for FrontServe {
 							return Poll::Ready(in_flight);
 						}
 					}
+				}
+				// The machine stopped asking the route this request went to, by asking another or
+				// giving the switch up: drop it, so its claimant learns nobody waits on it.
+				if self
+					.upstream
+					.as_ref()
+					.is_some_and(|asked| self.front.asking() != Some(asked.route))
+				{
+					self.upstream = None;
 				}
 				// A staged copy the machine did not splice was refused or is no longer wanted:
 				// let it go, or its source stays subscribed for nobody.
@@ -7348,6 +7364,15 @@ impl Request {
 	pub fn reject(self, err: Error) {
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Err(err));
 	}
+
+	/// Ready once no requester waits on the answer any more: each left, or the relay
+	/// moved it to another route. Final: a later requester gets a new request.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		// A front adds a requester only through `kio::Producer::join`, which never takes
+		// the count from zero, so once unwanted it stays so.
+		self.producer.poll_wanted_changed(waiter, true).map(|_| ())
+	}
 }
 
 impl Drop for Request {
@@ -7743,8 +7768,7 @@ pub struct Consumer {
 	// for a session serving its peer (see `Self::serving`).
 	interested: bool,
 
-	// Whether a lite-07 session publishing through this handle sends its peer the
-	// routes this node learned from other peers (see `Self::with_proxy`).
+	// Whether this origin forwards; see [`Config::proxy`].
 	proxy: bool,
 
 	// The cache policy remote fronts inherit, mirroring what
@@ -7872,8 +7896,7 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		// A relay forwards on every handle (`with_proxy`), and an application on none, so
-		// the creating handle speaks for the origin here, as for `OwnClaims::proxy`.
+		// Whether the origin forwards is fixed in its config, so every handle agrees here.
 		let node = crate::route::Node::origin(self.node(), self.proxy, self.timers.clone());
 		let claims = OwnClaims {
 			routes: own(false).routes(),
@@ -7910,8 +7933,8 @@ impl Consumer {
 		created
 	}
 
-	/// Whether this handle carries its peer's traffic to other origins, taken from
-	/// the [`Producer::with_proxy`] it was consumed from.
+	/// Whether this origin carries its peer's traffic to other origins; see
+	/// [`Config::proxy`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn proxy(&self) -> bool {
 		self.proxy
@@ -12094,12 +12117,12 @@ mod tests {
 
 	/// A route node already fed by its driver still answers a new stream with the table as
 	/// it stands, including a claim announced since the driver last ran, whichever handle
-	/// created it: one scoped away from the claim, upstream, proxying, and hiding hidden
+	/// created it: one scoped away from the claim, upstream, and hiding hidden
 	/// routes sees the whole table all the same.
 	#[test]
 	fn the_route_node_answers_with_the_table_as_it_stands() {
 		let producer = origin(1).produce();
-		(producer.clone().with_link(Link::Upstream).with_proxy(true).consume())
+		(producer.clone().with_link(Link::Upstream).consume())
 			.scope("elsewhere", &Prefixes::all())
 			.unwrap()
 			.with_hidden(false)
@@ -14218,6 +14241,122 @@ mod tests {
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
 		drop(prepared);
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
+	}
+
+	/// Whether a held request reports nobody waits on it, without waiting.
+	#[cfg(feature = "async")]
+	fn unwanted(request: &Request) -> bool {
+		request.poll_unwanted(&kio::Waiter::noop()).is_ready()
+	}
+
+	/// A held request is unwanted once its only requester leaves, and stays so: a new
+	/// requester gets a new request rather than reviving the skipped one.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_requester_leaves() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&claim).await;
+		assert!(!unwanted(&request));
+
+		drop(pending);
+		settle(|| unwanted(&request)).await;
+
+		let pending = consumer.request("room/alice", None);
+		let fresh = queued(&claim).await;
+		assert!(unwanted(&request), "a new requester never revives it");
+		assert!(!unwanted(&fresh));
+		drop(request);
+		fresh.serve(broadcast::Info::new().produce());
+		pending.await.expect("the fresh request answers");
+	}
+
+	/// Coalesced requesters share one request: it is unwanted only once the last leaves.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_coalesced_request_is_unwanted_once_the_last_requester_leaves() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
+		let first = consumer.request("room/alice", None);
+		let second = consumer.request("room/alice", None);
+		let request = queued(&claim).await;
+
+		drop(first);
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert!(!unwanted(&request), "the second requester still waits");
+		assert!(
+			claim.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"one request for both"
+		);
+
+		drop(second);
+		settle(|| unwanted(&request)).await;
+	}
+
+	/// A front moving to a cheaper route leaves the request it held unwanted, while its
+	/// requester resolves through the new route.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_front_moves_to_another_route() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let pool = producer.claim("room", RouteOptions::default().with_cost(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&pool).await;
+
+		let node = producer.claim("room", RouteOptions::default().with_cost(1)).unwrap();
+		let moved = queued(&node).await;
+		settle(|| unwanted(&request)).await;
+		assert!(!unwanted(&moved));
+
+		let served = broadcast::Info::new().produce();
+		moved.serve(&served);
+		pending.await.expect("resolves through the cheaper route");
+	}
+
+	/// A front moving to a route that serves at once, such as a local broadcast, also
+	/// leaves the request it held unwanted.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_a_direct_route_takes_over() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let pool = producer.claim("room", RouteOptions::default().with_cost(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&pool).await;
+
+		let _direct = producer
+			.route("room/alice", RouteOptions::default().with_cost(1))
+			.unwrap();
+		settle(|| unwanted(&request)).await;
+		pending.await.expect("resolves through the direct route");
+	}
+
+	/// A front that gives up a switch without asking anew, because its serving route is
+	/// the best again, leaves the switch's request unwanted.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_front_gives_up_the_switch() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let options = |cost: u64| RouteOptions::default().with_instance(instance(), 0).with_cost(cost);
+		let serving = producer.claim("room", options(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let source = broadcast::Info::new().produce();
+		queued(&serving).await.serve(&source);
+		let _resolved = pending.await.expect("resolves through the serving claim");
+
+		let cheaper = producer.claim("room", options(1)).unwrap();
+		let switch = queued(&cheaper).await;
+		assert!(!unwanted(&switch));
+
+		cheaper.set_cost(10).unwrap();
+		settle(|| unwanted(&switch)).await;
 	}
 
 	/// An answer prepared for a claim that went away is refused, never announced.
@@ -16824,7 +16963,7 @@ mod tests {
 		let mut later = video
 			.subscribe(crate::track::Subscription {
 				ranges: vec![crate::track::Range {
-					start: Some(3),
+					start: crate::track::Start::Time(3),
 					end: None,
 				}],
 				..Default::default()

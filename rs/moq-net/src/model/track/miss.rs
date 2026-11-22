@@ -36,7 +36,7 @@ use crate::{Error, ledger};
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
 /// and readers start, and the drops revision.
-type JudgedAt = (u64, u64, Option<u64>, Option<u64>, Option<u64>, super::Start, u64);
+type JudgedAt = (u64, u64, Option<u64>, Option<u64>, Option<u64>, super::FeedStart, u64);
 
 /// The misses of one cursor, judged as what it reads or the feed moves.
 #[derive(Default)]
@@ -735,7 +735,7 @@ impl Misses {
 		let bound = bound.filter(|_| state.unfed).and_then(|end| end.checked_sub(1));
 		// The feed's start is unknown until the serving session resolves it, and readers
 		// take nothing from a cache that does not reflect the feed.
-		if matches!(state.start, super::Start::Pending(_)) || !state.readable() && bound.is_none() {
+		if matches!(state.start, super::FeedStart::Pending(_)) || !state.readable() && bound.is_none() {
 			return asks;
 		}
 		// A received stale run this reader cannot trust is still asked for, though nothing above
@@ -1039,7 +1039,7 @@ impl Misses {
 		// the live edge or the floor the copy asked for leaves older groups as history only a
 		// reader naming them asked for.
 		let unasked = state.fills_from_start
-			|| !matches!(state.start, super::Start::Resolved(_))
+			|| !matches!(state.start, super::FeedStart::Resolved(_))
 				&& state.anchors.received()
 				&& named.is_none_or(|named| named >= start);
 		if unasked && start > 0 {

@@ -65,6 +65,10 @@ pub enum Error {
 	#[error("no roots found in {}", .0.display())]
 	EmptyRoots(PathBuf),
 
+	/// A listener requires client certificates but names no root to verify them.
+	#[error("a required client certificate needs a root to verify it against")]
+	RequireRoots,
+
 	/// Nothing is configured that could ever verify a server certificate.
 	#[error(
 		"no trusted roots: provide --connect-tls-root, enable --connect-tls-system-roots, or use --connect-tls-fingerprint / --connect-tls-insecure"
@@ -1252,6 +1256,15 @@ pub struct Listen {
 	#[serde(skip)]
 	pub identity: Option<Identity>,
 
+	/// Refuse a client that presents no certificate chaining to [`root`](Self::root),
+	/// instead of admitting it unauthenticated. Needs `root`.
+	///
+	/// Set by an embedder for a listener only its own peers dial; a public listener
+	/// leaves it off, since some browsers abort a connection whose server asks.
+	#[usage(skip)]
+	#[serde(skip)]
+	pub require: bool,
+
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
 	/// When set, clients *may* present a certificate during the TLS handshake.
@@ -1353,6 +1366,7 @@ impl Listen {
 			|| !self.key.is_empty()
 			|| !self.generate.is_empty()
 			|| !self.root.is_empty()
+			|| self.require
 			|| self.identity.is_some()
 	}
 
@@ -1427,20 +1441,22 @@ impl Listen {
 	/// certificate at all, with the roots it verifies against.
 	///
 	/// The one place the TLS listeners agree on what mTLS means here, so a new
-	/// mode lands once rather than in each of them: optional CA-rooted
-	/// [`root`](Self::root), else nothing.
+	/// mode lands once rather than in each of them: CA-rooted
+	/// [`root`](Self::root), optional unless [`require`](Self::require), else nothing.
 	pub(crate) fn client_auth(&self, provider: crypto::Provider) -> Result<ClientAuth> {
-		match self.root.is_empty() {
-			true => Ok(ClientAuth::default()),
-			false => self.client_verifier(provider),
+		match (self.root.is_empty(), self.require) {
+			(true, false) => Ok(ClientAuth::default()),
+			(true, true) => Err(Error::RequireRoots),
+			(false, _) => self.client_verifier(provider),
 		}
 	}
 
-	/// Build the optional-client-auth verifier, reloading configured roots in place.
+	/// Build the client-auth verifier, reloading configured roots in place.
 	fn client_verifier(&self, provider: crypto::Provider) -> Result<ClientAuth> {
 		self.refuse_deprecated()?;
 		let roots = ClientRoots::default();
-		let initial = Self::build_client_verifier(&self.root, &provider, &roots)?;
+		let require = self.require;
+		let initial = Self::build_client_verifier(&self.root, require, &provider, &roots)?;
 
 		let verifier = {
 			let paths = self.root.clone();
@@ -1448,7 +1464,7 @@ impl Listen {
 			let reload_provider = provider.clone();
 			let reload_roots = roots.clone();
 			let verifier = ReloadingClientVerifier::new(&paths, initial, move || {
-				Self::build_client_verifier(&reload_paths, &reload_provider, &reload_roots)
+				Self::build_client_verifier(&reload_paths, require, &reload_provider, &reload_roots)
 			})?;
 			Arc::new(verifier)
 		};
@@ -1460,19 +1476,23 @@ impl Listen {
 	}
 
 	/// Build a verifier from the root files, adding them to `roots` once it builds.
+	/// A client without a certificate is refused when `require` is set.
 	fn build_client_verifier(
 		paths: &[PathBuf],
+		require: bool,
 		provider: &crypto::Provider,
 		roots: &ClientRoots,
 	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
 		let certs = read_roots(paths)?;
-		let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+		let builder = rustls::server::WebPkiClientVerifier::builder_with_provider(
 			Arc::new(root_store(&certs)?),
 			provider.clone(),
-		)
-		.allow_unauthenticated()
-		.build()
-		.map_err(Error::ClientVerifier)?;
+		);
+		let builder = match require {
+			true => builder,
+			false => builder.allow_unauthenticated(),
+		};
+		let verifier = builder.build().map_err(Error::ClientVerifier)?;
 		roots.extend(certs);
 		Ok(verifier)
 	}
@@ -2504,7 +2524,20 @@ mod tests {
 	#[test]
 	fn client_auth_is_off_until_configured() {
 		let provider = crypto::provider().unwrap();
-		assert!(Listen::default().client_auth(provider).unwrap().verifier.is_none());
+		assert!(
+			Listen::default()
+				.client_auth(provider.clone())
+				.unwrap()
+				.verifier
+				.is_none()
+		);
+		let require = Listen {
+			require: true,
+			..Default::default()
+		};
+		assert!(matches!(require.client_auth(provider), Err(Error::RequireRoots)));
+		// A shared policy beside it is refused rather than serving without the requirement.
+		assert!(require.configured(), "require alone reads as unconfigured");
 	}
 
 	/// A plain-TLS embedder receives a working config from the shared identity.
@@ -2740,7 +2773,7 @@ mod tests {
 		let roots = ClientRoots::default();
 		let load = |root: &CertificateDer<'static>| {
 			std::fs::write(&path, pem::encode(&pem::Pem::new("CERTIFICATE", root.to_vec()))).unwrap();
-			Listen::build_client_verifier(std::slice::from_ref(&path), &provider, &roots).unwrap();
+			Listen::build_client_verifier(std::slice::from_ref(&path), false, &provider, &roots).unwrap();
 		};
 
 		load(&old);
@@ -3103,7 +3136,7 @@ mod tests {
 		let control_client = Arc::new(build_client(client_cert.clone(), client_key.clone_key()));
 		let reloadable_client = Arc::new(build_client(client_cert, client_key));
 
-		let verifier = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
+		let verifier = Listen::build_client_verifier(&paths, false, &provider, &ClientRoots::default()).unwrap();
 		let control = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()
 			.unwrap()
@@ -3111,12 +3144,12 @@ mod tests {
 			.with_single_cert(vec![server_cert.clone()], server_key.clone_key())
 			.unwrap();
 
-		let initial = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
+		let initial = Listen::build_client_verifier(&paths, false, &provider, &ClientRoots::default()).unwrap();
 		let reload_paths = paths.clone();
 		let reload_provider = provider.clone();
 		let verifier = Arc::new(
 			ReloadingClientVerifier::new(&paths, initial, move || {
-				Listen::build_client_verifier(&reload_paths, &reload_provider, &ClientRoots::default())
+				Listen::build_client_verifier(&reload_paths, false, &reload_provider, &ClientRoots::default())
 			})
 			.unwrap(),
 		);
@@ -3179,11 +3212,11 @@ mod tests {
 		})
 		.unwrap();
 
-		let initial = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
+		let initial = Listen::build_client_verifier(&paths, false, &provider, &ClientRoots::default()).unwrap();
 		let reload_paths = paths.clone();
 		let reload_provider = provider.clone();
 		let client_verifier = ReloadingClientVerifier::new(&paths, initial, move || {
-			Listen::build_client_verifier(&reload_paths, &reload_provider, &ClientRoots::default())
+			Listen::build_client_verifier(&reload_paths, false, &reload_provider, &ClientRoots::default())
 		})
 		.unwrap();
 

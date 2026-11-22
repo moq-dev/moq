@@ -8,14 +8,9 @@ use bytes::{Buf, Bytes, BytesMut};
 use moq_quic::VarInt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::Transport;
+use super::{READ_BUFFER, Transport};
 use crate::protocol::validate_protocol;
 use crate::{Config, Driver, Error, MAX_FRAME_SIZE, Protocol, Session};
-
-/// The size of each read buffer: one default record with its size field, or one draft-00
-/// frame. Records are sliced out of it rather than copied, and the session counts every slice
-/// as pinning a whole buffer of this size. A larger record gets a buffer of its own size.
-const READ_BUFFER: usize = MAX_FRAME_SIZE;
 
 /// The least room a read is worth a syscall for; a fuller buffer moves its partial record to
 /// a fresh one first.
