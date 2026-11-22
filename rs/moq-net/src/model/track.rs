@@ -11804,11 +11804,18 @@ impl Subscriber {
 	}
 
 	/// Whether this subscriber may still hand out group `key`: its ranges and floor cover it,
-	/// nothing skipped or gave it up, and it has not handed it out or passed it already, as an
-	/// ordered read passes what lies below where it reads next.
+	/// nothing skipped or gave it up, and it has not handed it out, passed it, as an ordered
+	/// read passes what lies below where it reads next, or skipped it as stale under its
+	/// current budget, which only a wider one reverses.
 	pub(super) fn may_take(&self, key: u64) -> bool {
 		let ahead = match &self.inner {
-			Inner::Plain(cursor) => cursor.next_key <= key,
+			Inner::Plain(cursor) => {
+				cursor.next_key <= key
+					&& cursor.record.skipped.judged(key).is_none_or(|judged| {
+						let budget = cursor.subscription.read().budget();
+						judged < clamp_max_delay(budget, cursor.state.read().max_age_bound())
+					})
+			}
 			Inner::Resume(..) => true,
 		};
 		ahead && self.next_in_range(key) == Some(key) && !self.record().delivered.contains(key)
@@ -31908,6 +31915,32 @@ mod test {
 			"newest first, never 0, 3, or 4 again"
 		);
 		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
+	}
+
+	/// A group skipped as stale under the current budget is not one the subscriber may still
+	/// hand out, until the budget widens past the one it was judged under.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_skip_may_be_taken_only_once_the_budget_widens() {
+		let mut producer = track_producer("test", Info::timed());
+		let narrow = Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500)));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+		assert!(!subscriber.may_take(0), "handed out");
+		assert!(!subscriber.may_take(1), "skipped as stale under this budget");
+		assert!(subscriber.may_take(5), "not arrived yet");
+
+		subscriber
+			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(10))))
+			.unwrap();
+		assert!(subscriber.may_take(1), "a wider budget offers it again");
+		assert_eq!(drain(&mut subscriber), vec![2, 1]);
+		assert!(!subscriber.may_take(1), "handed out");
 	}
 
 	/// An ascending subscription gets the re-offer lowest first.

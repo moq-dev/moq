@@ -4652,10 +4652,15 @@ export class Subscriber {
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
-		hooks.mayTake = (subscriber, key) =>
-			(subscriber.#resume !== undefined || subscriber.#nextKey <= key) &&
-			subscriber.#nextInRange(key) === key &&
-			!subscriber.#delivered.has(key);
+		hooks.mayTake = (subscriber, key) => {
+			if (!subscriber.#resume) {
+				if (key < subscriber.#nextKey) return false;
+				// Skipped as stale under the current budget, it comes back only once the budget widens.
+				const judged = subscriber.#skipped.get(key);
+				if (judged !== undefined && judged >= subscriber.#drift().budget) return false;
+			}
+			return subscriber.#nextInRange(key) === key && !subscriber.#delivered.has(key);
+		};
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
 			subscriber.#state.groups
 				.peek()

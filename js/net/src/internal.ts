@@ -978,8 +978,8 @@ export const hooks: {
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
 	 * Whether the subscriber may still hand out group `key`: its ranges and floor cover it, nothing
-	 * skipped or gave it up, and it has not handed it out or passed it already, as an ordered read
-	 * passes what lies below where it reads next. Mirrors the Rust
+	 * skipped or gave it up, and it has not handed it out, passed it, as an ordered read passes what
+	 * lies below where it reads next, or skipped it as stale under its current budget. Mirrors the Rust
 	 * crate-private `track::Subscriber::may_take`.
 	 */
 	mayTake: (subscriber: Subscriber, key: bigint) => boolean;

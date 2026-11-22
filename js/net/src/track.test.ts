@@ -5175,6 +5175,33 @@ test("a widened maxDelay re-offers what it skipped as stale", () => {
 	producer.close();
 });
 
+// A group skipped as stale under the current budget is not one the reader may still hand out,
+// until the budget widens past the one it was judged under. Mirrors the Rust test.
+test("a stale skip may be taken only once the budget widens", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const subscriber = producer.subscribe({ delay: { max: Duration.millis(1500) } });
+	stampGroup(producer, 0n, 0);
+	expect(drainGroups(subscriber)).toEqual([0n]);
+	for (const [key, ms] of [
+		[1n, 1000],
+		[2n, 2000],
+		[3n, 3000],
+		[4n, 6000],
+	] as const) {
+		stampGroup(producer, key, ms);
+	}
+	expect(drainGroups(subscriber)).toEqual([3n, 4n]);
+	expect(hooks.mayTake(subscriber, 0n)).toBe(false);
+	expect(hooks.mayTake(subscriber, 1n)).toBe(false);
+	expect(hooks.mayTake(subscriber, 5n)).toBe(true);
+
+	subscriber.update({ delay: { max: Duration.millis(10_000) } });
+	expect(hooks.mayTake(subscriber, 1n)).toBe(true);
+	expect(drainGroups(subscriber)).toEqual([1n, 2n]);
+	expect(hooks.mayTake(subscriber, 1n)).toBe(false);
+	producer.close();
+});
+
 // A read already parked when the budget widens wakes for the re-offer.
 test("a widened maxDelay wakes a parked read", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
