@@ -135,6 +135,14 @@ impl Prefix {
 		}
 	}
 
+	/// Whether `other` is this prefix or beneath it. Both are canonical and never end inside
+	/// an escape, so the byte after this one is a separator exactly when it is a `/`.
+	fn contains(&self, other: &Prefix) -> bool {
+		let (path, prefix) = (&other.text, &self.text);
+		path.starts_with(prefix.as_str())
+			&& (prefix.is_empty() || path.len() == prefix.len() || path.as_bytes()[prefix.len()] == b'/')
+	}
+
 	/// The paths this prefix covers, as a pattern: `prefix/**`, or the literal when it is
 	/// already as deep as a path may be.
 	pub fn pattern(&self) -> Pattern {
@@ -277,16 +285,12 @@ impl Prefixes {
 	/// Add a prefix, dropping the members beneath it. Returns `false` when a member already
 	/// covers it, leaving the set unchanged.
 	pub fn insert(&mut self, prefix: Prefix) -> bool {
-		if self.matches(&prefix.text) {
+		if self.holds(&prefix) {
 			return false;
 		}
 		// Everything beneath the new member sorts right after where it goes.
 		let at = self.0.partition_point(|member| member < &prefix);
-		let end = at
-			+ self.0[at..]
-				.iter()
-				.take_while(|member| prefix.matches(&member.text))
-				.count();
+		let end = at + self.0[at..].iter().take_while(|member| prefix.contains(member)).count();
 		self.0.splice(at..end, [prefix]);
 		true
 	}
@@ -294,6 +298,11 @@ impl Prefixes {
 	/// Whether some member covers `path`, normalized like a broadcast path.
 	pub fn matches(&self, path: &str) -> bool {
 		!self.0.is_empty() && self.covering(&normalize(path)).is_some()
+	}
+
+	/// Whether some member covers `prefix`, which is canonical already.
+	fn holds(&self, prefix: &Prefix) -> bool {
+		self.covering(&prefix.text).is_some()
 	}
 
 	/// The member covering the normalized `path`, if any.
@@ -314,7 +323,7 @@ impl Prefixes {
 	/// Whether every member of `other` is covered here: `other` grants nothing this set
 	/// does not. The empty set is covered by anything.
 	pub fn covers(&self, other: &Self) -> bool {
-		other.0.iter().all(|prefix| self.matches(&prefix.text))
+		other.0.iter().all(|prefix| self.holds(prefix))
 	}
 
 	/// Whether some member covers a path at or beneath `path`, normalized like a broadcast
@@ -338,8 +347,8 @@ impl Prefixes {
 	/// The paths both sets grant. Each member of the result is a member of one side lying
 	/// within the other, so it never grows past both sets together.
 	pub fn intersect(&self, other: &Self) -> Self {
-		let ours = self.0.iter().filter(|prefix| other.matches(&prefix.text));
-		let theirs = other.0.iter().filter(|prefix| self.matches(&prefix.text));
+		let ours = self.0.iter().filter(|prefix| other.holds(prefix));
+		let theirs = other.0.iter().filter(|prefix| self.holds(prefix));
 		ours.chain(theirs).cloned().collect()
 	}
 
@@ -388,7 +397,7 @@ impl FromIterator<Prefix> for Prefixes {
 		sorted.sort_unstable();
 		let mut kept: Vec<Prefix> = Vec::with_capacity(sorted.len());
 		for prefix in sorted {
-			if kept.last().is_none_or(|last| !last.matches(&prefix.text)) {
+			if kept.last().is_none_or(|last| !last.contains(&prefix)) {
 				kept.push(prefix);
 			}
 		}
@@ -660,7 +669,11 @@ mod tests {
 		for path in &paths {
 			let normal = normalize(path);
 			for member in members.map(prefix) {
-				assert_eq!(member.matches(path), member.pattern().matches(path), "{member:?} {path}");
+				assert_eq!(
+					member.matches(path),
+					member.pattern().matches(path),
+					"{member:?} {path}"
+				);
 				assert_eq!(member.matches(path), member.matches(&normal), "{member:?} {path}");
 				assert_eq!(member.overlaps(path), member.overlaps(&normal), "{member:?} {path}");
 			}
