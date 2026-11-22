@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const release = join(import.meta.dir, "release.ts");
+const clock = join(import.meta.dir, "release-clock.ts");
 
 type Manifest = {
 	dependencies?: Record<string, string>;
 	peerDependencies?: Record<string, string>;
 };
-type Reply = { status?: number; output?: string; error?: string };
+// `misses` answers E404 to that many views before the reply, as a CDN still catching up.
+type Reply = { status?: number; output?: string; error?: string; misses?: number };
 
 // Run the real release entrypoint with isolated command substitutes: no registry
 // credentials, builds, or publishing escape the fixture.
@@ -65,7 +67,9 @@ if ("${tool}" === "bun") {
 } else if ("${tool}" === "npm" && args[0] === "view") {
  if (args[1] === "@moq/fixture") { console.log(options.published ? "1.0.0" : "0.9.0"); }
  else {
- const r = options.replies?.[args[1]] ?? { status: 1, error: "E404: version not found" };
+ let r = options.replies?.[args[1]] ?? { status: 1, error: "E404: version not found" };
+ const views = readFileSync("${cwd}/calls.jsonl", "utf8").trim().split("\\n").filter((l) => JSON.parse(l)[2] === args[1]).length;
+ if (views <= (r.misses ?? 0)) r = { status: 1, error: "E404: version not found" };
  if (args.includes("--json")) {
  if (r.output) console.log(JSON.stringify(r.output.split("\\n")));
  else if (r.status) console.log(JSON.stringify({ error: { code: r.error?.startsWith("E404") ? "E404" : "ECONNRESET" } }));
@@ -78,16 +82,19 @@ if ("${tool}" === "bun") {
 				{ mode: 0o755 },
 			);
 		}
-		const result = Bun.spawnSync([process.execPath, release, ...(options.dryRun ? ["--dry-run"] : [])], {
-			cwd: packageDir,
-			env: {
-				PATH: bin,
-				HOME: cwd,
-				DRY_RUN: String(options.dryRun ?? false),
+		const result = Bun.spawnSync(
+			[process.execPath, "--preload", clock, release, ...(options.dryRun ? ["--dry-run"] : [])],
+			{
+				cwd: packageDir,
+				env: {
+					PATH: bin,
+					HOME: cwd,
+					DRY_RUN: String(options.dryRun ?? false),
+				},
+				stdout: "pipe",
+				stderr: "pipe",
 			},
-			stdout: "pipe",
-			stderr: "pipe",
-		});
+		);
 		const calls = readFileSync(join(cwd, "calls.jsonl"), "utf8")
 			.trim()
 			.split("\n")
@@ -132,11 +139,10 @@ test("checks built ranges, both constraints on a shared dependency, and not exte
 	});
 	expect(result.code).not.toBe(0);
 	expect(result.output).toContain("@moq/net@^2.0.0");
-	expect(result.calls.filter(([tool, cmd]) => tool === "npm" && cmd === "view").map((c) => c[2])).toEqual([
-		"@moq/fixture",
-		"@moq/net@^1.0.0",
-		"@moq/net@^2.0.0",
-	]);
+	const views = result.calls.filter(([tool, cmd]) => tool === "npm" && cmd === "view").map((c) => c[2]);
+	expect(views.slice(0, 3)).toEqual(["@moq/fixture", "@moq/net@^1.0.0", "@moq/net@^2.0.0"]);
+	// Only the missing range is rechecked.
+	expect(new Set(views.slice(3))).toEqual(new Set(["@moq/net@^2.0.0"]));
 });
 
 test("an empty successful registry response does not establish a matching version", () => {
@@ -250,4 +256,36 @@ test("a registry version can satisfy a range even when the local sibling cannot"
 	});
 	expect(result.code).toBe(0);
 	expect(result.calls).toContainEqual(["npm", "pack", "--dry-run"]);
+});
+
+test("a sibling still propagating through the registry CDN is awaited, then published", () => {
+	const result = run({
+		manifest: { dependencies: { "@moq/net": "^1" } },
+		replies: { "@moq/net@^1": { output: "1.0.0", misses: 3 } },
+	});
+	expect(result.code).toBe(0);
+	expect(result.output).toContain("waited 30s");
+	expect(result.calls.filter((c) => c[1] === "view" && c[2] === "@moq/net@^1")).toHaveLength(4);
+	expect(result.calls.at(-1)).toEqual(["npm", "publish", "--access", "public"]);
+});
+
+test("a sibling the registry never serves fails after 75 s without publishing", () => {
+	const result = run({
+		manifest: { dependencies: { "@moq/net": "^1" } },
+		replies: { "@moq/net@^1": { output: "1.0.0", misses: 99 } },
+	});
+	expect(result.code).not.toBe(0);
+	expect(result.output).toContain("@moq/net@^1");
+	expect(result.output).toContain("waited 75s");
+	expect(result.calls.some((c) => c[1] === "publish")).toBe(false);
+});
+
+test("a dry run never waits for the registry", () => {
+	const result = run({
+		dryRun: true,
+		manifest: { dependencies: { "@moq/net": "^999" } },
+		sibling: { name: "@moq/net", version: "999.0.0" },
+	});
+	expect(result.code).toBe(0);
+	expect(result.output).toContain("waited 0s");
 });

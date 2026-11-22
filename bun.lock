@@ -192,6 +192,7 @@
       "name": "@moq/common",
       "dependencies": {
         "@babel/parser": "^8.1.0",
+        "@moq/clock": "workspace:^",
         "publint": "^0.3.25",
         "rolldown": "^1.3.0",
         "typedoc": "^0.28.20",

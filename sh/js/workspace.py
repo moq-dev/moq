@@ -187,6 +187,7 @@ def run(action, plan):
             "js/common/constructors.test.ts",
             "js/common/deps.test.ts",
             "js/common/worklet.test.ts",
+            "js/common/propagation.test.ts",
             "js/common/release.test.ts",
         )
         scripts("test")
