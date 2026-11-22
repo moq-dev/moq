@@ -847,7 +847,8 @@ type Wire = {
 	starts: FillStarts;
 	// The first group its live feed serves (see `hooks.startTrack`), unset until its START
 	// resolves it, null for a resolved-empty range, and the floor its SUBSCRIBE requested.
-	served?: { start?: bigint | null; requested?: bigint };
+	// `resolved` when the publisher placed the start itself, whatever the wire.
+	served?: { start?: bigint | null; requested?: bigint; resolved?: boolean };
 };
 
 // Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
@@ -2912,7 +2913,7 @@ export class Producer {
 		const ranges = this.#requested.peek()?.ranges;
 		const served = wire.served;
 		const resolved =
-			wire.starts.resolvesStart === true &&
+			(wire.starts.resolvesStart === true || served?.resolved === true) &&
 			typeof served?.start === "bigint" &&
 			served.requested === (ranges && wireSpan(ranges).start);
 		if (resolved) return undefined;
@@ -4790,6 +4791,7 @@ export class Subscriber {
 			};
 		};
 		hooks.mayLand = (subscriber, land) => {
+			if (subscriber.#resume) return subscriber.#resume.mayLand(land);
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && mayLand(producer, land);
 		};

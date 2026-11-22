@@ -33,14 +33,18 @@ type (
 	VideoHint = ffi.MoqVideoHint
 	// AudioFormat is a single audio codec an importer can parse.
 	AudioFormat = ffi.MoqAudioFormat
-	// VideoFormat is a single video codec an importer can parse.
+	// VideoFormat is a single video codec an importer can parse. The two H.26x pairs
+	// differ by framing, not codec: Avc1/Hvc1 are length-prefixed with an out-of-band
+	// config record, H264/H265 are a raw Annex B elementary stream with the parameter
+	// sets inline.
 	VideoFormat = ffi.MoqVideoFormat
 	// ContainerFormat is a container that publishes its own tracks.
 	ContainerFormat = ffi.MoqContainerFormat
 	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
 	VideoProperties = ffi.MoqVideoProperties
 	// Container selects how subscribed media frames are demuxed. Build one with
-	// LegacyContainer, CmafContainer, or LocContainer.
+	// LegacyContainer, CmafContainer, or LocContainer. A catalog reports ContainerUnknown
+	// for a container this version cannot name yet, which a subscription refuses.
 	Container = ffi.MoqContainer
 	// ContainerLegacy is the legacy hang container variant of Container; build one with LegacyContainer.
 	ContainerLegacy = ffi.MoqContainerLegacy
@@ -48,6 +52,8 @@ type (
 	ContainerCmaf = ffi.MoqContainerCmaf
 	// ContainerLoc is the low-overhead container variant of Container; build one with LocContainer.
 	ContainerLoc = ffi.MoqContainerLoc
+	// ContainerUnknown is a container this version of the bindings cannot name yet.
+	ContainerUnknown = ffi.MoqContainerUnknown
 	// Rendition is a catalog rendition: its ID (catalog key) and config. Build one with VideoRendition or AudioRendition.
 	Rendition = ffi.MoqRendition
 	// RenditionVideo is the video variant of Rendition; build one with VideoRendition.
@@ -62,7 +68,7 @@ type (
 // VideoInit describes a video codec, initialization bytes, and hints.
 type VideoInit struct {
 	// Format selects the video codec.
-	Format VideoFormat
+	Format *VideoFormat
 	// Data supplies codec init bytes (an avcC, an hvcC, ...); may be empty for a format that resolves in band.
 	Data []byte
 	// Label is a human-readable rendition name for a track picker.
@@ -110,7 +116,7 @@ func (t *Timebase) Close() { t.inner.Destroy() }
 // ContainerInit describes a container, its leading bytes and an optional shared timebase.
 type ContainerInit struct {
 	// Format selects the container parser.
-	Format ContainerFormat
+	Format *ContainerFormat
 	// Data supplies the leading container bytes.
 	Data []byte
 	// Timebase shares a source offset, or nil for an independent offset.
@@ -348,49 +354,80 @@ func LocContainer() Container {
 	return ContainerLoc{}
 }
 
-// AudioFormat values: a single audio codec an importer can parse.
-const (
-	// AudioFormatAac is Advanced Audio Coding, configured by an AudioSpecificConfig.
-	AudioFormatAac = ffi.MoqAudioFormatAac
-	// AudioFormatOpus is Opus, configured by an OpusHead.
-	AudioFormatOpus = ffi.MoqAudioFormatOpus
-	// AudioFormatFlac is FLAC, configured by its STREAMINFO block.
-	AudioFormatFlac = ffi.MoqAudioFormatFlac
-	// AudioFormatMp3 is MPEG-1/2 Audio Layer III.
-	AudioFormatMp3 = ffi.MoqAudioFormatMp3
-)
+// AacAudioFormat selects Advanced Audio Coding, configured by an AudioSpecificConfig.
+func AacAudioFormat() *AudioFormat {
+	return ffi.MoqAudioFormatAac()
+}
 
-// VideoFormat values: a single video codec an importer can parse. The two H.26x pairs
-// differ by framing, not codec: Avc1/Hvc1 are length-prefixed with an out-of-band config
-// record, H264/H265 are a raw Annex B elementary stream with the parameter sets inline.
-const (
-	// VideoFormatAvc1 is H.264 with length-prefixed NALUs and an out-of-band avcC.
-	VideoFormatAvc1 = ffi.MoqVideoFormatAvc1
-	// VideoFormatH264 is H.264 as a raw Annex B elementary stream with inline SPS/PPS.
-	VideoFormatH264 = ffi.MoqVideoFormatH264
-	// VideoFormatHvc1 is H.265 with length-prefixed NALUs and an out-of-band hvcC.
-	VideoFormatHvc1 = ffi.MoqVideoFormatHvc1
-	// VideoFormatH265 is H.265 as a raw Annex B elementary stream with inline parameter sets.
-	VideoFormatH265 = ffi.MoqVideoFormatH265
-	// VideoFormatAv01 is AV1.
-	VideoFormatAv01 = ffi.MoqVideoFormatAv01
-	// VideoFormatVp8 is VP8.
-	VideoFormatVp8 = ffi.MoqVideoFormatVp8
-	// VideoFormatVp9 is VP9.
-	VideoFormatVp9 = ffi.MoqVideoFormatVp9
-)
+// OpusAudioFormat selects Opus, configured by an OpusHead.
+func OpusAudioFormat() *AudioFormat {
+	return ffi.MoqAudioFormatOpus()
+}
 
-// ContainerFormat values: a container that publishes its own tracks.
-const (
-	// ContainerFormatFmp4 is fragmented MP4 / CMAF, split into one frame per sample.
-	ContainerFormatFmp4 = ffi.MoqContainerFormatFmp4
-	// ContainerFormatMkv is Matroska / WebM.
-	ContainerFormatMkv = ffi.MoqContainerFormatMkv
-	// ContainerFormatTs is an MPEG-2 transport stream.
-	ContainerFormatTs = ffi.MoqContainerFormatTs
-	// ContainerFormatFlv is Flash Video, as used by RTMP.
-	ContainerFormatFlv = ffi.MoqContainerFormatFlv
-)
+// FlacAudioFormat selects FLAC, configured by its STREAMINFO block.
+func FlacAudioFormat() *AudioFormat {
+	return ffi.MoqAudioFormatFlac()
+}
+
+// Mp3AudioFormat selects MPEG-1/2 Audio Layer III.
+func Mp3AudioFormat() *AudioFormat {
+	return ffi.MoqAudioFormatMp3()
+}
+
+// Avc1VideoFormat selects H.264 with length-prefixed NALUs and an out-of-band avcC.
+func Avc1VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatAvc1()
+}
+
+// H264VideoFormat selects H.264 as a raw Annex B elementary stream with inline SPS/PPS.
+func H264VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatH264()
+}
+
+// Hvc1VideoFormat selects H.265 with length-prefixed NALUs and an out-of-band hvcC.
+func Hvc1VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatHvc1()
+}
+
+// H265VideoFormat selects H.265 as a raw Annex B elementary stream with inline parameter sets.
+func H265VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatH265()
+}
+
+// Av01VideoFormat selects AV1.
+func Av01VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatAv01()
+}
+
+// Vp8VideoFormat selects VP8.
+func Vp8VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatVp8()
+}
+
+// Vp9VideoFormat selects VP9.
+func Vp9VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatVp9()
+}
+
+// Fmp4ContainerFormat selects fragmented MP4 / CMAF, split into one frame per sample.
+func Fmp4ContainerFormat() *ContainerFormat {
+	return ffi.MoqContainerFormatFmp4()
+}
+
+// MkvContainerFormat selects Matroska / WebM.
+func MkvContainerFormat() *ContainerFormat {
+	return ffi.MoqContainerFormatMkv()
+}
+
+// TsContainerFormat selects an MPEG-2 transport stream.
+func TsContainerFormat() *ContainerFormat {
+	return ffi.MoqContainerFormatTs()
+}
+
+// FlvContainerFormat selects Flash Video, as used by RTMP.
+func FlvContainerFormat() *ContainerFormat {
+	return ffi.MoqContainerFormatFlv()
+}
 
 // DecodeStart values. A decoder's zero value starts at the oldest group.
 const (

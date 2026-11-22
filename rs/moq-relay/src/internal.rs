@@ -1746,7 +1746,7 @@ mod tests {
 		drop(
 			stats
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
-				.request(moq_net::Path::from_static("root")),
+				.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))),
 		);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1765,7 +1765,7 @@ mod tests {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let request = stats
 			.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("http")))
-			.request(moq_net::Path::from_static("root"));
+			.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root")));
 		drop(request);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(body.contains("# TYPE moq_relay_requests counter"), "{body}");
@@ -2107,7 +2107,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn()
 			.with_stats(edge.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let _broadcast = origin.route("demo", moq_net::origin::RouteOptions::default()).unwrap();
-		drop(edge.request(moq_net::Path::from_static("root")));
+		drop(edge.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let refusals = crate::refusals::Refusals::default();
 		refusals.record(crate::refusals::RefusalKind::Unavailable);
 		let (_trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(1));

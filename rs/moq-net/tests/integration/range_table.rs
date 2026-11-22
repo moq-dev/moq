@@ -2,10 +2,10 @@
 
 //! The lite-07 range table (`tests/range-table.json`), which `js/net/src/range-table.test.ts`
 //! passes too: each case's reader gets exactly the listed groups direct from the origin,
-//! through a relay copy cold, warm, and as a late join, and across a route switch mid-read. A
-//! warm copy also answers from what it holds exactly when the case says it may. Every group
-//! arrives whole: a switch stalls the first route partway through, so the second supplies the
-//! groups the first never delivered and the tail of one it delivered only the head of.
+//! through a relay copy cold, warm, and as a late join, two relay hops away, and across a route
+//! switch mid-read. A warm copy also answers from what it holds exactly when the case says it
+//! may. Every group arrives whole: a switch stalls the first route partway through, so the second
+//! supplies the groups the first never delivered and the tail of one it delivered only the head of.
 
 use crate::support;
 
@@ -37,6 +37,9 @@ enum Mode {
 	Warm,
 	/// Through a copy its readers joined before the origin wrote a group, so it received each live.
 	Late,
+	/// Through a copy holding what its readers filled, one relay hop further, so the copy's
+	/// relay serves it over the wire.
+	Chain,
 	/// Through one copy, then another holding what the copy's readers filled, mid-read.
 	Switch,
 }
@@ -48,6 +51,7 @@ impl Mode {
 			Mode::Cold => "cold",
 			Mode::Warm => "warm",
 			Mode::Late => "late",
+			Mode::Chain => "chain",
 			Mode::Switch => "switch",
 		}
 	}
@@ -154,9 +158,10 @@ fn produce_origin(hop: u64, pool: Option<cache::Pool>) -> origin::Producer {
 	if let Some(pool) = pool {
 		config.pool = pool;
 	}
+	config.proxy = true;
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull what `from` publishes over lite-07, priced at `cost` when given.
@@ -396,6 +401,17 @@ async fn run(case: &Case, mode: Mode) -> Result<bool, String> {
 			got.read(&mut reader, want).await;
 			_links.push(upstream);
 		}
+		Mode::Chain => {
+			source.write(case);
+			let relay = produce_origin(2, None);
+			let front = produce_origin(3, None);
+			_links.push(link(&source.origin, &relay, None).await);
+			_readers = warm(&broadcast(&relay).await, case).await;
+			_links.push(link(&relay, &front, None).await);
+			let remote = broadcast(&front).await;
+			let mut reader = subscribe(&remote, &case.read).await.map_err(|err| err.to_string())?;
+			got.read(&mut reader, want).await;
+		}
 		Mode::Switch => {
 			// The live edge stays mid-group until after the switch.
 			let live = source.write_head(case);
@@ -513,6 +529,11 @@ async fn warm_copy() {
 #[kio::test]
 async fn late_join() {
 	table(Mode::Late).await;
+}
+
+#[kio::test]
+async fn chain() {
+	table(Mode::Chain).await;
 }
 
 #[kio::test]

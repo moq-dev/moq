@@ -449,8 +449,11 @@ fn delay(config: &super::Config, info: &moq_net::track::Info) -> Duration {
 
 /// `duration` in `timescale` units, saturating.
 fn units(duration: Duration, timescale: Timescale) -> u64 {
-	let units = duration.as_nanos() * u128::from(timescale.as_u64()) / 1_000_000_000;
-	u64::try_from(units).unwrap_or(u64::MAX)
+	// Whole seconds and the rest apart, so no product overflows `u128`.
+	let scale = u128::from(timescale.as_u64());
+	let whole = u128::from(duration.as_secs()).saturating_mul(scale);
+	let part = u128::from(duration.subsec_nanos()) * scale / 1_000_000_000;
+	u64::try_from(whole.saturating_add(part)).unwrap_or(u64::MAX)
 }
 
 fn error(err: &moq_net::Error) -> End {
@@ -462,5 +465,23 @@ fn ready_at(timer: &mut Option<Pin<Box<kio::clock::Sleep>>>, waiter: &kio::Waite
 	match timer.as_mut() {
 		Some(timer) => waiter.poll_future(timer.as_mut()),
 		None => Poll::Pending,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The cut duration in track units is exact and saturates instead of overflowing.
+	#[test]
+	fn units_saturate() {
+		let khz = Timescale::new(1_000).unwrap();
+		assert_eq!(units(Duration::from_millis(2_500), khz), 2_500);
+		assert_eq!(
+			units(Duration::new(1, 999_999_999), Timescale::new(1_000_000_000).unwrap()),
+			1_999_999_999
+		);
+		let max = Timescale::new(crate::ID_MAX).unwrap();
+		assert_eq!(units(Duration::MAX, max), u64::MAX);
 	}
 }
