@@ -5431,6 +5431,52 @@ mod test {
 		}
 	}
 
+	/// As [`a_short_group_the_replacement_lacks_is_fetched`], with the replacement a front of
+	/// its own: a refused fetch of the rest is no verdict while the group may still land
+	/// there, which reads it on once it does, or ends it where that copy closed it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_group_a_nested_replacement_lacks_reads_on_once_it_lands() {
+		for whole in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&front, HOUR);
+			let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+			short.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			short.finish().unwrap();
+
+			let inner_routes = Producer::new();
+			let inner = logical(&inner_routes);
+			let b = copy();
+			let dynamic = b.requests();
+			inner_routes.serve(b.consume());
+			routes.serve(inner.consume());
+			assert!(reading.read_frame().now_or_never().is_none(), "whole={whole}");
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!(request.key(), 0, "whole={whole}");
+			request.reject(Error::NotFound);
+			assert!(
+				reading.read_frame().now_or_never().is_none(),
+				"whole={whole}: still waiting"
+			);
+
+			let mut landed = b.create_group(group::Info { start: 0 }).unwrap();
+			landed.write_frame(ts(0), b"a".as_ref()).unwrap();
+			if whole {
+				landed.write_frame(ts(1), b"b".as_ref()).unwrap();
+				landed.finish_at(2).unwrap();
+				assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+			} else {
+				landed.finish().unwrap();
+			}
+			assert_eq!(read(&mut reading), None, "whole={whole}");
+		}
+	}
+
 	/// A short group the replacement neither holds nor fetches ends where it closed once the
 	/// reader's budget gives up on it, where a stalled one fails as too old.
 	#[test]

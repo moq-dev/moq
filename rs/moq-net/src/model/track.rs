@@ -7053,7 +7053,11 @@ impl Consumer {
 
 	/// Poll for a cached group, a terminal disposition, or a gap outliving its grace: the
 	/// group, the error a dropped or cut group was given up with, or `None` once it is gone.
+	/// A front's logical track answers from the copy serving it, which holds its groups.
 	pub(crate) fn poll_group(&self, key: u64, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(serving) = self.serving() {
+			return serving.poll_group(key, waiter);
+		}
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(Ok(None));

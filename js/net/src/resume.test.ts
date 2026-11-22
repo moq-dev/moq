@@ -1745,6 +1745,44 @@ test("a short group the replacement lacks reads on once it lands there", async (
 	close();
 });
 
+/**
+ * As above, with the replacement a front of its own: a refused fetch of the rest is no verdict while
+ * the group may still land there, which reads it on once it does, or ends it where that copy closed
+ * it. Mirrors the Rust `a_short_group_a_nested_replacement_lacks_reads_on_once_it_lands`.
+ */
+for (const whole of [true, false]) {
+	test(`a short group a nested replacement lacks reads on once it lands there (whole: ${whole})`, async () => {
+		const { origin, a, b, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const inner = new Front();
+		inner.serve(b.consume());
+		const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+		ta.write(0n, 1);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		const handle = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+		void (async () => {
+			for await (const request of handle.requested()) request.serve(inner.consumer);
+		})();
+		await settle();
+		await settle();
+		const reading = group.readFrame();
+		await settle();
+		expect(await isPending(reading)).toBe(true);
+		tb.write(0n, whole ? 2 : 1);
+		if (whole) expect(dec.decode((await reading)?.payload)).toBe("0.1");
+		else expect(await reading).toBeUndefined();
+		expect(await group.readFrame()).toBeUndefined();
+
+		sub.close();
+		handle.close();
+		inner.consumer.close();
+		close();
+	});
+}
+
 test("a short group on a failed route waits for the next one", async () => {
 	const { a, b, swap, active, close } = await setup();
 	const ta = copy(a);
