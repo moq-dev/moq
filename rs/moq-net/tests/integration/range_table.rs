@@ -94,6 +94,8 @@ struct Case {
 	name: String,
 	groups: Vec<u64>,
 	append: bool,
+	/// How long after its start each group ends whole, `None` for no declared end.
+	span: Option<u64>,
 	copy: Vec<Ask>,
 	evict: bool,
 	read: Ask,
@@ -124,6 +126,7 @@ fn cases() -> Vec<Case> {
 			append: case
 				.get("append")
 				.is_none_or(|append| append.as_bool().expect("append")),
+			span: case.get("span").map(|span| span.as_u64().expect("a span")),
 			copy: case
 				.get("copy")
 				.map(|copy| copy.as_array().expect("copy").iter().map(Ask::parse).collect())
@@ -196,7 +199,10 @@ impl Source {
 				false => self.track.create_group(moq_net::group::Info { start }).unwrap(),
 			};
 			group.write_frame(time, &b"x"[..]).unwrap();
-			group.finish().unwrap();
+			match case.span {
+				Some(span) => drop(group.finish_at(start + span).unwrap()),
+				None => drop(group.finish().unwrap()),
+			}
 		}
 	}
 }

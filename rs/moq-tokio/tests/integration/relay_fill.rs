@@ -388,6 +388,7 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> any
 		None => groups.to_vec(),
 	};
 	let append = case.get("append").and_then(serde_json::Value::as_bool) != Some(false);
+	let span = case.get("span").and_then(serde_json::Value::as_u64);
 	for start in starts {
 		let time = Timestamp::from_millis(start)?;
 		let mut group = match append {
@@ -395,7 +396,10 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> any
 			false => track.create_group(moq_net::group::Info { start })?,
 		};
 		group.write_frame(time, b"x".to_vec())?;
-		group.finish()?;
+		match span {
+			Some(span) => drop(group.finish_at(start + span)?),
+			None => drop(group.finish()?),
+		}
 	}
 	broadcast.announce()?;
 	let version = "moq-lite-07-wip".parse().map_err(anyhow::Error::msg)?;
