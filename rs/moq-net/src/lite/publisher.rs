@@ -3056,9 +3056,7 @@ impl SubscribeServe {
 	) -> Self {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
-			delay: track::Delay {
-				max: msg.max_delay,
-			},
+			delay: track::Delay { max: msg.max_delay },
 			order: msg.order,
 			..bounds.groups()
 		};
@@ -5473,9 +5471,7 @@ impl TrackRun {
 				group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
 			}
 		}
-		let delay = crate::track::Delay {
-			max: upd.max_delay,
-		};
+		let delay = crate::track::Delay { max: upd.max_delay };
 		// Read first: the edit moves it.
 		let requested = self.requested.start();
 		let edited = match upd.ranges {
@@ -5697,11 +5693,19 @@ impl TrackRun {
 		let mut reported = false;
 		let unstarted = std::mem::take(&mut self.unstarted);
 		let resolved = self.track.resolved_keys(unstarted.iter().copied());
+		let mut lowest = from;
 		for (id, resolved) in unstarted.into_iter().zip(resolved) {
 			let start = match resolved {
+				// A range added below where delivery started, such as a live join further
+				// behind the live edge, starts where it resolved: its groups from there are
+				// owed, so delivery now starts there too.
 				Some(resolved) => {
-					let start = resolved.start.max(from);
-					resolved.end.is_none_or(|end| end > start).then_some(start)
+					let start = resolved.start;
+					let started = resolved.end.is_none_or(|end| end > start);
+					if started {
+						lowest = lowest.min(start);
+					}
+					started.then_some(start)
 				}
 				None if finished => None,
 				None => {
@@ -5713,6 +5717,7 @@ impl TrackRun {
 			reported = true;
 		}
 		self.unstarted = waiting;
+		self.start = Start::Resolved(lowest);
 		Ok(reported)
 	}
 
@@ -7280,7 +7285,10 @@ mod serve_group_test {
 			start: Some(lite::Anchor::Time(1_000)),
 			end: None,
 		}];
-		assert_eq!(Bounds::new(&time, false).ranges[0].start, crate::track::Start::Time(1_000));
+		assert_eq!(
+			Bounds::new(&time, false).ranges[0].start,
+			crate::track::Start::Time(1_000)
+		);
 	}
 
 	/// A wire without ranges means its start as the first group at or after it, so the
@@ -7336,7 +7344,7 @@ mod serve_group_test {
 			};
 			let ranges: Vec<track::Range> = (0..rng.random_range(0..6))
 				.map(|_| track::Range {
-					start: anchor(&mut rng),
+					start: anchor(&mut rng).map_or(crate::track::Start::Oldest, crate::track::Start::Time),
 					end: rng.random_bool(0.6).then(|| anchor(&mut rng)).flatten(),
 				})
 				.collect();
@@ -8809,14 +8817,10 @@ mod serve_group_test {
 		}
 		let subscriber = track.subscribe(
 			track::Subscription::default()
-				.with_delay(
-					track::Delay::default()
-						.with_max(Duration::from_secs(3600))
-						.with_min(Duration::from_secs(1)),
-				)
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
 				.with_ranges([
 					// A live join a second behind the newest frame, at 4 s.
-					Range::default(),
+					Range::from(crate::track::Start::Live(Duration::from_secs(1))),
 					Range {
 						start: crate::track::Start::Time(1500),
 						end: Some(1999),
@@ -8825,7 +8829,7 @@ mod serve_group_test {
 					Range::EMPTY,
 					// Empty only once its join resolves to group 3000.
 					Range {
-						start: crate::track::Start::Oldest,
+						start: crate::track::Start::Live(Duration::from_secs(1)),
 						end: Some(1999),
 					},
 				]),
@@ -8951,11 +8955,11 @@ mod serve_group_test {
 		}
 
 		// A live join two seconds behind the newest frame, at 4 s: group 2000.
-		let back = lite::Range::OPEN;
-		let join = |mut update: LiveUpdate| {
-			update.min_delay = Some(Duration::from_secs(2));
-			update
+		let back = lite::Range {
+			start: Some(lite::Anchor::Live(Duration::from_secs(2))),
+			end: None,
 		};
+		let join = |update: LiveUpdate| update;
 		let live = [(0, first)];
 		run.update(join(lite07_add(&run, &live, 1, &[back])));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -9745,7 +9749,6 @@ mod serve_group_test {
 					wanted_group: None,
 					priority: 0,
 					max_delay: Some(if widen { Duration::from_secs(10) } else { budget }),
-					min_delay: Some(Duration::ZERO),
 					ranges: kept_range(version, lite::Range::span(None, 0, None, None)),
 					order: Order::Descending,
 				});

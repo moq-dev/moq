@@ -21683,8 +21683,7 @@ impl ServeRange {
 /// from the oldest group would have a relay's route replay everything it retains, and
 /// SUBSCRIBE_OK then name the oldest group replayed so far as Largest.
 fn live_join(subscription: &mut Subscription) {
-	*subscription =
-		std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
+	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.

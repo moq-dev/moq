@@ -3956,8 +3956,7 @@ mod tests {
 		// An update moves the floor and the ranges together, as `begin_subscription` does.
 		let update = |sub: &mut SubStream, start: Option<u64>, ranges: Vec<lite::Range>| {
 			sub.start = start;
-			sub.edit(&ranges, (0, 0), false, &Default::default(), Duration::MAX)
-				.unwrap();
+			sub.edit(&ranges, (0, 0), &Default::default(), Duration::MAX).unwrap();
 		};
 		sub.started = Some(None);
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
@@ -3974,7 +3973,6 @@ mod tests {
 				lite::Range::span(Some(6), 0, None, None),
 			],
 			(0, 0),
-			false,
 			&Default::default(),
 			Duration::MAX,
 		)
@@ -4072,33 +4070,21 @@ mod tests {
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
 		// The same bounds again, as a fill.
-		sub.edit(&[demand, demand], (0, 1), false, &Default::default(), Duration::MAX)
+		sub.edit(&[demand, demand], (0, 1), &Default::default(), Duration::MAX)
 			.unwrap();
 		assert_eq!(sub.fill_range(0), None, "the demand keeps its range");
 		assert_eq!(sub.fill_range(1), Some(4..8), "the copy the edit added is the fill");
 
 		// Another fill joins, and the first keeps its Range ID.
 		let other = groups(10..12);
-		sub.edit(
-			&[demand, demand, other],
-			(0, 2),
-			false,
-			&Default::default(),
-			Duration::MAX,
-		)
-		.unwrap();
+		sub.edit(&[demand, demand, other], (0, 2), &Default::default(), Duration::MAX)
+			.unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 
 		// The demand moves away while the fill stays: the fill keeps Range ID 1.
 		let moved = lite::Range::span(Some(20), 0, None, None);
-		sub.edit(
-			&[moved, demand, other],
-			(0, 2),
-			false,
-			&Default::default(),
-			Duration::MAX,
-		)
-		.unwrap();
+		sub.edit(&[moved, demand, other], (0, 2), &Default::default(), Duration::MAX)
+			.unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 		assert_eq!(sub.fill_range(1), Some(4..8));
 		assert_eq!(sub.fill_range(3), None, "the demand's new range is no fill");
@@ -4106,12 +4092,12 @@ mod tests {
 		// Before SUBSCRIBE_START, a fill an update retires keeps its Range ID, since the start
 		// still names it, and it must not count as the demand's.
 		sub.started = None;
-		sub.edit(&[moved, demand], (0, 1), false, &Default::default(), Duration::MAX)
+		sub.edit(&[moved, demand], (0, 1), &Default::default(), Duration::MAX)
 			.unwrap();
 		assert_eq!(sub.fill_range(2), None, "retired");
 		assert!(sub.fill_ids.contains(&2), "still a fill's");
 		sub.started = Some(Some(4));
-		sub.edit(&[moved, demand], (0, 1), false, &Default::default(), Duration::MAX)
+		sub.edit(&[moved, demand], (0, 1), &Default::default(), Duration::MAX)
 			.unwrap();
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
@@ -4159,9 +4145,12 @@ mod tests {
 		assert_eq!(sub.owed(None), Some(vec![4..10]));
 
 		// A live join, which only the publisher can place.
-		let back = lite::Range::OPEN;
+		let back = lite::Range {
+			start: Some(lite::Anchor::Live(Duration::ZERO)),
+			end: None,
+		};
 		let (edit, changed) = sub
-			.edit(&[first, back], (0, 0), false, &Default::default(), Duration::MAX)
+			.edit(&[first, back], (0, 0), &Default::default(), Duration::MAX)
 			.unwrap();
 		assert!(changed);
 		assert_eq!(
@@ -4176,15 +4165,12 @@ mod tests {
 		assert_eq!(sub.owed(None), Some(vec![4..10, 1..10]));
 
 		// Retiring the first range forgets its start.
-		sub.edit(&[back], (0, 0), false, &Default::default(), Duration::MAX)
-			.unwrap();
+		sub.edit(&[back], (0, 0), &Default::default(), Duration::MAX).unwrap();
 		assert_eq!(sub.starts.keys().copied().collect::<Vec<_>>(), [1]);
 		assert_eq!(sub.owed(Some(8)), Some(vec![1..8]));
 
-		// A Min Age reaching further back places the join again, as a range of its own.
-		let (edit, changed) = sub
-			.edit(&[back], (0, 0), true, &Default::default(), Duration::MAX)
-			.unwrap();
+		// A join asked afresh is placed again, as a range of its own.
+		let (edit, changed) = sub.edit(&[back], (0, 0), &[1].into(), Duration::MAX).unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
@@ -10422,9 +10408,8 @@ impl SubStream {
 				Some(lite::Anchor::Live(min)) => {
 					// Recorded once, as it arrives: a reader that began waiting since takes only a
 					// newer answer.
-					if !self.join_ticks.contains_key(&id) {
-						let tick = serving.answer_join(min, through(range.end), start, budget);
-						self.join_ticks.insert(id, tick);
+					if let std::collections::btree_map::Entry::Vacant(entry) = self.join_ticks.entry(id) {
+						entry.insert(serving.answer_join(min, through(range.end), start, budget));
 					}
 					continue;
 				}
@@ -10447,7 +10432,8 @@ impl SubStream {
 		serving.time_starts(times);
 		let live = &self.live;
 		serving.retain_joins(|min, end| {
-			live.iter().any(|(_, range)| range.start == Some(lite::Anchor::Live(min)) && through(range.end) == end)
+			live.iter()
+				.any(|(_, range)| range.start == Some(lite::Anchor::Live(min)) && through(range.end) == end)
 		});
 	}
 
@@ -11382,11 +11368,7 @@ impl TrackServe {
 	///
 	/// `idle` when this opens a subscription for a copy whose newest cached group, while
 	/// idle, is its first.
-	fn wire_request(
-		&self,
-		pref: Option<Subscription>,
-		idle: Option<u64>,
-	) -> Option<(Subscription, Vec<lite::Range>)> {
+	fn wire_request(&self, pref: Option<Subscription>, idle: Option<u64>) -> Option<(Subscription, Vec<lite::Range>)> {
 		// An empty half-open range asks for nothing, and the wire cannot say that: its
 		// bounds are inclusive, so the nearest encoding either hands back the position
 		// the caller excluded or inverts the range outright once the two bounds meet. No
@@ -11410,7 +11392,11 @@ impl TrackServe {
 		// every group from the oldest.
 		let newest = idle.filter(|_| {
 			subscription.start().is_none()
-				&& (!ranged || subscription.ranges.iter().all(|range| *range == track::Range::default()))
+				&& (!ranged
+					|| subscription
+						.ranges
+						.iter()
+						.all(|range| *range == track::Range::default()))
 		});
 		if let Some(newest) = newest {
 			subscription = subscription.with_start(newest);
@@ -12863,6 +12849,11 @@ impl ServeLoop {
 		serving.received();
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
+		}
+		// A wire whose ranges carry each live join answers where each starts, which alone
+		// places a reader's.
+		if serve.subscriber.version.has_ranges() {
+			serving.answers_joins();
 		}
 		// A wire without ranges starts a time anchor at the first group at or after it, so
 		// its readers do too, rather than at an earlier group the copy happens to hold.

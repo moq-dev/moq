@@ -6,7 +6,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Delay, JoinAsk, Order, Position, Range, Subscription, TrackState, clamp_combined};
+use super::{Delay, JoinAsk, Order, Position, Range, Start, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -31,6 +31,9 @@ pub(super) struct Subscriptions {
 	/// The live joins a received copy's readers wait on, by lag and end: see
 	/// [`Subscription::joins`].
 	joins: BTreeMap<(Duration, Option<u64>), Waiting>,
+	/// How many answers to a received copy's live joins were recorded: a live join range a
+	/// reader adds notes it, and takes only an answer recorded since (see [`Prefs::since`]).
+	join_tick: u64,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -106,6 +109,18 @@ impl Subscriptions {
 				})
 			})
 			.collect()
+	}
+
+	/// How many join answers were recorded: see [`Self::answered`].
+	pub(super) fn join_tick(&self) -> u64 {
+		self.join_tick
+	}
+
+	/// Note an answer to a live join recorded, returning its tick: greater than that of every
+	/// range added before.
+	pub(super) fn answered(&mut self) -> u64 {
+		self.join_tick += 1;
+		self.join_tick
 	}
 
 	/// Count a reader waiting on `join`, or uncount one when not `waits`, waking the
@@ -476,6 +491,8 @@ pub(in crate::model) struct Prefs {
 	/// In key order, which is the order given: a whole replacement keys by position, and each
 	/// key an edit adds is past every key before it.
 	ranges: BTreeMap<u64, Range>,
+	/// The join tick each live join range was added at, by key: see [`Self::since`].
+	since: BTreeMap<u64, u64>,
 	/// How many ranges join live and follow the live edge: see [`Self::joins_live`].
 	joining: usize,
 	/// Bumped whenever the ranges change.
@@ -489,7 +506,8 @@ pub(in crate::model) struct Prefs {
 }
 
 impl Prefs {
-	fn new(value: Subscription) -> Self {
+	/// `value`, its live join ranges added at join tick `tick`.
+	fn new(value: Subscription, tick: u64) -> Self {
 		let mut prefs = Self {
 			priority: value.priority,
 			delay: value.delay,
@@ -497,15 +515,23 @@ impl Prefs {
 			feed: value.feed,
 			resume: value.resume,
 			ranges: BTreeMap::new(),
+			since: BTreeMap::new(),
 			joining: 0,
 			revision: 0,
 			log: VecDeque::new(),
 			base: 0,
 		};
 		for (key, range) in (0..).zip(value.ranges) {
-			prefs.insert(key, range);
+			prefs.insert(key, range, tick);
 		}
 		prefs
+	}
+
+	/// The join tick the live join range keyed `key` was added at, 0 for another: a received
+	/// copy places it only from an answer recorded since, the live edge having moved since any
+	/// earlier one.
+	pub fn since(&self, key: u64) -> u64 {
+		self.since.get(&key).copied().unwrap_or(0)
 	}
 
 	/// These preferences as a [`Subscription`], its ranges in key order. Costs every range.
@@ -563,15 +589,20 @@ impl Prefs {
 		}
 	}
 
-	fn insert(&mut self, key: u64, range: Range) {
+	fn insert(&mut self, key: u64, range: Range, tick: u64) {
 		self.count(&range, 1);
 		if let Some(old) = self.ranges.insert(key, range) {
 			self.count(&old, -1);
+		}
+		match range.start {
+			Start::Live(_) => _ = self.since.insert(key, tick),
+			Start::Oldest | Start::Time(_) => _ = self.since.remove(&key),
 		}
 	}
 
 	fn remove(&mut self, key: u64) -> Option<Range> {
 		let range = self.ranges.remove(&key)?;
+		self.since.remove(&key);
 		self.count(&range, -1);
 		Some(range)
 	}
@@ -596,8 +627,18 @@ impl Prefs {
 	/// reader resolves them all again.
 	fn rekey(&mut self, keys: impl IntoIterator<Item = u64>) {
 		let ranges = std::mem::take(&mut self.ranges);
+		let since = std::mem::take(&mut self.since);
 		let count = ranges.len();
-		self.ranges = keys.into_iter().zip(ranges.into_values()).collect();
+		let rekeyed: Vec<(u64, u64, Range)> = (keys.into_iter())
+			.zip(ranges)
+			.map(|(key, (old, range))| (key, old, range))
+			.collect();
+		for &(key, old, _) in &rekeyed {
+			if let Some(&tick) = since.get(&old) {
+				self.since.insert(key, tick);
+			}
+		}
+		self.ranges = rekeyed.into_iter().map(|(key, _, range)| (key, range)).collect();
 		debug_assert_eq!(self.ranges.len(), count, "one key per range");
 		self.revision += 1;
 		self.log.clear();
@@ -605,17 +646,18 @@ impl Prefs {
 	}
 
 	/// Replace every preference, rekeying the ranges by position when they change: every
-	/// reader resolves them all again.
-	fn replace(&mut self, next: Subscription) {
+	/// reader resolves them all again, its live joins added at join tick `tick`.
+	fn replace(&mut self, next: Subscription, tick: u64) {
 		(self.priority, self.delay, self.order, self.feed, self.resume) =
 			(next.priority, next.delay, next.order, next.feed, next.resume);
 		if self.ranges.values().eq(&next.ranges) {
 			return;
 		}
 		self.ranges.clear();
+		self.since.clear();
 		self.joining = 0;
 		for (key, range) in (0..).zip(next.ranges) {
-			self.insert(key, range);
+			self.insert(key, range, tick);
 		}
 		self.revision += 1;
 		self.log.clear();
@@ -636,7 +678,8 @@ impl Preferences {
 	pub(super) fn register(state: kio::Ref<'_, TrackState>, value: Subscription) -> Self {
 		let subscriptions = (!state.is_closed()).then(|| state.subscriptions.clone());
 		drop(state);
-		let value = Prefs::new(value);
+		let tick = subscriptions.as_ref().map_or(0, |subs| subs.lock().join_tick());
+		let value = Prefs::new(value, tick);
 		if let Some(subs) = &subscriptions {
 			let ranges: Vec<Range> = value.ranges.values().copied().collect();
 			let mut wakes = subs.lock().replace(None, Some(value.contribution()), (&[], &ranges));
@@ -666,11 +709,13 @@ impl Preferences {
 		}
 		// Found before taking the lock every subscriber shares.
 		let (gone, came) = moved(&old, &next.ranges);
+		let mut tick = 0;
 		let mut wakes = self.0.subscriptions.as_ref().map(|subs| {
-			subs.lock()
-				.replace(Some(contribution), Some(next_contribution), (&gone, &came))
+			let mut subs = subs.lock();
+			tick = subs.join_tick();
+			subs.replace(Some(contribution), Some(next_contribution), (&gone, &came))
 		});
-		value.replace(next);
+		value.replace(next, tick);
 		drop(value);
 		if let Some(wakes) = &mut wakes {
 			wakes.wake();
@@ -692,6 +737,7 @@ impl Preferences {
 		if contribution == scalars && edit.retire.is_empty() && edit.add.is_empty() {
 			return Ok(());
 		}
+		let tick = (self.0.subscriptions.as_ref()).map_or(0, |subs| subs.lock().join_tick());
 		let mut gone = Vec::new();
 		let mut came = Vec::new();
 		let mut touched = Vec::with_capacity(edit.retire.len() + edit.add.len());
@@ -705,7 +751,7 @@ impl Preferences {
 			if let Some(old) = value.remove(key) {
 				gone.push(old);
 			}
-			value.insert(key, range);
+			value.insert(key, range, tick);
 			came.push(range);
 			touched.push(key);
 		}
@@ -768,7 +814,7 @@ impl Drop for Preference {
 impl From<Subscription> for Preferences {
 	fn from(value: Subscription) -> Self {
 		Self(Arc::new(Preference {
-			value: kio::Producer::new(Prefs::new(value)),
+			value: kio::Producer::new(Prefs::new(value, 0)),
 			subscriptions: None,
 		}))
 	}

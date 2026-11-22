@@ -243,9 +243,10 @@ impl Range {
 		}
 	}
 
-	/// Whether this range joins live and follows the live edge.
+	/// Whether this range follows the live edge from no time: a live join, or one reaching
+	/// back from the oldest group its budget keeps, with no end.
 	pub(crate) fn is_open(&self) -> bool {
-		matches!(self.start, Start::Live(_)) && self.end.is_none()
+		self.time().is_none() && self.end.is_none()
 	}
 
 	/// A range holding nothing: nothing sorts below group 0, so an exclusive end there holds
@@ -707,7 +708,11 @@ mod tests {
 		let five = Duration::from_secs(5);
 		assert_eq!(
 			ranges(&[sub(&[groups(2, 5)]), joining(two), joining(five), joining(two)]),
-			vec![groups(2, 5), Range::from(Start::Live(two)), Range::from(Start::Live(five))]
+			vec![
+				groups(2, 5),
+				Range::from(Start::Live(two)),
+				Range::from(Start::Live(five))
+			]
 		);
 		// Unless another reader starts at the oldest group.
 		assert_eq!(

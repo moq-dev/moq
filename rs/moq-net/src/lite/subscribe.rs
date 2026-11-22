@@ -2033,9 +2033,9 @@ mod test {
 		));
 
 		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a
-		// start only; type 3 is assigned to nothing, as a start or an end. Each closes the
-		// session with a PROTOCOL_VIOLATION.
-		let starts = [3, 4].map(|kind| (2, kind));
+		// start only; type 3 is Live, a start only; type 4 is assigned to nothing, as a start
+		// or an end. Each closes the session with a PROTOCOL_VIOLATION.
+		let starts = [4].map(|kind| (2, kind));
 		let ends = [2, 3, 4].map(|kind| (1, kind));
 		for (back, kind) in starts.into_iter().chain(ends) {
 			let mut buf = encode(&msg, version).unwrap();
@@ -2152,7 +2152,11 @@ mod test {
 			start: Some(Anchor::Live(min)),
 			end: Some(Anchor::Time(9)),
 		};
-		for (min, wire) in [(ms(0), ms(0)), (ms(250), ms(250)), (std::time::Duration::from_micros(1500), ms(2))] {
+		for (min, wire) in [
+			(ms(0), ms(0)),
+			(ms(250), ms(250)),
+			(std::time::Duration::from_micros(1500), ms(2)),
+		] {
 			let mut msg = subscribe_sample();
 			msg.ranges = vec![live(min)];
 			assert_eq!(roundtrip(&msg, Version::Lite07).ranges, vec![live(wire)]);
@@ -2165,8 +2169,9 @@ mod test {
 				order: crate::track::Order::Descending,
 			};
 			let buf = update.encode_bytes(Version::Lite07).unwrap();
-			let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
-				.unwrap();
+			let got =
+				crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
+					.unwrap();
 			assert!(matches!(got.ranges, RangeEdit::Edit { add, .. } if add == [live(wire)]));
 		}
 
@@ -2190,7 +2195,10 @@ mod test {
 		for value in [0, 3, 250] {
 			w.varint(value).unwrap();
 		}
-		assert!(matches!(decode_range_list(&mut Decoder::new(&buf, Version::Lite07.into())), Err(DecodeError::InvalidValue)));
+		assert!(matches!(
+			decode_range_list(&mut Decoder::new(&buf, Version::Lite07.into())),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 
 	/// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and

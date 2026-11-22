@@ -335,7 +335,7 @@ async fn run(case: &Case, mode: Mode) -> Result<(), String> {
 			let mut reader = subscribe(&remote, &case.read).await.map_err(|err| err.to_string())?;
 			if warm {
 				got.read(&mut reader, 0).await;
-				cached = Some(got.groups.len());
+				cached = Some((got.groups.len(), got.ended));
 				upstream.client_transport.set_latency(Duration::ZERO);
 			}
 			got.read(&mut reader, want).await;
@@ -367,8 +367,9 @@ async fn run(case: &Case, mode: Mode) -> Result<(), String> {
 	if delivered != case.deliver {
 		return Err(format!("delivered {delivered:?}, ended: {}", got.ended));
 	}
-	if let (Some(asks), Some(cached)) = (case.asks, cached) {
-		let answered = cached == want;
+	if let (Some(asks), Some((cached, ended))) = (case.asks, cached) {
+		// Nothing to deliver is answered alone only by ending before upstream could answer.
+		let answered = cached == want && (want > 0 || ended);
 		if answered == asks {
 			return Err(match asks {
 				true => format!("answered {:?} from the copy alone, which must ask", got.groups),

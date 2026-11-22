@@ -4592,7 +4592,11 @@ mod test {
 		let serving = received_copy();
 		routes.serve(serving.consume());
 		let asked = serving.subscription().unwrap();
-		assert_eq!(asked.ranges[0].start, crate::track::Start::Time(66), "not inside group 64");
+		assert_eq!(
+			asked.ranges[0].start,
+			crate::track::Start::Time(66),
+			"not inside group 64"
+		);
 		assert_eq!(asked.resume, Some(Position::new(66, 1)));
 	}
 
@@ -7477,9 +7481,10 @@ mod test {
 			};
 			assert!(ended.unwrap().is_none(), "ranges_first={ranges_first}");
 
-			let everything = sub
-				.subscription()
-				.with_ranges([track::Range { start: crate::track::Start::Oldest, end: None }]);
+			let everything = sub.subscription().with_ranges([track::Range {
+				start: crate::track::Start::Oldest,
+				end: None,
+			}]);
 			let mut sub = match ranges_first {
 				true => {
 					sub.update(everything).unwrap();
@@ -7699,9 +7704,9 @@ mod test {
 
 		sub.edit(track::Edit {
 			retire: Vec::new(),
-			add: vec![(1, track::Range { start: crate::track::Start::Oldest, end: None })],
+			add: vec![(1, track::Range::from(track::Start::Live(Duration::from_millis(6))))],
 			priority: 0,
-			delay: Delay::default().with_max(HOUR).with_min(Duration::from_millis(6)),
+			delay: Delay::default().with_max(HOUR),
 			order: track::Order::default(),
 		})
 		.unwrap();
@@ -9522,8 +9527,8 @@ mod test {
 		routes.serve(a.consume());
 		let range = |rng: &mut rand::rngs::StdRng| {
 			let start = match rng.random_range(0..4) {
-				0 => None,
-				_ => Some(rng.random_range(0..24_000)),
+				0 => track::Start::Oldest,
+				_ => track::Start::Time(rng.random_range(0..24_000)),
 			};
 			let end = rng.random_bool(0.6).then(|| rng.random_range(0..24_000));
 			track::Range { start, end }
@@ -9626,9 +9631,9 @@ mod test {
 		}
 		// A new range, so it resolves afresh rather than where the reader's old one did.
 		let behind = Subscription::default()
-			.with_delay(Delay::default().with_min(Duration::from_millis(1500)).with_max(HOUR))
+			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: crate::track::Start::Oldest,
+				start: track::Start::Live(Duration::from_millis(1500)),
 				end: Some(1_000_000),
 			}]);
 		let reader = routes.readers.lock().unwrap().iter().find_map(Weak::upgrade).unwrap();
@@ -9769,8 +9774,8 @@ mod test {
 		let weak = logical.weak();
 		let range = |rng: &mut rand::rngs::StdRng| {
 			let start = match rng.random_range(0..4) {
-				0 => None,
-				_ => Some(rng.random_range(0..24_000)),
+				0 => track::Start::Oldest,
+				_ => track::Start::Time(rng.random_range(0..24_000)),
 			};
 			let end = rng.random_bool(0.6).then(|| rng.random_range(0..24_000));
 			track::Range { start, end }
@@ -9873,7 +9878,8 @@ mod test {
 		copy.floor = Some(0);
 		assert!(copy.poll_ready((0, None), &kio::Waiter::noop()).is_ready());
 		// Two behind the newest frame, at 4.
-		let updated = Subscription::default().with_delay(Delay::default().with_min(Duration::from_millis(2)));
+		let updated =
+			Subscription::default().with_ranges([track::Range::from(track::Start::Live(Duration::from_millis(2)))]);
 		let updated = Mirrored::of(&updated);
 		copy.update(&updated, &Change::All);
 		assert_eq!(copy.wire_all(&updated).ranges[0].start, crate::track::Start::Time(2));
@@ -10186,7 +10192,10 @@ mod test {
 		let from = |time, end| {
 			Subscription::default()
 				.with_delay(Delay::default().with_max(HOUR))
-				.with_ranges([track::Range { start: crate::track::Start::Time(time), end }])
+				.with_ranges([track::Range {
+					start: crate::track::Start::Time(time),
+					end,
+				}])
 		};
 		let mut sub = logical
 			.consume()
@@ -10234,7 +10243,10 @@ mod test {
 		let from = |time, end| {
 			Subscription::default()
 				.with_delay(Delay::default().with_max(HOUR))
-				.with_ranges([track::Range { start: crate::track::Start::Time(time), end }])
+				.with_ranges([track::Range {
+					start: crate::track::Start::Time(time),
+					end,
+				}])
 		};
 		let mut sub = front
 			.consume()
@@ -10367,8 +10379,9 @@ mod test {
 		}
 		routes.serve(a.consume());
 		// Two behind the newest frame, at 10.
-		let subscription =
-			Subscription::default().with_delay(Delay::default().with_max(HOUR).with_min(Duration::from_millis(2)));
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range::from(track::Start::Live(Duration::from_millis(2)))]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -10383,7 +10396,10 @@ mod test {
 		let c = copy();
 		routes.serve(c.consume());
 		// Resolved, then raised to the boundary.
-		assert_eq!(c.subscription().expect("subscribed").ranges[0].start, crate::track::Start::Time(10));
+		assert_eq!(
+			c.subscription().expect("subscribed").ranges[0].start,
+			crate::track::Start::Time(10)
+		);
 	}
 
 	/// A live join stays where it was placed while a time end settles, though a later copy,
@@ -10398,11 +10414,11 @@ mod test {
 		}
 		routes.serve(a.consume());
 		let range = track::Range {
-			start: crate::track::Start::Oldest,
+			start: track::Start::Live(Duration::ZERO),
 			end: Some(1_000_000),
 		};
 		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(HOUR).with_min(Duration::ZERO))
+			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([range]);
 		let mut sub = logical
 			.consume()
@@ -10423,8 +10439,8 @@ mod test {
 		assert_eq!(sub.floor(), Some(5));
 	}
 
-	/// A live join a front's reader asks for resolves on the copy serving now, at its first
-	/// group when asked before that copy held any.
+	/// A live join a front's reader asks for resolves on the copy serving now, where that
+	/// copy's upstream answered it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn the_serving_copy_places_a_live_join() {
@@ -10441,19 +10457,22 @@ mod test {
 		let b = copy();
 		b.received();
 		b.anchored();
+		b.answers_joins();
 		routes.serve(b.consume());
-		let joined = sub.subscription().with_ranges([track::Range::default()]).with_delay(
-			Delay::default()
-				.with_max(Duration::from_secs(30))
-				.with_min(Duration::ZERO),
-		);
+		let joined = sub
+			.subscription()
+			.with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))])
+			.with_delay(Delay::default().with_max(Duration::from_secs(30)));
 		sub.update(joined).unwrap();
 		assert!(sub.recv_group().now_or_never().is_none());
-		for key in 1..4 {
-			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
-			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
-		}
+		let mut group = b.create_group(group::Info { start: 1000 }).unwrap();
+		group.write_frame(ts(1000), b"x".as_ref()).unwrap();
+		group.finish().unwrap();
+		assert!(
+			sub.recv_group().now_or_never().is_none(),
+			"only its upstream's answer places it"
+		);
+		b.answer_join(Duration::ZERO, None, Some(1000), Duration::MAX);
 		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(group.start, 1000);
 	}
@@ -10535,7 +10554,10 @@ mod test {
 			write(&a, 3000);
 			write(&a, 3600);
 			routes.serve(a.consume());
-			let range = track::Range { start: crate::track::Start::Time(3000), end };
+			let range = track::Range {
+				start: crate::track::Start::Time(3000),
+				end,
+			};
 			let subscription = Subscription::default()
 				.with_delay(Delay::default().with_max(HOUR))
 				.with_ranges([range]);
@@ -10563,8 +10585,9 @@ mod test {
 		}
 		routes.serve(a.consume());
 		// Two behind the newest frame, at 10: group 8.
-		let subscription =
-			Subscription::default().with_delay(Delay::default().with_max(HOUR).with_min(Duration::from_millis(2)));
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range::from(track::Start::Live(Duration::from_millis(2)))]);
 		let sub = routes.consume().subscribe(subscription.into());
 		let mut reader = sub.reader.lock().unwrap();
 		let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
@@ -10740,9 +10763,9 @@ mod test {
 		// A live join `back` behind the newest frame, a range of its own for each.
 		let ranges = |back| {
 			Subscription::default()
-				.with_delay(Delay::default().with_max(HOUR).with_min(Duration::from_millis(back)))
+				.with_delay(Delay::default().with_max(HOUR))
 				.with_ranges([track::Range {
-					start: crate::track::Start::Oldest,
+					start: track::Start::Live(Duration::from_millis(back)),
 					end: Some(1_000_000 + back),
 				}])
 		};
@@ -10770,7 +10793,11 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(start(), crate::track::Start::Time(20));
 		preferences.update(ranges(3)).unwrap();
-		assert_eq!(start(), crate::track::Start::Oldest, "left for the copy to place");
+		assert_eq!(
+			start(),
+			track::Start::Live(Duration::from_millis(3)),
+			"left for the copy to place"
+		);
 	}
 
 	/// Every live reader counts toward the demand on a new copy however many readers came
@@ -11911,11 +11938,9 @@ mod test {
 		write(&a, 4);
 		write(&a, 5);
 		// One behind the newest frame, at 5.
-		let subscription = Subscription::default().with_delay(
-			Delay::default()
-				.with_max(Duration::from_secs(10))
-				.with_min(Duration::from_millis(1)),
-		);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+			.with_ranges([track::Range::from(track::Start::Live(Duration::from_millis(1)))]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -11969,12 +11994,11 @@ mod test {
 
 		// A live join one behind the newest frame, at 5.
 		let subscription = Subscription::default()
-			.with_delay(
-				Delay::default()
-					.with_max(Duration::from_secs(10))
-					.with_min(Duration::from_millis(1)),
-			)
-			.with_ranges([track::Range::groups(0..1), track::Range::default()]);
+			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+			.with_ranges([
+				track::Range::groups(0..1),
+				track::Range::from(track::Start::Live(Duration::from_millis(1))),
+			]);
 		sub.update(subscription).unwrap();
 		drain(&mut sub, false);
 		assert_eq!(
@@ -11989,14 +12013,14 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_resumed_reader_reports_starts_within_its_time_end() {
-		for (start, min) in [(Some(0), None), (None, Some(Duration::ZERO))] {
+		for start in [track::Start::Time(0), track::Start::Live(Duration::ZERO)] {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let a = copy();
 			write(&a, 0);
 			routes.serve(a.consume());
 			let subscription = Subscription::default()
-				.with_delay(Delay::default().with_max(HOUR).with_min(min))
+				.with_delay(Delay::default().with_max(HOUR))
 				.with_ranges([track::Range { start, end: Some(1) }]);
 			let mut sub = logical
 				.consume()

@@ -14619,15 +14619,17 @@ mod filter_tests {
 	#[test]
 	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
 		let live = |min: Option<Duration>, start: u64| {
-			track::Subscription::default()
-				.with_delay(track::Delay::default().with_min(min))
-				.with_ranges([
-					track::Range::default(),
-					track::Range {
-						start: crate::track::Start::Time(start),
-						end: None,
-					},
-				])
+			let first = match min {
+				Some(min) => track::Range::from(track::Start::Live(min)),
+				None => track::Range::default(),
+			};
+			track::Subscription::default().with_ranges([
+				first,
+				track::Range {
+					start: crate::track::Start::Time(start),
+					end: None,
+				},
+			])
 		};
 		let joined = Some(10);
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 10), joined), (None, None));
