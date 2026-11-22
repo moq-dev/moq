@@ -423,9 +423,14 @@ class MetadataTest(unittest.TestCase):
         jq = self.scratch / "jq"
         jq.write_text(
             "#!/usr/bin/env bash\nset -eu\n"
-            'count_file="$TEST_METADATA.count"\ncount=0\n'
+            'count_file="$TEST_METADATA.count"\nlock_dir="$TEST_METADATA.lock"\n'
+            # Pipeline stages (e.g. reads.sh | jq) invoke this wrapper concurrently;
+            # serialize counter updates with an atomic mkdir lock before exec.
+            'while ! mkdir "$lock_dir" 2>/dev/null; do sleep 0.005; done\n'
+            "count=0\n"
             'if [[ -f "$count_file" ]]; then read -r count <"$count_file"; fi\n'
             'count=$((count + 1))\nprintf "%s\\n" "$count" >"$count_file"\n'
+            'rmdir "$lock_dir"\n'
             'if [[ "$count" == "$FAIL_JQ" ]]; then\n'
             '    echo "partial output"\n    echo "jq: injected failure" >&2\n    exit 7\nfi\n'
             f'exec "{shutil.which("jq")}" "$@"\n'
