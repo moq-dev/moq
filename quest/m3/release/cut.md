@@ -247,9 +247,11 @@ ships the flow-control rework ships a counter for its failure mode, a
 connection blocked on its peer's credit (rejected: the cut not waiting;
 leaving it in m3). The peer window default
 ([#9329](https://github.com/moq-dev/moq/pull/9329)) ships with the cut only if it lands first
-(rejected: the cut waiting on it). If it does, rewrite moq-relay's `MIGRATE.md`
-`[limits.peer.quic]` entry under [#7624](https://github.com/moq-dev/moq/pull/7624) from its
-Impact section: the peer windows stay at release's 64 MiB, not 16 MiB.
+(rejected: the cut waiting on it). If it does, rewrite the
+[#7624](https://github.com/moq-dev/moq/pull/7624) entries in moq-relay's and moq-tokio's
+`MIGRATE.md` from its Impact section: the peer windows stay at release's 64 MiB, not 16 MiB,
+and every connection's stream window stays at release's 4 MiB, not 1 MiB. `@moq/net`'s
+"WebSocket receive windows match Rust" entry then says 4 MiB per stream.
 
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
