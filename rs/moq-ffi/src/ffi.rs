@@ -546,23 +546,24 @@ impl Background {
 
 	/// Run a binding call through [`run`], ending it with the owner's failure once it fails.
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
-		self.check()?;
-		let result = run(self.supervise(future)).await;
-		self.check()?;
-		result
+		run(self.supervise(future)).await
 	}
 
 	/// [`Self::watch`] without [`run`], for a caller already inside one.
 	pub async fn supervise<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
-		if self.result.is_none() {
-			return future.await;
-		}
-		tokio::pin!(future);
-		tokio::select! {
-			biased;
-			result = self.finished() => { result?; future.await }
-			result = &mut future => result,
-		}
+		self.check()?;
+		let result = if self.result.is_some() {
+			tokio::pin!(future);
+			tokio::select! {
+				biased;
+				result = self.finished() => { result?; future.await }
+				result = &mut future => result,
+			}
+		} else {
+			future.await
+		};
+		self.check()?;
+		result
 	}
 }
 
