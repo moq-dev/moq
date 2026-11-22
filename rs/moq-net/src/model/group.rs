@@ -2948,17 +2948,8 @@ impl Handle {
 	}
 
 	/// The newest object's ID, by its moq-transport object ID when the group carries one,
-	/// else its frame index; `None` before the first frame.
-	pub(crate) fn last_object(&self) -> Option<u64> {
-		let state = self.state.read();
-		match state.wire() {
-			Some(wire) => wire.last,
-			None => (state.next_index as u64).checked_sub(1),
-		}
-	}
-
-	/// [`Self::last_object`] without a terminal object: the newest object a publisher's
-	/// Largest can name, since it never counts the END_OF_GROUP it sends past the last.
+	/// else its frame index; `None` before the first frame. A terminal object does not
+	/// count: a publisher's Largest never names the END_OF_GROUP it sends past the last.
 	pub(crate) fn last_data_object(&self) -> Option<u64> {
 		let state = self.state.read();
 		match state.wire() {
