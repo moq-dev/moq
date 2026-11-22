@@ -213,11 +213,11 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 });
 
 test("a lite-07 list decodes its time anchors and starts with none", async () => {
-	// Priority, order, and max delay as SubscribeUpdate writes them, then no Range ID to retire,
-	// the ranges it adds, and an absent wanted group.
-	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [] }))).slice(1, 4);
+	// Priority and order as SubscribeUpdate writes them, then no Range ID to retire, the ranges it
+	// adds, no live join to retune, and an absent wanted group.
+	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [] }))).slice(1, 3);
 	const update = async (ranges: number[]) => {
-		const body = [...head, 0, ...ranges, 0];
+		const body = [...head, 0, ...ranges, 0, 0];
 		const got = await SubscribeUpdate.decode(
 			new Reader(undefined, new Uint8Array([body.length, ...body]), Version.DRAFT_07),
 			Version.DRAFT_07,
@@ -250,9 +250,10 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 
 	// An update may add no range, retiring some or none.
 	expect((await update([0])).ranges).toEqual([]);
-	// Type 3 is a live join's lag, which only a start may carry.
-	expect((await update([1, 3, 7, 0])).ranges).toEqual([{ start: { live: 7 } }]);
-	await expect(update([1, 0, 3, 7])).rejects.toThrow(ProtocolViolation);
+	// Type 3 is a live join's lag then its max plus one, 0 for none, which only a start may carry.
+	expect((await update([1, 3, 7, 0, 0])).ranges).toEqual([{ start: { live: { min: 7, max: null } } }]);
+	expect((await update([1, 3, 7, 5, 0])).ranges).toEqual([{ start: { live: { min: 7, max: 4 } } }]);
+	await expect(update([1, 0, 3, 7, 0])).rejects.toThrow(ProtocolViolation);
 	// Any other type is a violation, and so is a Position at frame 0 or as an end.
 	await expect(update([1, 2, 0, 0, 0])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 1, 0, 2, 7, 4])).rejects.toThrow(ProtocolViolation);
@@ -588,8 +589,8 @@ test.each([Version.DRAFT_03, Version.DRAFT_05, Version.DRAFT_06])(
 // Rust `a_live_start_roundtrips_only_on_lite07`.
 test("a live start round-trips only on lite-07", async () => {
 	const version = Version.DRAFT_07;
-	for (const live of [0, 250, Number.MAX_SAFE_INTEGER]) {
-		const ranges: WireRange[] = [{ start: { live }, end: { time: 9n } }];
+	for (const min of [0, 250, Number.MAX_SAFE_INTEGER]) {
+		const ranges: WireRange[] = [{ start: { live: { min, max: null } }, end: { time: 9n } }];
 		const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, ranges };
 		const subscribe = await encodeMessage(version, new Subscribe(props));
 		expect((await Subscribe.decode(new Reader(undefined, subscribe, version), version)).ranges).toEqual(ranges);
@@ -597,14 +598,16 @@ test("a live start round-trips only on lite-07", async () => {
 		expect((await SubscribeUpdate.decode(new Reader(undefined, update, version), version)).ranges).toEqual(ranges);
 	}
 	// The model rounds a lag up to whole milliseconds, as the wire carries it.
-	expect(toWireRanges(rangesOf([{ start: { live: Duration.micros(1500) } }]))).toEqual([{ start: { live: 2 } }]);
-	expect(requestedRanges({ startFrame: 0, ranges: [{ start: { live: 250 } }] })).toEqual([
-		{ start: { live: Duration.millis(250) } },
+	expect(
+		toWireRanges(rangesOf([{ start: { live: { min: Duration.micros(1500), max: Duration.ZERO } } }])),
+	).toEqual([{ start: { live: { min: 2, max: 0 } } }]);
+	expect(requestedRanges({ startFrame: 0, ranges: [{ start: { live: { min: 250, max: null } } }] })).toEqual([
+		{ start: { live: { min: Duration.millis(250), max: null } } },
 	]);
 
 	// No start on a wire without the Anchor, which carries only the span.
 	const legacy = Version.DRAFT_06;
-	const span = wireSpan([{ start: { live: Duration.millis(250) } }]);
+	const span = wireSpan([{ start: { live: { min: Duration.millis(250), max: Duration.ZERO } } }]);
 	expect(span).toEqual({ start: undefined, end: undefined });
 	const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, startGroup: span.start };
 	const old = await Subscribe.decode(
@@ -615,12 +618,18 @@ test("a live start round-trips only on lite-07", async () => {
 
 	// A live end is refused both ways.
 	await expect(
-		encodeMessage(version, new SubscribeUpdate({ priority: 3, ranges: [{ end: { live: 250 } as never }] })),
+		encodeMessage(
+			version,
+			new SubscribeUpdate({ priority: 3, ranges: [{ end: { live: { min: 250, max: null } } as never }] }),
+		),
 	).rejects.toThrow();
 	// A range ending at time 250 has the shape of one starting live 250 ms back, but for the Anchor
 	// Types: turn its end's Time (1) into Live (3).
 	const timed = await encodeMessage(version, new SubscribeUpdate({ priority: 3, ranges: [{ end: { time: 250n } }] }));
-	const live = await encodeMessage(version, new SubscribeUpdate({ priority: 3, ranges: [{ start: { live: 250 } }] }));
+	const live = await encodeMessage(
+		version,
+		new SubscribeUpdate({ priority: 3, ranges: [{ start: { live: { min: 250, max: null } } }] }),
+	);
 	const at = timed.findIndex((byte, index) => byte === 0 && live[index] === 3);
 	expect(timed[at + 1]).toBe(1);
 	const ended = Uint8Array.from(timed);
@@ -630,21 +639,23 @@ test("a live start round-trips only on lite-07", async () => {
 	);
 });
 
-// Lite-07 sends milliseconds plus one, 0 for no limit. Earlier wires send bare milliseconds, so
-// no limit goes out as the largest value every peer reads, and lite-01/02 carry none at all.
-test("max delay says no limit on lite-07, and the largest safe value before it", async () => {
-	// After the size, the priority, and the order.
-	const field = async (maxDelay: number | null) =>
-		(await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, maxDelay, ranges: [] })))[3];
-	expect([await field(null), await field(0), await field(5)]).toEqual([0, 1, 6]);
+// Subscriber Max Age is bare milliseconds before lite-07, so no limit goes out as the largest
+// value every peer reads and reads back as no limit. Lite-01/02 carry none, and lite-07 none
+// either, since each live start carries its own. Mirrors the Rust
+// `max_delay_is_carried_only_before_lite07`.
+test("max delay is carried only before lite-07", async () => {
+	// After the size, the priority, and the order: lite-07 goes straight on to its ranges.
+	const field = async (version: Version, maxDelay: number | null) =>
+		(await encodeMessage(version, new SubscribeUpdate({ priority: 0, maxDelay, ranges: [] }))).slice(3);
+	expect(await field(Version.DRAFT_07, 250)).toEqual(await field(Version.DRAFT_07, null));
 
 	for (const version of [Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06, Version.DRAFT_07]) {
 		for (const maxDelay of [null, 0, 250]) {
 			const expected = {
 				[Version.DRAFT_01]: null,
-				[Version.DRAFT_03]: maxDelay ?? Number.MAX_SAFE_INTEGER,
-				[Version.DRAFT_06]: maxDelay ?? Number.MAX_SAFE_INTEGER,
-				[Version.DRAFT_07]: maxDelay,
+				[Version.DRAFT_03]: maxDelay,
+				[Version.DRAFT_06]: maxDelay,
+				[Version.DRAFT_07]: null,
 			}[version];
 			const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, maxDelay };
 			const subscribe = await encodeMessage(version, new Subscribe(props));
@@ -663,11 +674,11 @@ test("optional subscriber milliseconds reject unsafe budgets", async () => {
 	for (const maxDelay of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
 		await expect(
 			encodeMessage(
-				Version.DRAFT_07,
+				Version.DRAFT_06,
 				new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, maxDelay }),
 			),
 		).rejects.toThrow(RangeError);
-		await expect(encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 3, maxDelay }))).rejects.toThrow(
+		await expect(encodeMessage(Version.DRAFT_06, new SubscribeUpdate({ priority: 3, maxDelay }))).rejects.toThrow(
 			RangeError,
 		);
 	}
@@ -724,7 +735,7 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	const live = new LiveRanges(version, [a, b]);
 	const step = async (ranges: WireRange[], remove: bigint[], add: WireRange[], renew?: Set<bigint>) => {
 		const edit = sent.edit(ranges, {}, renew);
-		expect(edit).toEqual({ remove, add, fillIds: [], probeIds: [] });
+		expect(edit).toEqual({ remove, add, retune: [], fillIds: [], probeIds: [] });
 		const update = new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add });
 		const got = await SubscribeUpdate.decode(
 			new Reader(undefined, await encodeMessage(version, update), version),
@@ -750,21 +761,87 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	expect(() => refused([0n], [])).toThrow(ProtocolViolation);
 });
 
+// An update retunes a live join wanted under another max alone in place, keeping its Range ID and
+// so where it was placed; anything else about it changing replaces it. The publisher refuses a
+// retune naming no live join, or one twice. Mirrors the Rust `lite07_retunes_a_live_join_in_place`.
+test("lite-07 retunes a live join in place", async () => {
+	const version = Version.DRAFT_07;
+	const live = (min: number, max: number | null): WireRange => ({ start: { live: { min, max } } });
+	const time: WireRange = { start: { time: 5n } };
+	const sent = new LiveRanges(version, [live(100, 500), time]);
+	const side = new LiveRanges(version, [live(100, 500), time]);
+
+	const edit = sent.edit([live(100, 2000), time]);
+	expect(edit).toEqual({ remove: [], add: [], retune: [[0n, 2000]], fillIds: [], probeIds: [] });
+	const update = new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add, retune: edit.retune });
+	const got = await SubscribeUpdate.decode(new Reader(undefined, await encodeMessage(version, update), version), version);
+	expect(side.apply(got)).toEqual({ retired: [], added: [], retuned: [[0n, live(100, 2000)]] });
+	expect(side.entries()).toEqual(sent.entries());
+
+	// Another lag is another join, placed afresh.
+	const lag = sent.edit([live(200, 2000), time]);
+	expect(lag).toEqual({ remove: [0n], add: [live(200, 2000)], retune: [], fillIds: [], probeIds: [] });
+	side.apply(new SubscribeUpdate({ priority: 0, remove: lag.remove, ranges: lag.add }));
+
+	const retune = (ranges: LiveRanges, retune: [bigint, number | null][]) =>
+		ranges.apply(new SubscribeUpdate({ priority: 0, remove: [], ranges: [], retune }));
+	// Fresh copies of what `side` holds, since a refused edit ends the session: 0 retired, 1 a time
+	// start, 2 a live join.
+	const held = () => {
+		const ranges = new LiveRanges(version, [live(100, 500), time, live(200, 2000)]);
+		ranges.apply(new SubscribeUpdate({ priority: 0, remove: [0n], ranges: [] }));
+		return ranges;
+	};
+	expect(held().entries()).toEqual(side.entries());
+	expect(() => retune(held(), [[1n, null]])).toThrow(ProtocolViolation);
+	expect(() => retune(held(), [[0n, null]])).toThrow(ProtocolViolation);
+	expect(() =>
+		retune(held(), [
+			[2n, null],
+			[2n, null],
+		]),
+	).toThrow(ProtocolViolation);
+	expect(retune(side, [[2n, null]]).retuned).toEqual([[2n, live(200, null)]]);
+});
+
+// A live start's max rides beside its lag, in milliseconds plus one, rounded up, 0 for no limit.
+// Mirrors the Rust `a_live_starts_max_age_roundtrips_on_lite07`.
+test("a live start's max round-trips on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	for (const [max, wire] of [
+		[null, null],
+		[Duration.ZERO, 0],
+		[Duration.millis(250), 250],
+		[Duration.micros(1500), 2],
+	] as const) {
+		const ranges = toWireRanges(rangesOf([{ start: { live: { min: Duration.millis(100), max } } }]));
+		expect(ranges).toEqual([{ start: { live: { min: 100, max: wire } } }]);
+		const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, ranges };
+		const subscribe = await encodeMessage(version, new Subscribe(props));
+		const got = await Subscribe.decode(new Reader(undefined, subscribe, version), version);
+		expect(got.ranges).toEqual(ranges);
+		expect(requestedRanges(got)).toEqual([
+			{ start: { live: { min: Duration.millis(100), max: wire === null ? null : Duration.millis(wire) } } },
+		]);
+	}
+});
+
 // An edit resolves to the Range IDs it names. Mirrors the Rust `lite07_an_edit_names_its_range_ids`.
 test("lite-07 an edit names its range ids", () => {
 	const live = new LiveRanges(Version.DRAFT_07, [{}]);
 	const range = (group: bigint): WireRange => ({ start: { absolute: group } });
 	const edit = (remove: bigint[], ranges: WireRange[]) =>
 		live.apply(new SubscribeUpdate({ priority: 0, remove, ranges }));
-	expect(edit([], [])).toEqual({ retired: [], added: [] });
+	expect(edit([], [])).toEqual({ retired: [], added: [], retuned: [] });
 	expect(edit([0n], [range(4n), range(5n)])).toEqual({
 		retired: [0n],
 		added: [
 			[1n, range(4n)],
 			[2n, range(5n)],
 		],
+		retuned: [],
 	});
-	expect(edit([1n], [range(6n)])).toEqual({ retired: [1n], added: [[3n, range(6n)]] });
+	expect(edit([1n], [range(6n)])).toEqual({ retired: [1n], added: [[3n, range(6n)]], retuned: [] });
 	expect(live.entries()).toEqual([
 		[2n, range(5n)],
 		[3n, range(6n)],
@@ -783,7 +860,13 @@ test("lite-07 a refused edit leaves the ranges as sent", () => {
 	expect(() => live.edit(wide)).toThrow("too many ranges");
 	expect(live.entries()).toEqual([[0n, {}]]);
 	expect(live.next()).toBe(1n);
-	expect(live.edit(wide.slice(0, 2))).toEqual({ remove: [0n], add: wide.slice(0, 2), fillIds: [], probeIds: [] });
+	expect(live.edit(wide.slice(0, 2))).toEqual({
+		remove: [0n],
+		add: wide.slice(0, 2),
+		retune: [],
+		fillIds: [],
+		probeIds: [],
+	});
 });
 
 test("SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it", async () => {

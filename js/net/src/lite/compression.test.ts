@@ -10,6 +10,7 @@ import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timestamp } from "../time.ts";
 import { ALPN_06, ALPN_07_WIP } from "./version.ts";
+import { withMax } from "../subscription.test-util.ts";
 
 for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 	test(`compressed publishing on ${downstream}, FETCH and independent datagrams`, async () => {
@@ -45,7 +46,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			const active = await request.broadcast();
 			const remote = active.track("data");
 			expect((await remote.info()).compression).toBe(downstream === ALPN_07_WIP ? "deflate" : "none");
-			const reader = remote.subscribe({ delay: { max: Duration.millis(1000) } });
+			const reader = remote.subscribe(withMax({ delay: { max: Duration.millis(1000) } }));
 			const group = hooks.appendNext(track);
 			const payloads = [new Uint8Array(4096).fill(7), new Uint8Array(), new Uint8Array(4096).fill(7)];
 			for (const payload of payloads) group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });

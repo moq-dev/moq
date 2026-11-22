@@ -19,6 +19,7 @@ import { encodeSubscribeResponse, Subscribe, SubscribeStart } from "./subscribe.
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, Version } from "./version.ts";
+import { withMax } from "../subscription.test-util.ts";
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
 	/** A subscriber whose publisher the test plays by hand, up to the SUBSCRIBE. */
@@ -28,7 +29,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const reader = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ delay: { max: Duration.millis(100) } });
+			.subscribe(withMax({ delay: { max: Duration.millis(100) } }));
 
 		const track = await Stream.accept(pair.server, version);
 		if (!track) throw new Error("the subscriber never asked for TRACK_INFO");

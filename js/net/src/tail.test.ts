@@ -14,6 +14,7 @@ import { Tail } from "./tail.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Ordered } from "./track.ts";
 import { wireOf } from "./wire.ts";
+import { withMax } from "./subscription.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -34,7 +35,7 @@ async function session(protocol: string) {
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote
 		.track("video")
-		.subscribe({ delay: { max: MAX_DELAY } })
+		.subscribe(withMax({ delay: { max: MAX_DELAY } }))
 		.ordered();
 
 	return {

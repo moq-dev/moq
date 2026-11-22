@@ -13,6 +13,7 @@ import { Timescale, Timestamp } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import { withMax } from "../subscription.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -46,10 +47,10 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	]);
 	const remote = wireOf(client).consume(Path.from("room"));
 	// Group 5 ends at 6s, a full 3s behind the 9s edge.
-	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(2500) } });
+	const reader = remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(2500) } }));
 	expect(await received(reader, 4)).toEqual([6n, 7n, 8n, 9n]);
 
-	reader.update({ delay: { max: Duration.millis(6500) } });
+	reader.update(withMax({ delay: { max: Duration.millis(6500) } }));
 	expect(await received(reader, 4)).toEqual([2n, 3n, 4n, 5n]);
 	// Ending the track flushes anything else the publisher would send: nothing, not even a repeat.
 	producer.finish();
@@ -87,7 +88,7 @@ for (const [version, alpn] of [
 			accept({ transport: pair.server, url, version, publish: origin.consume() }),
 		]);
 		const remote = wireOf(client).consume(Path.from("room"));
-		const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });
+		const reader = remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(1500) } }));
 		expect(await received(reader, 1)).toEqual([0n]);
 		// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge, so they are reported
 		// stale after SUBSCRIBE_START.
@@ -104,7 +105,7 @@ for (const [version, alpn] of [
 		// A lite-07 stale drop holds only for a budget no wider than the one it was judged under, so the
 		// widened reader asks for the groups with a request of its own; earlier versions' drops are
 		// final for every reader.
-		reader.update({ delay: { max: Duration.millis(10_000) } });
+		reader.update(withMax({ delay: { max: Duration.millis(10_000) } }));
 		if (recovers) expect(await received(reader, 2)).toEqual([1n, 2n]);
 		producer.finish();
 		producer.close();
@@ -138,7 +139,7 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	]);
 	const remote = wireOf(client).consume(Path.from("room"));
 	const ranges = [{ start: 0n, end: 4n }];
-	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) }, ranges });
+	const reader = remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(1500) }, ranges }));
 	expect(await received(reader, 1)).toEqual([0n]);
 	// Groups 1 and 2 are reported stale after SUBSCRIBE_START.
 	for (const [key, millis] of [
@@ -152,7 +153,7 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	expect(await received(reader, 2)).toEqual([3n, 4n]);
 
 	// The widened reader asks for them with a request of its own.
-	reader.update({ delay: { max: Duration.millis(10_000) }, ranges });
+	reader.update(withMax({ delay: { max: Duration.millis(10_000) }, ranges }));
 	expect(await received(reader, 2)).toEqual([1n, 2n]);
 	producer.finish();
 

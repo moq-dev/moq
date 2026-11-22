@@ -29,6 +29,7 @@ import { routeFailed } from "./resume.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
+import { withMax } from "./subscription.test-util.ts";
 
 /** Groups in the logical track; group `g` has `1 + g % 3` frames. */
 const GROUPS = 12;
@@ -386,10 +387,10 @@ function groups(range: Range): track.Groups {
 }
 
 function subscription(budget: Budget, range: Range): track.Subscription {
-	return {
+	return withMax({
 		delay: { max: budget === "hour" ? HOUR : SHORT },
 		ranges: range ? [{ start: BigInt(range[0]), end: BigInt(range[1]) - 1n }] : undefined,
-	};
+	});
 }
 
 function max(values: Iterable<number>): number | undefined {

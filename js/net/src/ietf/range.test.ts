@@ -13,6 +13,7 @@ import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
+import { withMax } from "../subscription.test-util.ts";
 
 const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 const ALPNS = {
@@ -20,11 +21,11 @@ const ALPNS = {
 	[Version.DRAFT_20]: ALPN.DRAFT_20,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
 };
-const ranges = (start: bigint, end: bigint): Subscription => ({
+const ranges = (start: bigint, end: bigint): Subscription => (withMax({
 	ranges: [{ start: start, end: end - 1n }],
 	delay: { max: null },
 	order: "ascending",
-});
+}));
 
 function fixture(version: IetfVersion) {
 	const pair = createMockTransportPair(ALPNS[version]);
@@ -325,7 +326,7 @@ for (const version of VERSIONS) {
 		await fx.status();
 		const fetching = await fx.fetch();
 		await fx.answer(fetching.stream, 2n);
-		const live = fx.broadcast.track("video").subscribe({ ranges: [{ start: 6n }], delay: { max: null } });
+		const live = fx.broadcast.track("video").subscribe(withMax({ ranges: [{ start: 6n }], delay: { max: null } }));
 		fx.readers.push(live);
 		const failed = live.recvGroup().catch((error) => error);
 		const widening = await fx.next();
@@ -360,7 +361,7 @@ for (const version of VERSIONS) {
 		await fx.status();
 		const fetching = await fx.fetch();
 		await fx.answer(fetching.stream, 2n);
-		const live = fx.broadcast.track("video").subscribe({ ranges: [{ start: 6n }], delay: { max: null } });
+		const live = fx.broadcast.track("video").subscribe(withMax({ ranges: [{ start: 6n }], delay: { max: null } }));
 		const widening = await fx.next();
 		expect(await widening.reader.u53()).toBe(Subscribe.id);
 		await Subscribe.decode(widening.reader, version);

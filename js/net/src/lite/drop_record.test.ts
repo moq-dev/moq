@@ -19,6 +19,7 @@ import type { Subscription, Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { SubscribeDrop, SubscribeSkip, SubscribeStart, SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import { withMax } from "../subscription.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 const path = Path.from("room");
@@ -254,7 +255,7 @@ function groupsOf(rows: unknown[][]): unknown[] {
 		.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: 0n }] };
+const WIDE: Subscription = withMax({ delay: { max: null }, order: "ascending", ranges: [{ start: 0n }] });
 
 // Groups 1 to 4 after group 0 at 0s: 1 and 2 end 3s and 4s behind the 6s edge, and 3 starts 3s
 // behind it, so a 1.5s budget gives up 1 and 2 and still takes 3.
@@ -286,7 +287,7 @@ async function relayEvicted(readers: ("owed" | "fresh" | "widened")[]): Promise<
 	expect(groupsOf(read)).toEqual([0n, 1n, 2n, 3n, 4n]);
 	// Half a second gives up groups 1 and 2 as stale, on the viewer alone. Group 0 is the
 	// reader's start or stale too, depending on which group reached it first.
-	const widened = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const widened = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	const stale = await drain(clock, widened);
 	const given = stale.filter((row) => row[0] === "drop");
 	expect(given.every((row) => row[3] === StreamCode.Old && row[2] === (row[1] as bigint) + 1n)).toBe(true);
@@ -345,7 +346,7 @@ test("an origin's evicted drops cross the relay unchanged, and no update re-offe
 	using clock = manual();
 	const wire = tap();
 	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07);
-	const reader = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(2000) } });
+	const reader = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(2000) } }));
 	await chained.reached();
 	const evicted = () => ({ error: new StreamError(StreamCode.Evicted, { message: "group evicted from the cache" }) });
 	chained.write(0n, 0);
@@ -371,9 +372,9 @@ test("an origin's evicted drops cross the relay unchanged, and no update re-offe
 
 	// A widening and a narrowing each reach the publisher, and neither drops nor offers them again.
 	const heard = wire.heard.length;
-	reader.update({ delay: { max: Duration.millis(60_000) } });
+	reader.update(withMax({ delay: { max: Duration.millis(60_000) } }));
 	await until(clock, () => wire.updates.length >= 2);
-	reader.update({ delay: { max: Duration.millis(1000) } });
+	reader.update(withMax({ delay: { max: Duration.millis(1000) } }));
 	await until(clock, () => wire.updates.length >= 4);
 	chained.track.finish();
 	expect(await drain(clock, reader)).toEqual([["done"]]);
@@ -392,7 +393,7 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 		using clock = manual();
 		const wire = tap();
 		const chained = await chain(Version.DRAFT_06, down);
-		const reader = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });
+		const reader = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(1500) } }));
 		await chained.reached();
 		chained.write(0n, 0);
 		expect(settled(await next(reader))).toEqual(["group", 0n]);
@@ -411,7 +412,7 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 
 		// A widened reader and a new one each find groups 1 and 2 still dropped, though the
 		// publisher holds them.
-		reader.update({ delay: { max: null } });
+		reader.update(withMax({ delay: { max: null } }));
 		const fresh = chained.remote.track("video").subscribe(WIDE);
 		expect(groupsOf(await drain(clock, fresh))).toEqual([0n, 3n, 4n]);
 		expect(groupsOf(await drain(clock, reader))).toEqual([]);
@@ -420,7 +421,7 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 		fresh.close();
 		const heard = wire.heard.length;
 		const updates = wire.updates.length;
-		reader.update({ delay: { max: Duration.millis(500) } });
+		reader.update(withMax({ delay: { max: Duration.millis(500) } }));
 		await until(clock, () => wire.updates.length >= updates + 2);
 		await drain(clock, reader);
 		expect(wire.on("up", heard)).toEqual([]);
@@ -443,7 +444,7 @@ test("through a lite-06 upstream, a group reported dropped as it lands is fetche
 		if (key !== 7n) chained.write(key, Number(key) * 1000);
 	}
 	// Reaches groups 5 and up by media time.
-	const first = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(3500) }, ranges: [{}] });
+	const first = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(3500) }, ranges: [{}] }));
 	await chained.reached();
 	expect(groupsOf(await drain(clock, first))).toEqual([5n, 6n, 8n, 9n]);
 
@@ -458,9 +459,9 @@ test("through a lite-06 upstream, a group reported dropped as it lands is fetche
 	// holds only for a budget no wider than its own, so the widened reader fills 0 to 4 and 7 from
 	// the publisher, as a later reader does.
 	const all = [0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n];
-	first.update({ delay: { max: Duration.millis(60_000) }, ranges: [{}] });
+	first.update(withMax({ delay: { max: Duration.millis(60_000) }, ranges: [{}] }));
 	expect(groupsOf(await drain(clock, first))).toEqual([0n, 1n, 2n, 3n, 4n, 7n]);
-	const second = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(60_000) }, ranges: [{}] });
+	const second = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(60_000) }, ranges: [{}] }));
 	expect(groupsOf(await drain(clock, second))).toEqual(all);
 
 	chained.track.finish();
@@ -482,7 +483,7 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 	using clock = manual();
 	const wire = tap();
 	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07);
-	const reader = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });
+	const reader = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(1500) } }));
 	await chained.reached();
 	chained.write(0n, 0);
 	expect(settled(await next(reader))).toEqual(["group", 0n]);
@@ -513,10 +514,10 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 			// Judged stale by its own budget while the viewer still holds the run. Once every hop forgot
 			// it, the relay recovers it with no max delay, as the Rust `Recovery` does, so the narrow
 			// reader takes the stale history: no hop still holds a newer group to judge it by.
-			const narrow = chained.remote.track("video").subscribe({
+			const narrow = chained.remote.track("video").subscribe(withMax({
 				delay: { max: Duration.millis(1500) },
 				ranges: [{ start: 1n }],
-			});
+			}));
 			expect(groupsOf(await drain(clock, narrow))).toEqual([1n, 2n, 3n, 4n, 5n]);
 			narrow.close();
 		}
@@ -553,8 +554,8 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 	using clock = manual();
 	const wire = tap();
 	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07);
-	const narrow = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });
-	const wide = chained.remote.track("video").subscribe({ delay: { max: null }, order: "ascending" });
+	const narrow = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(1500) } }));
+	const wide = chained.remote.track("video").subscribe(withMax({ delay: { max: null }, order: "ascending" }));
 	await chained.reached();
 	chained.write(0n, 0);
 	for (const reader of [narrow, wide]) expect(settled(await next(reader))).toEqual(["group", 0n]);
@@ -590,11 +591,11 @@ for (const judged of ["unsettled by a widening", "forgotten by the relay"] as co
 	test(`a run of billions ${judged} is judged again in one step`, async () => {
 		using clock = manual();
 		const chained = await chain(Version.DRAFT_07, Version.DRAFT_07);
-		const reader = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });
+		const reader = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(1500) } }));
 		// An unbounded reader keeps the relay's subscription unbounded too.
 		const wide =
 			judged === "forgotten by the relay"
-				? chained.remote.track("video").subscribe({ delay: { max: null } })
+				? chained.remote.track("video").subscribe(withMax({ delay: { max: null } }))
 				: undefined;
 		await chained.reached();
 		chained.write(0n, 0);
@@ -609,7 +610,7 @@ for (const judged of ["unsettled by a widening", "forgotten by the relay"] as co
 		if (wide) await drain(clock, wide);
 		const before = chained.fetches();
 
-		if (judged === "unsettled by a widening") reader.update({ delay: { max: null } });
+		if (judged === "unsettled by a widening") reader.update(withMax({ delay: { max: null } }));
 		else await clock.advance(cache.DEFAULT_EXPIRY.mul(2));
 		const after = await drain(clock, reader);
 		expect(after.length).toBeLessThanOrEqual(1);

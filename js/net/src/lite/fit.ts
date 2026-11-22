@@ -267,8 +267,8 @@ function bySpan(a: Span, b: Span): number {
 /**
  * One range per kind of start covering every range of that kind, from the earliest start to the
  * latest end. A time or absolute start is a span, so only ranges with no start and live joins are
- * left: those with no start all start at the same group, and the join reaching furthest back
- * delivers what each of the others does. Mirrors the Rust `collapse`.
+ * left: those with no start all start at the same group, and the join reaching furthest back,
+ * under the widest max, delivers what each of the others does. Mirrors the Rust `collapse`.
  */
 function collapse(ranges: readonly WireRange[]): WireRange[] {
 	const kinds: WireRange[] = [];
@@ -279,8 +279,15 @@ function collapse(ranges: readonly WireRange[]): WireRange[] {
 			kinds.push({ ...range });
 			continue;
 		}
-		if (cover.start?.live !== undefined && live !== undefined)
-			cover.start = { live: Math.max(cover.start.live, live) };
+		// The join reaching furthest back, under the widest max, delivers what each of the others does.
+		const held = cover.start?.live;
+		if (held !== undefined && live !== undefined)
+			cover.start = {
+				live: {
+					min: Math.max(held.min, live.min),
+					max: held.max === null || live.max === null ? null : Math.max(held.max, live.max),
+				},
+			};
 		const [a, b] = [cover.end, range.end];
 		if (a?.absolute !== undefined && b?.absolute !== undefined)
 			cover.end = { absolute: max(a.absolute, b.absolute) };

@@ -24,6 +24,7 @@ import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, type IetfVersion, Version, versionName } from "./version.ts";
+import { withMax } from "../subscription.test-util.ts";
 
 const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 const VERSION = Version.DRAFT_18;
@@ -70,12 +71,12 @@ async function subscribed(version: IetfVersion = VERSION, subscription: Partial<
 	const consumer = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({
+		.subscribe(withMax({
 			...track.Subscription.default(),
 			delay: { max: Duration.ZERO },
-			ranges: [{ start: { live: Duration.ZERO } }],
+			ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }],
 			...subscription,
-		});
+		}));
 	onTestFinished(() => {
 		consumer.close();
 		session.close();
@@ -269,7 +270,7 @@ for (const outcome of ["a refused joining FETCH", "an empty joining FETCH"] as c
 }
 
 test("a reader in sequence order with no delay budget skips headless groups", async () => {
-	const { subscriber, consumer, fetching } = await join(undefined, { order: "ascending", delay: { max: null } });
+	const { subscriber, consumer, fetching } = await join(undefined, withMax({ order: "ascending", delay: { max: null } }));
 	await refuse(fetching);
 
 	// The joined group's head was refused, and the next group's stream starts mid-group.
@@ -284,11 +285,11 @@ test("a reader in sequence order with no delay budget skips headless groups", as
 for (const version of VERSIONS) {
 	for (const objectId of [0n, 2n]) {
 		test(`draft ${version}: a group-0 reader skips the Largest group's cut tail after object ${objectId}`, async () => {
-			const { subscriber, consumer, answer } = await subscribed(version, {
+			const { subscriber, consumer, answer } = await subscribed(version, withMax({
 				order: "ascending",
 				delay: { max: null },
 				ranges: [{ start: 0n }],
-			});
+			}));
 			await answer({ groupId: 0n, objectId });
 			// Largest is inclusive, including object 0: its following tail is no whole message.
 			await subscriber.handleGroup(...liveStream(0n, Number(objectId) + 1, ["cut"], version));

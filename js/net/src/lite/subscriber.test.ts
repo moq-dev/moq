@@ -23,7 +23,7 @@ import {
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import { hooks, NO_MAX_DELAY } from "../internal.ts";
+import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -63,6 +63,7 @@ import {
 import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, Version, versionName } from "./version.ts";
+import { withMax } from "../subscription.test-util.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;
@@ -1467,7 +1468,7 @@ test.each(
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ priority: 3, delay: { max: Duration.millis(10_000) } });
+		.subscribe(withMax({ priority: 3, delay: { max: Duration.millis(10_000) } }));
 	try {
 		await opened(0);
 		await streams[0].reading;
@@ -1490,7 +1491,7 @@ test.each(
 		await track.info();
 		await request.reading;
 		// An explicit change orders after any update caused by TRACK_INFO, even if its encoding yields.
-		track.update({ priority: 4, delay: { max: Duration.millis(10_000) } });
+		track.update(withMax({ priority: 4, delay: { max: Duration.millis(10_000) } }));
 		const update = await SubscribeUpdate.decode(subscribe, version);
 		expect([update.priority, update.maxDelay]).toEqual([4, 10_000]);
 		track.close();
@@ -1574,7 +1575,7 @@ test.each([
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
+		.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -1620,7 +1621,7 @@ test("a reset without its code ends the group", async () => {
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
+		.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -1829,7 +1830,7 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		// SUBSCRIBE_FINISH starts the end's grace, and the update then widens the budget.
 		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 		await drainReactions();
-		track.update({ priority: 0, delay: { max: Duration.millis(60_000) } });
+		track.update(withMax({ priority: 0, delay: { max: Duration.millis(60_000) } }));
 		await drainReactions();
 
 		await clock.advance(GRACE.mul(3));
@@ -1852,7 +1853,7 @@ test("a malformed lite-07 group stream ends only its group", async () => {
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
+		.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -1902,7 +1903,7 @@ test("a lite-07 GROUP_END accounts for the starts inside its group's span", asyn
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
+		.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2912,7 +2913,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	// Old enough to keep every group, however far behind the newest start.
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(60_000) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2948,7 +2949,7 @@ test("a lite-07 rewind is refused", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(60_000) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -3055,7 +3056,7 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const oldest = broadcast.track("video").subscribe({ delay: { max: null } });
+	const oldest = broadcast.track("video").subscribe(withMax({ delay: { max: null } }));
 	let reader: ReturnType<typeof oldest.fork> | undefined;
 	try {
 		await opened(0);
@@ -3068,7 +3069,7 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 		// The oldest group's range starts at 5, which may have expired a group at or before 3.
 		await respond(request, version, [{ start: new SubscribeStart([5n]) }]);
 		await drainReactions();
-		reader = oldest.fork({ delay: { max: null }, ranges: [{ start: 3n }] });
+		reader = oldest.fork(withMax({ delay: { max: null }, ranges: [{ start: 3n }] }));
 		const probe = await SubscribeUpdate.decode(sent, version);
 		expect(probe.remove ?? []).toEqual([]);
 		expect(probe.ranges).toEqual([{ start: { time: 3n }, end: { time: 3n } }]);
@@ -3094,16 +3095,13 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const reported: (readonly [bigint, bigint | undefined, number])[][] = [];
+	const reported: (readonly [bigint, bigint | undefined])[][] = [];
 	const timeStarts = hooks.timeStarts;
 	hooks.timeStarts = (producer, starts) => {
 		reported.push([...starts]);
 		timeStarts(producer, starts);
 	};
-	const track = broadcast.track("video").subscribe({
-		delay: { max: null },
-		ranges: [{ start: 10n, end: 20n }, { start: 30n }],
-	});
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: 10n, end: 20n }, { start: 30n }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3111,8 +3109,7 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 		await request.reading;
 		await respond(request, version, [{ start: new SubscribeStart([undefined, undefined]) }]);
 		await drainReactions();
-		// Under the budget the range was asked with, here none.
-		expect(reported.at(-1)).toEqual([[10n, undefined, NO_MAX_DELAY]]);
+		expect(reported.at(-1)).toEqual([[10n, undefined]]);
 	} finally {
 		hooks.timeStarts = timeStarts;
 		track.close();
@@ -3142,7 +3139,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3184,7 +3181,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 		await send(old(4n));
 		if (!entry) throw new Error("no subscription");
 
-		track.update({ priority: 1, delay: { max: Duration.millis(500) } });
+		track.update(withMax({ priority: 1, delay: { max: Duration.millis(500) } }));
 		await drainReactions();
 		expect(entry.tail.covers(1n, 5n)).toBe(true);
 		// Neither the drop nor the update aborts a group still arriving.
@@ -3218,7 +3215,7 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3232,10 +3229,10 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 
 		// Each update is sent only once the previous write is credited, which may take tasks, so wait
 		// for it on the wire: the budget narrows before its update is written.
-		track.update({ delay: { max: Duration.millis(5000) } });
+		track.update(withMax({ delay: { max: Duration.millis(5000) } }));
 		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(5000);
 		expect(entry.staleBudget).toBe(500);
-		track.update({ delay: { max: Duration.millis(200) } });
+		track.update(withMax({ delay: { max: Duration.millis(200) } }));
 		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(200);
 		expect(entry.staleBudget).toBe(200);
 	} finally {
@@ -3263,7 +3260,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3290,7 +3287,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		await drainReactions();
 		if (!entry) throw new Error("no subscription");
 
-		track.update({ priority: 1, delay: { max: Duration.millis(500) } });
+		track.update(withMax({ priority: 1, delay: { max: Duration.millis(500) } }));
 		await drainReactions();
 		expect(entry.tail.covers(1n, 3n)).toBe(true);
 		expect(entry.tail.covers(4n, 5n)).toBe(true);
@@ -3323,7 +3320,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 	});
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3358,7 +3355,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 		expect(entry.tail.covers(4n, 7n)).toBe(true);
 		expect(warn).toHaveBeenCalledTimes(1);
 
-		const reader = entry.track.subscribe({ delay: { max: null } });
+		const reader = entry.track.subscribe(withMax({ delay: { max: null } }));
 		const got: unknown[] = [];
 		for (
 			let next = hooks.tryRecvGroup(reader, true);

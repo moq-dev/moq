@@ -3711,8 +3711,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
 		expect(track.subscription.peek()?.priority).toBe(117);
-		// Only the priority changes; retention and the group range survive.
-		expect(track.subscription.peek()?.delay?.max).toEqual(before?.delay?.max);
+		// Only the priority changes; the group range, and so its retention, survives.
 		expect(track.subscription.peek()?.ranges).toEqual(before?.ranges);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
@@ -5168,13 +5167,14 @@ test("a SUBSCRIBE carries no budget, so the publisher's own policy bounds it", a
 		}),
 	);
 	try {
-		const unbounded = Duration.millis(Number.MAX_SAFE_INTEGER);
-		expect(track.subscription.peek()?.delay?.max).toEqual(unbounded);
+		// A live join whose groups only the publisher's max age expires.
+		const unbounded = [{ start: { live: { min: Duration.ZERO, max: null } } }];
+		expect(track.subscription.peek()?.ranges).toEqual(unbounded);
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.delay?.max).toEqual(unbounded);
+		expect(track.subscription.peek()?.ranges).toEqual(unbounded);
 	} finally {
 		client.close();
 		track.finish();
