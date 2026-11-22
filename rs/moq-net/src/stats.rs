@@ -3167,6 +3167,42 @@ mod tests {
 		assert_eq!((key.sessions_started, key.sessions_ended, key.sent_bytes), (1, 0, 7));
 	}
 
+	/// A rooted exclusion skips the subtree under the counting session's own root
+	/// and no other, and a session's rows stay under its root across a retag.
+	#[test]
+	fn rooted_exclusion_follows_the_session_root() {
+		let stats = Registry::new(Config::new().with_exclude_rooted(Pattern::subtree(".stats").unwrap()));
+		let tier = Tier::default();
+		let path = crate::Path::from_static;
+		let rooted = stats
+			.tier(tier.clone())
+			.session(SessionInfo::new(path("x")).with_root(path("a")));
+		let unrooted = stats.tier(tier.clone()).session(SessionInfo::new(path("x")));
+		rooted.egress(path("a/.stats/node")).meter().bytes(1);
+		rooted.egress(path("a/b/.stats/node")).meter().bytes(2);
+		unrooted.egress(path(".stats/node")).meter().bytes(4);
+		unrooted.egress(path("a/.stats/node")).meter().bytes(8);
+		rooted.retag(tier.clone(), path("y"));
+		rooted.egress(path("a/live")).meter().bytes(16);
+
+		let mut report = Report::default();
+		stats.report(&mut report, Instant::now());
+		let mut traffic: Vec<_> = report
+			.traffic
+			.iter()
+			.map(|row| (row.path.as_str(), row.publisher.bytes))
+			.collect();
+		traffic.sort();
+		assert_eq!(traffic, [("a/.stats/node", 8), ("a/b/.stats/node", 2), ("a/live", 16)]);
+		let mut sessions: Vec<_> = report
+			.sessions
+			.iter()
+			.map(|row| (row.root.as_str(), row.label.as_str(), row.presence.sent_bytes))
+			.collect();
+		sessions.sort();
+		assert_eq!(sessions, [("", "x", 8), ("a", "x", 2), ("a", "y", 16)]);
+	}
+
 	#[test]
 	fn retag_back_counts_bytes_once() {
 		let stats = test_stats();

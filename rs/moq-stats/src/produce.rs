@@ -1729,6 +1729,7 @@ mod tests {
 				linger: DEFAULT_LINGER,
 				// Hundreds of drains, each an interval apart, stay inside the relays' cache.
 				interval: Duration::from_millis(10),
+				roots: false,
 			})
 			.unwrap();
 			let (middle, middle_cache) = relay();
@@ -2236,6 +2237,7 @@ mod tests {
 			depth: 0,
 			linger: DEFAULT_LINGER,
 			interval,
+			roots: false,
 		})
 		.unwrap();
 		let start = kio::clock::now();
@@ -2550,6 +2552,89 @@ mod tests {
 		(producer, origin)
 	}
 
+	/// Each root's view carries only the traffic under the root, named relative to
+	/// it, and the sessions scoped to it or beneath it, merging one label's rows.
+	#[tokio::test(start_paused = true)]
+	async fn each_root_sees_only_its_own_subtree() {
+		let origin = produce_origin();
+		let producer = crate::produce::spawned(Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_roots(true)
+				.with_linger(Duration::ZERO),
+		));
+		let registry = producer.registry();
+		let session = |root: &'static str, label: &'static str| {
+			registry.tier(Tier::default()).session(
+				moq_net::stats::SessionInfo::new(Path::from_static(label)).with_root(Path::from_static(root)),
+			)
+		};
+		let _a = session("a", "x");
+		let _ab = session("a/b", "x");
+		let c = session("c", "y");
+		let _top = session("", "z");
+		for (path, bytes) in [("a/live", 1), ("a/b/cam", 2), ("c/live", 4), ("d/live", 8)] {
+			moq_net::fuzz::bump_publisher_bytes(registry, Path::from_static(path), &Tier::default(), bytes);
+		}
+		drive_tick().await;
+
+		let view = |root: &str| {
+			let prefix = crate::root_prefix(&Path::from_static(".stats"), &Path::new(root).unwrap()).unwrap();
+			format!("{prefix}/node")
+		};
+		assert_eq!(view("a/b"), ".stats/root/a\\/b/node", "a root is one segment");
+		let read = |root: &str| {
+			let origin = origin.clone();
+			let path = view(root);
+			async move {
+				let broadcast = origin.consume().request(path.as_str(), None).await.expect("announced");
+				let mut frame = read_bucket(&broadcast, "").await;
+				frame.tiers.remove("").unwrap_or_default()
+			}
+		};
+
+		let a = read("a").await;
+		let paths: BTreeMap<_, _> = a.paths.iter().map(|(path, usage)| (path.as_str(), usage.publisher.bytes)).collect();
+		assert_eq!(paths, BTreeMap::from([("live", 1), ("b/cam", 2)]), "relative, nested root included");
+		assert_eq!(a.publisher.bytes, 3);
+		assert_eq!(a.labels.len(), 1, "one label across two roots");
+		assert_eq!(a.labels["x"].sessions_started, 2);
+
+		let ab = read("a/b").await;
+		let paths: Vec<_> = ab.paths.keys().map(String::as_str).collect();
+		assert_eq!(paths, ["cam"]);
+		assert_eq!(ab.labels["x"].sessions_started, 1, "a parent's session stays out");
+
+		let c_view = read("c").await;
+		assert_eq!(c_view.publisher.bytes, 4);
+		assert_eq!(c_view.labels.keys().collect::<Vec<_>>(), ["y"]);
+
+		// The empty root's view is the node's own broadcast, which sees everything.
+		let top = origin.consume().request(".stats/node", None).await.expect("node");
+		let mut frame = read_bucket(&top, "").await;
+		let top = frame.tiers.remove("").unwrap();
+		assert_eq!(top.publisher.bytes, 15);
+		assert_eq!(top.labels["x"].sessions_started, 2, "the node merges one label across roots");
+
+		// A root whose last session leaves ends its broadcast once it lingers.
+		let mut routes = origin.consume().with_hidden(true).routes();
+		let mut live = |routes: &mut origin::Routes| {
+			let mut live = None;
+			while let Some(Some((update, active))) = futures::FutureExt::now_or_never(next_update(routes)) {
+				if update.prefix.as_str() == view("c") {
+					live = Some(active);
+				}
+			}
+			live
+		};
+		assert_eq!(live(&mut routes), Some(true));
+		drop(c);
+		drive_tick().await;
+		drive_tick().await;
+		let ended = live(&mut routes) == Some(false);
+		assert!(ended, "root c's view ended");
+	}
+
 	/// The announce events buffered so far in delivery order, as
 	/// `(path, active, instance)`.
 	fn take_instances(events: &mut origin::Routes) -> Vec<(String, bool, Instance)> {
@@ -2604,7 +2689,7 @@ mod tests {
 		let first = producer
 			.registry()
 			.tier(Tier::default())
-			.request(moq_net::Path::from_static("acme"));
+			.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 		let handle = broadcast
@@ -2635,7 +2720,7 @@ mod tests {
 		let second = producer
 			.registry()
 			.tier(Tier::default())
-			.request(moq_net::Path::from_static("acme"));
+			.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 		assert_eq!(drain(&mut track), [Some(2)]);
 
@@ -2766,6 +2851,7 @@ mod tests {
 			depth: 0,
 			linger: DEFAULT_LINGER,
 			interval: Duration::from_secs(1),
+			roots: false,
 		})
 		.expect("drain");
 		let mut tick = || {
@@ -3027,6 +3113,7 @@ mod tests {
 			depth: 0,
 			linger: DEFAULT_LINGER,
 			interval: Duration::from_secs(1),
+			roots: false,
 		})
 		.expect("drain");
 		let mut tick = || {
@@ -3260,6 +3347,7 @@ mod tests {
 					depth,
 					linger: DEFAULT_LINGER,
 					interval: Duration::from_secs(1),
+					roots: false,
 				})
 				.expect("drain");
 
@@ -3356,6 +3444,7 @@ mod tests {
 			depth: 1,
 			linger: Duration::from_secs(10),
 			interval: Duration::from_secs(1),
+			roots: false,
 		})
 		.unwrap();
 		let (edge, _cache) = relay();
@@ -3525,6 +3614,7 @@ mod tests {
 			depth: 1,
 			linger: Duration::ZERO,
 			interval: Duration::from_secs(1),
+			roots: false,
 		})
 		.unwrap();
 		let stats = crate::Consumer::new(drain.node.route.broadcast().consume(), Default::default());

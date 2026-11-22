@@ -21,6 +21,10 @@
 //! they spread across, each bucket one track: the rows cost the same however
 //! they split, so a slope in buckets is per-track overhead.
 //!
+//! `stats/roots` sweeps a producer publishing each root's view over held paths
+//! and the roots they spread across, one session per root: each row is copied
+//! into the one view above it, so a slope in roots is per-broadcast overhead.
+//!
 //! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
 
 #![expect(
@@ -160,6 +164,20 @@ impl Relay {
 			_sessions: sessions,
 			_held: Vec::new(),
 		}
+	}
+
+	/// Scope one session to each of the first `roots` buckets and publish each
+	/// root's view.
+	fn root(&mut self, roots: usize) {
+		for index in 0..roots {
+			let root = moq_net::Path::new(&format!("g{index:04}")).unwrap();
+			let session = self
+				.registry
+				.tier(self.tiers[0].clone())
+				.session(stats::SessionInfo::new(root.clone()).with_root(root));
+			self._sessions.push(session);
+		}
+		self.driver.publish_roots();
 	}
 
 	/// Hold the first `held` paths' `room/<index>` prefix tracks.
@@ -485,5 +503,46 @@ fn buckets(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench, presence, prefix, buckets);
+/// Roots the paths spread across, one session scoped to each.
+const ROOTS: [usize; 3] = [1, 100, 1_000];
+
+/// What publishing each root's view costs a tick, with a tenth of the paths moving.
+fn roots(c: &mut Criterion) {
+	println!("paths roots allocs/tick us/tick");
+
+	let mut group = c.benchmark_group("stats/roots");
+	group.sample_size(10);
+	group.warm_up_time(Duration::from_millis(200));
+	group.measurement_time(Duration::from_secs(1));
+	for &paths in &BUCKET_PATHS {
+		for &roots in ROOTS.iter().filter(|&&roots| roots <= paths) {
+			let id = BenchmarkId::from_parameter(format!("{paths}p_{roots}r"));
+			group.throughput(Throughput::Elements(paths as u64));
+			let mut relay = None;
+			group.bench_function(id, |b| {
+				let relay = relay.get_or_insert_with(|| {
+					let mut relay = Relay::build(paths, 1, 10, 2, Some(roots));
+					relay.root(roots);
+					let row = sample(&mut relay);
+					let micros = row.elapsed.as_secs_f64() * 1e6;
+					println!("{paths:>5} {roots:>5} {allocs:>11} {micros:>8.1}", allocs = row.allocs);
+					relay
+				});
+				b.iter_custom(|iters| {
+					let mut total = Duration::ZERO;
+					for _ in 0..iters {
+						relay.touch();
+						let start = Instant::now();
+						black_box(relay.driver.tick());
+						total += start.elapsed();
+					}
+					total
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench, presence, prefix, buckets, roots);
 criterion_main!(benches);
