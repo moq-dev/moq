@@ -8143,9 +8143,8 @@ struct Logical {
 
 impl Logical {
 	/// Take back what the copies took back after a widening (see [`Cursor::rejudge`]): a run
-	/// still to report is dropped from the queue, and one reported to an owner that may take
-	/// it back is untold, for that owner to forget. What the owner settled stays settled, since
-	/// the copies were told of it.
+	/// still to report leaves the queue, and one reported is untold, for the owner to forget.
+	/// What the owner settled stays settled, since the copies were told of it.
 	fn take_back(&mut self, resume: &mut super::resume::Subscriber) {
 		for run in resume.take_withdrawn().iter() {
 			let record = &mut self.record;
@@ -11598,14 +11597,6 @@ impl Subscriber {
 			Inner::Resume(resume, logical) => {
 				let delivered = &mut logical.record.delivered;
 				if ordered {
-					// A run a copy gave up under the key still goes out below it, as on a plain
-					// cursor: once passed, the copies' reports of it no longer reach this reader.
-					if !delivered.covers(0..key) {
-						while let Poll::Ready((range, hole)) = resume.poll_drop(delivered, false, &kio::Waiter::noop())
-						{
-							logical.record.pending.insert(range, Pending::own(hole));
-						}
-					}
 					delivered.forget_below(key);
 				}
 				delivered.insert(key);
@@ -11775,14 +11766,18 @@ impl Subscriber {
 		}
 	}
 
-	/// Let the drops this reports be taken back until its owner settles them with
+	/// Let a widening take back the drops this reports until its owner settles them with
 	/// [`Self::settle_gap`], as an [`Ordered`] does for the gaps it returns.
-	pub(super) fn withdrawing(mut self) -> Self {
+	pub(super) fn set_withdrawing(&mut self) {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.withdrawn = Some(RangeSet::new()),
-			Inner::Resume(_, logical) => logical.withdrawn = Some(RangeSet::new()),
+			Inner::Plain(cursor) => {
+				cursor.withdrawn.get_or_insert_default();
+			}
+			Inner::Resume(resume, logical) => {
+				logical.withdrawn.get_or_insert_default();
+				resume.set_withdrawing();
+			}
 		}
-		self
 	}
 
 	/// Settle `keys` as reported for good: a gap an [`Ordered`] returned. A front's copies are
@@ -11825,9 +11820,10 @@ impl Subscriber {
 	/// arrival-order [`Subscriber`] or a key-order [`Ordered`], never both at once.
 	/// The two advance independently, and interleaving them produces a group stream that
 	/// is neither, which is why the choice is a handle rather than a method.
-	pub fn ordered(self) -> Ordered {
+	pub fn ordered(mut self) -> Ordered {
+		self.set_withdrawing();
 		Ordered {
-			inner: self.withdrawing(),
+			inner: self,
 			held: None,
 			gaps: BTreeMap::new(),
 			at: 0,
@@ -12098,13 +12094,12 @@ impl Subscriber {
 			// Each copy reports to its own route; the logical record keeps one route's run from
 			// going out over what another's already settled.
 			Inner::Resume(resume, logical) => loop {
-				logical.take_back(resume);
-				if let Some((range, hole)) = logical.record.next_pending() {
-					// An owner that cannot take it back reported it for good, which the copies learn.
-					if logical.withdrawn.is_none() {
-						resume.settle(range.clone());
-					}
-					return Poll::Ready((range, hole));
+				// Only an owner that may take a report back lets the copies take theirs back.
+				if logical.withdrawn.is_some() {
+					logical.take_back(resume);
+				}
+				if let Some(next) = logical.record.next_pending() {
+					return Poll::Ready(next);
 				}
 				let (range, hole) = std::task::ready!(resume.poll_drop(&logical.record.delivered, probe, waiter));
 				logical.record.pending.insert(range, Pending::own(hole));
