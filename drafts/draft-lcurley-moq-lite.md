@@ -1532,6 +1532,7 @@ Which fields follow, and what the Anchor names:
 - Time (0x1): `Timestamp`, the Group containing that time: the one whose start (see [Group](#group)) is the highest at or below it.
 - Position (0x2): `Timestamp` then `Frame`, as Time, except that a Group starting exactly at `Timestamp` is delivered from frame `Frame` (see [Positions](#positions)). A `Start` only, and `Frame` is never 0, which Time says: anything else is a PROTOCOL_VIOLATION.
 - Live (0x3): `Min Age` then `Max Age`: a live join, starting at the Group containing the live edge minus `Min Age` (see below), whose Groups expire once their age reaches `Max Age` (see [Expiration](#expiration)). `Min Age` is in milliseconds: the subscriber's target latency behind the live edge, such as the playout or jitter-buffer delay it holds, so its buffer arrives full. `Max Age` is in milliseconds plus one, `0` meaning no limit beyond `Publisher Max Age`: how long a non-latest Group the join reaches may remain in flight before it is stale, so an encoded `1` wants only the latest Group (older ones are stale once a newer one arrives). The latest Group is never stale. A `Start` only: as an `End` it is a PROTOCOL_VIOLATION.
+- Joined (0x4): `Timestamp`, `Frame`, then `Max Age`: a live join already placed, starting at the Group with that start, from frame `Frame` (`0` for the whole Group), whose Groups expire as a Live Anchor's do under `Max Age`, encoded as there. A subscriber resuming a live join on a new subscription, such as a relay moving to another route, names where the join landed, so it keeps its `Max Age` without being placed at the live edge again. A `Start` only: as an `End` it is a PROTOCOL_VIOLATION.
 
 Any other value is a PROTOCOL_VIOLATION.
 Both ends include the Group they name, so a Range from Time `a` to Time `b` delivers every Group from the one containing `a` through the one containing `b`.
@@ -1541,7 +1542,7 @@ A relay's copy places a Time `Start` only where it can show its origin would: at
 A Range Start past the time, or 0, shows only that its upstream held no Group at or below the time when it answered.
 Otherwise the relay adds a Range from that time to its subscription and waits for the answer.
 
-A `Start` other than Live is a floor for history: the publisher starts at the oldest group it holds at or above the floor, MUST NOT deliver an older one, and delivers every group the Range covers, none of which expires for staleness.
+A `Start` other than Live or Joined is a floor for history: the publisher starts at the oldest group it holds at or above the floor, MUST NOT deliver an older one, and delivers every group the Range covers, none of which expires for staleness.
 Only `Publisher Max Age` bounds how far back it reaches.
 A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
@@ -1555,10 +1556,10 @@ Otherwise it adds such a Range to its subscription and waits for the answer, so 
 Once its upstream declared the Track's end and every Group below it arrived or was given up, the copy waits on no answer: it places the join as a Time `Start` at the final live edge minus `Min Age`, by the rule above.
 A relay whose upstream session cannot carry a Live `Start`, such as an earlier version, places the join from the Groups it holds instead.
 
-A Range covers whole Groups but for a Position `Start`; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
+A Range covers whole Groups but for a Position or Joined `Start`; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
 A Group that another Range may also cover is delivered whole, since each Group is delivered once: one whose `Start` is at or below the Group's start, or is None, and whose `End` is not a Time below the Group's start.
 A Time `Start` inside the Group, after its start, does not count: whether it falls before the next Group's start is unknown until that Group arrives.
-A subscriber resuming a Track on a new subscription, such as a relay moving to another route, starts at the Position past the frames it holds, so no frame it holds is sent again.
+A subscriber resuming a Track on a new subscription, such as a relay moving to another route, starts at the Position past the frames it holds, or at a Joined `Start` there for a live join, so no frame it holds is sent again.
 The Group Stream of a Group that ended at `Frame` carries no FRAME, only how the Group ended.
 
 ## SUBSCRIBE_UPDATE {#subscribe-update}
@@ -1606,7 +1607,7 @@ A publisher closes the session with a PROTOCOL_VIOLATION otherwise.
 The live joins whose `Max Age` changes, each a Range ID and its new `Max Age`, encoded as in a Live Anchor.
 A retuned Range keeps where it started and is not resolved again: only which of its Groups are stale changes, from then on.
 A wider `Max Age` reopens no Group already named in a SUBSCRIBE_DROP.
-A Range ID that is not live after the removals, names a Range whose `Start` is not Live, or appears twice in the list is a PROTOCOL_VIOLATION.
+A Range ID that is not live after the removals, names a Range whose `Start` is neither Live nor Joined, or appears twice in the list is a PROTOCOL_VIOLATION.
 
 **Wanted Start**:
 The group start the subscriber's readers want, plus one; `0` means none.
@@ -2341,6 +2342,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Removed `Subscriber Max Age` from SUBSCRIBE and SUBSCRIBE_UPDATE. Only a Group reached through a live join expires for staleness, under that join's own `Max Age`, measured from the live edge; a Group several joins cover takes the largest, and one any other Range covers has no subscriber limit. A Range whose `Start` is None, a Time, or a Position asks for history: every Group it covers is delivered, bounded only by `Publisher Max Age`.
 - Added a Live Anchor (0x3), a `Start` only, carrying a `Min Age` in milliseconds, the subscriber's target latency: the Range joins at the Group containing the live edge minus it. It also carries a `Max Age`, milliseconds plus one with zero meaning no limit, past which the Groups it reaches are stale; the join never starts at a Group it expired. Each Range joins on its own, so one subscription can join at several lags. A relay places the join only at the Range Start its upstream answered a Range of its own with, the same `Start` and `End`, under a `Max Age` at least as large, answered after the subscriber's Range was added, and otherwise adds such a Range and waits for its answer. A `Start` of None is the oldest Group the publisher holds.
 - Added a retune list to SUBSCRIBE_UPDATE, after the Ranges to add: Range IDs of live joins, each with a new `Max Age`, changed in place without resolving the Range again.
+- Added a Joined Anchor (0x4), a `Start` only: a live join already placed, carrying a Group's start, a frame within it (`0` for the whole Group), and the join's `Max Age`, so a subscriber resuming a live join on a new subscription keeps its `Max Age` without being placed at the live edge again.
 - A relay places a Time `Start` only where it can show its origin would, and otherwise adds a Range from that time to its own subscription and waits for its answer.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups but for a Position `Start`: any other read of part of a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
