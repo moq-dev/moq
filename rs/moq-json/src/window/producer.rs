@@ -457,7 +457,9 @@ mod tests {
 			.unwrap();
 		let mut groups = track.subscribe(None);
 		let mut producer = Producer::<Value>::new(track, Config::default());
-		producer.push(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1)).unwrap();
+		producer
+			.push(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
+			.unwrap();
 
 		let mut inner = producer.inner.lock().unwrap();
 		// Swap in a group its own track's abort already failed, keeping the handle.
@@ -490,7 +492,10 @@ mod tests {
 			// The first group finished; the one the failed write published carries the abort.
 			match read {
 				1 => assert!(matches!(ended, Poll::Ready(Ok(None))), "{ended:?}"),
-				_ => assert!(matches!(ended, Poll::Ready(Err(moq_net::Error::GroupTooLarge))), "{ended:?}"),
+				_ => assert!(
+					matches!(ended, Poll::Ready(Err(moq_net::Error::GroupTooLarge))),
+					"{ended:?}"
+				),
 			}
 		}
 		assert_eq!(read, 2);

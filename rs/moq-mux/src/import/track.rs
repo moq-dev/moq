@@ -1787,7 +1787,10 @@ mod tests {
 		let timestamp = Timestamp::from_micros(1_000).unwrap();
 		import.decode(&keyframe, Some(timestamp)).unwrap();
 		let _finished = import.finish().unwrap();
-		assert_eq!(first_frame(&consumer, "video").await.payload.as_ref(), keyframe.as_slice());
+		assert_eq!(
+			first_frame(&consumer, "video").await.payload.as_ref(),
+			keyframe.as_slice()
+		);
 	}
 
 	/// A keyframe after a pre-picture seek carries the retained init header ahead of its own. The

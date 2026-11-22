@@ -480,7 +480,10 @@ mod tests {
 	fn units_saturate() {
 		let khz = Timescale::new(1_000).unwrap();
 		assert_eq!(units(Duration::from_millis(2_500), khz), 2_500);
-		assert_eq!(units(Duration::new(1, 999_999_999), Timescale::new(1_000_000_000).unwrap()), 1_999_999_999);
+		assert_eq!(
+			units(Duration::new(1, 999_999_999), Timescale::new(1_000_000_000).unwrap()),
+			1_999_999_999
+		);
 		let max = Timescale::new(crate::ID_MAX).unwrap();
 		assert_eq!(units(Duration::MAX, max), u64::MAX);
 	}

@@ -2129,7 +2129,9 @@ fn opus_init(entry_rate: u16) -> (mp4_atom::Dops, Vec<u8>) {
 #[test]
 fn aac_rate_and_channels_come_from_the_esds() {
 	for (profile, rate, channels) in [(2, 96_000, 2), (29, 48_000, 2)] {
-		let asc = crate::codec::aac::Config::new(profile, rate, channels).encode().unwrap();
+		let asc = crate::codec::aac::Config::new(profile, rate, channels)
+			.encode()
+			.unwrap();
 		let mut config = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile }),
 			rate,

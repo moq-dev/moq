@@ -487,7 +487,13 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 				// stream's core, so the codec's own config gives the rate and channels.
 				mp4_atom::Codec::Mp4a(mp4a) => {
 					let malformed = || Error::MalformedAac(track.name.clone());
-					let asc = mp4a.esds.es_desc.dec_config.dec_specific.as_ref().ok_or_else(malformed)?;
+					let asc = mp4a
+						.esds
+						.es_desc
+						.dec_config
+						.dec_specific
+						.as_ref()
+						.ok_or_else(malformed)?;
 					let cfg = crate::codec::aac::Config::parse(&mut asc.raw.as_slice()).map_err(|_| malformed())?;
 					return Ok(DerivedAudio {
 						sample_rate: cfg.sample_rate,
@@ -1101,15 +1107,19 @@ mod test {
 	#[test]
 	fn cmaf_audio_derivation_reads_the_codec_config() {
 		let aac = |profile, rate, channels| {
-			let mut config = hang::catalog::AudioConfig::new(
-				AudioCodec::AAC(hang::catalog::AAC { profile }),
-				rate,
-				channels,
+			let mut config =
+				hang::catalog::AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile }), rate, channels);
+			config.description = Some(
+				crate::codec::aac::Config::new(profile, rate, channels)
+					.encode()
+					.unwrap(),
 			);
-			config.description = Some(crate::codec::aac::Config::new(profile, rate, channels).encode().unwrap());
 			(format!("mp4a.40.{profile}"), config)
 		};
-		let opus = ("opus".to_string(), hang::catalog::AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		let opus = (
+			"opus".to_string(),
+			hang::catalog::AudioConfig::new(AudioCodec::Opus, 48_000, 2),
+		);
 		for (codec, config) in [aac(2, 96_000, 2), aac(29, 48_000, 2), opus] {
 			let mut trak = crate::container::fmp4::synthesize_audio_trak(1, 48_000, &config).unwrap();
 			match &mut trak.mdia.minf.stbl.stsd.codecs[0] {
@@ -1133,7 +1143,11 @@ mod test {
 
 			let catalog = from_msf::<()>(&msf, &moq_net::Path::empty()).expect("CMAF audio should convert");
 			let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
-			assert_eq!((audio.sample_rate, audio.channel_count), (config.sample_rate, 2), "{codec}");
+			assert_eq!(
+				(audio.sample_rate, audio.channel_count),
+				(config.sample_rate, 2),
+				"{codec}"
+			);
 		}
 	}
 
