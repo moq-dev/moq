@@ -3313,9 +3313,10 @@ impl TrackState {
 				if self.oldest_is_stale(&pool) {
 					accrued = accrued.saturating_mul(2);
 				}
-				// The excess bounds what eviction could ever free, keeping a track that
-				// can't pay (everything protected) from hoarding a stale schedule.
-				self.debt = self.debt.saturating_add(accrued).min(pool.excess().unwrap_or(0));
+				// What the pool doesn't pin bounds what eviction could ever free, keeping a
+				// track that can't pay (everything protected) from hoarding a stale schedule.
+				let unpinned = pool.used().saturating_sub(pool.pinned());
+				self.debt = self.debt.saturating_add(accrued).min(unpinned);
 				// Cap each payment at twice what was written so one write never dumps
 				// a deep backlog at once; the remainder carries to the next write.
 				let cap = written.saturating_mul(2);
@@ -3422,9 +3423,12 @@ impl TrackState {
 		if self.debt > 0 && paid < cap {
 			paid = paid.saturating_add(self.shed_drops(cap - paid));
 		}
-		// No cold group left to pay with: shed the front of the groups being read, which could
-		// not go whole. Never the live edge's: the pool pins it, so shedding it frees nothing
-		// toward its target, and its session's budget and the group tail bound it instead.
+		// No cold group left to pay with: shed the front of the groups that could not go
+		// whole, the ones being read and then the live edge, so neither grows without bound.
+		// A finished live edge is pinned instead: it no longer grows, and a new reader starts
+		// from it.
+		let latest = self.latest_group.filter(|latest| self.protects(*latest));
+		fresh.extend(latest);
 		for key in fresh {
 			if self.debt == 0 || paid >= cap {
 				break;
@@ -3433,7 +3437,11 @@ impl TrackState {
 				continue;
 			};
 			for group in slot.copies() {
-				let freed = group.shed(self.debt, cap - paid.min(cap));
+				let budget = cap - paid.min(cap);
+				let freed = match Some(key) == latest {
+					true => group.shed_growing(self.debt, budget),
+					false => group.shed(self.debt, budget),
+				};
 				self.debt -= freed.min(self.debt);
 				paid = paid.saturating_add(freed);
 			}

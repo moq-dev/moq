@@ -285,12 +285,11 @@ impl Pool {
 		self.used().checked_sub(self.target()).filter(|excess| *excess > 0)
 	}
 
-	/// The part of the excess that ending readers would give back to other content: no more
-	/// than the room the capacity leaves beside the pinned bytes. None in a pool held past its
-	/// capacity by what it pins, where the room a reader frees is room nothing may use.
-	pub(super) fn contested(&self) -> u64 {
-		let room = self.inner.capacity.load(Ordering::Relaxed).saturating_sub(self.pinned());
-		self.excess().map_or(0, |excess| excess.min(room))
+	/// What the capacity leaves beside the pinned bytes, for everything the pool may reclaim.
+	/// None in a pool held past its capacity by what it pins, where the room a reader frees by
+	/// ending is room nothing may use.
+	pub(super) fn room(&self) -> u64 {
+		self.inner.capacity.load(Ordering::Relaxed).saturating_sub(self.pinned())
 	}
 
 	/// Change the capacity. `None` makes the pool unbounded.
@@ -1406,17 +1405,23 @@ impl Drop for Bill {
 
 /// The flag bit in a [`Footprint`]'s counts: set while its bytes are its track's live edge.
 const EDGE: u64 = 1 << 63;
+/// The flag bit in a [`Footprint`]'s content: set once its group finished.
+const FINAL: u64 = 1 << 62;
+/// The byte count under a [`Footprint`]'s flags.
+const BYTES: u64 = !(EDGE | FINAL);
 
 /// The bytes one cached group bills, across its [`Charge`] and the [`Extra`]s it hands out
 /// (shared content, inflated copies, codec state), and whether they are its track's live
-/// edge, which the [`Pool`] pins and its session's [`Edges`] bill.
+/// edge, which its session's [`Edges`] bill and the [`Pool`] pins.
 ///
-/// Its content bills the session; its fixed costs, the [`ENTRY_OVERHEAD`] and codec state,
-/// only the pool's pins: those scale with the tracks a session holds, which its stream
+/// Its content bills the session, and is pinned once its group finished: a live edge still
+/// growing sheds its front under pool debt, while a whole one is what a new reader starts
+/// from. Its fixed costs, the [`ENTRY_OVERHEAD`] and codec state, are always pinned and
+/// never bill the session: they scale with the tracks a session holds, which its stream
 /// credit bounds, and shedding can never free them.
 ///
-/// Each count is one atomic holding the flag in its top bit (no group bills 2^63 bytes), so
-/// a byte added while the flag flips is counted exactly once, by whichever came last.
+/// Each count is one atomic holding its flags in its top bits (no group bills 2^62 bytes),
+/// so a byte added while a flag flips is counted exactly once, by whichever came last.
 #[derive(Default)]
 pub(super) struct Footprint {
 	content: AtomicU64,
@@ -1426,36 +1431,58 @@ pub(super) struct Footprint {
 impl Footprint {
 	/// Count `n` more content bytes, returning whether they bill the session.
 	fn add(&self, track: &Track, n: u64) -> bool {
-		let edge = Self::count(&self.content, track, n);
+		let prior = self.content.fetch_add(n, Ordering::Relaxed);
+		let edge = prior & EDGE != 0;
 		if edge {
 			track.edges.add(n);
+		}
+		if prior & (EDGE | FINAL) == EDGE | FINAL {
+			track.pool.pin(n);
 		}
 		edge
 	}
 
 	/// Count `n` fewer content bytes, no more than it holds.
 	fn sub(&self, track: &Track, n: u64) {
-		let taken = Self::uncount(&self.content, track, n);
-		if let Some(taken) = taken {
+		let (prior, taken) = Self::take(&self.content, n);
+		if prior & EDGE != 0 {
 			track.edges.sub(taken);
+		}
+		if prior & (EDGE | FINAL) == EDGE | FINAL {
+			track.pool.unpin(taken);
 		}
 	}
 
 	/// Count `n` more fixed bytes.
 	fn add_fixed(&self, track: &Track, n: u64) {
-		Self::count(&self.fixed, track, n);
+		if self.fixed.fetch_add(n, Ordering::Relaxed) & EDGE != 0 {
+			track.pool.pin(n);
+		}
 	}
 
 	/// Count `n` fewer fixed bytes, no more than it holds.
 	fn sub_fixed(&self, track: &Track, n: u64) {
-		Self::uncount(&self.fixed, track, n);
+		let (prior, taken) = Self::take(&self.fixed, n);
+		if prior & EDGE != 0 {
+			track.pool.unpin(taken);
+		}
+	}
+
+	/// The group finished, so its content no longer grows.
+	fn finish(&self, track: &Track) {
+		let prior = self.content.fetch_or(FINAL, Ordering::Relaxed);
+		if prior & (EDGE | FINAL) == EDGE {
+			track.pool.pin(prior & BYTES);
+		}
 	}
 
 	fn promote(&self, track: &Track) {
 		let prior = self.content.fetch_or(EDGE, Ordering::Relaxed);
 		if prior & EDGE == 0 {
-			track.edges.add(prior);
-			track.pool.pin(prior);
+			track.edges.add(prior & BYTES);
+			if prior & FINAL != 0 {
+				track.pool.pin(prior & BYTES);
+			}
 		}
 		let prior = self.fixed.fetch_or(EDGE, Ordering::Relaxed);
 		if prior & EDGE == 0 {
@@ -1466,39 +1493,27 @@ impl Footprint {
 	fn demote(&self, track: &Track) {
 		let prior = self.content.fetch_and(!EDGE, Ordering::Relaxed);
 		if prior & EDGE != 0 {
-			track.edges.sub(prior & !EDGE);
-			track.pool.unpin(prior & !EDGE);
+			track.edges.sub(prior & BYTES);
+			if prior & FINAL != 0 {
+				track.pool.unpin(prior & BYTES);
+			}
 		}
 		let prior = self.fixed.fetch_and(!EDGE, Ordering::Relaxed);
 		if prior & EDGE != 0 {
-			track.pool.unpin(prior & !EDGE);
+			track.pool.unpin(prior & BYTES);
 		}
 	}
 
-	/// Add `n` to `count`, pinning them while it is the live edge, and return whether it is.
-	fn count(count: &AtomicU64, track: &Track, n: u64) -> bool {
-		let edge = count.fetch_add(n, Ordering::Relaxed) & EDGE != 0;
-		if edge {
-			track.pool.pin(n);
-		}
-		edge
-	}
-
-	/// Take up to `n` from `count`, unpinning them while it is the live edge: what it took
-	/// then, `None` otherwise.
-	fn uncount(count: &AtomicU64, track: &Track, n: u64) -> Option<u64> {
+	/// Take up to `n` from `count`, returning its prior value and what it took.
+	fn take(count: &AtomicU64, n: u64) -> (u64, u64) {
 		let mut taken = 0;
 		let prior = count
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prior| {
-				taken = n.min(prior & !EDGE);
+				taken = n.min(prior & BYTES);
 				Some(prior - taken)
 			})
 			.expect("always updates");
-		if prior & EDGE == 0 {
-			return None;
-		}
-		track.pool.unpin(taken);
-		Some(taken)
+		(prior, taken)
 	}
 }
 
@@ -1769,6 +1784,13 @@ impl Charge {
 		}
 	}
 
+	/// The group finished: pin its content while it is the live edge, which no longer grows.
+	pub(super) fn finish(&self) {
+		if let Some(track) = &self.track {
+			self.footprint.finish(track);
+		}
+	}
+
 	/// Record a cache read: a delivered or fetched group, a frame read, or a
 	/// fetched backfill's birth. `&self` so the read paths can stamp through a
 	/// shared guard without waking parked consumers.
@@ -1880,27 +1902,28 @@ impl Reader {
 		}
 	}
 
-	/// The debt the track's readers owe, up to [`Pool::contested`]: forgiven once nothing
-	/// needs the room any more, as the track forgives its own debt.
+	/// The debt the track's readers owe, forgiven once the pool is back within its target:
+	/// nothing needs the room any more, as the track forgives its own debt.
 	pub(crate) fn debt(&self) -> u64 {
 		let readers = &self.track.readers;
-		let contested = self.track.pool.contested();
-		if contested == 0 {
+		if self.track.pool.excess().is_none() {
 			readers.debt.store(0, Ordering::Relaxed);
 			return 0;
 		}
-		readers.debt.load(Ordering::Relaxed).min(contested)
+		readers.debt.load(Ordering::Relaxed)
 	}
 
 	/// Whether this record is one to end when folding leaves a debt: it bills more than a
-	/// cached group's overhead, so ending it frees more than evicting a group would, and at
-	/// least its readers' average, so a reader holding little never ends for one holding much.
+	/// cached group's overhead, so ending it frees more than evicting a group would, at least
+	/// its readers' average, so a reader holding little never ends for one holding much, and
+	/// the pool has [`Pool::room`], so what ending it frees is room other content may use.
 	pub(super) fn ends(&self) -> bool {
 		let readers = &self.track.readers;
 		let count = readers.count.load(Ordering::Relaxed);
 		self.record
 			&& self.bytes > ENTRY_OVERHEAD
 			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
+			&& self.track.pool.room() > 0
 	}
 }
 
@@ -2331,6 +2354,47 @@ mod test {
 		let mut c = charge(&pool);
 		c.add(1 << 40);
 		assert_eq!(pool.accrue(1 << 40), Some(u64::MAX));
+	}
+
+	/// A live edge pins its fixed costs at once and its content once it finished, moving the
+	/// pins with every byte it or its extras gain or shed, until it is demoted. A pool held past
+	/// its capacity by pins alone has no excess, and no room to give.
+	#[test]
+	fn a_live_edge_pins_what_no_eviction_reclaims() {
+		let pool = bounded(0);
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+
+		let mut charge = track.charge();
+		charge.add(1_000);
+		assert_eq!(pool.pinned(), 0, "not the live edge yet");
+		charge.promote();
+		assert_eq!(pool.pinned(), ENTRY_OVERHEAD, "a growing edge may still shed its content");
+		let extra = charge.extra();
+		extra.add(500);
+		extra.add_state(100);
+		assert_eq!(pool.pinned(), ENTRY_OVERHEAD + 100);
+		charge.finish();
+		assert_eq!(pool.pinned(), ENTRY_OVERHEAD + 1_600);
+		assert_eq!(pool.pinned(), pool.used());
+		assert_eq!(pool.excess(), None, "held past its capacity by pins alone");
+		assert_eq!(pool.room(), 0);
+		assert_eq!(pool.accrue(1_000), None);
+
+		charge.sub(400);
+		extra.sub_state(100);
+		assert_eq!(pool.pinned(), ENTRY_OVERHEAD + 1_100);
+		let mut cold = track.charge();
+		cold.add(200);
+		cold.demote();
+		assert_eq!(pool.excess(), Some(ENTRY_OVERHEAD + 200), "only what eviction can reclaim");
+
+		charge.demote();
+		assert_eq!(pool.pinned(), 0);
+		drop(extra);
+		drop(charge);
+		drop(cold);
+		assert_eq!(pool.used(), 0);
+		assert_eq!(pool.pinned(), 0);
 	}
 
 	/// A live edge bills its session for every byte it holds, its extras included (shared

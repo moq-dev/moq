@@ -444,6 +444,37 @@ mod test {
 		assert!(!record.told(2), "the run given up is still owed");
 	}
 
+	/// A pool held past its capacity by what it pins ends no reader, since what ending one
+	/// frees is room nothing may use, though it still folds what is final. Given room beside
+	/// the pins, the same debt ends it.
+	#[test]
+	fn a_debt_past_the_pins_ends_no_reader() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(0));
+		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+		let mut edge = track.charge();
+		edge.add(1 << 20);
+		edge.promote();
+		edge.finish();
+		let mut record = Record::default();
+		record.delivered.insert(0);
+		record.reported.insert(1..2, Report::Dropped);
+		record
+			.pending
+			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
+		for key in (5..1_000).step_by(2) {
+			record.reported.insert(key..key + 1, Report::Dropped);
+		}
+		record.settle(|| track.clone(), &mut (), None).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), None).unwrap();
+		assert!(record.told(1), "what is final still folds");
+		assert!(!record.failed());
+
+		pool.resize(pool.pinned() + 1);
+		owe(&track, pool.used());
+		assert!(record.settle(|| track.clone(), &mut (), None).is_err());
+	}
+
 	/// Of a track's readers, one holding little never ends for one holding much, nor one
 	/// holding less than a cached group costs.
 	#[test]

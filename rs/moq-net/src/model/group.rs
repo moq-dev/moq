@@ -2382,6 +2382,7 @@ impl Producer {
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let fin = state.next_index;
 		state.outcome = Outcome::Finished(fin, end);
+		state.charge.finish();
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
 		if let Some(flate) = &mut state.flate {
@@ -2790,6 +2791,15 @@ impl Handle {
 		match self.state.write() {
 			Ok(mut state) => state.shed(debt, cap),
 			Err(_) => 0,
+		}
+	}
+
+	/// Shed like [`Self::shed`] while the group still grows: a finished live edge is pinned,
+	/// what a new reader starts from.
+	pub(super) fn shed_growing(&self, debt: u64, cap: u64) -> u64 {
+		match self.state.write() {
+			Ok(mut state) if state.outcome.frames().is_none() => state.shed(debt, cap),
+			_ => 0,
 		}
 	}
 
