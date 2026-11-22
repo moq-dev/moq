@@ -37,9 +37,9 @@ awk 'FNR==1 { print ":" FILENAME } { print " " $0 }' $files |
     | split("\n:")
     | .[]
     | select(. != "")
-    | index("\n") as $nl
-    | .[:$nl] as $file
-    | (.[$nl + 1:] | ltrimstr(" ") | split("\n ") | join("\n")) as $text
+    | split("\n ")
+    | .[0] as $file
+    | (.[1:] | join("\n")) as $text
     | ($file | split("/")[:-1] | join("/")) as $dir
     | ([$crates[] | select(. as $c | $file | startswith($c + "/"))] | max_by(length)) as $crate
     | ($text | test("CARGO_MANIFEST_DIR")) as $manifest

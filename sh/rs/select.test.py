@@ -288,11 +288,12 @@ class SelectTest(unittest.TestCase):
             (repo / "rs/a/src/lib.rs").write_bytes(
                 b'const A: &str = "\x00"; const B: &str = include_str!("../../shared.txt");\n'
                 b":not_a_header\n"
-                b'const D: &str = include_str!("../../tail.txt");'
+                b"\n"
+                b' const D: &str = include_str!("../../tail.txt");'
             )
             (repo / "rs/b/src").mkdir(parents=True)
             (repo / "rs/b/Cargo.toml").write_text('[package]\nname = "b"\n')
-            (repo / "rs/b/src/lib.rs").write_bytes(b'const C: &str = include_str!("../../other.txt");')
+            (repo / "rs/b/src/caf\u00e9.rs").write_bytes(b'const C: &str = include_str!("../../other.txt");')
 
             result = subprocess.run(
                 ["bash", str(ROOT / "sh/rs/reads.sh")],
@@ -305,8 +306,8 @@ class SelectTest(unittest.TestCase):
                 result.stdout.splitlines(),
                 [
                     "rs/a rs/shared.txt rs/a/src/lib.rs:1",
-                    "rs/a rs/tail.txt rs/a/src/lib.rs:3",
-                    "rs/b rs/other.txt rs/b/src/lib.rs:1",
+                    "rs/a rs/tail.txt rs/a/src/lib.rs:4",
+                    "rs/b rs/other.txt rs/b/src/caf\u00e9.rs:1",
                 ],
             )
 
