@@ -24,9 +24,21 @@ const GROUPS: u64 = 8;
 const RESET: u64 = 3;
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	start(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()))
+}
+
+/// An origin that holds its groups for good, where another's cache would expire them.
+fn holding(hop: u64) -> origin::Producer {
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.pool = moq_net::cache::Pool::unbounded();
+	start(config)
+}
+
+fn start(mut config: origin::Config) -> origin::Producer {
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// The FETCHes the relay sent upstream: FETCH's lite stream type is 3, a one-byte varint.
@@ -183,11 +195,7 @@ fn subscribes(pair: &support::harness::MockPair) -> usize {
 async fn a_recovery_outlives_the_finished_subscription() {
 	const TIMEOUT: Duration = Duration::from_secs(10);
 	// The publisher holds its groups for good; the copy's cache expires them.
-	let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
-	config.pool = moq_net::cache::Pool::unbounded();
-	let (publisher, driver) = origin::Producer::new(config);
-	support::harness::spawn(driver);
-	let publisher = publisher.with_proxy(true);
+	let publisher = holding(1);
 	let broadcast = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
 		.broadcast()
@@ -323,14 +331,7 @@ async fn a_relay_start_naming_no_group_costs_no_subscribe_per_key() {
 	const TIMEOUT: Duration = Duration::from_secs(600);
 	// The publisher and the first relay hold their groups for good; the last relay's cache
 	// expires them.
-	let unbounded = |hop| {
-		let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
-		config.pool = moq_net::cache::Pool::unbounded();
-		let (origin, driver) = origin::Producer::new(config);
-		support::harness::spawn(driver);
-		origin.with_proxy(true)
-	};
-	let publisher = unbounded(1);
+	let publisher = holding(1);
 	let broadcast = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
 		.broadcast()
@@ -353,7 +354,7 @@ async fn a_relay_start_naming_no_group_costs_no_subscribe_per_key() {
 		finished.push(group.finish().unwrap());
 	}
 
-	let middle = unbounded(2);
+	let middle = holding(2);
 	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(middle.clone());
