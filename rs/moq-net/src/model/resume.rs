@@ -3213,14 +3213,21 @@ impl Reader {
 		// does one still unanswered, whose ranges are not placed yet.
 		let start = self.groups.0;
 		let budget = self.mirrored.budget();
+		// Each replaced copy's staleness verdict, taken once for the whole walk.
+		let taking: Vec<Option<track::Taking<'_>>> = (self.copies.iter())
+			.map(|copy| match &copy.sub {
+				Sub::Ready(sub) if copy.replaced => Some(sub.taking()),
+				_ => None,
+			})
+			.collect();
 		let drains = |key: u64| {
-			self.copies.iter().any(|copy| {
+			self.copies.iter().zip(&taking).any(|(copy, taking)| {
 				copy.replaced
 					&& copy.done.is_none()
 					&& !copy.expired(budget, waiter)
 					&& copy.start(start) <= key
 					&& copy.end().is_some_and(|end| key < end)
-					&& matches!(&copy.sub, Sub::Ready(sub) if sub.may_take(key))
+					&& taking.as_ref().is_some_and(|taking| taking.may_take(key))
 					&& !copy_failed(&copy.track)
 					&& copy.track.peek_group(key).is_some_and(|group| group.first_frame() == 0)
 			})

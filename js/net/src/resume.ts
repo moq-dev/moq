@@ -1088,6 +1088,10 @@ class Reader implements ResumeSource {
 		// spent its drain budget delivers nothing more, even while a read still leases it, and one
 		// holding a group without its head may give that group up, so neither counts.
 		const cursor = this.#shell.cursor.peek().start;
+		// Each replaced copy's staleness verdict, taken once for the whole walk.
+		const taking = new Map(
+			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.taking(copy.sub)]),
+		);
 		const drains = (key: bigint) =>
 			this.#copies.some(
 				(copy) =>
@@ -1095,7 +1099,7 @@ class Reader implements ResumeSource {
 					this.#feeds(copy) &&
 					(copy.backfill ? cursor : max(cursor, copy.floor ?? 0n)) <= key &&
 					key < (copyEnd(copy) ?? UNBOUNDED) &&
-					hooks.mayTake(copy.sub, key) &&
+					taking.get(copy)?.(key) === true &&
 					!copyFailed(copy) &&
 					hooks.holdsGroup(copy.sub, key, true),
 			);

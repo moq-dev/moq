@@ -4708,14 +4708,18 @@ export class Subscriber {
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
-		hooks.mayTake = (subscriber, key) => {
-			if (!subscriber.#resume) {
-				if (key < subscriber.#nextKey) return false;
-				// Stale under the current budget, it is skipped when reached or already was: only a wider
-				// budget offers it again, and at the track's max age bound none does.
-				if (subscriber.#staleAt(key, subscriber.#drift())) return false;
-			}
-			return subscriber.#nextInRange(key) === key && !subscriber.#delivered.has(key);
+		hooks.taking = (subscriber) => {
+			// One staleness verdict for the whole walk, as the Rust `Subscriber::taking` takes.
+			const drift = subscriber.#resume ? undefined : subscriber.#drift();
+			return (key) => {
+				if (drift) {
+					if (key < subscriber.#nextKey) return false;
+					// Stale under the current budget, it is skipped when reached or already was: only a
+					// wider budget offers it again, and at the track's max age bound none does.
+					if (subscriber.#staleAt(key, drift)) return false;
+				}
+				return subscriber.#nextInRange(key) === key && !subscriber.#delivered.has(key);
+			};
 		};
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
 			subscriber.#state.groups

@@ -8163,6 +8163,35 @@ impl Reserved {
 	}
 }
 
+/// Which groups a subscriber may still hand out, against the staleness verdict it held when
+/// taken; see [`Subscriber::taking`].
+pub(super) struct Taking<'a> {
+	sub: &'a Subscriber,
+	/// `None` while the edge is unknown, which judges nothing stale.
+	drift: Option<Drift>,
+}
+
+impl Taking<'_> {
+	/// Whether the subscriber may still hand out group `key`: its ranges and floor cover it,
+	/// nothing skipped or gave it up, it has not handed it out or passed it, as an ordered read
+	/// passes what lies below where it reads next, and it is not stale under the budget, which
+	/// skips it when reached or already did: only a wider budget offers it again, and at the
+	/// track's max age bound none does.
+	pub fn may_take(&self, key: u64) -> bool {
+		let ahead = match &self.sub.inner {
+			Inner::Plain(cursor) => {
+				cursor.next_key <= key
+					&& self
+						.drift
+						.as_ref()
+						.is_none_or(|drift| !cursor.state.read().is_stale(key, &drift.edge, drift.budget))
+			}
+			Inner::Resume(..) => true,
+		};
+		ahead && self.sub.next_in_range(key) == Some(key) && !self.sub.record().delivered.contains(key)
+	}
+}
+
 /// One poll's view of how far this subscription may drift: the clamped budget and the
 /// live edge to measure a candidate group against. Resolved once, then applied to every
 /// group that poll considers.
@@ -11868,23 +11897,17 @@ impl Subscriber {
 		}
 	}
 
-	/// Whether this subscriber may still hand out group `key`: its ranges and floor cover it,
-	/// nothing skipped or gave it up, it has not handed it out or passed it, as an ordered
-	/// read passes what lies below where it reads next, and it is not stale under the current
-	/// budget, which skips it when reached or already did: only a wider budget offers it again,
-	/// and at the track's max age bound none does.
-	pub(super) fn may_take(&self, key: u64) -> bool {
-		let ahead = match &self.inner {
-			Inner::Plain(cursor) => {
-				cursor.next_key <= key
-					&& match cursor.poll_drift(&cursor.servable, &kio::Waiter::noop()) {
-						Poll::Ready(Ok(drift)) => !cursor.state.read().is_stale(key, &drift.edge, drift.budget),
-						_ => true,
-					}
-			}
-			Inner::Resume(..) => true,
+	/// Which groups this subscriber may still hand out, judged against one staleness verdict
+	/// taken now, so a walk over many keys resolves the edge once; see [`Taking::may_take`].
+	pub(super) fn taking(&self) -> Taking<'_> {
+		let drift = match &self.inner {
+			Inner::Plain(cursor) => match cursor.poll_drift(&cursor.servable, &kio::Waiter::noop()) {
+				Poll::Ready(Ok(drift)) => Some(drift),
+				_ => None,
+			},
+			Inner::Resume(..) => None,
 		};
-		ahead && self.next_in_range(key) == Some(key) && !self.record().delivered.contains(key)
+		Taking { sub: self, drift }
 	}
 
 	/// Whether the publisher declared every start in `groups` skipped, never to be produced
@@ -32085,16 +32108,16 @@ mod test {
 			append_at(&mut producer, millis);
 		}
 		assert_eq!(drain(&mut subscriber), vec![3, 4]);
-		assert!(!subscriber.may_take(0), "handed out");
-		assert!(!subscriber.may_take(1), "skipped as stale under this budget");
-		assert!(subscriber.may_take(5), "not arrived yet");
+		assert!(!subscriber.taking().may_take(0), "handed out");
+		assert!(!subscriber.taking().may_take(1), "skipped as stale under this budget");
+		assert!(subscriber.taking().may_take(5), "not arrived yet");
 
 		subscriber
 			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(10))))
 			.unwrap();
-		assert!(subscriber.may_take(1), "a wider budget offers it again");
+		assert!(subscriber.taking().may_take(1), "a wider budget offers it again");
 		assert_eq!(drain(&mut subscriber), vec![2, 1]);
-		assert!(!subscriber.may_take(1), "handed out");
+		assert!(!subscriber.taking().may_take(1), "handed out");
 	}
 
 	/// Re-offered under a budget the track's max age bounds, a group still stale there is
@@ -32117,8 +32140,8 @@ mod test {
 			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(10))))
 			.unwrap();
 		assert_eq!(drain(&mut subscriber), Vec::<u64>::new(), "still stale at the bound");
-		assert!(!subscriber.may_take(1));
-		assert!(!subscriber.may_take(2));
+		assert!(!subscriber.taking().may_take(1));
+		assert!(!subscriber.taking().may_take(2));
 	}
 
 	/// An ascending subscription gets the re-offer lowest first.

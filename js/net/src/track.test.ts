@@ -5204,14 +5204,14 @@ test("a stale skip may be taken only once the budget widens", () => {
 		stampGroup(producer, key, ms);
 	}
 	expect(drainGroups(subscriber)).toEqual([3n, 4n]);
-	expect(hooks.mayTake(subscriber, 0n)).toBe(false);
-	expect(hooks.mayTake(subscriber, 1n)).toBe(false);
-	expect(hooks.mayTake(subscriber, 5n)).toBe(true);
+	expect(hooks.taking(subscriber)(0n)).toBe(false);
+	expect(hooks.taking(subscriber)(1n)).toBe(false);
+	expect(hooks.taking(subscriber)(5n)).toBe(true);
 
 	subscriber.update({ delay: { max: Duration.millis(10_000) } });
-	expect(hooks.mayTake(subscriber, 1n)).toBe(true);
+	expect(hooks.taking(subscriber)(1n)).toBe(true);
 	expect(drainGroups(subscriber)).toEqual([1n, 2n]);
-	expect(hooks.mayTake(subscriber, 1n)).toBe(false);
+	expect(hooks.taking(subscriber)(1n)).toBe(false);
 	producer.close();
 });
 
@@ -5234,8 +5234,8 @@ test("a stale skip at the max age bound may not be taken", () => {
 
 	subscriber.update({ delay: { max: Duration.millis(10_000) } });
 	expect(drainGroups(subscriber)).toEqual([]);
-	expect(hooks.mayTake(subscriber, 1n)).toBe(false);
-	expect(hooks.mayTake(subscriber, 2n)).toBe(false);
+	expect(hooks.taking(subscriber)(1n)).toBe(false);
+	expect(hooks.taking(subscriber)(2n)).toBe(false);
 	producer.close();
 });
 
