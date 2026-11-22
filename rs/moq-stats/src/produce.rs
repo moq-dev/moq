@@ -774,7 +774,6 @@ impl<V: Serialize> Output<V> {
 	}
 }
 
-/// The node's stats broadcast and its change-detection state.
 /// One root's view of the node's counters: its rows, named relative to the root,
 /// and the publisher of its broadcast.
 struct RootView {
@@ -829,6 +828,7 @@ impl RootView {
 	}
 }
 
+/// The node's stats broadcast and its change-detection state.
 struct NodePublisher {
 	/// The node's route, which owns its broadcast.
 	route: origin::Route,
