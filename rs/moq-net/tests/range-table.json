@@ -105,7 +105,20 @@
 			"copy": [{}],
 			"read": { "ranges": [{ "start": 1000, "end": 2000 }, { "start": { "live": 1000 } }] },
 			"deliver": [1000, 2000, 8000, 9000],
-			"asks": true
+			"asks": true,
+			"known": [
+				{
+					"mode": "chain",
+					"lang": "rs",
+					"quest": "/quest/m2/time-addressing/relayed-live-join-start.md",
+					"why": "a relay whose copy holds the track sends SUBSCRIBE_START before upstream places the join, naming it no start"
+				},
+				{
+					"mode": "relay-warm",
+					"quest": "/quest/m2/time-addressing/relayed-live-join-start.md",
+					"why": "the JavaScript relay's warm copy delivers only the time range's groups"
+				}
+			]
 		},
 		{
 			"name": "a time start between held groups linked by Previous Start is answered from the copy",
