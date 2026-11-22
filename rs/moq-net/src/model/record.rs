@@ -254,9 +254,11 @@ impl Record {
 	/// groups. Not final are the runs given up and not reported yet, and the keys nothing
 	/// settled.
 	///
-	/// A reader that started above its floor, as at a sparse-key track's live edge, never
-	/// settles the keys below its start, so the final stretch from its start folds too, into
-	/// one handed-out and reported run. The keys below stay owed, should its ranges widen.
+	/// A reader that started above its floor, as at a sparse-key track's live edge or its
+	/// oldest group, never settles the keys below its start, so the final stretch from its
+	/// start folds too, into one handed-out and reported run: from where its ranges start, or
+	/// the lowest key it settled when they name none or less. The keys below stay owed, should
+	/// a group arrive there or its ranges widen.
 	fn fold(&mut self, reader: Standing) {
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
@@ -272,7 +274,7 @@ impl Record {
 			}
 			self.rescan = true;
 		}
-		let floor = self.final_end(self.floor, reader.handed);
+		let (floor, _) = self.final_end(self.floor, reader.handed);
 		if floor > self.floor {
 			self.floor = floor;
 			self.delivered.forget_below(floor);
@@ -281,10 +283,11 @@ impl Record {
 			self.pending.remove(0..floor);
 			self.reported.remove(0..floor);
 		}
-		let from = reader.from;
+		let from = reader.from.max(self.lowest_settled().unwrap_or(0));
 		if from > self.floor {
-			let end = self.final_end(from, reader.handed);
-			if end > from {
+			// Folded, the stretch costs two runs: only one spanning more is worth it.
+			let (end, runs) = self.final_end(from, reader.handed);
+			if runs > 2 {
 				let stretch = from..end;
 				self.delivered.insert_run(stretch.clone());
 				self.skipped.forget(stretch.clone());
@@ -294,10 +297,25 @@ impl Record {
 		}
 	}
 
-	/// One past the final stretch starting at `start`: `start` itself when its key is not
-	/// final, or is the group this read hands out.
-	fn final_end(&self, start: u64, handed: Option<u64>) -> u64 {
+	/// The lowest key above the floor that anything settled.
+	fn lowest_settled(&self) -> Option<u64> {
+		[
+			self.delivered.above_gap(),
+			self.skipped.lowest(),
+			self.written_off.iter().next().map(|run| run.start),
+			self.reported.iter().next().map(|(run, _)| run.start),
+		]
+		.into_iter()
+		.flatten()
+		.filter(|key| *key > self.floor)
+		.min()
+	}
+
+	/// One past the final stretch starting at `start`, and how many runs it spans: `start`
+	/// itself when its key is not final, or is the group this read hands out.
+	fn final_end(&self, start: u64, handed: Option<u64>) -> (u64, usize) {
 		let mut end = start;
+		let mut runs = 0;
 		loop {
 			let next = match self.reported.get_key_value(&end) {
 				Some((run, _)) => run.end,
@@ -332,8 +350,9 @@ impl Record {
 				break;
 			}
 			end = next;
+			runs += 1;
 		}
-		end
+		(end, runs)
 	}
 
 	/// End this reader: forget every run, releasing its bill against the debt.
@@ -411,11 +430,11 @@ mod test {
 		assert_eq!(record.untold(0..u64::MAX / 2 + 3), untold);
 	}
 
-	/// A reader that joined above key 0, as at a sparse-key track's live edge, folds the final
-	/// stretch from its start, though nothing settled the keys below it, which stay owed should
-	/// its ranges widen.
+	/// A reader that joined above key 0, as at a sparse-key track's live edge or its oldest
+	/// group, folds the final stretch from the lowest key it settled, though nothing settled
+	/// the keys below it, which stay owed should a group arrive there.
 	#[test]
-	fn a_debt_folds_from_where_the_reader_starts() {
+	fn a_debt_folds_from_the_lowest_key_settled() {
 		let (pool, track) = account();
 		let mut record = Record::default();
 		for key in [1_000, 2_000, 3_000] {
@@ -425,17 +444,9 @@ mod test {
 		record
 			.pending
 			.insert(4_000..4_001, Pending::own(Hole::drop(StreamError::NotFound)));
-		let unstarted = Standing::default();
-		record.settle(|| track.clone(), &mut (), unstarted).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), unstarted).unwrap();
-		assert_eq!(pool.used(), 6 * RUN_OVERHEAD, "a reader owed key 0 folds nothing");
-
-		let started = Standing {
-			from: 1_000,
-			handed: None,
-		};
-		record.settle(|| track.clone(), &mut (), started).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		assert_eq!(
 			pool.used(),
 			2 * RUN_OVERHEAD,
@@ -444,9 +455,39 @@ mod test {
 		assert!(record.delivered.contains(2_500) && record.told(2_500));
 		assert!(
 			!record.delivered.contains(999) && !record.told(999),
-			"below its start stays owed"
+			"below it stays owed"
 		);
 		assert!(!record.told(4_000), "the run still to report stays");
+	}
+
+	/// A reader whose ranges start above a key nothing settled, which it no longer asks for,
+	/// folds the final stretch from where they start.
+	#[test]
+	fn a_debt_folds_from_where_the_reader_starts() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(1_000);
+		for key in [2_000, 3_000] {
+			record.delivered.insert(key);
+			record.reported.insert(key + 1..key + 1_000, Report::Dropped);
+		}
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		assert_eq!(
+			pool.used(),
+			4 * RUN_OVERHEAD,
+			"the lowest key settled starts no stretch"
+		);
+
+		let started = Standing {
+			from: 2_000,
+			handed: None,
+		};
+		record.settle(|| track.clone(), &mut (), started).unwrap();
+		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the stretch, and the key below it");
+		assert!(record.delivered.contains(3_500) && record.told(3_500));
+		assert!(!record.told(1_500), "below its start stays owed");
 	}
 
 	/// The group a read hands out stays above the fold: its publisher has yet to tell its wire
