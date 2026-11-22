@@ -1448,3 +1448,29 @@ test("a held request is unwanted once a direct route takes over", async () => {
 	pool.close();
 	origin.close();
 });
+
+test("a held request is unwanted once its requester gives up the switch", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const id = Instance.random();
+	const serving = origin.claim(Path.from("room"), { instance: { id, epoch: 0n }, cost: 5n });
+	const requester = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await serving.requested().next()).value).serve(source.consume());
+	await requester.broadcast();
+
+	const cheaper = origin.claim(Path.from("room"), { instance: { id, epoch: 0n }, cost: 1n });
+	const held = defined((await cheaper.requested().next()).value);
+	const left = unwanted(held);
+	await settle();
+	expect(left()).toBe(false);
+
+	cheaper.setCost(10n);
+	await settle();
+	expect(left()).toBe(true);
+	requester.close();
+	source.close();
+	cheaper.close();
+	serving.close();
+	origin.close();
+});

@@ -5134,9 +5134,6 @@ impl kio::Task for FrontServe {
 							self.events.push_back(event);
 						}
 						Action::Request { route } => {
-							// Whatever answers this ask, the one it replaces is unwanted: drop
-							// it now, so its claimant learns nobody waits on it.
-							self.upstream = None;
 							// The entry and what it serves.
 							let found = {
 								let table = self.shared.read();
@@ -5213,10 +5210,14 @@ impl kio::Task for FrontServe {
 							}
 							// A request nobody waits on any more is final: its claimant may
 							// already be skipping it, so ask afresh rather than revive it.
-							serve.requests.remove_if(&self.path, |producer| !producer.wanted());
-							let pending = match serve.requests.join(&self.path) {
-								Some(producer) => producer.consume(),
-								None => {
+							// `join` refuses atomically, since its last reader leaves outside
+							// this lock.
+							let pending = match serve.requests.join(&self.path).map(|producer| producer.join()) {
+								Some(Some(consumer)) => consumer,
+								stale => {
+									if stale.is_some() {
+										serve.requests.take(&self.path);
+									}
 									let producer = kio::Producer::<PendingBroadcast>::default();
 									let consumer = producer.consume();
 									match serve.requests.insert(self.path.clone(), producer) {
@@ -5502,6 +5503,15 @@ impl kio::Task for FrontServe {
 							return Poll::Ready(in_flight);
 						}
 					}
+				}
+				// The machine stopped asking the route this request went to, by asking another or
+				// giving the switch up: drop it, so its claimant learns nobody waits on it.
+				if self
+					.upstream
+					.as_ref()
+					.is_some_and(|asked| self.front.asking() != Some(asked.route))
+				{
+					self.upstream = None;
 				}
 				// A staged copy the machine did not splice was refused or is no longer wanted:
 				// let it go, or its source stays subscribed for nobody.
@@ -7342,8 +7352,8 @@ impl Request {
 	/// moved it to another route. Final: a later requester gets a new request.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
-		// Only a front joining under the queue's lock adds a requester, and it never joins
-		// an unwanted request, so once unwanted the count stays at zero.
+		// A front adds a requester only through `kio::Producer::join`, which never takes
+		// the count from zero, so once unwanted it stays so.
 		self.producer.poll_wanted_changed(waiter, true).map(|_| ())
 	}
 }
@@ -14130,6 +14140,28 @@ mod tests {
 			.unwrap();
 		settle(|| unwanted(&request)).await;
 		pending.await.expect("resolves through the direct route");
+	}
+
+	/// A front that gives up a switch without asking anew, because its serving route is
+	/// the best again, leaves the switch's request unwanted.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_front_gives_up_the_switch() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let options = |cost: u64| RouteOptions::default().with_instance(instance(), 0).with_cost(cost);
+		let serving = producer.claim("room", options(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let source = broadcast::Info::new().produce();
+		queued(&serving).await.serve(&source);
+		let _resolved = pending.await.expect("resolves through the serving claim");
+
+		let cheaper = producer.claim("room", options(1)).unwrap();
+		let switch = queued(&cheaper).await;
+		assert!(!unwanted(&switch));
+
+		cheaper.set_cost(10).unwrap();
+		settle(|| unwanted(&switch)).await;
 	}
 
 	/// An answer prepared for a claim that went away is refused, never announced.

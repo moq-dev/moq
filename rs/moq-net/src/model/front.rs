@@ -307,6 +307,11 @@ impl Front {
 		!self.orphans.is_empty()
 	}
 
+	/// The route an upstream request is in flight through, if any.
+	pub(super) fn asking(&self) -> Option<u64> {
+		self.upstream.map(|upstream| upstream.route)
+	}
+
 	/// The route the attached source came through, if any.
 	pub(super) fn serving_route(&self) -> Option<u64> {
 		self.serving.map(|(_, candidate)| candidate.route)
