@@ -254,6 +254,9 @@ pub struct Connection {
 	probe_when_heard: bool,
 	/// When handshake CRYPTO was last recovered ahead of the PTO ([`Self::recover_crypto_early`])
 	early_crypto_sent: Option<Instant>,
+	/// The client acknowledged a Handshake packet carrying our ACK, so it knows we validated its
+	/// address and which of its Handshake packets we lack
+	handshake_ack_heard: bool,
 
 	//
 	// Congestion Control
@@ -386,6 +389,7 @@ impl Connection {
 			heard_since_sent: false,
 			probe_when_heard: false,
 			early_crypto_sent: None,
+			handshake_ack_heard: false,
 
 			app_limited: false,
 			send_rate: None,
@@ -1861,6 +1865,7 @@ impl Connection {
 		for packet in newly_acked.elts() {
 			if let Some(info) = self.spaces[space].sent_packets.remove(packet) {
 				if let Some(acked) = info.largest_acked {
+					self.handshake_ack_heard |= space == SpaceId::Handshake;
 					// Assume ACKs for all packets below the largest acknowledged in `packet` have
 					// been received. This can cause the peer to spuriously retransmit if some of
 					// our earlier ACKs were lost, but allows for simpler state tracking. See
@@ -3225,6 +3230,19 @@ impl Connection {
 			if self.spaces[space].crypto_stream.bytes_read() == read {
 				self.recover_crypto_early(now, Missing::Ours);
 			}
+		} else if space == SpaceId::Handshake
+			&& self.side.is_server()
+			&& self.state.is_handshake()
+			&& !self.handshake_ack_heard
+		{
+			// A client's ACK-only packet before its Finished, such as its answer to our PING. Until
+			// we acknowledge one of its Handshake packets, it cannot declare a lost Finished lost,
+			// and keeps its PTO armed and backed off as if we had not validated its address (RFC
+			// 9002 §6.2.1, §6.2.2.1), which can hold the Finished past a handshake timeout. RFC
+			// 9000 §13.2.1 forbids answering a non-ack-eliciting packet with another, so the ACK
+			// rides with a PING; the exchange ends once the client acknowledges one.
+			self.spaces[space].pending_acks.set_immediate_ack_required();
+			self.spaces[space].ping_pending = true;
 		}
 
 		self.write_crypto();
@@ -4163,6 +4181,12 @@ impl Connection {
 		.ok()?;
 
 		Some(packet.payload.to_vec())
+	}
+
+	/// The largest packet number received in `space`
+	#[cfg(test)]
+	pub(crate) fn largest_received(&self, space: SpaceId) -> u64 {
+		self.spaces[space].rx_packet
 	}
 
 	/// Encrypts `payload` as this connection's next packet in `space`, untracked, so tests can

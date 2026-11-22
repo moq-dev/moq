@@ -4314,6 +4314,62 @@ fn recovered_crypto_precedes_unsent_flight() {
 	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
 }
 
+/// A server lacking the client's Finished acknowledges the client's ACK-only Handshake packet in
+/// an ack-eliciting one, once: a client that only ACKs the server's PING otherwise never learns
+/// its Finished was lost, nor that its address is validated, so its PTO stays backed off (RFC 9002
+/// §6.2.1)
+#[test]
+fn server_acks_client_ack_only_handshake_packet() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	pair.latency = Duration::from_millis(10);
+	let client_ch = pair.begin_connect(client_config());
+	pair.drive_client();
+	// The client's Finished is lost, with everything else it sends until the server's flight is in
+	while !is_connected(pair.client_conn_mut(client_ch)) {
+		pair.drive_server();
+		let arrival = pair.client.inbound.front().map(|(at, ..)| *at);
+		pair.time = min_opt(arrival, pair.server.next_wakeup()).unwrap();
+		pair.client.drive(pair.time, pair.server.addr);
+		pair.client.outbound.clear();
+	}
+	let server_ch = pair.server.assert_accept();
+
+	// The ACKs and PINGs the server sends for a client Handshake packet acknowledging all the
+	// client received and nothing else, as a client that does not re-send its Finished early sends
+	let client_acks = |pair: &mut Pair| {
+		let largest = pair.client_conn_mut(client_ch).largest_received(SpaceId::Handshake);
+		let mut ranges = crate::range_set::ArrayRangeSet::new();
+		ranges.insert(0..largest + 1);
+		let mut ack = Vec::new();
+		frame::Ack::encode(0, &ranges, None, false, &mut ack);
+		let now = pair.time;
+		let packet = pair.client_conn_mut(client_ch).forge_packet(now, SpaceId::Handshake, &ack);
+		pair.server.inbound.push_back((now, None, packet.as_slice().into()));
+		let before = pair.server_conn_mut(server_ch).stats().frame_tx;
+		// Well inside a round trip, past the pacing between the server's packets
+		let deadline = now.saturating_add(Duration::from_millis(5));
+		loop {
+			pair.drive_server();
+			match pair.server.next_wakeup() {
+				Some(wakeup) if wakeup <= deadline => pair.time = pair.time.max(wakeup),
+				_ => break,
+			}
+		}
+		// The client takes in the answer, but anything it sends back is lost
+		pair.time = deadline.saturating_add(pair.latency);
+		pair.client.drive(pair.time, pair.server.addr);
+		pair.client.outbound.clear();
+		let after = pair.server_conn_mut(server_ch).stats().frame_tx;
+		(after.acks - before.acks, after.ping - before.ping)
+	};
+
+	// The server holds no other client packet to acknowledge, so its ACK is of the forged one
+	assert_eq!(client_acks(&mut pair), (1, 1));
+	// Acknowledging that answer ends the exchange
+	assert_eq!(client_acks(&mut pair), (0, 0));
+}
+
 /// A short idle timeout does not cut the handshake to two Initial flights.
 ///
 /// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while
