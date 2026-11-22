@@ -9753,20 +9753,14 @@ mod serve_tests {
 				h.track.finish_shared().unwrap();
 				assert!(matches!(run.await, Some(Served::Track(Ok(())))), "{version}");
 			}
-			// The same reader now watches cancellation while the final marker waits for credit.
+			// The same reader now watches cancellation while the final marker waits for credit,
+			// where a second GOAWAY still closes the session.
 			session.push(&[0x10, 0, 2, 0, 0]);
 			let waiter = &kio::Waiter::noop();
 			assert!(
-				matches!(
-					super::super::request_stream::poll_cancel(
-						&mut stream,
-						&mut finished,
-						&mut goaways,
-						super::super::request_stream::fin_cancels(version),
-						waiter
-					),
-					Poll::Ready(Err(Error::ProtocolViolation))
-				),
+				h.publisher
+					.poll_ended_cancel(&mut stream, &mut finished, &mut goaways, waiter)
+					.is_ready(),
 				"{version}"
 			);
 			assert_eq!(h.log.closes()[0].0, 0x03, "{version}");
