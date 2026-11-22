@@ -627,10 +627,18 @@ function parseTransportParams(buffer: Uint8Array): TransportParams {
 				params.initialMaxStreamDataUni = paramValue;
 				break;
 			case 0x08n:
-				params.initialMaxStreamsBidi = streamCount(paramValue, TransportCode.TRANSPORT_PARAMETER_ERROR, "initialMaxStreamsBidi");
+				params.initialMaxStreamsBidi = streamCount(
+					paramValue,
+					TransportCode.TRANSPORT_PARAMETER_ERROR,
+					"initialMaxStreamsBidi",
+				);
 				break;
 			case 0x09n:
-				params.initialMaxStreamsUni = streamCount(paramValue, TransportCode.TRANSPORT_PARAMETER_ERROR, "initialMaxStreamsUni");
+				params.initialMaxStreamsUni = streamCount(
+					paramValue,
+					TransportCode.TRANSPORT_PARAMETER_ERROR,
+					"initialMaxStreamsUni",
+				);
 				break;
 			case 0x20n:
 				params.maxDatagramFrameSize = paramValue;
@@ -857,7 +865,10 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 	if (frameType === 0x16n) {
 		[v, buffer] = VarInt.decode(buffer);
 		return [
-			{ type: "streams_blocked_bidi", limit: streamCount(v.value, TransportCode.FRAME_ENCODING_ERROR, "STREAMS_BLOCKED") },
+			{
+				type: "streams_blocked_bidi",
+				limit: streamCount(v.value, TransportCode.FRAME_ENCODING_ERROR, "STREAMS_BLOCKED"),
+			},
 			buffer,
 		];
 	}
@@ -866,7 +877,10 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 	if (frameType === 0x17n) {
 		[v, buffer] = VarInt.decode(buffer);
 		return [
-			{ type: "streams_blocked_uni", limit: streamCount(v.value, TransportCode.FRAME_ENCODING_ERROR, "STREAMS_BLOCKED") },
+			{
+				type: "streams_blocked_uni",
+				limit: streamCount(v.value, TransportCode.FRAME_ENCODING_ERROR, "STREAMS_BLOCKED"),
+			},
 			buffer,
 		];
 	}

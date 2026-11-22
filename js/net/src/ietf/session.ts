@@ -40,7 +40,8 @@ export class NativeSession implements Session {
 		try {
 			checkPeerRequestId(id, this.client);
 		} catch (err) {
-			if (err instanceof SessionError) this.#quic.close({ closeCode: err.code, reason: closeReason(err.message) });
+			if (err instanceof SessionError)
+				this.#quic.close({ closeCode: err.code, reason: closeReason(err.message) });
 			throw err;
 		}
 	}

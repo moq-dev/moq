@@ -86,7 +86,13 @@ test("verify refuses unsafe signed payloads without dropping their restrictions"
 		const text = (payload: string) => raw(new TextEncoder().encode(payload));
 		await expect(Key.verify(key, await text('{"publish":[""]}'))).resolves.toMatchObject({ publish: [""] });
 		for (const token of [
-			await raw(new Uint8Array([...new TextEncoder().encode('{"publish":["'), 0xff, ...new TextEncoder().encode('"]}')])),
+			await raw(
+				new Uint8Array([
+					...new TextEncoder().encode('{"publish":["'),
+					0xff,
+					...new TextEncoder().encode('"]}'),
+				]),
+			),
 			await text('{"publish":[""],"publish":["alice"]}'),
 			await text('{"publish":["\\ud800"]}'),
 		]) {
