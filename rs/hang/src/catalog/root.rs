@@ -1735,7 +1735,10 @@ mod test {
 			.insert("audio".into(), AudioConfig::new(Opus, 48_000, 2));
 		catalog.sync.interval = Some(std::time::Duration::from_secs(2));
 		catalog.json.insert("chat", JsonConfig::new(Mode::Stream)).unwrap();
-		catalog.binary.insert("blob", BinaryConfig::new(Mode::Snapshot)).unwrap();
+		catalog
+			.binary
+			.insert("blob", BinaryConfig::new(Mode::Snapshot))
+			.unwrap();
 		catalog.include.insert(
 			"other".into(),
 			crate::catalog::Include::new(moq_net::path::Relative::new("other").unwrap()),
