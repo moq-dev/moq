@@ -19,8 +19,9 @@
 //!
 //! A closed session is named once per neighbour in a fixed-size [`Msg::Dead`], which ends
 //! every route its sender offered through it until the sender offers it again or ends
-//! it. A node names its own session only once every older one to the same relay closed
-//! too, so it never names one below a live session. Per pair of relays a node keeps the
+//! it. A node names its own session only if none it numbered lower to the same relay is
+//! live when it closes; one that closes while such a session lives is never named, and
+//! its routes go as any route change does, so no name covers a live session. Per pair of relays a node keeps the
 //! highest session it knows closed (the session floor), and refuses any path naming that
 //! pair at or below it: a session orders by its node's start and then its number, so a
 //! restart replaces the pair's entry. A floor only refuses stale routes sooner, so a node
@@ -1232,9 +1233,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		// The session is named before any route it carried is withdrawn: a neighbour that
 		// hears only the withdrawal still takes the routes others offer through it.
-		// A floor covers every session of its pair at or below it, so the session is named
-		// only once every older one to the same relay closed too: a newer one closing first
-		// would floor the older, live one, and every route still crossing it.
+		// A floor covers every session of its pair at or below it, so a session closing while
+		// an older one to the same relay lives is never named: its floor would cover the
+		// older, live one, and every route still crossing it. Its routes go by replacement.
 		if let Role::Routing(far) = gone.port.role {
 			let older = (self.peers.values())
 				.any(|peer| peer.session < gone.session && peer.routing().is_some_and(|id| id.relay == far.relay));
@@ -5586,6 +5587,55 @@ mod tests {
 		}
 		router.disconnect(2);
 		assert_eq!(router.kept().closed, 0);
+	}
+
+	/// A relay that restarts under a higher start replaces its pair's floor rather than
+	/// adding one: its new sessions, numbered from 1 again, order above the old start's.
+	#[test]
+	fn a_restart_replaces_the_pairs_floor() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Routing(node(2)));
+		for start in [5, 6] {
+			let through = Hop {
+				node: NodeId {
+					relay: 7,
+					start,
+					marked: false,
+				},
+				session: 1,
+			};
+			let path = vec![
+				Hop {
+					node: node(5),
+					session: 0,
+				},
+				through,
+				Hop {
+					node: node(2),
+					session: 1,
+				},
+			];
+			let offer = Offer {
+				path: path.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 2,
+				marked: false,
+			};
+			let route = Msg::Route {
+				origin: node(5),
+				offer: Some(offer),
+			};
+			router.recv(2, route).unwrap();
+			assert!(router.best(node(5)).is_some(), "start {start} is above every floor");
+			let dead = Msg::Dead {
+				hop: through,
+				far: node(5),
+			};
+			router.recv(2, dead).unwrap();
+			assert_eq!(router.best(node(5)), None, "start {start} closed");
+			assert_eq!(router.kept().closed, 1, "one floor for the pair after start {start}");
+		}
 	}
 
 	/// A relay whose start is below one of its sessions known closed is refused as a

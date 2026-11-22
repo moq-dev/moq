@@ -1356,37 +1356,6 @@ fn a_gateway_takes_no_claim_it_first_hears_unavailable() {
 	}
 }
 
-/// A relay that restarts is a new node, and its neighbours keep no more floors after eight
-/// restarts than after one: each restart replaces the pair's entry or lets it go.
-#[test]
-fn a_session_floor_keeps_an_entry_per_pair_of_relays() {
-	let mut sim = RelaySim::new(5, relay::debounce(HOP));
-	let links = [(0, 1), (1, 2), (0, 2), (0, 3)];
-	for (a, b) in links {
-		sim.link(a, b, 1, Tie::Peer);
-	}
-	// A publisher behind the relay that restarts, so 1 and 2 offer each other routes
-	// through their sessions to it, and name those sessions closed when it goes.
-	sim.client(4);
-	sim.publish(4, 100);
-	sim.link(4, 3, 1, Tie::Peer);
-	sim.claim(4, "live", true);
-	quiesce(&mut sim);
-	let mut kept = Vec::new();
-	for _ in 0..8 {
-		sim.reset(0);
-		quiesce(&mut sim);
-		for peer in [1, 2, 3] {
-			sim.open(0, peer);
-		}
-		quiesce(&mut sim);
-		kept.push(sim.kept().closed);
-	}
-	// Two ways round each link at most.
-	assert!(kept.iter().all(|&pairs| pairs <= 2 * links.len()), "{kept:?}");
-	assert_eq!(kept[0], kept[7], "{kept:?}");
-}
-
 /// A route learned over an upstream link is marked, and a marked route is never sent over
 /// another upstream link. Relay 3 hears two routes of equal rank to relay 0: through 2,
 /// over a link it marked upstream, and through 1, over a peer link. Were the mark below the
