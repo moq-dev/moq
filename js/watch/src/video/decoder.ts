@@ -20,11 +20,14 @@ import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync, Track } from "../sync";
+import { type CcDataEvent, extractCcData } from "./ccdata";
 import { type DecoderConfig, hardwareAcceleration, type PlaybackIdentity, playbackIdentity } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { Recovery } from "./recovery";
 import type { Source } from "./source";
 import { accepted } from "./supported";
+
+export { type CcDataEvent, type CcDataPair, extractCcData } from "./ccdata";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Duration.millis(500);
@@ -52,6 +55,14 @@ type Finish = "read" | "played";
 export type DecoderInput = {
 	/** Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output. */
 	enabled: Getter<boolean>;
+
+	/**
+	 * When true, parse A/53 `cc_data` from each encoded sample (Annex-B or
+	 * length-prefixed AVCC/HVCC) before it is sent to WebCodecs and publish the
+	 * result on {@link Decoder.out.ccData}. Off by default so existing players
+	 * pay no parse cost.
+	 */
+	emitSei?: Getter<boolean>;
 };
 
 /** Constructor properties for {@link Decoder}. */
@@ -129,6 +140,9 @@ export type DecoderOutput = {
 
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
+
+	/** Latest A/53 cc_data from the coded video, when emitSei is on. */
+	ccData: Signal<CcDataEvent | undefined>;
 };
 
 /** Downloads video from a track and decodes it into {@link VideoFrame}s with WebCodecs. */
@@ -153,6 +167,7 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		jitter: new Signal<Duration | undefined>(undefined),
 		buffered: new Signal<Container.BufferedRanges>([]),
+		ccData: new Signal<CcDataEvent | undefined>(undefined),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
@@ -186,6 +201,7 @@ export class Decoder {
 	constructor(props: DecoderProps) {
 		this.in = {
 			enabled: getter(props?.enabled ?? true),
+			emitSei: getter(props?.emitSei ?? false),
 		};
 
 		this.source = props.source;
@@ -354,6 +370,7 @@ export class Decoder {
 			key: { path: broadcast.in.name.peek(), id: track },
 			catalog: broadcast.out.catalog,
 			predecessor,
+			emitSei: this.in.emitSei ?? getter(false),
 		});
 		this.#selection.set({ kind: "selected", rendition });
 		// Whether the rendition is still waiting to replace the active one: neither promoted nor failed.
@@ -406,6 +423,7 @@ export class Decoder {
 		if (!active) {
 			// Clear stale data when disabled (e.g. paused or not visible).
 			this.#out.buffered.set([]);
+			this.#out.ccData.set(undefined);
 			this.#spread.set(undefined);
 			return;
 		}
@@ -442,6 +460,7 @@ export class Decoder {
 			});
 		});
 		effect.proxy(this.#out.buffered, active.buffered);
+		effect.proxy(this.#out.ccData, active.ccData);
 		effect.proxy(this.#spread, active.spread);
 	}
 
@@ -578,6 +597,7 @@ interface RenditionProps {
 	// The rendition's feedback counters, under `key`: its ID in the catalog it was selected from.
 	tally: Tally;
 	key: Key;
+	emitSei: Getter<boolean>;
 }
 
 /** One rendition's playback through one WebCodecs decoder. */
@@ -594,6 +614,8 @@ class Rendition {
 	stats: Signal<Stats | undefined>;
 	tally: Tally;
 	key: Key;
+	emitSei: Getter<boolean>;
+	ccData = new Signal<CcDataEvent | undefined>(undefined);
 	timestamp = new Signal<Duration | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
@@ -656,6 +678,7 @@ class Rendition {
 		this.stats = props.stats;
 		this.tally = props.tally;
 		this.key = props.key;
+		this.emitSei = props.emitSei;
 		this.#delay = new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max }));
 		this.#predecessor = props.predecessor;
 
@@ -1030,6 +1053,7 @@ class Rendition {
 
 	// Feed `frame` to the codec, noting the newest timestamp it holds.
 	#submit(decoder: VideoDecoder, frame: Container.ReceivedFrame): void {
+		this.#maybeEmitSei(frame);
 		this.#submitted = this.#submitted?.max(frame.timestamp) ?? frame.timestamp;
 		decoder.decode(
 			new EncodedVideoChunk({
@@ -1038,6 +1062,14 @@ class Rendition {
 				timestamp: frame.timestamp.asMicros(),
 			}),
 		);
+	}
+
+	#maybeEmitSei(frame: Container.ReceivedFrame): void {
+		if (!this.emitSei.peek()) return;
+		const codec = this.config.codec.startsWith("hev") || this.config.codec.startsWith("hvc") ? "hevc" : "avc";
+		const pairs = extractCcData(frame.payload, codec);
+		if (!pairs.length) return;
+		this.ccData.set({ timestamp: frame.timestamp, pairs, payloadBytes: frame.payload.byteLength });
 	}
 
 	// Whether a picture at `timestamp` is behind the one already rendered.
