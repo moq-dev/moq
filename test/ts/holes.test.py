@@ -203,6 +203,62 @@ class LegacyTimestamps(unittest.TestCase):
         self.assertEqual(self.grade("h264", source, [t - 1 for t in source]), 1)
 
 
+class Tables(unittest.TestCase):
+    SOURCE = {1: holes.Program(0x1000, 0x100, ["0x100", "0x101"]), 2: holes.Program(0x1001, 0x102, ["0x102", "0x103"])}
+
+    def test_one_program_as_the_source_carries_it(self):
+        # The export may write its own PMT PID: the PAT entry is what names it.
+        capture = {2: holes.Program(0x1000, 0x102, ["0x102", "0x103"])}
+        self.assertEqual(holes.tables(capture, self.SOURCE, 2), [])
+
+    def test_the_other_program_too(self):
+        self.assertEqual(len(holes.tables(self.SOURCE, self.SOURCE, 2)), 1)
+
+    def test_another_program(self):
+        self.assertEqual(len(holes.tables({1: self.SOURCE[1]}, self.SOURCE, 2)), 1)
+
+    def test_another_pcr_pid(self):
+        capture = {2: holes.Program(0x1001, 0x103, ["0x102", "0x103"])}
+        self.assertEqual(len(holes.tables(capture, self.SOURCE, 2)), 1)
+
+    def test_a_lost_stream(self):
+        capture = {2: holes.Program(0x1001, 0x102, ["0x102"])}
+        self.assertEqual(len(holes.tables(capture, self.SOURCE, 2)), 1)
+
+
+class Join(unittest.TestCase):
+    def grade(self, first: int, *flags: str) -> int:
+        def stream(pts):
+            return holes.Stream(
+                {"codec_name": "h264", "time_base": "1/90000"},
+                pts,
+                pts,
+                [True] * len(pts),
+                tuple(Fraction(t, 90_000) for t in (pts[0], pts[-1], pts[-1])),
+            )
+
+        source = [i * 3600 for i in range(500)]
+        with (
+            patch.object(holes, "probe", side_effect=[{"0x102": stream(source[first:])}, {"0x102": stream(source)}]),
+            patch.object(holes, "programs", return_value={2: holes.Program(0x1001, 0x102, ["0x102"])}),
+            patch.object(sys, "argv", ["holes.py", "capture.ts", "source.ts", *flags]),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as exit,
+        ):
+            holes.main()
+        return exit.exception.code
+
+    def test_a_late_export_starts_by_its_join(self):
+        # 10 s in, at 25 frames a second.
+        self.assertEqual(self.grade(250, "--program", "2"), 1)
+        self.assertEqual(self.grade(250, "--program", "2", "--join", "8"), 0)
+        self.assertEqual(self.grade(250, "--program", "2", "--join", "6"), 1)
+
+    def test_join_needs_a_program(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.grade(0, "--join", "8"), 2)
+
+
 class Probe(unittest.TestCase):
     def test_audio_starting_past_the_default_probe(self):
         # Intra-only video ahead of an MP2 stream that starts 3 s in, past FFmpeg's default 5 MB

@@ -138,6 +138,15 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # The same multiplex split into a broadcast per program, and one program exported late:
+      # it must start within 3 s, carry that program alone, and lose nothing once joined.
+      - name: TS late join to one program of an MPTS
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --mpts --program 2 --join 5
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
       # so the export has to spread it over the slots before its DTS and still keep
       # the constant-rate schedule.
