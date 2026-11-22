@@ -109,7 +109,7 @@ export type TrackInfoOptions = {
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
-export function subscribed(delay: Delay, ranges?: readonly Net.Track.Range[]): Pick<Net.Track.Subscription, "delay" | "ranges">;
+export function subscription(delay: Delay, subscription?: Net.Track.Subscription): Net.Track.Subscription;
 
 export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
 ```

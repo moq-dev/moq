@@ -372,7 +372,11 @@ impl Delay {
 		subscription: moq_net::track::Subscription,
 	) -> moq_net::track::Subscription {
 		use moq_net::track::Start;
-		let starts: Vec<_> = subscription.ranges.iter().map(|range| (range.start, range.end)).collect();
+		let starts: Vec<_> = subscription
+			.ranges
+			.iter()
+			.map(|range| (range.start, range.end))
+			.collect();
 		let mut updated = self.subscription(subscription);
 		for (range, (start, end)) in updated.ranges.iter_mut().zip(starts) {
 			if start != Start::Oldest {

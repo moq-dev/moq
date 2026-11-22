@@ -3959,7 +3959,12 @@ mod tests {
 		assert_eq!(probes, [], "the kept demand range answers the join");
 
 		// Hidden by an oldest range, it is retired, so the join is asked by a probe.
-		let (probes, _) = join_probes(Some(&sub), &[join], &[lite::Range { start: None, end: None }], Duration::MAX);
+		let (probes, _) = join_probes(
+			Some(&sub),
+			&[join],
+			&[lite::Range { start: None, end: None }],
+			Duration::MAX,
+		);
 		assert_eq!(probes, [probe], "the retired demand range answers nothing");
 	}
 
