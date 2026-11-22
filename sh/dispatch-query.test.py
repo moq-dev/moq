@@ -553,12 +553,21 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(run(fail=True), rust)
         self.assertEqual(run(), {"rs test-changed"})
         self.assertEqual(run(), set())
-        # A file outside the module's pattern, or a dispatcher control, leaves
-        # it skipped; a file inside, any other variable, or a tool replaced in
-        # place runs it again.
-        self.change("quest/m1/example.md")
-        # Each run differs from the one before it in one way only.
+        # Each run differs from the one before it in one way only. Committing
+        # changes no file, and a dispatcher control steers no phase.
+        self.git("add", "-A")
+        self.git("commit", "-qm", "work")
         self.assertEqual(run(CHECK_JOBS="1"), set())
+        # A file anywhere in the tree runs every phase again, even one that no
+        # pattern selects rs by: moq-net's tests run test/interop's scripts,
+        # which import js/. The second edit leaves the diff's paths as they
+        # were, so only the file's content changed.
+        self.change("js/net/src/index.ts")
+        self.assertEqual(run(), rust)
+        self.assertEqual(run(), set())
+        self.change("js/net/src/index.ts")
+        self.assertEqual(run(), rust)
+        # So does any other variable, or a tool replaced in place.
         self.assertEqual(run(zig="# upgraded\n"), {"rs cross-lint-changed"})
         self.assertEqual(run(), {"rs cross-lint-changed"})
         self.assertEqual(run(RUSTFLAGS="-Dwarnings"), rust)
@@ -571,9 +580,6 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(run("ci", CI_STRICT="1"), rust)
         self.assertEqual(run(GITHUB_ACTIONS="true"), rust)
         self.assertEqual(run(), set())
-        # A file the lint reads without selecting rs reruns only rs.
-        self.change("doc/lib/py/index.md")
-        self.assertEqual(run(), {"rs lint-changed", "rs test-changed"})
         # A failure forgets the pass, under CHECK_RERUN and `just ci` alike,
         # while CHECK_RERUN still records the phases that passed.
         self.assertEqual(run(fail=True, CHECK_RERUN="1"), rust)

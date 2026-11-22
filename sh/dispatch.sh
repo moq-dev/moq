@@ -81,14 +81,12 @@ fi
 #   alone           Its lane runs with no other lane beside it, so it waits for
 #                   the rest.
 #   fix             `just fix` runs it too; check and ci run every module.
-#   memo[=REGEX]    A local check skips a phase of it that passed before in this
-#                   worktree when every file its pattern or REGEX matches, the
-#                   slice of the diff that selects it, its tools, and the
-#                   environment are unchanged. REGEX names what a phase reads
-#                   that should not select the module, such as the doc pages a
-#                   lint checks against. It is for modules that cost minutes
-#                   even on a rerun: Rust's tests, and its builds once mbx
-#                   evicts an idle worktree's target directory.
+#   memo            A local check skips a phase of it that passed before in this
+#                   worktree when no file in the working tree, nor the diff, its
+#                   tools, or the environment, changed since (see memo_key). It
+#                   is for modules that cost minutes even on a rerun: Rust's
+#                   tests, and its builds once mbx evicts an idle worktree's
+#                   target directory.
 declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=() memo=()
 checks=()
 fixes=()
@@ -105,8 +103,7 @@ module() {
             lane=*) lane[$name]=${option#lane=} ;;
             alone) solo=1 ;;
             fix) fixes+=("$name") ;;
-            memo) memo[$name]= ;;
-            memo=*) memo[$name]=${option#memo=} ;;
+            memo) memo[$name]=1 ;;
             *)
                 echo "error: module $name has an unknown option '$option'" >&2
                 exit 2
@@ -114,10 +111,6 @@ module() {
         esac
     done
     [[ -z "$solo" ]] || alone[${lane[$name]:-$name}]=1
-    if [[ -v "memo[$name]" && -z "${scope[$name]}" ]]; then
-        echo "error: module $name takes memo but matches every path" >&2
-        exit 2
-    fi
 }
 
 # maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other bindings
@@ -140,8 +133,7 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # last: the relay's configs, unit, and NixOS module, the scripts the tests
 # run, and the vectors the tests share with JS and the docs.
 module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/(nextest|hakari)\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
-    tools='cargo jq cc' compiles='check fix' fix \
-    memo='^(doc/lib/[^/]+/index\.md|\.github/workflows/[^/]+\.yml)$'
+    tools='cargo jq cc' compiles='check fix' fix memo
 # Clippy for macOS and Windows over rs's selection, so a platform-gated error
 # fails here rather than in the nightly native lanes. The flake pins its
 # toolchain and the zig that compiles its build scripts' C, so a change there
@@ -607,24 +599,25 @@ snapshot() (
     GIT_INDEX_FILE=$index git write-tree
 )
 
-# A hash of what one phase of a module reads, from a snapshot: the files its
-# pattern matches with the slice of the diff that selected it, the scripts that
-# orchestrate it, its tools, and the environment. Every exported variable counts
-# but the shell's and systemd's per-run bookkeeping (`quest gate` runs a command
-# as a systemd unit) and the dispatcher's own CHECK_* controls, so an unforeseen
-# one that steers a build or a test can only cost a rerun.
+# A hash of everything one phase of a module could read, from a snapshot: the
+# whole working tree, not the files its pattern matches, since a phase reads
+# more than selects it (moq-net's unit tests run test/interop's scripts, which
+# import js/), and no list of those reads stays complete. Beside the tree: the
+# diff, which picks the crates a phase covers, its tools, and the environment.
+# Every exported variable counts but the shell's and systemd's per-run
+# bookkeeping (`quest gate` runs a command as a systemd unit) and the
+# dispatcher's own CHECK_* controls, so an unforeseen one that steers a build or
+# a test can only cost a rerun. Ignored files are left out: what they hold, such
+# as node_modules, follows from tracked ones like bun.lock.
 memo_key() (
     set -e
     phase=$1 module=$2 tree=$3
     {
-        echo "$phase $module ${all:+all}"
-        [[ -n "$all" ]] || grep -E "${scope[$module]}" "$changed" || (($? == 1))
-        git ls-tree -r "$tree" -- justfile sh/dispatch.sh sh/changed.sh
+        echo "$phase $module $tree ${all:+all}"
+        [[ -n "$all" ]] || cat "$changed"
         grep -Ev '^declare -x (PWD|OLDPWD|SHLVL|_|INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_EXEC_PID|MANAGERPID|CHECK_[A-Za-z0-9_]*)(=|$)' <<<"$inherited"
         read -ra list <<<"${tools[$module]}"
         tool_identity "${list[@]}"
-        git -c core.quotePath=false ls-tree -r --format='%(path)%x09%(objectname)' "$tree" |
-            PATTERN=${scope[$module]} EXTRA=${memo[$module]} awk -F '\t' '$1 ~ ENVIRON["PATTERN"] || (ENVIRON["EXTRA"] != "" && $1 ~ ENVIRON["EXTRA"])'
     } | git hash-object --stdin
 )
 
