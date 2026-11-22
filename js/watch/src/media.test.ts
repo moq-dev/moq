@@ -48,6 +48,16 @@ test("media joins live, with its delay on the initial subscription and later upd
 		ranges: live,
 	});
 
+	// A new min moves no join: the range resolves once, and placing it anew would skip media
+	// buffered behind the new start.
+	delay.set({ min: Duration.millis(300), max: Duration.millis(500) });
+	await flush();
+	expect(updates.at(-1)).toEqual({
+		priority: 7,
+		delay: { max: Duration.millis(500) },
+		ranges: live,
+	});
+
 	effect.close();
 });
 

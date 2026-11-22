@@ -847,9 +847,14 @@ impl Copy {
 	fn ask_whole(&mut self, reader: &Mirrored) {
 		let mut wire = reader.wire(self.floor, self.end(), &self.resolved);
 		wire.resume = self.resume;
+		// Each live join as the reader added it, keyed by position as replaced, noted before the
+		// copy's window places it: rekeying below carries it to the reader's own keys.
+		let since = (0..)
+			.zip(reader.ranges.keys())
+			.filter_map(|(position, key)| Some((position, *reader.since.get(key)?)));
 		let _ = match &mut self.sub {
-			Sub::Pending(pending) => pending.update(wire),
-			Sub::Ready(sub) => sub.update(wire),
+			Sub::Pending(pending) => pending.update(wire).and_then(|_| pending.preferences().stamp(since)),
+			Sub::Ready(sub) => sub.update_stamped(wire, since),
 		};
 		// Keyed by position as replaced: the reader's own keys from then on.
 		let keyed = self
@@ -861,7 +866,6 @@ impl Copy {
 		if !keyed {
 			let _ = self.preferences().rekey(reader.ranges.keys().copied());
 		}
-		self.stamp(reader);
 	}
 
 	/// Take nothing past group `until` from this replaced copy, and ask for nothing past it on
@@ -926,19 +930,16 @@ impl Copy {
 			delay: reader.delay,
 			order: reader.order,
 		};
+		// Each live join as the reader added it, noted before the copy's window places it, so
+		// an answer the copy recorded since places it.
+		let since = reader.since.iter().map(|(key, since)| (*key, *since));
 		let _ = match &mut self.sub {
-			Sub::Pending(pending) => pending.preferences().edit(edit),
-			Sub::Ready(sub) => sub.edit(edit),
+			Sub::Pending(pending) => pending
+				.preferences()
+				.edit(edit)
+				.and_then(|_| pending.preferences().stamp(since)),
+			Sub::Ready(sub) => sub.edit_stamped(edit, since),
 		};
-		self.stamp(reader);
-	}
-
-	/// Note each live join the copy is asked for as the reader added it: see
-	/// [`track::Preferences::stamp`].
-	fn stamp(&self, reader: &Mirrored) {
-		let _ = self
-			.preferences()
-			.stamp(reader.since.iter().map(|(key, since)| (*key, *since)));
 	}
 
 	/// The subscription, once the copy answered. `Err` once it refused.

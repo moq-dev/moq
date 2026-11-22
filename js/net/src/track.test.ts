@@ -5812,6 +5812,41 @@ test("track: readers with the same lag and end share one pending join", () => {
 	}
 });
 
+// A reader asking the same live join with two ranges waits on it once: retiring them one at a time
+// leaves nothing asked. Mirrors moq-net's `a_reader_asking_one_join_twice_withdraws_it_once`.
+test("track: a reader asking one join twice withdraws it once", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	const lag = { start: { live: Duration.millis(2) } };
+	try {
+		const reader = producer.subscribe({ delay: { max: null }, ranges: [lag, lag] });
+		expect(hooks.requested(producer).joins()).toHaveLength(1);
+		reader.update({ delay: { max: null }, ranges: [lag] });
+		expect(hooks.requested(producer).joins()).toHaveLength(1);
+		reader.update({ delay: { max: null }, ranges: [{ start: 9000n }] });
+		expect(hooks.requested(producer).joins()).toEqual([]);
+	} finally {
+		producer.close();
+	}
+});
+
+// Once a copy's end is declared, nothing more is answered: a live join added then places as the
+// groups held measure it, and drains the final groups rather than waiting on an answer.
+test("track: a copy whose end is declared places a live join from its groups", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		putGroup(producer, 1000n, 1000);
+		putGroup(producer, 2000n, 2000);
+		producer.finishAt({ group: 2001n, frame: 0 });
+		const reader = producer.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] });
+		expect(reader.tryRecvGroup()?.start).toBe(2000n);
+		expect(hooks.requested(producer).joins()).toEqual([]);
+	} finally {
+		producer.close();
+	}
+});
+
 // A bounded join its upstream answered empty holds nothing: its start is past its end, so it
 // delivers none of the groups the copy holds or receives later.
 test("track: a bounded join answered empty delivers nothing", () => {

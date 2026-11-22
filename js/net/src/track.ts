@@ -1004,7 +1004,7 @@ let timeAnchors: (producer: Producer) => {
 	joins: ReadonlyMap<string, JoinAnswer>;
 	/**
 	 * Whether a reader's live join places only where the publisher answered a range asking it: a
-	 * lite-07 copy, whose ranges carry each join. See `hooks.answersJoins`.
+	 * lite-07 copy, whose ranges carry each join, until its end is declared. See `hooks.answersJoins`.
 	 */
 	answersJoins: boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
@@ -1612,7 +1612,13 @@ export class Producer {
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
 			joins: producer.#joinAnswers,
-			answersJoins: producer.#answersJoins,
+			// Once the end is declared, nothing more is answered: a join places as the groups held
+			// measure it, as its upstream's would, holding the same final groups. Mirrors the Rust
+			// `TrackState::joins_answered`.
+			answersJoins:
+				producer.#answersJoins &&
+				producer.#state.end.peek() === undefined &&
+				producer.#state.outcome.peek() === undefined,
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -2207,16 +2213,20 @@ export class Producer {
 
 	// Count `times` and `joins` in the wire's aggregate instead of those `sink` counted; see
 	// {@link countAsks}.
-	#countAsks(sink: TrackState, times: readonly (readonly [bigint, number])[], joins: readonly JoinAsk[]): void {
+	// Each counts once however many of the sink's ranges wait on it: the aggregate counts
+	// readers, so a count added once is taken once.
+	#countAsks(sink: TrackState, asked: readonly (readonly [bigint, number])[], asking: readonly JoinAsk[]): void {
 		const same = (a: readonly [bigint, number], b: readonly [bigint, number]) => a[0] === b[0] && a[1] === b[1];
+		const sameJoin = (a: JoinAsk, b: JoinAsk) =>
+			a.min === b.min && a.end === b.end && a.budget === b.budget && a.since === b.since;
+		const times = asked.filter((ask, i) => asked.findIndex((other) => same(other, ask)) === i);
+		const joins = asking.filter((join, i) => asking.findIndex((other) => sameJoin(other, join)) === i);
 		const held = sink.asks;
 		if (times.length !== held.length || !times.every((ask, i) => same(ask, held[i]))) {
 			for (const ask of times) if (!held.some((h) => same(h, ask))) this.#requested.ask(ask[0], ask[1], true);
 			for (const ask of held) if (!times.some((t) => same(t, ask))) this.#requested.ask(ask[0], ask[1], false);
 			sink.asks = [...times];
 		}
-		const sameJoin = (a: JoinAsk, b: JoinAsk) =>
-			a.min === b.min && a.end === b.end && a.budget === b.budget && a.since === b.since;
 		const waiting = sink.joins;
 		if (joins.length === waiting.length && joins.every((join, i) => sameJoin(join, waiting[i]))) return;
 		for (const join of joins) if (!waiting.some((w) => sameJoin(w, join))) this.#requested.join(join, true);

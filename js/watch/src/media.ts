@@ -5,9 +5,10 @@ import type { Effect, Getter } from "@moq/signals";
 
 /**
  * Open a media subscription, joining live at its min delay, with its delay on the initial request
- * and every update. The serving hop starts the live join that far behind the live edge, so a cold
- * join, a replacement, or a fallback arrives with its buffer full rather than replaying the
- * retained backlog.
+ * and its max on every update. The serving hop starts the live join that far behind the live edge,
+ * so a cold join, a replacement, or a fallback arrives with its buffer full rather than replaying
+ * the retained backlog. An update keeps the ranges first subscribed: a changed range resolves
+ * again, which would place the join anew and skip media buffered behind it.
  *
  * @internal
  */
@@ -21,7 +22,12 @@ export function subscribeMedia(
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
-	const subscription = (delay: Container.Delay) => ({ priority: props.priority, ...Container.subscribed(delay) });
+	const { ranges } = Container.subscribed(props.delay.peek());
+	const subscription = (delay: Container.Delay) => ({
+		priority: props.priority,
+		delay: Container.subscribed(delay).delay,
+		ranges,
+	});
 	const subscriber = props.broadcast.track(props.track).subscribe(subscription(props.delay.peek()));
 	effect.cleanup(() => subscriber.close());
 

@@ -9022,13 +9022,27 @@ struct Asked {
 }
 
 impl Asked {
-	/// Count `times` and `joins` instead of those counted now.
+	/// Count `times` and `joins` instead of those counted now, each once however many of the
+	/// window's ranges wait on it: the demand counts readers, so a count added once is taken
+	/// once.
 	fn set(
 		&mut self,
-		times: Vec<(u64, Duration)>,
-		joins: Vec<JoinAsk>,
+		mut times: Vec<(u64, Duration)>,
+		mut joins: Vec<JoinAsk>,
 		subscriptions: impl FnOnce() -> kio::Lock<Subscriptions>,
 	) {
+		fn dedup<T: PartialEq>(items: &mut Vec<T>) {
+			let mut kept = 0;
+			for index in 0..items.len() {
+				if !items[..kept].contains(&items[index]) {
+					items.swap(kept, index);
+					kept += 1;
+				}
+			}
+			items.truncate(kept);
+		}
+		dedup(&mut times);
+		dedup(&mut joins);
 		if times == self.times && joins == self.joins {
 			return;
 		}
@@ -12088,11 +12102,22 @@ impl Subscriber {
 	/// if the track already ended; the update is meaningless at that point and can usually
 	/// be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
+		self.update_stamped(subscription, [])
+	}
+
+	/// [`Self::update`], each live join keyed in `since` noted as added at its tick before the
+	/// window places it: see [`Preferences::stamp`].
+	pub(super) fn update_stamped(
+		&mut self,
+		subscription: Subscription,
+		since: impl IntoIterator<Item = (u64, u64)>,
+	) -> Result<()> {
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
 		channel.update(subscription)?;
+		channel.stamp(since)?;
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
@@ -12113,11 +12138,18 @@ impl Subscriber {
 	/// [`Self::update`] last gave, are keyed by position.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn edit(&mut self, edit: Edit) -> Result<()> {
+		self.edit_stamped(edit, [])
+	}
+
+	/// [`Self::edit`], each live join keyed in `since` noted as added at its tick before the
+	/// window places it: see [`Preferences::stamp`].
+	pub(super) fn edit_stamped(&mut self, edit: Edit, since: impl IntoIterator<Item = (u64, u64)>) -> Result<()> {
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
 		channel.edit(edit)?;
+		channel.stamp(since)?;
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
@@ -17675,6 +17707,63 @@ mod test {
 		producer.answer_join(Duration::from_millis(2), None, Some(9), Duration::MAX);
 		assert_eq!(placed(&mut later), Some(9));
 		assert_eq!(placed(&mut behind), Some(7), "an earlier reader stays where it started");
+	}
+
+	/// A front's copy, edited to add a live join its reader added before the copy's upstream
+	/// answered it, places the join from that answer: the reader's tick is noted before the
+	/// copy's window places the range.
+	#[test]
+	fn a_copy_edited_with_a_readers_tick_places_from_an_earlier_answer() {
+		let lag = Duration::from_millis(2);
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		write_group(&producer, 9);
+		let mut copy = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(None))
+				.with_ranges([Range::groups(9..)]),
+		);
+		assert_eq!(drain_groups(&mut copy), [9]);
+
+		// The reader added its join, then the copy's upstream answered it.
+		let added = demand::join_tick();
+		producer.answer_join(lag, None, Some(9), Duration::MAX);
+		let edit = Edit {
+			retire: Vec::new(),
+			add: vec![(1, Range::from(Start::Live(lag)))],
+			priority: 0,
+			delay: Delay::default().with_max(None),
+			order: Order::default(),
+		};
+		copy.edit_stamped(edit, [(1, added)]).unwrap();
+		assert_eq!(copy.resolved_range(1).map(|resolved| resolved.start), Some(9));
+		assert_eq!(producer.subscription().unwrap_or_default().joins, []);
+	}
+
+	/// A reader asking the same live join with two ranges waits on it once: retiring them one
+	/// at a time leaves nothing asked.
+	#[test]
+	fn a_reader_asking_one_join_twice_withdraws_it_once() {
+		let lag = Range::from(Start::Live(Duration::from_millis(2)));
+		let asked = |producer: &Producer| producer.subscription().unwrap_or_default().joins.len();
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		write_group(&producer, 9);
+
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(None));
+		let mut reader = producer.subscribe(subscription.clone().with_ranges([lag, lag]));
+		assert_eq!(drain_groups(&mut reader), Vec::<u64>::new());
+		assert_eq!(asked(&producer), 1);
+		reader.update(subscription.clone().with_ranges([lag])).unwrap();
+		assert_eq!(drain_groups(&mut reader), Vec::<u64>::new());
+		assert_eq!(asked(&producer), 1, "the other range still waits");
+		reader.update(subscription.with_ranges([Range::groups(9..)])).unwrap();
+		assert_eq!(drain_groups(&mut reader), [9]);
+		assert_eq!(asked(&producer), 0, "no reader waits on it");
 	}
 
 	/// Readers waiting on the same join share its answer, and one waiting with a wider budget
