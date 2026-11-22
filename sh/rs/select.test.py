@@ -137,14 +137,16 @@ class SelectTest(unittest.TestCase):
 
     def test_gate_proves_send_depth_for_net(self):
         # moq-net and its dependencies can deepen the session driver's Send proof.
+        # send-depth runs in parallel with the stable lint steps in its own target dir.
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = [call for call in self.selected(path) if call != "rs c-tests --syntax"]
-                self.assertEqual(len(calls), 4, calls)
-                self.assertTrue(calls[0].startswith("rs lint "), calls)
-                self.assertEqual(calls[1], "rs media-defaults", calls)
-                self.assertEqual(calls[2], "rs no-async", calls)
-                self.assertEqual(calls[3], "rs send-depth", calls)
+                self.assertEqual(calls.count("rs send-depth"), 1, calls)
+                stable = [call for call in calls if call != "rs send-depth"]
+                self.assertEqual(len(stable), 3, stable)
+                self.assertTrue(stable[0].startswith("rs lint "), stable)
+                self.assertEqual(stable[1], "rs media-defaults", stable)
+                self.assertEqual(stable[2], "rs no-async", stable)
         # The script that runs the proof selects moq-net, so an edit to it is proved too.
         self.assertIn("rs send-depth", self.selected("sh/rs/send-depth.sh"))
         # Only the lint phase runs it, so the gate compiles it once.
@@ -154,11 +156,11 @@ class SelectTest(unittest.TestCase):
         self.assertIn("rs send-depth", self.selected("rs/moq-tokio/src/client.rs"))
 
     def test_gate_compiles_c_callers_against_libmoq(self):
-        # libmoq, a crate its header reaches, and the C callers' own inputs.
+        # libmoq, the C callers' own inputs, and workspace-wide changes.
         for path in (
             "rs/libmoq/src/lib.rs",
+            "rs/libmoq/build.rs",
             "rs/libmoq/c-tests/abort-unwanted.c",
-            "rs/moq-net/src/lib.rs",
             "sh/rs/c-tests.sh",
             "doc/lib/c/index.md",
             "doc/lib/samples.sh",
@@ -167,7 +169,11 @@ class SelectTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertRegex(path, dispatch_scope())
                 self.assertEqual(self.selected(path).count("rs c-tests --syntax"), 1)
-        # Only the lint phase runs it, and only for libmoq.
+        # Upstream crate edits cannot alter rs/libmoq/src (where cbindgen reads moq.h),
+        # so they skip the extra libmoq header check while still testing libmoq.
+        self.assertNotIn("rs c-tests --syntax", self.selected("rs/moq-net/src/lib.rs"))
+        self.assertTrue(any("/rs/libmoq#" in call for call in self.selected("rs/moq-net/src/lib.rs", action="test")))
+        # Only the lint phase runs it, and only when libmoq is seeded.
         self.assertNotIn("rs c-tests --syntax", self.selected("rs/libmoq/src/lib.rs", action="test"))
         self.assertNotIn("rs c-tests --syntax", self.selected("rs/moq-auth/src/lib.rs"))
 
