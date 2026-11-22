@@ -1810,6 +1810,28 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// A group the local floor keeps out of where an earlier copy placed a range, below where
+		// the serving copy places it, stays owed: the read does not end without it.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 2,
+					spec: spec(false, Budget::Hour, Some((8, 9)), false),
+				},
+				Op::Bounds {
+					reader: 2,
+					range: Some((1, 9)),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {

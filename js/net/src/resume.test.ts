@@ -1008,6 +1008,112 @@ test("a bounded read through routes ends once its window is read, across a route
 	}
 });
 
+/**
+ * A group of the window under the serving copy's resume point that the local floor keeps out and
+ * the publisher skipped is accounted for: the read ends once the rest is read. Mirrors the Rust
+ * `a_skip_under_the_resume_point_the_local_floor_keeps_out_ends_the_read`.
+ */
+test("a skip under the resume point the local floor keeps out ends the read", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(0n);
+	ta.producer.skipGroups(1n, 2n);
+	ta.write(2n);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 3n }] });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([0n, 2n]);
+		tb.write(3n);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 2n }, end: { excluded: 4n } });
+		await settle();
+		expect(drain(sub)).toEqual([3n]);
+		expect(await isPending(sub.recvGroup())).toBe(false);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+/**
+ * On one route, a group of the window that the local floor keeps out and the publisher skipped is
+ * the serving copy's to account for: the read ends once the rest is read. Mirrors the Rust
+ * `a_skip_under_the_local_floor_ends_a_single_route_read`.
+ */
+test("a skip under the local floor ends a single route read", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	ta.producer.skipGroups(0n, 1n);
+	ta.write(1n);
+	ta.write(2n);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 2n }] })
+		.withRange({ start: { included: 1n }, end: { excluded: 3n } });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([1n, 2n]);
+		expect(await isPending(sub.recvGroup())).toBe(false);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
+/**
+ * With overlapping ranges, a group the publisher skipped above the serving copy's resume point is
+ * accounted for through either range, wherever an earlier copy placed the other. Mirrors the Rust
+ * `a_skip_between_overlapping_placements_ends_the_read`.
+ */
+test("a skip between overlapping placements ends the read", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.producer.skipGroups(0n, 6n);
+	ta.write(6n);
+	const front = new Front();
+	front.serve(a.consume());
+	const ranges = [
+		{ start: 8n, end: 8n },
+		{ start: 0n, end: 8n },
+	];
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([6n]);
+		tb.producer.skipGroups(0n, 6n);
+		front.serve(b.consume());
+		await settle();
+		expect(drain(sub)).toEqual([]);
+		tb.producer.skipGroups(7n, 8n);
+		tb.write(8n);
+		tb.write(9n);
+		await settle();
+		expect(drain(sub)).toEqual([8n]);
+		expect(await isPending(sub.recvGroup())).toBe(false);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a fork continues its open group across a route failure after its parent closes", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();

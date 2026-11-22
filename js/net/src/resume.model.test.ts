@@ -1482,6 +1482,17 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A group the local floor keeps out of where an earlier copy placed a range, below where the
+		// serving copy places it, stays owed: the read does not end without it. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },
+				{ kind: "bounds", reader: 2, range: [1, 9] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {

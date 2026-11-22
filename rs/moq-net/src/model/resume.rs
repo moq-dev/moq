@@ -582,6 +582,7 @@ impl Consumer {
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
+				skipped: Delivered::default(),
 				resumed: None,
 				refused: None,
 				window,
@@ -1172,11 +1173,17 @@ impl Subscriber {
 		Idle::disarm(&mut self.idle);
 	}
 
-	/// Whether this reader's bounded window has nothing left for the readers that handed out
-	/// `taken`, the first of which is its own; see [`Reader::exhausted`].
-	pub(super) fn exhausted(&mut self, taken: &[&Delivered], ordered: bool, waiter: &kio::Waiter) -> bool {
+	/// Whether this reader accounts for every key of `gaps`, which none of the readers that
+	/// handed out `taken` did, the first of which is its own; see [`Reader::accounts`].
+	pub(super) fn accounts(
+		&mut self,
+		taken: &[&Delivered],
+		gaps: &[std::ops::Range<u64>],
+		ordered: bool,
+		waiter: &kio::Waiter,
+	) -> bool {
 		let mut reader = self.reader();
-		!reader.let_go(taken[0], waiter) && reader.exhausted(taken, ordered, waiter)
+		!reader.let_go(taken[0], waiter) && reader.accounts(taken, gaps, ordered, waiter)
 	}
 
 	/// Hand out the group a [`Self::poll_peek_group`] reserved.
@@ -1737,6 +1744,10 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: a switch's boundary is never below it.
 	newest: Option<u64>,
+	/// The keys the reader lacked that a copy declared skipped as it was let go, so a key the
+	/// local floor or cap keeps out under the serving copy's resume point counts as accounted
+	/// for after the copy that knew it is gone; see [`Reader::accounts`].
+	skipped: Delivered,
 	/// Set once the serving copy's resume point may pass over groups the reader lacks: the
 	/// route changed, or the ranges did. Kept until the gaps are backfilled: see
 	/// [`Reader::backfill_gaps`].
@@ -2270,6 +2281,7 @@ impl Reader {
 			waiter,
 		};
 		let mut waits = false;
+		let mut gone = Vec::new();
 		// The serving copy, or one between routes with nothing replacing it yet, stays.
 		self.copies.retain_mut(|copy| {
 			let retains = copy.replaced.then(|| copy.retains(&reader));
@@ -2280,9 +2292,30 @@ impl Reader {
 					waits = true;
 					true
 				}
-				Some(Retains::No) => false,
+				Some(Retains::No) => {
+					gone.push((copy.track.clone(), copy.end()));
+					false
+				}
 			}
 		});
+		// A skip is final, and only that copy may know it: keep what it skipped of the
+		// window's gaps under its bound. Each kept run lies in a gap the reader still lacks.
+		for (track, end) in gone {
+			let end = end.unwrap_or(u64::MAX);
+			let from = self.window.floor().unwrap_or(0).max(delivered.floor());
+			let gaps: Vec<_> = self
+				.window
+				.runs(from)
+				.take_while(|run| *run.start() < end)
+				.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(end)))
+				.collect();
+			for gap in gaps {
+				for run in track.skipped_in(gap).iter() {
+					self.skipped.insert_run(run.clone());
+				}
+			}
+		}
+		self.skipped.forget_below(delivered.floor());
 		waits
 	}
 
@@ -2582,50 +2615,89 @@ impl Reader {
 	}
 
 	/// Whether a bounded window has nothing left to deliver, once no replaced copy may still
-	/// deliver a group under its bound. The serving copy reads every group of the window from
-	/// its resume point, so its cursor judges those: each was handed out (in any of `taken`, or
-	/// by that copy), dropped, skipped as stale, or given up as unfillable. What lies under its
-	/// resume point was the copies' it replaced, each let go once it had nothing more, and a
-	/// backfill still out is not judged yet. A route between copies has nothing to judge.
-	/// `taken` holds the logical readers' records, the reader's own first.
+	/// deliver a group under its bound: every group of the whole window is handed out (in any
+	/// of `taken`, the logical readers' records, the reader's own first) or accounted for, as
+	/// [`Self::accounts`] judges.
 	fn exhausted(&mut self, taken: &[&Delivered], ordered: bool, waiter: &kio::Waiter) -> bool {
-		if self.resumed.is_some() {
-			return false;
-		}
-		let (lowest, cap) = self.groups;
-		let resumed = self.copies.last().and_then(|copy| copy.floor);
 		let window = self.window();
 		let Some(end) = window.end().filter(|_| !window.is_pending()) else {
 			return false;
 		};
-		// A group under the serving copy's resume point that the local floor or cap keeps
-		// out stays owed, as on one cursor, though no copy reads it.
-		if let Some(resumed) = resumed {
-			let until = resumed.min(end);
-			for run in window
-				.runs(window.floor().unwrap_or(0))
-				.take_while(|run| *run.start() < until)
-			{
-				let run = *run.start()..run.end().saturating_add(1).min(until);
-				if Delivered::gaps_in_all(taken, run)
-					.iter()
-					.any(|gap| gap.start < lowest || cap.is_some_and(|cap| gap.end > cap))
-				{
-					return false;
-				}
+		let gaps: Vec<std::ops::Range<u64>> = window
+			.runs(window.floor().unwrap_or(0))
+			.take_while(|run| *run.start() < end)
+			.flat_map(|run| Delivered::gaps_in_all(taken, *run.start()..run.end().saturating_add(1).min(end)))
+			.collect();
+		self.accounts(taken, &gaps, ordered, waiter)
+	}
+
+	/// Whether every key of `gaps`, which none of `taken` handed out, is accounted for.
+	///
+	/// Under the serving copy's resume point, a key the local floor and cap admit was the copies'
+	/// it replaced, each let go once it had nothing more; one they keep out stays owed, as on one
+	/// cursor, unless a copy declares it skipped. The serving copy judges the rest by where it
+	/// placed the reader's ranges itself: a time a copy held no group for places the reader's
+	/// window at the time itself, wider than any group the serving copy reads. A backfill still
+	/// out is not judged yet, and a route between copies has nothing to judge.
+	fn accounts(
+		&mut self,
+		taken: &[&Delivered],
+		gaps: &[std::ops::Range<u64>],
+		ordered: bool,
+		waiter: &kio::Waiter,
+	) -> bool {
+		if self.resumed.is_some() {
+			return false;
+		}
+		let window = self.window();
+		if window.end().is_none() || window.is_pending() {
+			return false;
+		}
+		let (lowest, cap) = self.groups;
+		let serving = self.copies.last().filter(|copy| {
+			Some(copy.generation) == self.generation
+				&& !copy.replaced
+				&& copy.done.is_none()
+				&& matches!(copy.sub, Sub::Ready(_))
+		});
+		let Some(serving) = serving else {
+			return false;
+		};
+		let resumed = serving.floor.unwrap_or(0);
+		// Declared skipped by a copy held now, or by one let go.
+		let skipped = |key: u64| {
+			self.copies
+				.iter()
+				.filter_map(|copy| copy.track.hole_end(key, false))
+				.max()
+		};
+		let mut above = Vec::new();
+		for gap in gaps {
+			let split = resumed.clamp(gap.start, gap.end);
+			// Under the resume point, only what the local floor or cap keeps out.
+			let kept_out = [
+				gap.start..split.min(lowest),
+				cap.map_or(split, |cap| cap.max(gap.start))..split,
+			];
+			let open = kept_out
+				.into_iter()
+				.filter(|run| !run.is_empty())
+				.flat_map(|run| self.skipped.gaps(run))
+				.any(|run| track::first_open(std::iter::once(run.start..=run.end - 1), skipped).is_some());
+			if open {
+				return false;
+			}
+			if split < gap.end {
+				above.push(split..gap.end);
 			}
 		}
-		match self.copies.last_mut() {
-			Some(Copy {
-				generation,
-				replaced: false,
-				done: None,
-				sub: Sub::Ready(sub),
-				floor,
-				..
-			}) if Some(*generation) == self.generation => sub.exhausted_for(taken, *floor, ordered, waiter),
-			_ => false,
-		}
+		let Some(Copy {
+			sub: Sub::Ready(sub), ..
+		}) = self.copies.last_mut()
+		else {
+			unreachable!("the serving copy is ready")
+		};
+		sub.accounts_for(taken, &above, ordered, waiter)
 	}
 
 	/// Whether the track ended, once the serving copy's channel (as `done` reads it) ran
@@ -12371,5 +12443,115 @@ mod test {
 				Event::Cancel,
 			],
 		);
+	}
+
+	/// A group of the window under the serving copy's resume point that the local floor keeps
+	/// out and the publisher skipped is accounted for: the read ends once the rest is read.
+	#[test]
+	fn a_skip_under_the_resume_point_the_local_floor_keeps_out_ends_the_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.skip_groups(1..2);
+		write(&a, 2);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Some(0),
+				end: Some(3),
+			}]);
+		let sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let mut sub = sub;
+		assert_eq!(drain(&mut sub, false), [0, 2]);
+		let b = copy();
+		write(&b, 3);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(2..4);
+		assert_eq!(drain(&mut sub, false), [3]);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// On one route, a group of the window that the local floor keeps out and the publisher
+	/// skipped is the serving copy's to account for: the read ends once the rest is read.
+	#[test]
+	fn a_skip_under_the_local_floor_ends_a_single_route_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		a.skip_groups(0..1);
+		write(&a, 1);
+		write(&a, 2);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Some(0),
+				end: Some(2),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.with_range(1..3);
+		assert_eq!(drain(&mut sub, false), [1, 2]);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// With overlapping ranges, a group the publisher skipped above the serving copy's resume
+	/// point is accounted for through either range, wherever an earlier copy placed the other.
+	#[test]
+	fn a_skip_between_overlapping_placements_ends_the_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		a.skip_groups(0..6);
+		write(&a, 6);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([
+				track::Range {
+					start: Some(8),
+					end: Some(8),
+				},
+				track::Range {
+					start: Some(0),
+					end: Some(8),
+				},
+			]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [6]);
+		let b = copy();
+		b.skip_groups(0..6);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		b.skip_groups(7..8);
+		write(&b, 8);
+		write(&b, 9);
+		assert_eq!(drain(&mut sub, false), [8]);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
 	}
 }
