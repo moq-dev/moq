@@ -126,9 +126,7 @@ printf '  moqsink: fixture\n  moqsrc: fixture\n'
         # Preserve the actual consumer expressions, so a leftover target path fails.
         late_examples = "\n".join(
             '"' + path + '"'
-            for path in sorted(
-                set(re.findall(r"\$(?:EXAMPLES|TARGET_BASE/\$PROFILE)/interop-[\w-]+", runtime))
-            )
+            for path in sorted(set(re.findall(r"\$(?:EXAMPLES|TARGET_BASE/\$PROFILE)/interop-[\w-]+", runtime)))
         )
         self.run_script(
             setup
