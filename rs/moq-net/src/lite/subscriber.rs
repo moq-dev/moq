@@ -10251,7 +10251,8 @@ mod tests {
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
 /// on every version: a time start as the start, from the frame it resumes at (see
 /// [`Subscription::resume`]), and a time end as the exclusive group past it, which lite-07
-/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
+/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]), or before the frame
+/// it is capped at (see [`Subscription::cap`]).
 /// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
@@ -10272,10 +10273,12 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 				_ => Position::group(time),
 			})
 		});
-		let end = range
-			.end
-			.and_then(|time| time.checked_add(1))
-			.map(|end| lite::Anchor::Absolute(Position::group(end)));
+		// A switch caps the copy it replaces where the new one resumes, before a frame of the
+		// group it ends at.
+		let end = range.end.and_then(|time| match subscription.cap {
+			Some(cap) if cap.group == time && cap.frame != 0 => Some(lite::Anchor::Absolute(cap)),
+			_ => Some(lite::Anchor::Absolute(Position::group(time.checked_add(1)?))),
+		});
 		ranges.push(lite::Range { start, end });
 	}
 	(!ranges.is_empty()).then_some(ranges)
@@ -11382,6 +11385,7 @@ impl TrackServe {
 		// A wire without frame bounds asks the group whole.
 		if !self.subscriber.version.has_frame_bounds() {
 			subscription.resume = None;
+			subscription.cap = None;
 		}
 		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
 	}

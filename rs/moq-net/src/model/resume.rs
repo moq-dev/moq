@@ -737,6 +737,10 @@ struct Copy {
 	/// backfill at the groups it fills: nothing past this group is taken from it or asked of
 	/// it. Unset while it serves.
 	until: Option<Option<u64>>,
+	/// The frame of the group at `until` the copy replacing it resumes at, which its wire
+	/// subscription stops before, so the two send none of the group twice; see
+	/// [`Subscription::cap`]. `None` asks the group whole.
+	cap: Option<Position>,
 	/// The group channel ran out: cleanly with how many groups had arrived on the copy by
 	/// then, since one arriving later is still in flight below its end, which a read still
 	/// open takes.
@@ -857,6 +861,7 @@ impl Copy {
 	fn ask_whole(&mut self, reader: &Mirrored) {
 		let mut wire = reader.wire(self.floor, self.end(), &self.resolved);
 		wire.resume = self.resume;
+		wire.cap = self.cap;
 		let _ = match &mut self.sub {
 			Sub::Pending(pending) => pending.update(wire),
 			Sub::Ready(sub) => sub.update(wire),
@@ -874,11 +879,23 @@ impl Copy {
 	}
 
 	/// Take nothing past group `until` from this replaced copy, and ask for nothing past it on
-	/// the wire: the copy replacing it starts there. A cap only narrows what it may deliver,
-	/// so a copy that ran out stays out: reopened, it would be waited on with nothing left to
-	/// wake the reader.
-	fn cap(&mut self, until: u64, reader: &Mirrored) {
-		if self.until.is_some_and(|capped| capped <= Some(until)) {
+	/// the wire, nor past `stop` in it: the copy replacing it starts there. A cap only narrows
+	/// what it may deliver, so a copy that ran out stays out: reopened, it would be waited on
+	/// with nothing left to wake the reader.
+	///
+	/// The rest of the group at `until` comes from the copy replacing it: a read of it here
+	/// stalls at `stop`, and its [`Recover`] moves to that copy.
+	fn cap(&mut self, until: u64, stop: Option<Position>, reader: &Mirrored) {
+		let cap = stop.filter(|stop| stop.group == until && stop.frame != 0);
+		let narrower = match self.until {
+			None => true,
+			Some(None) => false,
+			Some(Some(capped)) => {
+				until < capped
+					|| until == capped && cap.is_some_and(|cap| self.cap.is_none_or(|capped| cap < capped))
+			}
+		};
+		if !narrower {
 			return;
 		}
 		self.until = Some(Some(until));
@@ -887,7 +904,14 @@ impl Copy {
 			let keys = reader.ranges.keys().copied();
 			self.resolved = keyed_resolution(reader.ranges.keys().copied(), sub.resolved_ranges(keys));
 		}
-		self.send(reader, reader.ranges.keys().copied());
+		match cap == self.cap {
+			true => self.send(reader, reader.ranges.keys().copied()),
+			// An edit carries no cap, so a new one is asked whole.
+			false => {
+				self.cap = cap;
+				self.ask_whole(reader);
+			}
+		}
 	}
 
 	/// Read this copy again: one that ran out under the reader's old ranges, budget, or
@@ -1663,6 +1687,7 @@ impl Mirrored {
 			order: self.order,
 			feed: self.feed,
 			resume: None,
+			cap: None,
 			asks: Vec::new(),
 		}
 	}
@@ -2153,9 +2178,16 @@ impl Reader {
 		let returning = returning.map(|index| (self.window().resolved_by_key(), self.copies.remove(index)));
 		match boundary {
 			Some(boundary) => {
+				// The copies it replaces stop the boundary group where the new copy resumes it, so
+				// none of it is sent twice: only when the new copy resumes at the boundary.
+				let floor = (returning.as_ref()).map_or(Some(boundary), |(_, copy)| copy.floor.max(Some(boundary)));
+				let stop = match floor == Some(boundary) {
+					true => self.held_at(floor).map(|(stop, _)| stop),
+					false => None,
+				};
 				for copy in &mut self.copies {
 					copy.replaced = true;
-					copy.cap(boundary, &self.mirrored);
+					copy.cap(boundary, stop, &self.mirrored);
 				}
 			}
 			// Nothing held nor handed out: nothing to split, so the new copy serves it all. Kept
@@ -2171,6 +2203,7 @@ impl Reader {
 			copy.generation = generation;
 			copy.replaced = false;
 			copy.until = None;
+			let capped = copy.cap.take().is_some();
 			copy.since = None;
 			copy.done = None;
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
@@ -2186,9 +2219,9 @@ impl Reader {
 				));
 			}
 			copy.resolved = resolved;
-			match resume == copy.resume {
+			match resume == copy.resume && !capped {
 				true => copy.send(&self.mirrored, self.mirrored.ranges.keys().copied()),
-				// An edit carries no resume, so a new one is asked whole.
+				// An edit carries no resume nor cap, so a new one is asked whole.
 				false => {
 					copy.resume = resume;
 					copy.ask_whole(&self.mirrored);
@@ -2214,6 +2247,7 @@ impl Reader {
 			resolved,
 			replaced: false,
 			until: None,
+			cap: None,
 			done: None,
 			since: None,
 			lease: Arc::new(()),
@@ -3060,7 +3094,11 @@ impl Reader {
 			copy.done = None;
 			copy.backfill |= raised;
 			copy.resolved = resolved;
-			copy.send(&self.mirrored, self.mirrored.ranges.keys().copied());
+			// Widened past the group it stopped partway through, which it now fills whole.
+			match copy.cap.take() {
+				None => copy.send(&self.mirrored, self.mirrored.ranges.keys().copied()),
+				Some(_) => copy.ask_whole(&self.mirrored),
+			}
 			return;
 		}
 		let floor = Some(lowered.start);
@@ -3081,6 +3119,7 @@ impl Reader {
 			// already read, so it is waited for no longer than the reader's budget.
 			replaced: true,
 			until: Some(lowered.end.checked_sub(1)),
+			cap: None,
 			since: Some(track.now()),
 			track,
 			done: None,
@@ -10776,7 +10815,7 @@ mod test {
 			let old = &mut reader.copies[0];
 			old.replaced = true;
 			assert!(old.poll_ready(groups, &kio::Waiter::noop()).is_ready());
-			old.cap(cap - 1, &mirrored);
+			old.cap(cap - 1, None, &mirrored);
 			let window = reader.window();
 			assert_eq!(window.is_settled(), placed.is_some(), "{end:?} capped at {cap}");
 			assert_eq!(window.end(), placed, "{end:?} capped at {cap}");

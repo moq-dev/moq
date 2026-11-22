@@ -53,6 +53,11 @@ pub struct Subscription {
 	/// copy. Only a range whose start is exactly that group's start uses
 	/// it. Aggregated only when every reader resumes: the lowest position then.
 	pub(crate) resume: Option<Position>,
+	/// Where a range ending at that group stops: before this frame, rather than through the
+	/// group's end. A route switch capping the copy it replaces where the new one resumes (see
+	/// [`Self::resume`]). Only a range whose end is exactly that group's start uses it.
+	/// Aggregated only when every reader caps: the highest position then.
+	pub(crate) cap: Option<Position>,
 	/// The time starts a received copy's readers wait on, each with the widest budget one
 	/// waits under: the copy can't prove where the publisher would start them, so its session
 	/// asks its upstream with a range of its own from each. Only an aggregate holds any.
@@ -308,6 +313,7 @@ impl Default for Subscription {
 			order: Order::Descending,
 			feed: false,
 			resume: None,
+			cap: None,
 			asks: Vec::new(),
 		}
 	}
@@ -499,6 +505,7 @@ impl Combined {
 		}
 		combined.feed |= sub.feed;
 		combined.resume = combined.resume.zip(sub.resume).map(|(a, b)| a.min(b));
+		combined.cap = combined.cap.zip(sub.cap).map(|(a, b)| a.max(b));
 	}
 
 	/// The aggregate, or `None` without a subscriber.
