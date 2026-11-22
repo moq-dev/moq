@@ -47,7 +47,7 @@ use super::super::encoder::{Applied, Codec, Config};
 use super::{Backend, Encoded, keyframe_annexb};
 use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::{Surface, interleave_uv};
-use crate::mf::{ComGuard, mf_err, pack_2x32};
+use crate::mf::{ComGuard, Locked, memory_buffer, mf_err, pack_2x32};
 use crate::{Color, Error, Frame};
 
 pub(crate) const NAME: &str = "mediafoundation";
@@ -428,22 +428,16 @@ impl MediaFoundation {
 		let (cw, ch) = (w / 2, h / 2);
 		let len = w * h + 2 * cw * ch;
 
-		let buffer = unsafe { MFCreateMemoryBuffer(len as u32).map_err(|e| mf_err("MFCreateMemoryBuffer", e))? };
-		let mut ptr_out: *mut u8 = ptr::null_mut();
-		unsafe {
-			buffer
-				.Lock(&mut ptr_out, None, None)
-				.map_err(|e| mf_err("lock NV12 buffer", e))?;
+		let buffer = memory_buffer(len)?;
+		{
+			let mut locked = Locked::new(&buffer)?;
+			// Y plane verbatim, then interleave U/V into the NV12 chroma plane.
+			let (y_dst, uv_dst) = locked.data_mut(len)?.split_at_mut(w * h);
+			y_dst.copy_from_slice(i420.y());
+			interleave_uv(i420.u(), i420.v(), uv_dst);
 		}
-		// SAFETY: we wrote `len` bytes' worth via the slice below and hold the lock
-		// until `Unlock`.
-		let nv12 = unsafe { std::slice::from_raw_parts_mut(ptr_out, len) };
-		// Y plane verbatim, then interleave U/V into the NV12 chroma plane.
-		let (y_dst, uv_dst) = nv12.split_at_mut(w * h);
-		y_dst.copy_from_slice(i420.y());
-		interleave_uv(i420.u(), i420.v(), uv_dst);
 		unsafe {
-			let _ = buffer.Unlock();
+			// `memory_buffer` already refused a length past `u32`.
 			buffer
 				.SetCurrentLength(len as u32)
 				.map_err(|e| mf_err("set NV12 length", e))?;
@@ -836,18 +830,7 @@ fn sample_to_bytes(sample: &IMFSample) -> Result<Bytes, Error> {
 			.ConvertToContiguousBuffer()
 			.map_err(|e| mf_err("output contiguous buffer", e))?
 	};
-	let mut ptr_out: *mut u8 = ptr::null_mut();
-	let mut len: u32 = 0;
-	unsafe {
-		buffer
-			.Lock(&mut ptr_out, None, Some(&mut len))
-			.map_err(|e| mf_err("lock output", e))?;
-	}
-	let bytes = Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(ptr_out, len as usize) });
-	unsafe {
-		let _ = buffer.Unlock();
-	}
-	Ok(bytes)
+	Ok(Bytes::copy_from_slice(Locked::new(&buffer)?.data()))
 }
 
 fn clamp_u32(value: u64) -> u32 {
