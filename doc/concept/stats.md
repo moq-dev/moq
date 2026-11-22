@@ -367,6 +367,7 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
     "wire_tx": 2048, "wire_rx": 1024, "credit_stalls": 2, "credit_stalled_us": 350000,
+    "credit_held_readers_us": 120000, "credit_held_evicted_us": 0,
     "routes_refused": 0,
     "routes": {
       "changed": 4, "rewritten": 120,
@@ -417,6 +418,15 @@ or not granting credit, as opposed to loss or congestion. Native QUIC,
 WebTransport, and Rust qmux sessions report them through the same wire counters
 as `wire_tx`; other transports contribute zero. A wait in progress counts up to
 the transport's latest step, at most a keep-alive behind.
+
+`credit_held_readers_us` and `credit_held_evicted_us` are the receiving side of
+the same wait: the microseconds a peer had a connection's whole receive window
+spent while this node evicted nothing to free it. `readers` counts while a
+reader had data it had not looked at yet, or waited behind a gap, so a reader
+running behind holds the window. `evicted` counts while an evicted reader had
+yet to stop its stream, keeping the credit of the bytes it took. A window held
+by a rate cap rather than by readers counts in neither. The same transports
+report them, at the same lag.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
 They never start a session. `expired` counts a verified credential that expired
