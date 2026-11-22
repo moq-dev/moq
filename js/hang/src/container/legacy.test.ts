@@ -129,7 +129,11 @@ test("Legacy Producer moves a picture with the parameter sets a marker moved", a
 	producer.finish();
 
 	// Its End follows the source's 33ms cadence past the last frame, not the moved start's.
-	expect((await groups(subscriber))[2]).toEqual({ start: 33_001n, end: 99_000n, frames: [33_001, 33_001, 66_000, 99_000] });
+	expect((await groups(subscriber))[2]).toEqual({
+		start: 33_001n,
+		end: 99_000n,
+		frames: [33_001, 33_001, 66_000, 99_000],
+	});
 });
 
 test("Legacy Producer refuses an end below a frame of the open group, for every kind", () => {

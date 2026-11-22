@@ -250,7 +250,13 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 		};
 		let group = writer.finish()?;
 		self.group = Some(group);
-		self.written(frame.source, frame.timestamp, frame.duration, frame.size, frame.keyframe);
+		self.written(
+			frame.source,
+			frame.timestamp,
+			frame.duration,
+			frame.size,
+			frame.keyframe,
+		);
 		Ok(())
 	}
 }
@@ -1098,7 +1104,9 @@ where
 			.into());
 		}
 		let key = |timestamp: Option<moq_net::Timestamp>| {
-			timestamp.map(|timestamp| crate::start::key(&self.inner, timestamp)).transpose()
+			timestamp
+				.map(|timestamp| crate::start::key(&self.inner, timestamp))
+				.transpose()
 		};
 		let past_newest = key(self.newest)?.map_or(0, |newest| newest.saturating_add(1));
 		Ok(start.max(past_newest).max(key(self.ended)?.unwrap_or(0)))
