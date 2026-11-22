@@ -2050,6 +2050,22 @@ impl TrackState {
 		}
 	}
 
+	/// Whether `groups` holds a group [`Self::poll_next_in_range`] would hand out.
+	fn walkable(&self, groups: ops::Range<u64>, end_key: Option<u64>, window: &Window) -> bool {
+		if !self.serves_bounded(window) {
+			return false;
+		}
+		window
+			.runs(groups.start)
+			.take_while(|run| *run.start() < groups.end)
+			.any(|run| {
+				self.lookup
+					.range(run)
+					.take_while(|(key, _)| **key < groups.end && super::subscription::before_end(**key, end_key))
+					.any(|(_, slot)| slot.serves_end() || slot.cut().is_some())
+			})
+	}
+
 	/// Find the smallest-key cached group in `window` satisfying
 	/// `next_key <= seq < end_key (if set)`. Used by
 	/// [`Subscriber::next_group`] so the range can be widened (or unset)
@@ -3435,7 +3451,9 @@ impl TrackState {
 		if !self.anchors.received() || self.outcome.is_released() || !self.readable() {
 			return None;
 		}
-		let asked = self.start.key().is_some();
+		// A start still pending at no floor waits on SUBSCRIBE_START: groups arrive newest first,
+		// so the feed may start below the first to arrive.
+		let asked = self.start.key().is_some() || self.start == Start::Pending(None);
 		self.find_landable(groups, asked, self.arrival_grace(), |open, _| {
 			window.clip(open).map(|run| run.start)
 		})
@@ -9627,22 +9645,35 @@ impl Cursor {
 	/// budget, so a read in key order waits for it; see `TrackState::owed`. A budget
 	/// with no deadline waits until the hole resolves: the group lands, or the track learns
 	/// it won't.
-	fn poll_owed(&self, groups: ops::Range<u64>, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<()>> {
+	///
+	/// Ready with `true` once a group the walk found missing from `walked` up has landed:
+	/// groups land on other threads, and one landing after the walk passed its key would
+	/// read as accounted for here, yet never be handed out.
+	fn poll_owed(
+		&self,
+		groups: ops::Range<u64>,
+		walked: u64,
+		drift: &Drift,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<bool>> {
 		if groups.is_empty() {
-			return Poll::Ready(Ok(()));
+			return Poll::Ready(Ok(false));
 		}
 		let window = &self.filter.window;
 		self.poll(waiter, |state| {
+			if state.walkable(walked..groups.end, self.end_key, window) {
+				return Poll::Ready(Ok(true));
+			}
 			// An unjudgeable old gap cannot stand in for a fresh gap above the floor.
 			let floor = groups.start.max(state.cache_floor(drift.budget));
 			if floor >= groups.end {
-				return Poll::Ready(Ok(()));
+				return Poll::Ready(Ok(false));
 			}
 			let Some(owed) = state.owed(floor..groups.end, window) else {
-				return Poll::Ready(Ok(()));
+				return Poll::Ready(Ok(false));
 			};
 			if state.poll_drifted(owed, &drift.edge.servable, drift.budget, None, waiter) {
-				return Poll::Ready(Ok(()));
+				return Poll::Ready(Ok(false));
 			}
 			// The ledger may stop owing it before the budget gives up on it.
 			if let Some(folds) = state.arrivals.folds_at(owed, state.arrival_grace()) {
@@ -10367,7 +10398,10 @@ impl Cursor {
 
 			// In order means a group the live feed still owes below this one comes first,
 			// until the budget gives up on it. Its landing, its drop, or that verdict wakes us.
-			ready!(self.poll_owed(from..group.start, &drift, waiter))?;
+			// One that landed since the walk passed its key goes first: walk again.
+			if ready!(self.poll_owed(from..group.start, floor, &drift, waiter))? {
+				continue;
+			}
 
 			// A group missing its head comes from the fill asked for it, in its turn.
 			let group = match self.lacks_head(&group) {
@@ -19687,6 +19721,32 @@ mod test {
 		assert!(arrival.recv_group().now_or_never().is_none(), "group 0 is owed");
 		elapse(&producer, replay().budget());
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// An ordered read of a copy whose start is pending at no floor waits on the start rather
+	/// than hand out the first group to arrive: groups arrive newest first, so the feed may
+	/// start below it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_waits_on_a_pending_start() {
+		let every = || Subscription::default().with_delay(Delay::default().with_max(None));
+		let mut producer = received_producer(None);
+		producer.request_start(None).unwrap();
+		let mut ordered = producer.subscribe(every()).ordered();
+		put(&producer, 1, None);
+		assert_eq!(items(&mut ordered), ["pending"]);
+		producer.start_at(0).unwrap();
+		assert_eq!(items(&mut ordered), ["pending"], "group 0 is owed");
+		put(&producer, 0, None);
+		assert_eq!(items(&mut ordered), ["group 0", "group 1", "pending"]);
+
+		// A start at the first arrival owes nothing below it.
+		let mut producer = received_producer(None);
+		producer.request_start(None).unwrap();
+		let mut ordered = producer.subscribe(every()).ordered();
+		put(&producer, 1, None);
+		producer.start_at(1).unwrap();
+		assert_eq!(items(&mut ordered), ["group 1", "pending"]);
 	}
 
 	/// A fetched copy of a group the live feed still owes never reaches an arrival-order
