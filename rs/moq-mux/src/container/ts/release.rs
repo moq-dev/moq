@@ -110,8 +110,9 @@ impl Release {
 
 	/// Carry on into `broadcast`, whose `catalog` is subscribed. The same instance's return reads
 	/// its track on after the group last delivered, on the same clock, giving up the rest of the
-	/// group it was reading. Another instance's track replaces the one being read, and its objects
-	/// go out on a new clock once what is queued has.
+	/// group it was reading as a gap, however often it returns before its catalog names the
+	/// track. Another instance's track replaces the one being read, and its objects go out on a
+	/// new clock once what is queued has.
 	pub(super) fn followed(
 		&mut self,
 		broadcast: &moq_net::broadcast::Consumer,
@@ -123,13 +124,14 @@ impl Release {
 		} else {
 			self.source = self.source.switched(broadcast);
 			self.instance = broadcast.info().instance.clone();
+			self.resume = None;
 		}
 		self.catalog = Some(catalog);
-		self.resume = None;
 		if let Some((_, track)) = self.track.take() {
 			self.restarts += track.markers() + u64::from(!same);
 			self.gaps += track.skips() - track.markers();
 			if same {
+				self.gaps += u64::from(track.mid_group());
 				self.resume = Some(track.resume());
 			}
 		}

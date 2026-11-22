@@ -341,9 +341,30 @@ async fn a_follower_carries_a_release_on_into_a_restarted_importer() {
 /// The same instance back a second after its route went, as a relay that lost and regained it
 /// serves it, the source having run on meanwhile: the follower reads on after the last group
 /// delivered, on the same clock. It writes no object twice and skips no group but the one it
-/// was reading, which it gives up as the demultiplexed export does.
+/// was reading, which it gives up as a gap, as the demultiplexed export does.
 #[tokio::test(start_paused = true)]
 async fn a_follower_reads_a_release_on_when_the_same_instance_returns() {
+	same_instance_returns(false).await;
+}
+
+/// The same, with a return in between whose catalog never names the track: the follower keeps
+/// where it stopped for the next.
+#[tokio::test(start_paused = true)]
+async fn a_return_whose_catalog_names_no_track_keeps_the_read_position() {
+	same_instance_returns(true).await;
+}
+
+/// Every object `follower` writes over the next `span`.
+async fn away(span: Duration, released: &mut Vec<Frame>, follower: &mut super::Follower<Ext, Release>) {
+	let until = Instant::now().saturating_add(span);
+	while let Ok(frame) = kio::clock::timeout(until.saturating_duration_since(Instant::now()), follower.next()).await {
+		released.push(frame.unwrap().unwrap());
+	}
+}
+
+/// The first instance serves the capture, unfinished, and returns serving the capture and its
+/// continuation, after a return whose catalog names no track when `flap`.
+async fn same_instance_returns(flap: bool) {
 	let continued = stepped(0, false);
 	let objects: Vec<_> = import(&continued)
 		.await
@@ -367,9 +388,21 @@ async fn a_follower_reads_a_release_on_when_the_same_instance_returns() {
 	}
 
 	drop(gone);
-	let away = Instant::now().saturating_add(Duration::from_secs(1));
-	while let Ok(frame) = kio::clock::timeout(away.saturating_duration_since(Instant::now()), follower.next()).await {
-		released.push(frame.unwrap().unwrap());
+	match flap {
+		false => away(Duration::from_secs(1), &mut released, &mut follower).await,
+		true => {
+			let step = Duration::from_millis(250);
+			away(step, &mut released, &mut follower).await;
+			let options = moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0);
+			let bare = origin.route("live", options).unwrap();
+			let mut catalog = crate::catalog::Producer::new(&mut bare.broadcast().clone(), config()).unwrap();
+			for _ in 0..2 {
+				std::ops::DerefMut::deref_mut(&mut catalog.modify(catalog.next_timestamp()).unwrap());
+			}
+			away(step, &mut released, &mut follower).await;
+			drop((bare, catalog));
+			away(step, &mut released, &mut follower).await;
+		}
 	}
 	let mut back = importing(&origin, &continued, instance);
 	std::ops::DerefMut::deref_mut(&mut back.1.modify(back.1.next_timestamp()).unwrap());
@@ -389,6 +422,7 @@ async fn a_follower_reads_a_release_on_when_the_same_instance_returns() {
 	skipped.dedup();
 	assert!(next > capture, "the return's own groups went out");
 	assert!(skipped.len() <= 1, "groups skipped: {skipped:?}");
+	assert_eq!(follower.export().stats().gaps, skipped.len() as u64, "the gap counted");
 }
 
 /// The capture, then the capture again with its PCRs moved by `step` 90 kHz ticks around the

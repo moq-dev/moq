@@ -481,6 +481,12 @@ impl ExportSource {
 		self.cuts
 	}
 
+	/// Whether a group it began delivering has not ended, so a source resuming after it gives
+	/// up the rest of that group.
+	pub(crate) fn mid_group(&self) -> bool {
+		self.open
+	}
+
 	/// True if the codec config is resolved (either present in the catalog,
 	/// no transform attached, or the transform has built its record).
 	pub fn header_ready(&self) -> bool {
