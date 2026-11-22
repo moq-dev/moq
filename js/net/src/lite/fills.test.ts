@@ -11,6 +11,7 @@ import { Tail } from "../tail.ts";
 import { Timestamp } from "../time.ts";
 import type { FillGroups, Producer } from "../track.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refused } from "./fills.ts";
+import { Version } from "./version.ts";
 
 const enc = new TextEncoder();
 
@@ -78,6 +79,7 @@ function recoveries() {
 		};
 		opened.push(entry);
 		return {
+			groups: () => entry.groups,
 			done,
 			takeRefused: () => soFar.splice(0),
 			changed,
@@ -95,7 +97,7 @@ function recoveries() {
 test("range fills: a fill of more than one group joins the subscription's ranges", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	fills.push(peer.fill);
 	expect(fills.poll(new Tail(), true)).toBe(true);
 	expect(fills.ask.groups).toEqual([{ start: 0n, end: 4n }]);
@@ -111,7 +113,7 @@ test("range fills: a fill of more than one group joins the subscription's ranges
 test("range fills: a stale drop of asked groups is recovered once, on a subscription of its own", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -149,7 +151,7 @@ test("range fills: a stale drop of asked groups is recovered once, on a subscrip
 test("range fills: the last recovery finishing reports the fills empty", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -183,7 +185,7 @@ test("range fills: the last recovery finishing reports the fills empty", async (
 test("range fills: a recovery's refusals stand until the fill reaches them", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -223,7 +225,7 @@ test("range fills: a recovery's refusals stand until the fill reaches them", asy
 test("range fills: a lost wait releases what it listened to", async () => {
 	const peer = await missing();
 	const { recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -274,7 +276,7 @@ test("range fills: a lost wait releases what it listened to", async () => {
 test("range fills: a range start past the asked groups refuses only the fills owing them now", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -312,7 +314,7 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 test("range fills: a recovery the first poll opens asks with the fill's priority", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	// The subscription accounted for groups 1 and 2 before the fill arrived.
 	tail.account(1n, 3n);
@@ -330,7 +332,7 @@ test("range fills: a recovery the first poll opens asks with the fill's priority
 test("range fills: a passing refusal ends with the fills it answered", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -376,7 +378,7 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 test("range fills: a recovery's refusal answers before it is over", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -402,7 +404,7 @@ test("range fills: a recovery's refusal answers before it is over", async () => 
 test("range fills: a recovery's refusal is taken once", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -454,7 +456,7 @@ test("range fills: a recovery's refusal is taken once", async () => {
 test("range fills: an older recovery ending keeps a newer one's coverage", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -514,7 +516,7 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 test("range fills: a stale drop repeated during its recovery waits on it", async () => {
 	const peer = await missing();
 	const { recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);
@@ -535,7 +537,7 @@ test("range fills: a stale drop repeated during its recovery waits on it", async
 test("range fills: a recovery's stream ending wakes the fills", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	fills.push(peer.fill);
 	fills.poll(tail, true);

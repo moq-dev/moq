@@ -103,6 +103,7 @@ import {
 	hasDatagrams,
 	hasDatagramTracks,
 	hasFetchMaxDelay,
+	hasGroupEnd,
 	hasInstance,
 	hasLengthFirst,
 	hasMediaTime,
@@ -2087,28 +2088,26 @@ export class Subscriber {
 		}
 	}
 
-	// Serve the received copy's misses as its request handler, until the copy closes. A lite-07 miss
-	// of more than one group joins the copy's subscription (see `RangeFills`); any other FETCHes its
-	// groups upstream one at a time, newest first for a descending reader, as the Rust
-	// `FillServeRun` does.
+	// Serve the received copy's misses as its request handler, until the copy closes. A miss of more
+	// than one group is asked through a subscription (see `RangeFills`): on lite-07 the copy's own,
+	// and before it one of its own per run. Any other FETCHes its groups upstream one at a time,
+	// newest first for a descending reader, as the Rust `FillServeRun` does.
 	async #runFills(broadcast: Path.Valid, consumed: Consumed, entry: SubscribeEntry): Promise<void> {
 		const producer = entry.track;
 		const requests = producer.requests();
 		const jobs = new Set<Promise<void>>();
-		const fills = hasRanges(this.version)
-			? new RangeFills(producer, (groups, priority) =>
-					this.#recover(broadcast, consumed, entry, groups, priority),
-				)
-			: undefined;
+		const fills = new RangeFills(producer, this.version, (groups, priority) =>
+			this.#recover(broadcast, consumed, entry, groups, priority),
+		);
 		entry.fills = fills;
-		const driving = fills ? this.#driveFills(entry, fills) : undefined;
+		const driving = this.#driveFills(entry, fills);
 		try {
 			// Accepted before its fills run, so this only reads what TRACK_INFO said.
 			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
 			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-				// One group is what FETCH carries; more go through the subscription.
-				if (fills && fill.end - fill.start > 1n) {
+				// One group is what FETCH carries; more go through a subscription.
+				if (fill.end - fill.start > 1n) {
 					fills.push(fill);
 					continue;
 				}
@@ -2118,7 +2117,7 @@ export class Subscriber {
 			}
 		} finally {
 			requests.close();
-			fills?.close();
+			fills.close();
 			await Promise.all([driving, ...jobs]);
 		}
 	}
@@ -2157,21 +2156,32 @@ export class Subscriber {
 		}
 	}
 
-	// Ask `groups` of `copy` again on a lite-07 SUBSCRIBE of their own with no max delay, as the Rust
-	// `Recovery` does: `copy`'s subscription dropped them as stale, or delivered them before and they
-	// were since evicted, so it never sends them again. Its groups land in the copy as a
-	// subscription's do. It FINs once every group is accounted for and read, and is over at the
-	// publisher's FIN in reply, refusing whatever it did not deliver.
+	// Ask `asked` of `copy` on a SUBSCRIBE of their own with no max delay, as the Rust `Recovery`
+	// does: on lite-07 `copy`'s subscription dropped them as stale, or delivered them before and they
+	// were since evicted, so it never sends them again, and before lite-07 every run is asked this
+	// way. Its groups land in the copy as a subscription's do. It FINs once every group is accounted
+	// for and read, and is over at the publisher's FIN in reply, refusing whatever it did not deliver.
 	#recover(
 		broadcast: Path.Valid,
 		consumed: Consumed,
 		copy: SubscribeEntry,
-		groups: Run,
+		asked: Run,
 		priority: number,
 	): RecoveryHandle {
 		const producer = copy.track;
 		const id = this.#subscribeNext++;
-		const ranges: track.Range[] = [span(groups.start, groups.end) ?? EMPTY];
+		// Narrowed in place once a start before lite-07 settles how far it reaches.
+		const groups = { ...asked };
+		// Before lite-07 the start is the answer, which the publisher gives only once a group in range
+		// can start it: the range reaches the first group held at or past the run, or the live edge
+		// when none is.
+		const oneStart = !hasGroupEnd(this.version);
+		let end: bigint | undefined = groups.end;
+		if (oneStart) {
+			const next = hooks.nextCachedGroup(producer, groups.end);
+			end = next === undefined ? undefined : next + 1n;
+		}
+		const ranges: track.Range[] = [span(groups.start, end) ?? EMPTY];
 		const msg = this.#withRanges(
 			this.#subscribeMessage(
 				id,
@@ -2244,7 +2254,7 @@ export class Subscriber {
 				);
 				stream = opened;
 				let fin = false;
-				const responses = this.#recoveryResponses(opened, entry, groups, giveUp, () => fin);
+				const responses = this.#recoveryResponses(opened, entry, groups, oneStart, giveUp, () => fin);
 				// FIN once every group is accounted for and read, as a subscriber does once its tail
 				// settles, and the publisher FINs in reply.
 				let ended = false;
@@ -2308,6 +2318,7 @@ export class Subscriber {
 			return taken;
 		};
 		return {
+			groups: () => groups,
 			done,
 			takeRefused,
 			changed,
@@ -2318,11 +2329,13 @@ export class Subscriber {
 	}
 
 	// Read a recovery's responses to the publisher's FIN, giving up what it names it will not
-	// deliver. `fin` says whether our FIN went out, which the publisher's answers.
+	// deliver. `fin` says whether our FIN went out, which the publisher's answers. With `oneStart`,
+	// before lite-07, `groups` narrows to the group it starts at.
 	async #recoveryResponses(
 		stream: Stream,
 		entry: SubscribeEntry,
 		groups: Run,
+		oneStart: boolean,
 		giveUp: (start: bigint, end: bigint, refusal: Refusal) => void,
 		fin: () => boolean,
 	): Promise<void> {
@@ -2347,6 +2360,9 @@ export class Subscriber {
 					max(groups.start, min(from, groups.end)),
 					passing(new NotFound(`group ${groups.start}`)),
 				);
+				// Nothing names the keys past a group before lite-07, so this one waits only for the
+				// group it starts at, and the rest is asked again.
+				if (oneStart && from < groups.end) groups.end = from + 1n;
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
 				const cause = resp.drop.cause(this.version);

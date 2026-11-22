@@ -1,8 +1,9 @@
 // A received copy asks its publisher for the groups its readers miss, over lite FETCH, as the Rust
-// lite subscriber's `FillServeRun` does, or on lite-07 for more than one group, through its
-// subscription's ranges, as its `RangeFills` does, and on a SUBSCRIBE of its own for what that
-// subscription already delivered, as its `Recovery` does: below where the copy's feed started, by
-// the copy's start rule, and inside the copy, once it evicted what it received.
+// lite subscriber's `FillServeRun` does, or for more than one group, as its `RangeFills` does:
+// on lite-07 through its subscription's ranges, and on a SUBSCRIBE of its own for what that
+// subscription already delivered, as its `Recovery` does, and before lite-07 on a SUBSCRIBE of its
+// own per run: below where the copy's feed started, by the copy's start rule, and inside the copy,
+// once it evicted what it received.
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
@@ -317,8 +318,9 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			expect((await first.recvGroup())?.start).toBe(4n);
 			const before = peer.fetches();
 
-			// The same ranges, so nothing changes upstream: only a fill brings what the copy lost, a
-			// FETCH per group, or on lite-07 one SUBSCRIBE for the run, its groups and its miss.
+			// The same ranges, so nothing changes upstream: only a fill brings what the copy lost, on
+			// lite-07 one SUBSCRIBE for the run, its groups and its miss. Before lite-07 a SUBSCRIBE
+			// waits only for the group it starts at: one from group 0, then one from the miss at 1.
 			const again = peer.remote.track("video").subscribe(history);
 			const got = await take(again, 4);
 			expect(sorted(got)).toEqual([
@@ -327,7 +329,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 				[3n, "old 3"],
 				[4n, "live 4"],
 			]);
-			expect(peer.fetches()).toBe(before + (alpn === Lite.ALPN_07_WIP ? 1 : 4));
+			expect(peer.fetches()).toBe(before + (alpn === Lite.ALPN_07_WIP ? 1 : 2));
 			first.close();
 			again.close();
 		} finally {
@@ -740,5 +742,88 @@ test.each([
 			server.abort();
 			origin.close();
 		}
+	}
+});
+
+// A lite-06 copy of a timestamp-keyed track whose publisher never says which keys between its
+// group starts are empty, and resets its first groups as stale after their headers went out: an
+// ordered reader reaches the later groups, and the copy asks upstream about the keys between group
+// starts once per run, not a FETCH per key. Mirrors the Rust `lite06_fill_walk`. The ordered reader
+// alone, from the first group; then behind a live reader holding the copy, joining once the resets
+// are over.
+test.each([
+	[false, 0],
+	[true, 4],
+] as const)("copy fill: lite-06 asks a run of undeclared keys once (live %p)", async (live, join) => {
+	// One group per second of media, keyed by its start in microseconds; the first three reset.
+	const GROUP = 1_000_000;
+	const FRAME = 33_333;
+	const FRAMES = 30;
+	const GROUPS = 8;
+	const RESET = 3;
+	const clock = new Manual();
+	const installed = clock.install();
+	const pair = createMockTransportPair(Lite.ALPN_06);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client }),
+		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
+	]);
+	const publication = origin.route(Path.from("room"));
+	const track = defined(
+		publication.broadcast.createTrack("video", { timescale: Timescale.MICRO, maxAge: Duration.secs(30) }),
+	);
+	const remote = wireOf(client).consume(Path.from("room"));
+	// Every FETCH and SUBSCRIBE the copy sends opens a bidi stream of its own.
+	const requests = () => pair.client.sendStreams.bidi.length;
+	const held = live ? remote.track("video").subscribe() : undefined;
+	try {
+		let read: Promise<bigint[]> | undefined;
+		let before = 0;
+		for (let index = 0; index < GROUPS; index++) {
+			if (index === join) {
+				before = requests();
+				const reader = remote
+					.track("video")
+					.subscribe({ delay: { max: Duration.secs(30) } })
+					.ordered();
+				read = (async () => {
+					const keys: bigint[] = [];
+					for (let group = await reader.nextGroup(); group; group = await reader.nextGroup()) {
+						// A group reset as stale ends its read with that error.
+						while (await group.readFrame().catch(() => undefined)) {}
+						keys.push(group.start);
+						if (group.start === BigInt((GROUPS - 1) * GROUP)) break;
+					}
+					return keys;
+				})();
+			}
+			// Created rather than appended: like a publisher that cannot say, the track never
+			// declares the keys between its group starts skipped.
+			const start = index * GROUP;
+			const group = track.createGroup(BigInt(start));
+			for (let frame = 0; frame < FRAMES; frame++) {
+				group.writeFrame({ payload: enc.encode("frame"), timestamp: Timestamp.fromMicros(start + frame * FRAME) });
+				await clock.advance(Duration.micros(FRAME));
+			}
+			if (index < RESET) group.abort(new StreamError(StreamCode.Old, { message: "old" }));
+			else group.finish();
+		}
+		let done: bigint[] | undefined;
+		void read?.then((keys) => {
+			done = keys;
+		});
+		for (let waited = 0; done === undefined && waited < 120; waited++) await clock.advance(Duration.secs(1));
+		expect(done?.at(-1)).toBe(BigInt((GROUPS - 1) * GROUP));
+		// At most one request per group: never one per key between them.
+		expect(requests() - before).toBeLessThanOrEqual(GROUPS);
+	} finally {
+		held?.close();
+		remote.close();
+		publication.broadcast.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		installed.close();
 	}
 });
