@@ -48,4 +48,4 @@ Public API: additive, a new `session::Limits` field. Wire: none.
 
 ## Related
 
-- [Route wakes](/quest/m4/route-wakes.md) - the origin route table these cursors walk
+- [Route wakes](/quest/m3/route-wakes.md) - the origin route table these cursors walk

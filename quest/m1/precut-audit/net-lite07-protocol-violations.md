@@ -1,11 +1,11 @@
-# [S] Enforce lite-07 ProtocolViolation on malformed subscribe and unknown announce messages
+# [S] Enforce lite-07 ProtocolViolation on malformed subscribe and unknown announce messages, in Rust and JS
 
 ## Goal
 
 A lite-07 subscriber immediately closes the session with
 `SessionError::ProtocolViolation` when `Recv::Malformed` arrives on a Subscribe
 Stream (never hiding it behind `ServeMode::Failed`) and rejects unknown Announce
-Stream message types on Lite07+ rather than skipping them.
+Stream message types on Lite07+ rather than skipping them, in Rust and JS.
 
 ## Plan
 
@@ -27,6 +27,19 @@ bugs in `m1` (rejected: `m0` with `release` backports; `m3`).
    - On Lite07+, unknown Announce Stream message types are protocol violations,
      not skippable extensions. Gate the `Self::Skipped` fallback on
      `!version.has_routes()` and close with `ProtocolViolation` on Lite07+.
+
+Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
+audit): ✅ item 2 stands (rejected: Gemini's proposal to skip unknown
+messages on the Subscribe Stream too, so a later warm routing extension
+could add them). lite-07 extends by a new wip version or a SETUP parameter,
+whose unknown IDs are ignored, and the draft says to extend by version and
+extension rather than message length (about line 962). A message skipped in
+the middle of a claim batch would leave the receiver out of sync with no
+error. Two more parts:
+
+- JS skips unknown Announce Stream types on lite-07 too
+  (`js/net/src/lite/announce.ts:62-65`): reject them there as well.
+- State the unknown-type rule in the draft.
 
 Note: `DatagramServe`'s missing `Recv::Malformed` session close is tracked in
 [control-stream-recv](/quest/m3/control-stream-recv.md).
