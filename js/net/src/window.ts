@@ -314,6 +314,14 @@ export interface Holdings {
 	 */
 	answersJoins?(): boolean;
 	/**
+	 * The group the upstream's answer to the live join `min` through `end` starts at, for a reader
+	 * within `budget` whose range was added at tick `since`. It stands once the end is declared too,
+	 * when {@link answersJoins} no longer holds: a copy holds only the groups from where its feed
+	 * started, so they can't measure a join behind them. Absent for none. Mirrors the Rust
+	 * `Holdings::answered`.
+	 */
+	answered?(min: Duration, end: bigint | undefined, budget: number, since: number): bigint | undefined;
+	/**
 	 * Whether the producer declared every start in `[start, end)` skipped, so no group starts there
 	 * even in the history a handler serves. Absent for none.
 	 */
@@ -437,8 +445,8 @@ export class Window {
 	 */
 	#reaching = new Set<bigint>();
 	/**
-	 * The join tick each live join's range was added at, by key: a hop that
-	 * {@link Holdings.answersJoins} places it only from an answer recorded since.
+	 * The join tick each live join's range was added at, by key: only an upstream's answer recorded
+	 * since places it.
 	 */
 	#since = new Map<bigint, number>();
 	// How many spans name each start, and how many name none: see {@link start}.
@@ -908,21 +916,28 @@ export class Window {
 					this.#reaching.add(key);
 					return;
 				}
-			} else if (latest === undefined) {
-				// Nothing to measure the live edge by yet: wait for the first group, reading everything
-				// meanwhile.
-				this.#pending.add(key);
-				return;
-			} else if (live.asNanos() === 0) {
-				// The latest group holds the live edge. One made before any group then starts at the first,
-				// which was the latest when it was placed.
-				join = { group: latest };
 			} else {
-				join = holdings.join?.(live, range.end, this.budget, this.#since.get(key) ?? 0);
-				// Nothing to measure the live edge by yet: read none of the groups held until it resolves.
-				if (join === undefined || join === "empty") {
-					this.#reaching.add(key);
+				const since = this.#since.get(key) ?? 0;
+				const answered = holdings.answered?.(live, range.end, this.budget, since);
+				if (answered !== undefined) {
+					// Its upstream's answer places it, whatever the groups held measure.
+					join = { group: answered };
+				} else if (latest === undefined) {
+					// Nothing to measure the live edge by yet: wait for the first group, reading everything
+					// meanwhile.
+					this.#pending.add(key);
 					return;
+				} else if (live.asNanos() === 0) {
+					// The latest group holds the live edge. One made before any group then starts at the
+					// first, which was the latest when it was placed.
+					join = { group: latest };
+				} else {
+					join = holdings.join?.(live, range.end, this.budget, since);
+					// Nothing to measure the live edge by yet: read none of the groups held until it resolves.
+					if (join === undefined || join === "empty") {
+						this.#reaching.add(key);
+						return;
+					}
 				}
 			}
 			// A group a join measured starts there; a time is placed among the groups held.

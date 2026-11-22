@@ -98,6 +98,15 @@ pub(in crate::model) trait Holdings {
 		false
 	}
 
+	/// The group the upstream's answer to the live join `min` through `end` starts at, for a
+	/// reader within `budget` whose range was added at join tick `since`. It stands once the
+	/// end is declared too, when [`Self::answers_joins`] no longer holds: a copy holds only the
+	/// groups from where its feed started, so they can't measure a join behind them.
+	fn answered(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
+		let _ = (min, end, budget, since);
+		None
+	}
+
 	/// Whether the producer declared every key in `keys` skipped, so no group starts there
 	/// even in the history a handler serves.
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
@@ -815,32 +824,33 @@ impl Window {
 					}
 				}
 			}
-			Start::Live(min) => match latest {
-				// Nothing to measure the live edge by yet: wait for the first group, reading
-				// everything meanwhile.
-				None => {
-					self.pending.insert(key);
-					return;
-				}
-				// The latest group holds the live edge. One made before any group then starts at
-				// the first, which was the latest when it was placed.
-				Some(latest) if min.is_zero() => (Some(latest), false),
-				Some(_) => match holdings.join(
-					min,
-					join_end(range.end),
-					self.budget,
-					self.since.get(&key).copied().unwrap_or(0),
-				) {
-					Join::Time(time) => (Some(time), true),
-					Join::Group(group) => (Some(group), false),
-					// Nothing to measure the live edge by yet: read none of the groups held until it
-					// resolves.
-					Join::Empty | Join::Unknown => {
-						self.reaching.insert(key);
+			Start::Live(min) => {
+				let since = self.since.get(&key).copied().unwrap_or(0);
+				let until = join_end(range.end);
+				match (holdings.answered(min, until, self.budget, since), latest) {
+					// Its upstream's answer places it, whatever the groups held measure.
+					(Some(group), _) => (Some(group), false),
+					// Nothing to measure the live edge by yet: wait for the first group, reading
+					// everything meanwhile.
+					(None, None) => {
+						self.pending.insert(key);
 						return;
 					}
-				},
-			},
+					// The latest group holds the live edge. One made before any group then starts at
+					// the first, which was the latest when it was placed.
+					(None, Some(latest)) if min.is_zero() => (Some(latest), false),
+					(None, Some(_)) => match holdings.join(min, until, self.budget, since) {
+						Join::Time(time) => (Some(time), true),
+						Join::Group(group) => (Some(group), false),
+						// Nothing to measure the live edge by yet: read none of the groups held until
+						// it resolves.
+						Join::Empty | Join::Unknown => {
+							self.reaching.insert(key);
+							return;
+						}
+					},
+				}
+			}
 		};
 		// A group a join measured starts there; a time is placed among the groups held.
 		let placed = match (anchor, asks) {
@@ -1176,6 +1186,10 @@ mod tests {
 
 		fn answers_joins(&self) -> bool {
 			self.0.answers_joins()
+		}
+
+		fn answered(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
+			self.0.answered(min, end, budget, since)
 		}
 
 		fn complete(&self) -> bool {

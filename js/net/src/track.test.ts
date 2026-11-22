@@ -5867,25 +5867,29 @@ test("track: a declared end resolves an unproven live join", () => {
 	}
 });
 
-// A received lite-07 copy's join answered with a group stays placed there once the end is declared:
-// the copy holds only the groups from where its feed started, so the edge it measures may fall
-// behind all of them. One joining after the answer can't take it. Mirrors the Rust
-// `a_received_copy_keeps_a_join_answer_past_its_declared_end`.
+// A received lite-07 copy's join answered with a group stays placed there once the end is declared,
+// at any lag: the copy holds only the groups from where its feed started, so the edge it measures may
+// fall behind all of them, and its newest group is past the answer. One joining after the answer
+// can't take it. Mirrors the Rust `a_received_copy_keeps_a_join_answer_past_its_declared_end`.
 test("track: a received copy keeps a join answer past its declared end", () => {
-	const producer = receivedTrack({ timescale: Timescale.MILLI });
-	hooks.answersJoins(producer);
-	const join = { delay: { max: Duration.millis(1000) }, ranges: [{ start: { live: Duration.millis(1000) } }] };
-	try {
-		const reader = producer.subscribe(join);
-		hooks.answerJoin(producer, 1000, undefined, 4000n, 1000);
-		// An end past the groups held, still owed the ones between.
-		producer.finishAt({ group: 6001n, frame: 0 });
-		putGroup(producer, 4000n, 4000);
-		expect(reader.tryRecvGroup()?.start).toBe(4000n);
-		const later = producer.subscribe(join);
-		expect(later.tryRecvGroup()).toBeUndefined();
-	} finally {
-		producer.close();
+	for (const min of [0, 1000]) {
+		const producer = receivedTrack({ timescale: Timescale.MILLI });
+		hooks.answersJoins(producer);
+		const join = { delay: { max: Duration.millis(1000) }, ranges: [{ start: { live: Duration.millis(min) } }] };
+		try {
+			const reader = producer.subscribe(join);
+			hooks.answerJoin(producer, min, undefined, 4000n, 1000);
+			// An end past the groups held, still owed the ones between.
+			producer.finishAt({ group: 7001n, frame: 0 });
+			putGroup(producer, 4000n, 4000);
+			putGroup(producer, 6000n, 6000);
+			expect(reader.tryRecvGroup()?.start).toBe(4000n);
+			expect(reader.tryRecvGroup()?.start).toBe(6000n);
+			const later = producer.subscribe(join);
+			expect(later.tryRecvGroup()?.start).not.toBe(4000n);
+		} finally {
+			producer.close();
+		}
 	}
 });
 

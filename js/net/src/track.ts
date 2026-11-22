@@ -3885,6 +3885,12 @@ export class Subscriber {
 		// reader's: the live edge is the upstream's, which no group held here measures. Mirrors the
 		// Rust `Holdings::answers_joins for TrackState`.
 		const answers = anchors.answersJoins;
+		// The upstream's answer to a live join, recorded after the reader's range was added, under a
+		// budget at least as wide as the reader's. Mirrors the Rust `TrackState::join_answer`.
+		const joinAnswer = (min: Duration, end: bigint | undefined, budget: number, since: number) => {
+			const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
+			return answer && answer.tick > since && budget <= answer.budget ? answer : undefined;
+		};
 		// The times from `from` on that the drops from there leave open.
 		const uncovered = (from: bigint): Run | undefined => {
 			const start = drops.coveredFrom(from);
@@ -3944,22 +3950,19 @@ export class Subscriber {
 			// A received copy's handler is its session, which fetches by group alone.
 			looksUp: () => !receivedCopy(producer) && fillsOf(producer).serving,
 			join: (min, end, budget, since) => {
-				const found = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
-				const answer = found && found.tick > since && budget <= found.budget ? found : undefined;
-				// An answer naming a group stands once the end is declared too: the copy holds only the
-				// groups from where its feed started, so they can't measure a join behind them.
-				if (answer?.start !== undefined) return { group: answer.start };
-				// Until the end is declared, only an answer places it. Nothing more is answered after, so
-				// the groups held measure it.
-				if (answers) return answer && "empty";
-				return this.#join(
-					min,
-					(time) => holdings.containing(time, budget),
-					wire && !anchors.atKeys,
-					anchors.ended,
-				);
+				if (!answers)
+					return this.#join(
+						min,
+						(time) => holdings.containing(time, budget),
+						wire && !anchors.atKeys,
+						anchors.ended,
+					);
+				const answer = joinAnswer(min, end, budget, since);
+				if (answer === undefined) return undefined;
+				return answer.start === undefined ? "empty" : { group: answer.start };
 			},
 			answersJoins: () => answers,
+			answered: (min, end, budget, since) => joinAnswer(min, end, budget, since)?.start,
 			// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 			// evicted a group inside it.
 			neverProduced: (start, end) => {
