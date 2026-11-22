@@ -24,15 +24,18 @@ files=$(grep -rlE --include='*.rs' --exclude-dir=target '"(\{\}/|/)?\.\./' rs) |
 [[ -n "$files" ]] || exit 0
 
 # One argument per file; no path under rs/ holds whitespace.
+# Stream NUL-delimited (filename, contents) pairs so jq scans each file once
+# instead of allocating and sorting one object per source line.
 # shellcheck disable=SC2086
-jq -nrR --arg crates "$crates" '
+awk 'FNR==1 { if (NR>1) printf "%c", 0; printf "%s%c", FILENAME, 0 } { print } END { if (NR>0) printf "%c", 0 }' $files |
+    jq -rRs --arg crates "$crates" '
     def resolve: reduce split("/")[] as $s ([];
         if $s == ".." then .[:-1] elif $s == "." or $s == "" then . else . + [$s] end) | join("/");
     ($crates | split("\n") | map(select(. != ""))) as $crates
-    | [inputs | {file: input_filename, line: .}]
-    | group_by(.file)[]
-    | .[0].file as $file
-    | (map(.line) | join("\n")) as $text
+    | split("\u0000")[:-1]
+    | range(0; length; 2) as $i
+    | .[$i] as $file
+    | .[$i + 1] as $text
     | ($file | split("/")[:-1] | join("/")) as $dir
     | ([$crates[] | select(. as $c | $file | startswith($c + "/"))] | max_by(length)) as $crate
     | ($text | test("CARGO_MANIFEST_DIR")) as $manifest
@@ -48,4 +51,4 @@ jq -nrR --arg crates "$crates" '
     | if ($from.string // "") | startswith("#") then sub("/mod\\.rs$"; "") else . end
     | select(startswith($crate + "/") | not)
     | "\($crate) \(.) \($source)"
-' $files | LC_ALL=C sort -u
+' | LC_ALL=C sort -u

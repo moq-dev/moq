@@ -5,8 +5,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -571,5 +573,48 @@ fi
 """
 
 
+def _iter_cases(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from _iter_cases(item)
+        else:
+            yield item
+
+
+def _run_parallel():
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    cases = list(_iter_cases(suite))
+    workers = min(os.cpu_count() or 4, 8, max(len(cases), 1))
+
+    def run_one(case):
+        result = unittest.TestResult()
+        case.run(result)
+        return case, result
+
+    failures = []
+    errors = []
+    unexpected = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _case, result in pool.map(run_one, cases):
+            failures.extend(result.failures)
+            errors.extend(result.errors)
+            unexpected.extend(result.unexpectedSuccesses)
+
+    for test, tb in errors:
+        print(f"ERROR: {test}\n{tb}", file=sys.stderr)
+    for test, tb in failures:
+        print(f"FAIL: {test}\n{tb}", file=sys.stderr)
+    for test in unexpected:
+        print(f"UNEXPECTED SUCCESS: {test}", file=sys.stderr)
+    print(
+        f"Ran {len(cases)} tests ({len(failures)} failures, {len(errors)} errors, {len(unexpected)} unexpected)",
+        file=sys.stderr,
+    )
+    sys.exit(1 if failures or errors or unexpected else 0)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 1:
+        _run_parallel()
+    else:
+        unittest.main()
