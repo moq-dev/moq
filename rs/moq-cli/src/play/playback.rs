@@ -50,6 +50,17 @@ pub(super) enum Switch {
 	/// way the window turns. It stays wanted until one starts: a failed attempt tries again from
 	/// the next snapshot.
 	Move,
+	/// A rendition ranked above the one playing had a broadcast still pending when that one was
+	/// picked, and it has landed, so only one ranked above the rendition playing is better.
+	Upgrade,
+}
+
+impl Switch {
+	/// Whether the rendition playing is still on its track, so its end is a finish: only a move
+	/// left it.
+	fn keeps_track(self) -> bool {
+		self != Self::Move
+	}
 }
 
 /// Which catalog snapshot a half last read. A half reads a snapshot once, so a track that ends
@@ -61,8 +72,8 @@ enum Read {
 	Unread,
 	/// Every enabled rendition in the snapshot was considered.
 	Full(u64),
-	/// The snapshot was read for a turn, which skipped the renditions shaped against the window,
-	/// so the half reads it again in full once the rendition playing ends.
+	/// The snapshot was read for a turn or an upgrade, which skipped the renditions no better
+	/// than the one playing, so the half reads it again in full once that one ends.
 	Narrowed(u64),
 }
 
@@ -71,8 +82,8 @@ impl Read {
 		matches!(self, Self::Full(read) | Self::Narrowed(read) if read == snapshot)
 	}
 
-	/// What is left read once the rendition playing ends: the renditions a turn skipped are no
-	/// worse than nothing.
+	/// What is left read once the rendition playing ends: the renditions a turn or an upgrade
+	/// skipped are no worse than nothing.
 	fn ended(self) -> Self {
 		match self {
 			Self::Narrowed(_) => Self::Unread,
@@ -97,7 +108,7 @@ enum Phase<D, O> {
 	/// A rendition plays, and its end is a finish.
 	Playing { running: Running<D> },
 	/// A rendition plays while a replacement is picked, and stops once one is ready. Its end is
-	/// a finish only on a turn: a move left its track.
+	/// a finish unless a move left its track.
 	Switching {
 		running: Running<D>,
 		switch: Switch,
@@ -143,6 +154,15 @@ impl<D, O> Half<D, O> {
 	/// The rendition playing, unless it was stopped.
 	pub(super) fn running(&self) -> Option<&Running<D>> {
 		match &self.phase {
+			Phase::Playing { running } | Phase::Switching { running, .. } | Phase::Retiring { running } => {
+				Some(running)
+			}
+			Phase::Idle { .. } | Phase::Stopping { .. } => None,
+		}
+	}
+
+	pub(super) fn running_mut(&mut self) -> Option<&mut Running<D>> {
+		match &mut self.phase {
 			Phase::Playing { running } | Phase::Switching { running, .. } | Phase::Retiring { running } => {
 				Some(running)
 			}
@@ -208,16 +228,12 @@ impl<D, O> Half<D, O> {
 	}
 
 	/// Give up the rendition being picked, which found nothing to open or is no longer wanted.
-	/// A turn's switch ends with it, keeping what plays; a move's stays wanted, so the next
-	/// snapshot tries again.
+	/// A turn's or an upgrade's switch ends with it, keeping what plays; a move's stays wanted,
+	/// so the next snapshot tries again.
 	pub(super) fn give_up(&mut self) {
 		self.phase = match self.take() {
 			Phase::Idle { .. } => Phase::Idle { opening: None },
-			Phase::Switching {
-				running,
-				switch: Switch::Turn,
-				..
-			} => Phase::Playing { running },
+			Phase::Switching { running, switch, .. } if switch.keeps_track() => Phase::Playing { running },
 			Phase::Switching {
 				running,
 				switch: Switch::Move,
@@ -242,6 +258,23 @@ impl<D, O> Half<D, O> {
 				switch: Switch::Turn,
 				opening: None,
 			},
+			phase => phase,
+		};
+	}
+
+	/// A better-ranked rendition's broadcast landed, so pick a replacement ranked above the
+	/// rendition playing from the snapshot on hand while it plays on. A switch already under way
+	/// keeps its own pick, which waits on pending broadcasts itself.
+	pub(super) fn upgrade(&mut self) {
+		self.phase = match self.take() {
+			Phase::Playing { running } => {
+				self.read = Read::Unread;
+				Phase::Switching {
+					running,
+					switch: Switch::Upgrade,
+					opening: None,
+				}
+			}
 			phase => phase,
 		};
 	}
@@ -308,7 +341,7 @@ impl<D, O> Half<D, O> {
 				switch,
 				opening,
 			} => {
-				let finishes = (switch == Switch::Turn).then_some(running.track);
+				let finishes = switch.keeps_track().then_some(running.track);
 				(running.task, opening, finishes)
 			}
 			Phase::Retiring { running } => (running.task, None, None),
@@ -393,11 +426,7 @@ impl Playback {
 		self.played = true;
 		let replaced = match half.take() {
 			Phase::Playing { running } => Some(running),
-			Phase::Switching {
-				running,
-				switch: Switch::Turn,
-				..
-			} => Some(running),
+			Phase::Switching { running, switch, .. } if switch.keeps_track() => Some(running),
 			// A move left the track, and a stopped task's end is no finish.
 			Phase::Switching { .. } | Phase::Retiring { .. } | Phase::Idle { .. } | Phase::Stopping { .. } => None,
 		};
@@ -405,8 +434,8 @@ impl Playback {
 		if let Some(replaced) = replaced {
 			self.stopped.insert(replaced.task, replaced.track);
 		}
-		// A turn's replacement started from a narrowed read, which stays narrowed: once the
-		// replacement ends, the renditions the turn skipped are read again.
+		// A turn's or an upgrade's replacement started from a narrowed read, which stays narrowed:
+		// once the replacement ends, the renditions the switch skipped are read again.
 		half.phase = Phase::Playing { running };
 	}
 
@@ -434,9 +463,9 @@ impl Playback {
 			Phase::Playing { running } => (Some(running.track), None),
 			Phase::Switching {
 				running,
-				switch: Switch::Turn,
+				switch,
 				opening,
-			} => (Some(running.track), opening),
+			} if switch.keeps_track() => (Some(running.track), opening),
 			Phase::Switching { opening, .. } | Phase::Stopping { opening, .. } => (None, opening),
 			Phase::Retiring { .. } | Phase::Idle { .. } => (None, None),
 		};
@@ -691,6 +720,45 @@ mod tests {
 		assert!(playback.finished(&track("tall")));
 		assert!(!playback.finished(&track("wide")), "the turn stopped it");
 		assert!(playback.wants(&video), "the rendition the turn left is still playable");
+	}
+
+	/// An upgrade picks from the snapshot on hand while what plays plays on, which stays on its
+	/// track: replaced, it is stopped, and given up, it plays on. Only a playing half upgrades.
+	#[test]
+	fn an_upgrade_replaces_what_plays_on_its_track() {
+		let (mut playback, mut video, audio) = playing("low");
+		video.upgrade();
+		assert_eq!(video.switching(), Some(Switch::Upgrade));
+		assert!(playback.wants(&video), "an upgrade picks from the snapshot on hand");
+		playback.read(&mut video, true);
+		video.give_up();
+		assert_eq!(
+			video.switching(),
+			None,
+			"an upgrade with nothing better keeps what plays"
+		);
+		assert!(playback.pending(&video, &audio).is_none());
+
+		video.upgrade();
+		playback.read(&mut video, true);
+		playback.started(&mut video, running(2, "high"));
+		assert!(!video.is_current(1));
+		playback.ended(&mut video, 1, true);
+		assert!(
+			playback.finished(&track("low")),
+			"an upgrade's rendition stays on its track"
+		);
+
+		// The upgrade skipped the renditions ranked below the one it left.
+		playback.ended(&mut video, 2, false);
+		assert!(
+			playback.wants(&video),
+			"the renditions the upgrade skipped were never tried"
+		);
+
+		playback.stop(&mut video);
+		video.upgrade();
+		assert_eq!(video.switching(), None, "an idle half has nothing to upgrade");
 	}
 
 	/// A task a replacement stopped no longer drives the half, but if it finished its own track
