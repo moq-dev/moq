@@ -40,8 +40,9 @@ exclude_re = [
     # Polling a covered or finished copy hands out nothing, so polling it anyway
     # only costs work.
     ':\d+:36: replace \|\| with && in Reader::poll_lowest$',
-    # A run starting at `until` clips to an empty range, which has no gaps.
-    ':\d+:36: replace < with <= in Reader::exhausted$',
+    # A run starting at the window's end or the resume point clips to an empty range, which
+    # has no gaps.
+    'replace < with <= in Reader::(exhausted|lacking)$',
     # `learn_end` just polled the same copy and returned on an `Ok` end.
     'delete match arm Poll::Ready\(Ok\(fin\)\) in Reader::poll_finished$',
     # The one extra copy searched is the route's own, which never has an end.

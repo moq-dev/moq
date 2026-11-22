@@ -2674,15 +2674,21 @@ impl Reader {
 		}
 	}
 
+	/// Where the reader's window ends, once it is placed and bounded.
+	fn bounded_end(&mut self) -> Option<u64> {
+		let window = self.window();
+		window.end().filter(|_| !window.is_pending())
+	}
+
 	/// Whether a bounded window has nothing left to deliver, once no replaced copy may still
 	/// deliver a group under its bound: every group of the whole window is handed out (in any
 	/// of `taken`, the logical readers' records, the reader's own first) or accounted for, as
 	/// [`Self::accounts`] judges.
 	fn exhausted(&mut self, taken: &[&Delivered], ordered: bool, waiter: &kio::Waiter) -> bool {
-		let window = self.window();
-		let Some(end) = window.end().filter(|_| !window.is_pending()) else {
+		let Some(end) = self.bounded_end() else {
 			return false;
 		};
+		let window = &self.window;
 		let gaps: Vec<std::ops::Range<u64>> = window
 			.runs(window.floor().unwrap_or(0))
 			.take_while(|run| *run.start() < end)
@@ -2709,8 +2715,7 @@ impl Reader {
 		if self.resumed.is_some() {
 			return false;
 		}
-		let window = self.window();
-		if window.end().is_none() || window.is_pending() {
+		if self.bounded_end().is_none() {
 			return false;
 		}
 		let (lowest, cap) = self.groups;
@@ -2749,9 +2754,8 @@ impl Reader {
 			if open {
 				return false;
 			}
-			if split < gap.end {
-				above.push(split..gap.end);
-			}
+			// Empty at or past the resume point, which accounts for itself.
+			above.push(split..gap.end);
 		}
 		match self.copies.last_mut() {
 			Some(Copy {
@@ -12823,6 +12827,44 @@ mod test {
 		assert!(
 			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
 			"the replaced copy may still deliver 3"
+		);
+		kio::clock::sleep(HOUR).await;
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A skip ending a gap the reader lacks, known only to a replaced copy, outlives that copy
+	/// once the local cap keeps it out: the copy's skips are kept from both ends of the gap.
+	#[kio::test]
+	async fn a_skip_ending_a_gap_the_local_cap_keeps_out_outlives_its_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..3, StreamError::NotFound);
+		a.skip_groups(3..4);
+		write(&a, 4);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Some(0),
+				end: Some(4),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 4]);
+		// Past the window, so the whole window lies under the replacement's resume point.
+		let b = copy();
+		write(&b, 5);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(0..3);
+		assert!(
+			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
+			"the replaced copy may still deliver 1 and 2"
 		);
 		kio::clock::sleep(HOUR).await;
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
