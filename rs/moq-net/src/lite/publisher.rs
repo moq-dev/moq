@@ -4952,17 +4952,27 @@ impl Bounds {
 	/// `Subscriber Max Age` bounds the whole subscription; `None` on lite-07, which carries
 	/// one on each live start instead.
 	///
-	/// An absent start takes every group still within that max age, or every group with none,
-	/// as lite01/02 never carry one. Lite-06 resolves it there; before lite-06 an absent start
-	/// is the latest group, which [`cursor_floor`] places rather than a live join, since
-	/// lite01/02 keep the newest group known on arrival. A named start is a history floor on
-	/// every wire, bounded by the publisher's max age.
+	/// Lite-06 resolves an absent start from that max age, so it takes every group still
+	/// within it. Before lite-06 an absent start is the latest group, a live join expiring past
+	/// the max age, which is the first group to arrive when the track holds none yet. With no
+	/// max age, as lite01/02 never carry one, nothing expires and the start reaches back to the
+	/// oldest group, which [`cursor_floor`] raises to the latest group before lite-06: lite01/02
+	/// keep the newest group known on arrival, which a live join would move once the track
+	/// resolves. A named start is a history floor on every wire, bounded by the publisher's max
+	/// age.
 	fn legacy(version: Version, max_delay: Option<Duration>) -> Option<crate::track::Start> {
 		use crate::track::Start;
 		if version.has_ranges() {
 			return None;
 		}
-		Some(max_delay.map_or(Start::Oldest, Start::within))
+		Some(match (max_delay, version.resolves_start()) {
+			(None, _) => Start::Oldest,
+			(Some(max), true) => Start::within(max),
+			(Some(max), false) => Start::Live {
+				min: Duration::ZERO,
+				max: Some(max),
+			},
+		})
 	}
 
 	/// Whether a subscription to these ranges over `version` is answered once they are
@@ -12558,7 +12568,8 @@ mod tests {
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 						priority: 0,
-						max_delay: Some(Duration::from_secs(60)),
+						// Lite01/02 carry no max age.
+						max_delay: (version != Version::Lite01).then_some(Duration::from_secs(60)),
 						ranges: vec![lite::Range::span(start, 0, None, None)],
 					};
 					let mut serve =

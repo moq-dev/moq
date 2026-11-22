@@ -250,10 +250,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		async move {
 			let range = match (range.start, min) {
 				(moq_net::track::Start::Oldest, Some(min)) => Range {
-					start: moq_net::track::Start::Live {
-						min,
-						max: Some(std::time::Duration::ZERO),
-					},
+					start: moq_net::track::Start::Live { min, max: Some(BUDGET) },
 					..range
 				},
 				_ => range,

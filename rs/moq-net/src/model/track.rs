@@ -1290,6 +1290,12 @@ impl Holdings for TrackState {
 			let Some(target) = newest.map(|newest| newest.saturating_sub(back)) else {
 				return Join::Unknown;
 			};
+			// No group presents before time 0, so a join reaching back that far starts as the
+			// oldest group does, taking a lower group that arrives late rather than starting at
+			// the oldest group this hop happens to hold.
+			if target == 0 {
+				return Join::Oldest;
+			}
 			let started = |slot: &Slot| {
 				self.started_at(slot)
 					.and_then(|start| start.convert(scale).ok())

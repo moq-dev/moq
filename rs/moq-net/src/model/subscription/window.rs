@@ -113,6 +113,9 @@ pub(in crate::model) enum Join {
 	Time(u64),
 	/// The group starting here, which this hop measured by arrival, or its upstream answered.
 	Group(u64),
+	/// Past every group, so it starts as a range from the oldest group does, naming no group:
+	/// a lower one arriving late is still taken, and none below the groups held is owed.
+	Oldest,
 	/// Nothing to deliver, as the upstream answered a bounded join.
 	Empty,
 	/// Nothing measures it yet: a copy waits for its upstream to answer, and any hop for a
@@ -946,6 +949,7 @@ impl Window {
 				let past = range.end.and_then(|last| last.checked_add(1));
 				match (holdings.join(min, join_end(range.end), budget, since), past) {
 					(Join::Group(group) | Join::Time(group), _) | (Join::Empty, Some(group)) => (Some(group), false),
+					(Join::Oldest, _) => (None, false),
 					(Join::Empty | Join::Unknown, _) => {
 						self.reaching.insert(key);
 						return;
@@ -965,6 +969,7 @@ impl Window {
 				Some(_) => match holdings.join(min, range.end, budget, 0) {
 					Join::Time(time) => (Some(time), true),
 					Join::Group(group) => (Some(group), false),
+					Join::Oldest => (None, false),
 					// Nothing to measure the live edge by yet: read none of the groups held until it
 					// resolves.
 					Join::Empty | Join::Unknown => {
