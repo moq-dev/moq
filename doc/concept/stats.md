@@ -402,6 +402,9 @@ flushes the old tier and label first; closing a session records its final delta.
 An embedder creates a `transport::Wire`, registers it with `stats::Session::wire`,
 records its connection's cumulative totals on it, and holds the returned guard.
 Dropping the guard records the final reading.
+`moq-srt` fills one per connection through the `wire` field of its `Import` and
+`Export`: SRT packet bytes, headers and retransmits included, without IP and
+UDP, refreshed every 250 ms, so a connection's last quarter second goes uncounted.
 
 Unsupported transports, including browsers and the current WebSocket/qmux
 adapter, contribute zero. WebSocket wire accounting requires the separate

@@ -55,7 +55,7 @@ and io_uring QUIC sources and their relay integration tests are already on
 The unused public RTC wire source was removed. Reintroduce one only with an
 adapter that registers it on the shared stats handle for a real consumer.
 
-Remaining here: finish the qmux and SRT adapter children, then verify their
+Remaining here: finish the qmux adapter child, then verify the adapters'
 wire counters appear in the existing per-root presence and per-tier totals
 alongside native sessions, with final counts retained when a source closes.
 Confirm the stats documentation describes the supported adapters and their
