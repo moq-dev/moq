@@ -93,7 +93,7 @@ check:
 # avoiding a second full compilation of the bridge workspace.
 bridge-check:
     cd bridge && cargo fmt --check
-    cd bridge && CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash ../../../sh/local.sh cargo test --locked --all-targets
+    cd bridge && CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash ../../../sh/local.sh cargo test --locked
     cd bridge && RUSTDOCFLAGS="-D warnings" bash ../../../sh/local.sh cargo doc --locked --no-deps
 
 # Format the bridge and apply its lint fixes.
