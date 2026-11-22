@@ -5475,6 +5475,10 @@ impl TrackRun {
 		let delay = crate::track::Delay { max: upd.max_delay };
 		// Read first: the edit moves it.
 		let requested = self.requested.start();
+		let added: Vec<u64> = match &upd.ranges {
+			lite::Applied::Edit { added, .. } => added.iter().map(|(id, _)| *id).collect(),
+			lite::Applied::Replace(_) => Vec::new(),
+		};
 		let edited = match upd.ranges {
 			lite::Applied::Edit { retired, added } => self.edit(retired, added, upd.priority, delay, upd.order),
 			lite::Applied::Replace(ranges) => self.replace_ranges(ranges, upd.priority, delay, upd.order),
@@ -5506,6 +5510,7 @@ impl TrackRun {
 			}
 			floor => floor,
 		};
+		let floor = floor.map(|floor| self.placed_floor(floor, added));
 		let range = (self.floor, self.cap);
 		if let Some(start) = floor {
 			self.floor = start;
@@ -5523,6 +5528,26 @@ impl TrackRun {
 			self.move_cursor();
 		}
 		self.bounded = self.ctx.version.has_ranges() && self.requested.bounded();
+	}
+
+	/// Lower `floor`, the lowest start the ranges name, to where the ranges keyed in `added`
+	/// start: a time start lands in the group containing it, below that time, so a floor at
+	/// the time would cut that group off. One not placed yet lands at or above the newest
+	/// group held at or below it; with none, it raises the floor no further than it was, since
+	/// the group holding it may still arrive.
+	fn placed_floor(&mut self, floor: u64, added: Vec<u64>) -> u64 {
+		let resolved = self.track.resolved_keys(added.iter().copied());
+		let latest = self.track.latest_key();
+		added.iter().zip(resolved).fold(floor, |floor, (id, resolved)| {
+			match (resolved, self.requested.ranges.get(id).map(|range| range.start)) {
+				(Some(resolved), _) => floor.min(resolved.start),
+				(None, Some(crate::track::Start::Time(time))) => {
+					let below = latest.filter(|latest| *latest <= time).unwrap_or(self.floor.min(time));
+					floor.min(below)
+				}
+				(None, _) => floor,
+			}
+		})
 	}
 
 	/// Lite-07: retire the ranges with Range IDs `retired` and add `added`, passing the edit
@@ -10549,7 +10574,8 @@ mod serve_group_test {
 	/// named: the subscriber owes itself every group from the start.
 	#[kio::test]
 	async fn a_time_start_past_the_newest_group_starts_there() {
-		{
+		// Asked on the SUBSCRIBE, or by an update pipelined behind one before it is answered.
+		for pipelined in [false, true] {
 			let version = Version::Lite07;
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -10559,18 +10585,32 @@ mod serve_group_test {
 			track.start_at(0).unwrap();
 			write_group(&mut track, 5, 0);
 			track.drop_groups(11..12, crate::StreamError::NotFound);
-			let subscriber = track.subscribe(track::Subscription::default().with_start(10));
+			let first = if pipelined { 0 } else { 10 };
+			let subscriber = track.subscribe(track::Subscription::default().with_start(first));
 			let (run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			// Lite-07 resolves the start on its own, so the cursor's floor stays at 0.
-			let bounds = Bounds::new(&[lite::Range::span(Some(10), 0, None, None)], false);
+			let bounds = Bounds::new(&[lite::Range::span(Some(first), 0, None, None)], false);
 			let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
+			if pipelined {
+				run.replace(lite::SubscribeUpdate {
+					wanted_group: None,
+					order: crate::track::Order::Ascending,
+					priority: 0,
+					max_delay: None,
+					ranges: vec![lite::Range::span(Some(10), 0, None, None)],
+				});
+			}
 			assert!(
 				kio::wait(|waiter| run.poll(&mut writer, waiter))
 					.now_or_never()
 					.is_none()
 			);
-			assert_eq!(run.start.resolved(), Some(5), "{version}");
-			assert_eq!(drops(&mut writer, &log, version).await, [(11, 11)], "{version}");
+			assert_eq!(run.start.resolved(), Some(5), "pipelined: {pipelined}");
+			assert_eq!(
+				drops(&mut writer, &log, version).await,
+				[(11, 11)],
+				"pipelined: {pipelined}"
+			);
 		}
 	}
 
@@ -11049,7 +11089,7 @@ mod serve_group_test {
 		);
 		let mut relay = RelayRun::new(&mut track, 0);
 
-		write_group(&mut track, 5, 0);
+		write_group(&mut track, 5, 5);
 		relay.settle();
 
 		// The subscriber moves its start past the held group before the source resolves.
@@ -11067,8 +11107,8 @@ mod serve_group_test {
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "the held group is served");
 
-		// Group 6 is below the updated floor.
-		write_group(&mut track, 6, 6);
+		// A late group 4 is below the group the updated time start landed in.
+		write_group(&mut track, 4, 4);
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "served a group below the floor");
 	}
