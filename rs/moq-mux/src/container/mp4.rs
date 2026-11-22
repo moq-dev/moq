@@ -589,11 +589,21 @@ impl Atom {
 		}))
 	}
 
-	/// Read and decode the whole box.
+	/// Read and decode the whole box, held to the bounds a recording checked it against when
+	/// it was written, since a damaged or crafted file can declare anything.
 	fn decode<F: Read + Seek, T: Decode>(&self, file: &mut F) -> Result<T> {
+		let body = self.end - self.body;
+		if body > fmp4::MAX_METADATA_BYTES as u64 {
+			return Err(Error::MetadataTooLarge {
+				kind: String::from_utf8_lossy(&self.kind).into_owned(),
+				size: usize::try_from(body).unwrap_or(usize::MAX),
+			}
+			.into());
+		}
 		let mut data = vec![0u8; (self.end - self.start) as usize];
 		file.seek(SeekFrom::Start(self.start))?;
 		file.read_exact(&mut data)?;
+		fmp4::metadata::check(&data)?;
 		T::decode(&mut std::io::Cursor::new(data.as_slice())).map_err(crate::Error::mp4)
 	}
 }
@@ -686,6 +696,10 @@ struct Sample {
 impl Index {
 	/// Index a file whose reserved box starts at `reserved`, followed by the fragmented `moov`.
 	fn new(reserved: u64, moov: &mp4_atom::Moov) -> Result<Self> {
+		// Every movie and media tick count is divided by its timescale.
+		if moov.mvhd.timescale == 0 {
+			return Err(Error::Unrepairable("its moov declares a zero timescale").into());
+		}
 		let mut index = Self {
 			reserved,
 			timescale: moov.mvhd.timescale,
@@ -705,6 +719,9 @@ impl Index {
 			let Some(trex) = trexs.iter().find(|trex| trex.track_id == id) else {
 				return Err(unindexable(id, "the track has no trex").into());
 			};
+			if trak.mdia.mdhd.timescale == 0 {
+				return Err(unindexable(id, "the track declares a zero timescale").into());
+			}
 			self.descriptions.insert(id, Description::new(trak, trex));
 		}
 		Ok(())
@@ -2436,6 +2453,42 @@ mod tests {
 		apply(finish, &mut file);
 		file.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
 		assert!(repair(&file).is_err());
+	}
+
+	/// A crafted fragment or moov is held to the bounds a recording writes it within, so a
+	/// repair refuses it instead of expanding it.
+	#[tokio::test(start_paused = true)]
+	async fn repaired_metadata_is_bounded() {
+		use crate::container::fmp4::metadata::tests::{attacks, boxed, measure};
+		let (file, _) = recorded(&[]).await;
+		let first = file.windows(4).position(|kind| kind == b"moof").expect("a moof") - 4;
+		let mut bounded = true;
+		for (name, moof) in attacks(b"moof") {
+			let mut crafted = file[..first].to_vec();
+			crafted.extend_from_slice(&moof);
+			crafted.extend(boxed(b"mdat", &[]));
+			bounded &= measure(name, || repair(&crafted).is_err());
+		}
+		for (name, moov) in attacks(b"moov") {
+			let mut crafted = file[..first].to_vec();
+			crafted.extend(boxed(b"free", &moov));
+			bounded &= measure(name, || repair(&crafted).is_err());
+		}
+		assert!(bounded);
+	}
+
+	/// A zero movie or media timescale, which every tick count is divided by, is refused.
+	#[tokio::test(start_paused = true)]
+	async fn a_zero_timescale_is_refused() {
+		let (file, _) = recorded(&[]).await;
+		for kind in [b"mvhd", b"mdhd"] {
+			let mut crafted = file.clone();
+			let at = crafted.windows(4).position(|window| window == kind).expect("the box");
+			// The version picks 32- or 64-bit creation and modification times before it.
+			let timescale = at + 4 + 4 + if crafted[at + 4] == 1 { 16 } else { 8 };
+			crafted[timescale..timescale + 4].fill(0);
+			assert!(repair(&crafted).is_err(), "{}", String::from_utf8_lossy(kind));
+		}
 	}
 
 	/// The text track takes the next id, so a trailer advertising an occupied one is finished

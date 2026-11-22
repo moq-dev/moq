@@ -33,7 +33,7 @@ const MAX_HELD_BYTES: usize = 32 * 1024 * 1024;
 /// [`TrunEntry`](mp4_atom::TrunEntry)), so this keeps a parse within [`MAX_HELD_BYTES`].
 /// Counts and retained metadata-tree entries are checked separately, including entries that
 /// consume no bytes. Media payloads in `mdat` keep their transport-owned bound.
-const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
+pub(crate) const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
 
 /// The most samples parsed or planned for one CMAF fragment.
 ///
