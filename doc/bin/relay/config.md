@@ -290,7 +290,7 @@ See [Authentication](/bin/relay/auth).
 
 ```toml
 [cluster]
-connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token, upstream} objects.
+connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, token, upstream} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 max_hops = 32                                         # Legacy: longest hop path on moq-lite-03 to 06 (1 to 32).
