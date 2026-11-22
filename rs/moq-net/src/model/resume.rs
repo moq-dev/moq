@@ -725,7 +725,8 @@ struct Copy {
 	backfill: bool,
 	/// Asked only for groups under the serving copy's resume point. They come as fills under
 	/// where the track's live feed starts, which [`track::Consumer::may_land`] never waits
-	/// for, so it is waited for until it runs out, fails, or the reader's budget passes.
+	/// for, so they are waited for until its own subscription accounts for them, it fails, or
+	/// the reader's budget passes.
 	fills: bool,
 	/// The frames of the group at `floor` the reader already held when this copy was asked,
 	/// so it asks for that group from the next frame; see [`Reader::resume_at`].
@@ -1026,8 +1027,7 @@ impl Copy {
 			let floor = self.floor;
 			let from = self.start(start);
 			// A group still to land is waited for, as a gap is.
-			if self.fills
-				|| reader
+			if reader
 				.window
 				.runs(from)
 				.take_while(|run| *run.start() < end)
@@ -1042,6 +1042,22 @@ impl Copy {
 					)
 				}) {
 				return Retains::Wait;
+			}
+			// A fill still owes what its own feed has not accounted for: unanswered, it may land.
+			if self.fills {
+				let lacking: Vec<std::ops::Range<u64>> = (reader.window.runs(from))
+					.take_while(|run| *run.start() < end)
+					.flat_map(|run| reader.delivered.gaps(*run.start()..run.end().saturating_add(1).min(end)))
+					.collect();
+				let owes = !lacking.is_empty()
+					&& match self.poll_ready(reader.groups, &kio::Waiter::noop()) {
+						Poll::Pending => true,
+						Poll::Ready(Ok(sub)) => !sub.accounts_for(&[reader.delivered], &lacking, false, reader.waiter),
+						Poll::Ready(Err(_)) => false,
+					};
+				if owes {
+					return Retains::Wait;
+				}
 			}
 			// Inspect without moving either cursor: a later group poll still chooses its
 			// order and applies the current bounds and drift budget. Ignore the local cap
