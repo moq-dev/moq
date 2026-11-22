@@ -22207,6 +22207,10 @@ rec {
             packageId = "tempfile";
           }
           {
+            name = "test-env";
+            packageId = "test-env";
+          }
+          {
             name = "tokio";
             packageId = "tokio";
             features = [ "test-util" ];
