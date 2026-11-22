@@ -286,11 +286,16 @@ export class Game {
 		// ends without racing the teardown. The consumer skips a status that fails the schema; a
 		// rejection is a real failure, such as a track closed with an error, and ends the loop.
 		effect.spawn(async () => {
-			for (;;) {
-				const status = (await consumer.latest())?.value;
-				if (!status) break;
+			// A failed read ends the loop, so release the subscription instead of downloading what nothing reads.
+			try {
+				for (;;) {
+					const status = (await consumer.latest())?.value;
+					if (!status) break;
 
-				this.status.set(status);
+					this.status.set(status);
+				}
+			} finally {
+				consumer.close();
 			}
 		});
 	}

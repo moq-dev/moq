@@ -291,10 +291,15 @@ function subscribeJson<T>(
 	effect.cleanup(() => consumer.close());
 
 	effect.spawn(async () => {
-		for (;;) {
-			const state = await effect.race(consumer.latest());
-			if (state === undefined) break;
-			update(state.value);
+		// A failed read ends the loop, so release the subscription instead of downloading what nothing reads.
+		try {
+			for (;;) {
+				const state = await effect.race(consumer.latest());
+				if (state === undefined) break;
+				update(state.value);
+			}
+		} finally {
+			consumer.close();
 		}
 	});
 }
