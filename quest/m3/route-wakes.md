@@ -103,6 +103,24 @@ turn one route's cost change into per-broadcast mutations. The origin
 record and the index land together here, keeping these operation-count
 tests.
 
+Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
+audit): ✅ this quest moves to m3, so a rolling deploy's GOAWAY stops
+relaning every broadcast on each relay soon after the cut (rejected: keeping
+the 2026-11-18 m4 placement; a separate m3 quest for the router side alone,
+which would touch the same flush path). The audit adds the router's half:
+`reselect` → `relog` (`rs/moq-net/src/route/relay.rs`, about line 1747) logs a
+change whenever any usable route's next hop, rank, or mark moves, even a
+route no broadcast uses; `flush` then relanes every broadcast of that
+origin (`route/node.rs`, about line 816), and `ways` (`relay.rs`, about line
+2611) emits a Slot and a Serve per neighbour that holds the claim. One
+GOAWAY in a 30-relay full mesh relanes every broadcast at about 29 route
+evaluations each, under the node mutex. Log and relane only when a
+broadcast's chosen route or its standby moves, but keep every usable route
+available to the front: [route-health failover](/quest/m3/route-health/failover.md)
+needs the alternates, so change what is emitted, not what is held. Sweep
+`routes/drain` and `routes/reopen/spare` over mesh degree and broadcasts
+before and after.
+
 Verification: `origin/pool_churn` leaves flat in served paths at every pool
 width it already sweeps, and a unit test that counts `select` calls per
 route change: zero for an unrelated route's leave, only the won paths on a

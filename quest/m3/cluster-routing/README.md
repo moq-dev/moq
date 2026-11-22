@@ -102,5 +102,5 @@ setup after the capabilities land.
 ## Related
 
 - [Routing guide](/quest/m3/routing-guide.md) - concept page and federation setup
-- [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
+- [Route wakes](/quest/m3/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - per-broadcast warm routes ranked against these node routes
