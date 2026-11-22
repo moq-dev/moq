@@ -910,7 +910,7 @@ impl Copy {
 	/// than where it was asked to start, and through no later than where it was replaced.
 	fn wire(&self, reader: &Mirrored, key: u64) -> Option<track::Range> {
 		let range = reader.ranges.get(&key)?;
-		Some(range.clamped(self.floor, self.end(), self.resolved.get(&key).copied()))
+		Some(range.asked(self.floor, self.end(), self.resolved.get(&key).copied()))
 	}
 
 	/// Ask for the reader's current priority, delay, and order, and for the ranges keyed in
@@ -1703,12 +1703,12 @@ impl Mirrored {
 	}
 
 	/// [`Self::subscription`] from no earlier than `floor` and through no later than the
-	/// exclusive `end`, each range clamped where `resolved` places it.
+	/// exclusive `end`, each range asked where `resolved` places it; see [`track::Range::asked`].
 	fn wire(&self, floor: Option<u64>, end: Option<u64>, resolved: &BTreeMap<u64, Resolved>) -> Subscription {
 		self.with_ranges(
 			self.ranges
 				.iter()
-				.map(|(key, range)| range.clamped(floor, end, resolved.get(key).copied()))
+				.map(|(key, range)| range.asked(floor, end, resolved.get(key).copied()))
 				.collect(),
 		)
 	}
@@ -1874,7 +1874,7 @@ impl Reader {
 			.enumerate()
 			.map(|(index, (key, range))| {
 				let resolved = resolved.get(index).copied().flatten();
-				(*key, range.clamped(floor, None, resolved))
+				(*key, range.asked(floor, None, resolved))
 			})
 			.collect()
 	}

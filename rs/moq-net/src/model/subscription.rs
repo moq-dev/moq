@@ -240,7 +240,8 @@ impl Start {
 
 	/// A live join reaching back past every group, so it takes every group still within `max`
 	/// of the live edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and
-	/// no start.
+	/// no start, and how a front asks a new copy for a live join it resumes (see
+	/// [`Range::asked`]).
 	pub(crate) const fn within(max: Duration) -> Self {
 		Self::Live {
 			min: WITHIN,
@@ -528,6 +529,25 @@ impl Range {
 			(_, Some(Some(last))) => Some(last),
 		};
 		Self { start, end }
+	}
+}
+
+impl Range {
+	/// This range as a copy asked from `floor` through the exclusive `end` asks for it: as
+	/// [`Self::clamped`] places it, except a live join with a `max`. Placed at the group it
+	/// resolved to, that join would read as history, whose groups never go stale, so it is
+	/// asked again as a live join taking every group still within its `max` (see
+	/// [`Start::within`]). The copy's local floor keeps out the groups below where it resolved;
+	/// those its upstream sends are within `max`, so the cost is bounded by it.
+	pub(super) fn asked(&self, floor: Option<u64>, end: Option<u64>, resolved: Option<Resolved>) -> Self {
+		let clamped = self.clamped(floor, end, resolved);
+		match (self.start, clamped.start) {
+			(Start::Live { max: Some(max), .. }, Start::Time(_)) if !clamped.is_empty() => Self {
+				start: Start::within(max),
+				end: clamped.end,
+			},
+			_ => clamped,
+		}
 	}
 }
 
@@ -842,6 +862,46 @@ mod tests {
 		// Empty ranges ask for nothing.
 		assert_eq!(ranges(&[sub(&[groups(5, 5)])]), Vec::<Range>::new());
 		assert_eq!(ranges(&[sub(&[]), sub(&[groups(1, 2)])]), vec![groups(1, 2)]);
+	}
+
+	/// A copy asked from a floor gets a resolved live join with a `max` as a live join taking
+	/// every group within it, so its groups still go stale there; one with no `max`, and
+	/// history, are asked from where they resolved.
+	#[test]
+	fn a_resolved_live_join_is_asked_with_its_max() {
+		let max = Duration::from_secs(2);
+		let join = |max, end| Range {
+			start: Start::Live {
+				min: Duration::from_millis(2),
+				max,
+			},
+			end,
+		};
+		let at = |start, end| {
+			Some(Resolved {
+				start,
+				end,
+				floored: true,
+			})
+		};
+		assert_eq!(
+			join(Some(max), None).asked(Some(10), None, at(8, None)),
+			Range::from(Start::within(max))
+		);
+		// Its end where it resolved, as a placed one's.
+		assert_eq!(
+			join(Some(max), Some(500)).asked(Some(10), None, at(8, Some(12))),
+			Range {
+				start: Start::within(max),
+				end: Some(11)
+			}
+		);
+		assert_eq!(join(None, None).asked(Some(10), None, at(8, None)), groups(10, None));
+		assert_eq!(groups(8, None).asked(Some(10), None, at(8, None)), groups(10, None));
+		// Not yet resolved: asked as it is, for the copy to place.
+		assert_eq!(join(Some(max), None).asked(Some(10), None, None), join(Some(max), None));
+		// Capped at where it resolved: nothing, whatever its `max`.
+		assert!(join(Some(max), None).asked(None, Some(8), at(8, None)).is_empty());
 	}
 
 	/// Combining is order-independent and stops changing once it covers everyone.
