@@ -139,10 +139,11 @@ pub struct Config {
 	/// claims; on, the routes it learned from other peers too.
 	///
 	/// A relay turns it on. An application publishing its own broadcasts leaves it off,
-	/// so a peer never routes through it to reach anyone else. Confine a session that
-	/// must not forward on a proxying origin with [`Link::Upstream`]. Older versions
-	/// advertise everything either way, since their hop chains cannot tell this node's
-	/// claims from what it forwards.
+	/// so a peer never routes through it to reach anyone else. On a proxying origin, a
+	/// [`Link::Upstream`] session still gets routes learned from peers, just none from
+	/// other upstreams; a session that must forward nothing needs its own origin with
+	/// this off. Older versions advertise everything either way, since their hop chains
+	/// cannot tell this node's claims from what it forwards.
 	pub proxy: bool,
 
 	/// How long an announce cursor holds a changed route that arrived over a hop chain
