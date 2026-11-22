@@ -5322,7 +5322,8 @@ struct TrackRun {
 	initial: u64,
 	/// Lite-07: the ranges an update added whose start no SUBSCRIBE_STARTED reported yet, by
 	/// Range ID.
-	unstarted: std::collections::BTreeSet<u64>,
+	/// Each with whether it was added as a live join, which a pin before the report replaces.
+	unstarted: std::collections::BTreeMap<u64, bool>,
 	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 }
@@ -5583,7 +5584,8 @@ impl TrackRun {
 			self.requested.insert(id, range);
 			self.unpinned.insert(id, due(&range, false));
 			if id >= self.initial {
-				self.unstarted.insert(id);
+				self.unstarted
+					.insert(id, matches!(range.start, crate::track::Start::Live(_)));
 			}
 		}
 		self.positions.extend(positions);
@@ -5689,22 +5691,19 @@ impl TrackRun {
 		if self.unstarted.is_empty() {
 			return Ok(false);
 		}
-		let mut waiting = std::collections::BTreeSet::new();
+		let mut waiting = std::collections::BTreeMap::new();
 		let mut reported = false;
 		let unstarted = std::mem::take(&mut self.unstarted);
-		let resolved = self.track.resolved_keys(unstarted.iter().copied());
+		let resolved = self.track.resolved_keys(unstarted.keys().copied());
 		let mut lowest = from;
-		for (id, resolved) in unstarted.into_iter().zip(resolved) {
+		for ((id, joins), resolved) in unstarted.into_iter().zip(resolved) {
 			let start = match resolved {
 				Some(resolved) => {
 					// A live join placed behind where delivery started, further from the live edge
-					// than the first ranges, starts where it was placed: the subscriber reads its
-					// answer as the join's start, so its groups from there are owed, and delivery
-					// now starts there too. Any other range starts no earlier than delivery.
-					let joins = matches!(
-						self.requested.ranges.get(&id).map(|range| range.start),
-						Some(crate::track::Start::Live(_))
-					);
+					// than the first ranges, starts where it was placed, even once pinned there: the
+					// subscriber reads its answer as the join's start, so its groups from there are
+					// owed, and delivery now starts there too. Any other range starts no earlier
+					// than delivery.
 					let start = match joins {
 						true => resolved.start,
 						false => resolved.start.max(from),
@@ -5717,7 +5716,7 @@ impl TrackRun {
 				}
 				None if finished => None,
 				None => {
-					waiting.insert(id);
+					waiting.insert(id, joins);
 					continue;
 				}
 			};
@@ -8936,6 +8935,57 @@ mod serve_group_test {
 		run.update(edit(&[], &[(1, resume)]));
 		run.update(edit(&[1], &[(3, lite::Range::span(Some(4), 0, None, None))]));
 		assert_eq!(run.frames.start(5), 0, "the position retired");
+	}
+
+	/// A live join added behind the SUBSCRIBE's start reports where it was placed, even when a
+	/// later update pins it there before its SUBSCRIBE_STARTED goes out: the report keeps that
+	/// it was added as a join.
+	#[kio::test]
+	async fn lite07_a_join_pinned_before_its_report_keeps_its_start() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for key in 0..5 {
+			write_group(&mut track, key * 1000, key * 1000);
+		}
+		let first = lite::Range::span(Some(4000), 0, None, None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_range(4000..),
+		);
+		let (mut run, mut writer, log) = lite_run_from(Version::Lite07, subscriber, 4000);
+
+		// A live join two seconds behind the newest frame, at 4 s: group 2000, before delivery.
+		let back = lite::Range {
+			start: Some(lite::Anchor::Live(Duration::from_secs(2))),
+			end: None,
+		};
+		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
+		// Before any SUBSCRIBE_STARTED, another update pins the join to the group it resolved to.
+		run.update(lite07_add(
+			&run,
+			&[(0, first), (1, back)],
+			2,
+			&[lite::Range::span(Some(9000), 0, None, None)],
+		));
+		assert_eq!(
+			run.track.subscription().ranges[1].start,
+			crate::track::Start::Time(2000),
+			"pinned before the report"
+		);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let started: Vec<_> = responses(&mut writer, &log)
+			.await
+			.into_iter()
+			.filter_map(|msg| match msg {
+				lite::SubscribeResponse::Started(started) if started.id == 1 => Some(started.start),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(started, [Some(2000)]);
 	}
 
 	/// A range an update adds learns where it starts from SUBSCRIBE_STARTED, after

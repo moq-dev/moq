@@ -406,7 +406,7 @@ impl Window {
 			let range = self.ranges.get(key)?;
 			let since = self.since.get(key).copied().unwrap_or(0);
 			match range.start {
-				Start::Live(min) => Some((min, range.end, since)),
+				Start::Live(min) => Some((min, join_end(range.end), since)),
 				Start::Oldest | Start::Time(_) => None,
 			}
 		})
@@ -807,7 +807,7 @@ impl Window {
 				let since = self.since.get(&key).copied().unwrap_or(0);
 				// Nothing to deliver: a start past its end holds nothing.
 				let past = range.end.and_then(|last| last.checked_add(1));
-				match (holdings.join(min, range.end, self.budget, since), past) {
+				match (holdings.join(min, join_end(range.end), self.budget, since), past) {
 					(Join::Group(group) | Join::Time(group), _) | (Join::Empty, Some(group)) => (Some(group), false),
 					(Join::Empty | Join::Unknown, _) => {
 						self.reaching.insert(key);
@@ -1050,6 +1050,12 @@ fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) ->
 	let after = holdings.next_start(next)?;
 	let gap = next..after.min(time.saturating_add(1));
 	(!holdings.never_produced(gap)).then_some(next)
+}
+
+/// The end a live join is asked and answered under. One through the reserved group
+/// `u64::MAX` reaches every group, so the wire carries it unbounded and its answer comes back so.
+fn join_end(end: Option<u64>) -> Option<u64> {
+	end.filter(|end| end.checked_add(1).is_some())
 }
 
 #[cfg(test)]
@@ -1427,6 +1433,10 @@ mod tests {
 				"an answer from before it waited"
 			);
 			assert_eq!(window.joins().collect::<Vec<_>>(), [(min, None, 3)]);
+			// One through the reserved last group asks and waits as an unbounded one, as the wire
+			// carries it.
+			let through = Window::keyed_since([(0, live(min, time(u64::MAX)))], |_| 3, delay(), Some(99), &keys);
+			assert_eq!(through.joins().collect::<Vec<_>>(), [(min, None, 3)]);
 
 			// A newer answer places it, at exactly the group upstream answered.
 			keys.answered = Some(4);
