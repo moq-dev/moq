@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Wall, wall } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { base64url, exportJWK, generateKeyPair, SignJWT } from "jose";
+import { base64url, CompactSign, exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { Claims } from "./claims.ts";
 import { INSECURE_TEST_RS256_OTHER, INSECURE_TEST_RSA_KEYS } from "./insecure-test-keys.ts";
@@ -80,6 +80,24 @@ test("verify refuses unsafe signed payloads without dropping their restrictions"
 		await expect(Key.verify(key, await signed({ publish: [""], exp: 1001, nbf: 1000 }))).resolves.toMatchObject({
 			publish: [""],
 		});
+		// A payload serde_json refuses: invalid UTF-8, a repeated claim, or a lone surrogate.
+		const raw = (payload: Uint8Array) =>
+			new CompactSign(payload).setProtectedHeader({ alg: "HS256", kid: testKey.kid as string }).sign(secret);
+		const text = (payload: string) => raw(new TextEncoder().encode(payload));
+		await expect(Key.verify(key, await text('{"publish":[""]}'))).resolves.toMatchObject({ publish: [""] });
+		for (const token of [
+			await raw(
+				new Uint8Array([
+					...new TextEncoder().encode('{"publish":["'),
+					0xff,
+					...new TextEncoder().encode('"]}'),
+				]),
+			),
+			await text('{"publish":[""],"publish":["alice"]}'),
+			await text('{"publish":["\\ud800"]}'),
+		]) {
+			await expect(Key.verify(key, token)).rejects.toThrow(/Failed to parse token claims/);
+		}
 		await expect(Key.verify(key, await signed({ publish: [""] }, { alg: "HS256", kid: "other" }))).rejects.toThrow(
 			/kid/,
 		);
@@ -581,17 +599,20 @@ test("EdDSA algorithm - static sign and verify", async () => {
 	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
-test("EdDSA algorithm - verify with private key fails", async () => {
-	// Key generated via `moq auth generate`
-	const privateKey =
+test("a private key verifies as its public half, as moq-auth's does", async () => {
+	// EdDSA key generated via `moq auth generate`
+	const eddsa =
 		"eyJhbGciOiJFZERTQSIsImtleV9vcHMiOlsidmVyaWZ5Iiwic2lnbiJdLCJrdHkiOiJPS1AiLCJjcnYiOiJFZDI1NTE5IiwieCI6Imd4cXVxMDlJUE4xVHl1TG1nTnNqZmo2NWtoa05OWndKVmp1MEEtUmQ0dkEiLCJkIjoiU1NFSHBIeTFUNHJaemhua3dpVVFlUGV1TUh2MWpLUGlxRzRsbFhyQV91cyJ9";
-	const key = Key.parse(privateKey);
-	const token = await Key.sign(key, testClaims);
-	await expect(
-		(async () => {
-			await Key.verify(key, token);
-		})(),
-	).rejects.toThrow();
+	const keys = [
+		Key.parse(eddsa),
+		Key.parse(INSECURE_TEST_RSA_KEYS.RS256.private),
+		Key.parse(INSECURE_TEST_RSA_KEYS.PS256.private),
+		await Key.generate("ES256"),
+	];
+	for (const key of keys) {
+		const token = await Key.sign(key, testClaims);
+		expect((await Key.verify(key, token)).root).toBe(testClaims.root);
+	}
 });
 
 test("asymmetric cross-algorithm verification fails", async () => {

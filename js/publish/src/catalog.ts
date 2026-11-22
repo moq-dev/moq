@@ -24,7 +24,10 @@ const ESTIMATE_INTERVAL = Duration.millis(1000);
  * before it synced), so it omits `clock` rather than advertise a false one.
  */
 export class CatalogProducer {
+	// The catalog as edited, in its parsed shape, and as written. Only the edited one is encoded,
+	// since encoding is not idempotent: a written unknown container is no longer its parsed wrapper.
 	#value: Catalog.Root = pageRoot();
+	#wire: Catalog.Root = Catalog.encode(this.#value);
 	// Each output and the track it writes, whose newest start the next update must pass.
 	#outputs = new Map<Json.Snapshot.Producer<Catalog.Root>, Moq.Track.Producer>();
 	#lastEstimate: Instant | undefined;
@@ -38,7 +41,7 @@ export class CatalogProducer {
 		const value = Catalog.encode(draft);
 		// Estimates only rise for a track; a renamed rendition starts its new track over.
 		for (const field of ["jitter", "delay"] as const) {
-			const previous = new Map(advertised(this.#value, field));
+			const previous = new Map(advertised(this.#wire, field));
 			for (const [track, estimate] of advertised(value, field)) {
 				if (estimate === 0) throw new Error(`omit ${field} rather than advertising 0`);
 				const before = previous.get(track);
@@ -47,9 +50,10 @@ export class CatalogProducer {
 				}
 			}
 		}
-		const estimateOnly = Json.deepEqual(structure(this.#value), structure(value));
-		const changed = !Json.deepEqual(this.#value, value);
-		this.#value = value;
+		const estimateOnly = Json.deepEqual(structure(this.#wire), structure(value));
+		const changed = !Json.deepEqual(this.#wire, value);
+		this.#value = draft;
+		this.#wire = value;
 		if (!changed || this.#outputs.size === 0) return;
 
 		const at = now();
@@ -69,7 +73,7 @@ export class CatalogProducer {
 		// One timestamp past every output's newest start, so each opens its group at the same time.
 		let at = Time.Timestamp.now();
 		for (const track of this.#outputs.values()) at = Json.next(track, at);
-		for (const output of this.#outputs.keys()) output.update(this.#value, at);
+		for (const output of this.#outputs.keys()) output.update(this.#wire, at);
 	}
 
 	/**
@@ -79,7 +83,7 @@ export class CatalogProducer {
 	 */
 	serve(track: Moq.Track.Producer, effect: Effect): void {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
-		output.update(this.#value, Json.next(track, Time.Timestamp.now()));
+		output.update(this.#wire, Json.next(track, Time.Timestamp.now()));
 
 		this.#outputs.set(output, track);
 		effect.cleanup(() => {

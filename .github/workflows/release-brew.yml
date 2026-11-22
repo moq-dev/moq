@@ -25,9 +25,12 @@ on:
     types:
       - completed
 
+# One run pushes to the tap at a time. `queue: max` holds every other, in
+# order, where the default queue cancels all but one pending run, so a release
+# cut tagging moq-cli, moq-relay, and moq-gst together still renders all three.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read

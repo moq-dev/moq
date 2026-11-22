@@ -95,6 +95,7 @@ function resolveConfig(config?: Config): Required<Config> {
 			VarInt.from(value);
 		}
 	}
+	if (resolved.maxStreams > Frame.MAX_STREAMS) throw new Error("maxStreams must be at most 2^60");
 	if (resolved.maxDatagramFrameSize === 0n) throw new Error("maxDatagramFrameSize must be positive or null");
 	if (resolved.maxRecordSize < Frame.DEFAULT_MAX_RECORD_SIZE) {
 		throw new Error(`maxRecordSize must be at least ${Frame.DEFAULT_MAX_RECORD_SIZE}`);
@@ -1075,7 +1076,7 @@ export class Session implements WebTransport {
 		} else if (frame.type === "max_data") {
 			this.#connCredit.increaseMax(frame.max);
 		} else if (frame.type === "max_stream_data") {
-			this.#sendState(frame.id)?.send?.credit.increaseMax(frame.max);
+			this.#sendState(frame.id, "MAX_STREAM_DATA")?.send?.credit.increaseMax(frame.max);
 		} else if (frame.type === "max_streams_bidi") {
 			this.#bidiStreamCredit.increaseMax(frame.max);
 		} else if (frame.type === "max_streams_uni") {
@@ -1117,9 +1118,11 @@ export class Session implements WebTransport {
 			if (this.#version === "qmux-02" && frame.sequence >= BigInt(this.#nextPingSeq)) {
 				throw new Error("QX_PING response echoed a sequence we never sent");
 			}
+		} else if (frame.type === "stream_data_blocked") {
+			// Informational, but it still names a stream we must be able to receive on.
+			if (!this.#closed) this.#checkStream(frame.id, "recv", "STREAM_DATA_BLOCKED");
 		} else if (
 			frame.type === "data_blocked" ||
-			frame.type === "stream_data_blocked" ||
 			frame.type === "streams_blocked_bidi" ||
 			frame.type === "streams_blocked_uni"
 		) {
@@ -1311,6 +1314,24 @@ export class Session implements WebTransport {
 		return bytes;
 	}
 
+	/** Refuse a frame naming a stream it can't act on (RFC 9000 §19.8-19.13): one without
+	 *  the `half` of ours the frame acts on, one of ours we never opened, or a peer's past
+	 *  the limit we advertised. */
+	#checkStream(id: Stream.Id, half: "send" | "recv", frame: string) {
+		const can = half === "send" ? id.canSend(this.#isServer) : id.canRecv(this.#isServer);
+		if (!can) {
+			const only = half === "send" ? "receive" : "send";
+			throw new TransportError(TransportCode.STREAM_STATE_ERROR, `${frame} for a ${only}-only stream`);
+		}
+		if (this.#isPeerStream(id)) {
+			if (!this.#recvLimit(id.dir).allows(id.index)) {
+				throw new TransportError(TransportCode.STREAM_LIMIT_ERROR, `${frame} past the stream limit`);
+			}
+		} else if (id.index >= (id.dir === Stream.Dir.Bi ? this.#nextBiStreamId : this.#nextUniStreamId)) {
+			throw new TransportError(TransportCode.STREAM_STATE_ERROR, `${frame} for a stream we never opened`);
+		}
+	}
+
 	#isPeerStream(id: Stream.Id): boolean {
 		return id.serverInitiated !== this.#isServer;
 	}
@@ -1408,9 +1429,7 @@ export class Session implements WebTransport {
 
 		const id = frame.id;
 		const streamId = id.value.value;
-		if (!id.canRecv(this.#isServer)) {
-			throw new TransportError(TransportCode.STREAM_STATE_ERROR, "Invalid stream ID direction");
-		}
+		this.#checkStream(id, "recv", "STREAM");
 
 		const recv = this.#streams.get(streamId)?.recv;
 		if (recv) {
@@ -1419,13 +1438,8 @@ export class Session implements WebTransport {
 			return;
 		}
 
-		if (!this.#isPeerStream(id)) {
-			// One of ours whose receive half already ended: a late frame, dropped.
-			// One we never opened is malformed (canRecv leaves only bidi here).
-			if (id.index >= this.#nextBiStreamId)
-				throw new TransportError(TransportCode.STREAM_STATE_ERROR, "STREAM frame for a stream we never opened");
-			return;
-		}
+		// One of ours whose receive half already ended: a late frame, dropped.
+		if (!this.#isPeerStream(id)) return;
 		// A peer stream whose receive half already ended stays closed.
 		if (this.#recvOpen(id.dir).isClosed(id.index)) return;
 
@@ -1449,10 +1463,8 @@ export class Session implements WebTransport {
 			);
 		}
 		const id = frame.id;
-		if (!id.canRecv(this.#isServer)) {
-			throw new TransportError(TransportCode.STREAM_STATE_ERROR, "Invalid stream ID direction");
-		}
 		if (this.#closed) return;
+		this.#checkStream(id, "recv", "RESET_STREAM");
 
 		const streamId = id.value.value;
 		const err = new StreamError(streamCode(frame.code.value), "RESET_STREAM");
@@ -1463,13 +1475,8 @@ export class Session implements WebTransport {
 			return;
 		}
 
-		if (!this.#isPeerStream(id)) {
-			// One of ours whose receive half already ended, unless we never opened it.
-			const opened = id.dir === Stream.Dir.Bi ? this.#nextBiStreamId : this.#nextUniStreamId;
-			if (id.index >= opened)
-				throw new TransportError(TransportCode.STREAM_STATE_ERROR, "RESET_STREAM for a stream we never opened");
-			return;
-		}
+		// One of ours whose receive half already ended.
+		if (!this.#isPeerStream(id)) return;
 		// A terminal peer stream stays terminal, so a duplicate RESET can't charge its final size twice.
 		if (this.#recvOpen(id.dir).isClosed(id.index)) return;
 
@@ -1492,8 +1499,9 @@ export class Session implements WebTransport {
 
 	/** The stream a MAX_STREAM_DATA or STOP_SENDING names. As in QUIC, either can be
 	 *  the first frame of a peer's bidi stream, and opens it like a STREAM frame. */
-	#sendState(id: Stream.Id): StreamState | undefined {
+	#sendState(id: Stream.Id, frame: string): StreamState | undefined {
 		if (this.#closed) return undefined;
+		this.#checkStream(id, "send", frame);
 		const stream = this.#streams.get(id.value.value);
 		if (stream) return stream;
 		if (!this.#isPeerStream(id) || id.dir !== Stream.Dir.Bi) return undefined;
@@ -1504,7 +1512,7 @@ export class Session implements WebTransport {
 	}
 
 	#handleStopSending(frame: Frame.StopSending) {
-		const stream = this.#sendState(frame.id);
+		const stream = this.#sendState(frame.id, "STOP_SENDING");
 		if (!stream?.send) return;
 		const stopped = new StreamError(streamCode(frame.code.value), "STOP_SENDING");
 		this.#resetSend(frame.id, stream, stopped, frame.code);

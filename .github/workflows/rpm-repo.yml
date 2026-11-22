@@ -18,9 +18,11 @@ on:
 permissions:
   contents: read
 
+# One run mutates the bucket at a time. `queue: max` holds every other, in
+# order, where the default queue cancels all but one pending run.
 concurrency:
   group: rpm-repo
-  cancel-in-progress: false
+  queue: max
 
 jobs:
   publish:

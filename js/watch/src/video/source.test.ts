@@ -538,6 +538,32 @@ describe("Source rendition orientation", () => {
 	});
 });
 
+describe("rotated renditions", () => {
+	it("fits the box by the size as shown, the coded size turned by the rotation", async () => {
+		const renditions = {
+			"1080p": config("avc1.640028", { codedWidth: 1920, codedHeight: 1080 }),
+			"720p": config("avc1.64001f", { codedWidth: 1280, codedHeight: 720 }),
+			"360p": config("avc1.64001e", { codedWidth: 640, codedHeight: 360 }),
+		};
+		for (const [rotation, track] of [
+			[90, "720p"],
+			[270, "720p"],
+			// Unturned, a landscape 720p is too wide for the portrait box.
+			[0, "360p"],
+			[180, "360p"],
+		] as const) {
+			const broadcast = {
+				in: { connection: new Signal(undefined) },
+				out: { catalog: new Signal({ video: { renditions, rotation } }) },
+			} as unknown as Broadcast;
+			const source = new Source({ broadcast, target: { width: 720, height: 1280 } });
+			await settle();
+			expect([rotation, source.out.track.peek()]).toEqual([rotation, track]);
+			source.close();
+		}
+	});
+});
+
 describe("conflicting rendition metadata", () => {
 	it("keeps the first ranking's best picture when bitrate metadata has no common name", async () => {
 		const source = new Source({
