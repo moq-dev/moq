@@ -4456,17 +4456,29 @@ export class Subscriber {
 		if (this.#parks) return false;
 		const ordered = this.#mode === "ordered";
 		if (this.#resume) return this.#resume.exhausted(this.#delivered, ordered);
-		return this.#drained([this.#delivered], ordered);
+		return this.#drained(ordered);
 	}
 
 	// Whether a bounded window has nothing left to deliver: every group in its ranges was handed
-	// out (in any of `taken`), dropped, or never will be, as one skipped as stale, one below where
-	// the feed started, or a hole the feed no longer owes. An open window always has more, and so
-	// does one the cap keeps a group out of, since the reader may raise it again. A local
-	// producer may still create any group it did not skip, so only an `ordered` read, which hands
-	// out the group it created above a hole before any created later below, passes that hole.
-	// Mirrors the Rust `Cursor::is_exhausted`.
-	#drained(taken: readonly Delivered[], ordered: boolean): boolean {
+	// out or is accounted for (see #accounts). Mirrors the Rust `Cursor::is_exhausted`.
+	#drained(ordered: boolean): boolean {
+		const end = this.#window.end();
+		if (end === undefined) return false;
+		const gaps = this.#window
+			.runs(this.#window.floor() ?? 0n, end)
+			.flatMap((run) => this.#delivered.gaps(run.start, run.end));
+		return this.#accounts(gaps, ordered);
+	}
+
+	// Whether this reader accounts for every key of `gaps` it did not hand out itself: each was
+	// dropped, or never will be, as one skipped as stale, one below where the feed started, or a
+	// hole the feed no longer owes, or lies outside its window, which it never reads. An open
+	// window, or one with a fill still out, accounts for nothing yet, and a key the cap keeps out
+	// stays owed, since the reader may raise it again.
+	// A local producer may still create any group it did not skip, so only an `ordered` read,
+	// which hands out the group it created above a hole before any created later below, passes
+	// that hole. Mirrors the Rust `Cursor::accounts`.
+	#accounts(gaps: readonly Run[], ordered: boolean): boolean {
 		const end = this.#window.end();
 		if (end === undefined) return false;
 		// A fill still owes a group it reads.
@@ -4481,41 +4493,40 @@ export class Subscriber {
 		const budget = this.#drift().budget;
 		const coverage = this.#coverage();
 		const { drops: all, refused } = this.#state;
-		for (const run of this.#window.runs(this.#window.floor() ?? 0n, end)) {
-			let gaps = [run];
-			for (const delivered of taken) gaps = gaps.flatMap((gap) => delivered.gaps(gap.start, gap.end));
-			for (const gap of gaps) {
-				// Each run judged from where it meets the gap, as the reader would read it.
-				const overlapping = givenUp(all, refused.peek(), gap.start, gap.end, (run) =>
-					settles(run, budget, coverage),
-				).map((run) => ({
-					...run,
-					start: max(run.start, gap.start),
-					end: min(run.end, gap.end),
-				}));
-				const drops = overlapping.filter((run) => settles(run, budget, coverage));
-				const unknown = overlapping.filter((run) => !settles(run, budget, coverage));
-				// A miss this reader gave up on is never wanted again.
-				const opens = runGaps(drops, gap.start, gap.end).flatMap((run) =>
-					runGaps(this.#givenUp, run.start, run.end),
-				);
-				for (const open of opens) {
-					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
-					// Cached under the local floor, which lowering offers again, unless a key-order read
-					// already passed it: an ordered take let go of it, so it is not held.
-					const under = { start: max(open.start, this.#nextKey), end: min(open.end, cursor.start) };
-					if (producer && under.start < under.end && cachedIn(producer, under.start, under.end).length > 0)
-						return false;
-					// Not received yet, so it may still arrive; a local producer may still create it.
-					if (open.end > received || (local && !ordered)) return false;
-					// Held, so a read still hands it out, skips it, or waits for the cap to rise.
-					const index = timelineIndex(held, open.start);
-					if (held[index] && held[index].start < open.end) return false;
-					const owed = producer && owedGroup(producer, open.start, open.end);
-					if (owed) {
-						if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
-						return false;
-					}
+		const lacking = gaps
+			.flatMap((gap) => this.#window.runs(gap.start, min(gap.end, end)))
+			.flatMap((gap) => this.#delivered.gaps(gap.start, gap.end));
+		for (const gap of lacking) {
+			// Each run judged from where it meets the gap, as the reader would read it.
+			const overlapping = givenUp(all, refused.peek(), gap.start, gap.end, (run) =>
+				settles(run, budget, coverage),
+			).map((run) => ({
+				...run,
+				start: max(run.start, gap.start),
+				end: min(run.end, gap.end),
+			}));
+			const drops = overlapping.filter((run) => settles(run, budget, coverage));
+			const unknown = overlapping.filter((run) => !settles(run, budget, coverage));
+			// A miss this reader gave up on is never wanted again.
+			const opens = runGaps(drops, gap.start, gap.end).flatMap((run) =>
+				runGaps(this.#givenUp, run.start, run.end),
+			);
+			for (const open of opens) {
+				if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
+				// Cached under the local floor, which lowering offers again, unless a key-order read
+				// already passed it: an ordered take let go of it, so it is not held.
+				const under = { start: max(open.start, this.#nextKey), end: min(open.end, cursor.start) };
+				if (producer && under.start < under.end && cachedIn(producer, under.start, under.end).length > 0)
+					return false;
+				// Not received yet, so it may still arrive; a local producer may still create it.
+				if (open.end > received || (local && !ordered)) return false;
+				// Held, so a read still hands it out, skips it, or waits for the cap to rise.
+				const index = timelineIndex(held, open.start);
+				if (held[index] && held[index].start < open.end) return false;
+				const owed = producer && owedGroup(producer, open.start, open.end);
+				if (owed) {
+					if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
+					return false;
 				}
 			}
 		}
@@ -4562,10 +4573,18 @@ export class Subscriber {
 		};
 		// A route copy judged for the logical reader that handed out `delivered`: what the copy
 		// handed out itself counts too. A copy that is itself a front judges across its own copies.
-		hooks.exhaustedFor = (subscriber, delivered, ordered) =>
-			subscriber.#resume
-				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered), ordered)
-				: subscriber.#drained([subscriber.#delivered, delivered], ordered);
+		hooks.accountsFor = (subscriber, delivered, gaps, ordered) => {
+			if (!subscriber.#resume) return subscriber.#accounts(gaps, ordered);
+			const own = subscriber.#delivered;
+			const left = gaps.flatMap((gap) => own.gaps(gap.start, gap.end));
+			return subscriber.#resume.accounts(own.union(delivered), left, ordered);
+		};
+		hooks.skippedIn = (subscriber, start, end) =>
+			subscriber.#resume?.skippedIn(start, end) ??
+			subscriber.#state.drops
+				.overlapping(start, end)
+				.filter((run) => run.skip)
+				.map((run) => ({ start: max(run.start, start), end: min(run.end, end) }));
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
 		// their anchors against the groups it holds, then narrows them to its own local bounds.
