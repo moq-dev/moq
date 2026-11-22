@@ -26,8 +26,9 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   `select` under the table read lock (`retain_routes`, then `best_route`,
   which hashes every pool member), then the driver polls every track and
   rescans deadlines. `Pin` is gone (#4741).
-- `route_order` ranks, in order: the most specific claim; the claim the
-  route layer marks primary; a route neither draining nor unavailable; the
+- Every selection ranks the most specific claim first, wherever it is
+  filed, then by `route_order`, in order: a route that is available; one
+  that is not draining; the claim the route layer marks primary; the
   higher link priority; an identified hop chain before an anonymous one,
   whatever the cost; the cheaper cost; a broadcast published on this origin;
   the shorter hop chain; then, on lite-07, the draft's Rendezvous Hash of

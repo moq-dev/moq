@@ -116,12 +116,6 @@ export interface OriginConsumer {
 export interface Advertised {
 	readonly identity: object;
 	readonly route: WireRoute;
-	/**
-	 * The prefix the route was advertised at, when a scope's projection merged several covering
-	 * prefixes under one key; unset when the key is its prefix. Supersession compares only routes
-	 * of one prefix.
-	 */
-	readonly prefix?: Path.Valid;
 }
 
 /** What names a stream: an advertisement, and the instance its route serves. */

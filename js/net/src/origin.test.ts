@@ -11,6 +11,7 @@ import {
 	bestCandidate,
 	chainHash,
 	compareRouteCandidates,
+	compareRoutes,
 	hooks,
 	mostSpecific,
 	presented,
@@ -2234,20 +2235,44 @@ test("the most specific claim wins whichever prefix shows it", () => {
 		[Path.from("src/a/b"), broad],
 		[Path.from("src/a"), exact],
 	]);
-	const pick = (prefix: Path.Valid) => at.get(prefix);
+	const pick = (prefix: Path.Valid) => [at.get(prefix)].filter((route) => route !== undefined);
 	expect(mostSpecific(path, pick, (route) => route)).toBe(exact);
-	// Claims as specific as each other go to the deepest prefix.
+	// Claims as specific as each other tie to the deepest filing.
+	const deep = { ...WireRoute.default, claimed: true, above: 1n };
 	const same = new Map([
-		[Path.from("src/a/b"), { ...WireRoute.default, claimed: true, above: 1n }],
+		[Path.from("src/a/b"), deep],
 		[Path.from("src/a"), exact],
 	]);
-	expect(
-		mostSpecific(
-			path,
-			(prefix) => same.get(prefix),
-			(route) => route,
-		)?.above,
-	).toBe(1n);
+	const pickSame = (prefix: Path.Valid) => [same.get(prefix)].filter((route) => route !== undefined);
+	expect(mostSpecific(path, pickSame, (route) => route)).toBe(deep);
+});
+
+// Claims of one prefix rank against each other wherever each is filed, as `best_route` in Rust: a
+// draining claim filed deeper loses to a live one made at its prefix, and an instance's higher epoch
+// at the prefix supersedes its older one filed deeper.
+test("a claim filed deeper ranks against the claim of its prefix", () => {
+	const path = Path.from("src/a/b");
+	const instance = Instance.parse("i");
+	const made = { ...WireRoute.default, instance, claimed: true, epoch: 2n, cost: 5n };
+	for (const deep of [
+		{ ...WireRoute.default, instance: Instance.parse("j"), claimed: true, above: 1n, draining: true, cost: 1n },
+		{ ...WireRoute.default, instance, claimed: true, epoch: 1n, above: 1n, cost: 1n },
+	]) {
+		const at = new Map<Path.Valid, WireRoute>([
+			[Path.from("src/a"), deep],
+			[Path.from("src"), made],
+		]);
+		const pick = (prefix: Path.Valid) => [at.get(prefix)].filter((route) => route !== undefined);
+		expect(mostSpecific(path, pick, (route) => route)).toBe(made);
+	}
+});
+
+// A draining route still reaches its origin, so it outranks one held unavailable, however cheap.
+test("a draining route outranks an unavailable one", () => {
+	const draining = { ...WireRoute.default, draining: true, cost: 5n };
+	const held = { ...WireRoute.default, available: false, cost: 1n };
+	expect(compareRoutes(draining, held)).toBeLessThan(0);
+	expect(compareRoutes(held, draining)).toBeGreaterThan(0);
 });
 
 // An instance's epoch supersedes only within one claim, as Rust's `Epochs` keys by prefix and Above:

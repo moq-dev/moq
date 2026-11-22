@@ -125,31 +125,79 @@ export function presented(
 	shows: (candidate: Advertised, at: Path.Valid) => boolean = () => true,
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
-	// The most specific claim covering the prefix wins, then the deeper filing, as a request resolves.
-	let rootRank: [number, number] | undefined;
+	// Every claim covering the prefix, as a request through the prefix resolves: the most specific
+	// tier, ranked across the prefixes its claims are filed at.
+	const covering: Filed<Advertised>[] = [];
 	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
-			const snap = firstEligible(candidates, (candidate) => shows(candidate, prefix));
-			if (!snap) continue;
 			const depth = Path.parts(covered).length;
-			const rank: [number, number] = [depth - Number(snap.route.above ?? 0n), depth];
-			if (rootRank && (rank[0] < rootRank[0] || (rank[0] === rootRank[0] && rank[1] < rootRank[1]))) continue;
-			rootRank = rank;
-			const above = BigInt(Path.parts(prefix).length - depth);
-			out.set(
-				Path.empty(),
-				keepAbove && above > 0n
-					? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
-					: snap,
-			);
+			candidates.forEach((candidate, order) => {
+				if (!shows(candidate, prefix)) return;
+				// Hold the empty suffix's place in the order the table lists its first claim.
+				if (covering.length === 0) out.set(Path.empty(), candidate);
+				covering.push({ prefix: covered, depth, order, candidate, route: candidate.route });
+			});
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
 		const best = suffix !== null ? firstEligible(candidates, (candidate) => shows(candidate, covered)) : undefined;
 		if (suffix !== null && best) out.set(suffix, best);
 	}
+	const best = bestOfTier(
+		covering,
+		(a, b) => compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route),
+	);
+	if (best) {
+		const snap = best.candidate;
+		const above = BigInt(Path.parts(prefix).length - best.depth);
+		out.set(
+			Path.empty(),
+			keepAbove && above > 0n
+				? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
+				: snap,
+		);
+	}
 	return out;
+}
+
+/** A candidate filed at `prefix`, `depth` segments deep, `order`th in its prefix's preference. */
+interface Filed<T> {
+	readonly prefix: Path.Valid;
+	readonly depth: number;
+	readonly order: number;
+	readonly candidate: T;
+	readonly route: WireRoute;
+}
+
+/**
+ * The best of the most specific claims among `filed`, which all cover one path: a claim shown
+ * above its own prefix counts for the shallower prefix it is really at, and claims of one prefix
+ * rank against each other wherever each is filed. Only an instance's highest epoch among them
+ * (and `others`, of the same claim when `exact`) is eligible; `compare` ranks the rest, then the
+ * deeper filing, then each prefix's own preference. Mirrors `RouteTable::best_route` in rs/moq-net.
+ */
+function bestOfTier<T>(
+	filed: readonly Filed<T>[],
+	compare: (a: Filed<T>, b: Filed<T>) => number,
+	others: (specificity: number) => readonly WireRoute[] = () => [],
+): Filed<T> | undefined {
+	const specificity = (entry: Filed<T>) => entry.depth - Number(entry.route.above ?? 0n);
+	const most = Math.max(Number.NEGATIVE_INFINITY, ...filed.map(specificity));
+	const tier = filed.filter((entry) => specificity(entry) === most);
+	// One claim prefix: an instance's epochs compare across the whole tier.
+	const epochs = new Epochs([...tier.map((entry) => entry.route), ...others(most)], () => 0n);
+	let best: Filed<T> | undefined;
+	for (const entry of tier) {
+		if (epochs.supersedes(entry.route)) continue;
+		if (best === undefined) {
+			best = entry;
+			continue;
+		}
+		const order = compare(entry, best) || best.depth - entry.depth || entry.order - best.order;
+		if (order < 0) best = entry;
+	}
+	return best;
 }
 
 /**
@@ -157,19 +205,13 @@ export function presented(
  * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
  * it cannot see never hides a route it can.
  */
-export function firstEligible<T extends { readonly route: WireRoute; readonly prefix?: Path.Valid }>(
+export function firstEligible<T extends { readonly route: WireRoute }>(
 	candidates: readonly T[],
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	const byPrefix = new Map<Path.Valid | undefined, WireRoute[]>();
-	for (const candidate of admitted) {
-		const routes = byPrefix.get(candidate.prefix);
-		if (routes) routes.push(candidate.route);
-		else byPrefix.set(candidate.prefix, [candidate.route]);
-	}
-	const epochs = new Map([...byPrefix].map(([prefix, routes]) => [prefix, new Epochs(routes)]));
-	return admitted.find((candidate) => !epochs.get(candidate.prefix)?.supersedes(candidate.route));
+	const epochs = new Epochs(admitted.map((candidate) => candidate.route));
+	return admitted.find((candidate) => !epochs.supersedes(candidate.route));
 }
 
 /**
@@ -1690,29 +1732,31 @@ export function bestCandidate<T>(
 }
 
 /**
- * What `pick` finds at the most specific claim covering `path`: it picks at each covering prefix,
- * deepest first, and a claim shown above its own prefix counts for the shallower prefix it is
- * really at. Of claims as specific as each other the deepest prefix wins. Mirrors
- * `RouteTable::best_route` in rs/moq-net.
+ * The best claim covering `path`, as `RouteTable::best_route` in rs/moq-net picks it: only the
+ * most specific claims compete, a claim shown above its own prefix counting for the shallower
+ * prefix it is really at, and they rank against each other wherever each is filed. Of those, only
+ * an instance's highest epoch is eligible, an exact claim's `others` (which never win) included,
+ * and the rest order by {@link compareTier}, then the deeper filing, then the newest.
+ * `candidates` lists each covering prefix's, newest first.
  */
 export function mostSpecific<T>(
 	path: Path.Valid,
-	pick: (prefix: Path.Valid) => T | undefined,
-	route: (found: T) => WireRoute,
+	candidates: (prefix: Path.Valid) => Iterable<T>,
+	route: (candidate: T) => WireRoute,
+	others: readonly WireRoute[] = [],
 ): T | undefined {
-	let best: T | undefined;
-	let bestSpecificity = -1;
+	const filed: Filed<T>[] = [];
 	let depth = Path.parts(path).length;
+	const exact = depth;
 	for (const prefix of coveringPrefixes(path)) {
-		const found = pick(prefix);
-		const specificity = found === undefined ? 0 : depth - Number(route(found).above ?? 0n);
-		if (found !== undefined && specificity > bestSpecificity) {
-			best = found;
-			bestSpecificity = specificity;
+		let order = 0;
+		for (const candidate of candidates(prefix)) {
+			filed.push({ prefix, depth, order: order++, candidate, route: route(candidate) });
 		}
 		depth--;
 	}
-	return best;
+	const compare = (a: Filed<T>, b: Filed<T>) => compareTier(path, a, b);
+	return bestOfTier(filed, compare, (specificity) => (specificity === exact ? others : []))?.candidate;
 }
 
 /** Covering prefixes, most specific first, including the empty root. */
@@ -1746,37 +1790,42 @@ export function superseded(route: WireRoute, others: Iterable<WireRoute>): boole
  */
 export class Epochs {
 	readonly #highest = new Map<Instance.Valid | undefined, Map<bigint, bigint>>();
+	readonly #claim: (route: WireRoute) => bigint;
 
-	constructor(routes: Iterable<WireRoute>) {
+	/** `claim` names each route's claim among `routes`: its Above, for routes all of one prefix. */
+	constructor(routes: Iterable<WireRoute>, claim: (route: WireRoute) => bigint = (route) => route.above ?? 0n) {
+		this.#claim = claim;
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
-			let above = this.#highest.get(route.instance);
-			if (!above) {
-				above = new Map();
-				this.#highest.set(route.instance, above);
+			let claims = this.#highest.get(route.instance);
+			if (!claims) {
+				claims = new Map();
+				this.#highest.set(route.instance, claims);
 			}
-			const highest = above.get(route.above ?? 0n);
-			if (highest === undefined || epoch > highest) above.set(route.above ?? 0n, epoch);
+			const highest = claims.get(claim(route));
+			if (highest === undefined || epoch > highest) claims.set(claim(route), epoch);
 		}
 	}
 
 	/** Whether a route carries `route`'s instance at a higher epoch on the same claim. */
 	supersedes(route: WireRoute): boolean {
-		const highest = this.#highest.get(route.instance)?.get(route.above ?? 0n);
+		const highest = this.#highest.get(route.instance)?.get(this.#claim(route));
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
 
 /**
- * Prefer a route that is neither draining (a peer that sent GOAWAY) nor unavailable (held),
- * which rank below every other, then the highest priority on its path, then identified
+ * Prefer a route that is available (not held), then one that is not draining (a peer that sent
+ * GOAWAY), which still reaches its origin, then the highest priority on its path, then identified
  * publishers, then lower static cost.
  */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
-	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
+	const held = (route: WireRoute) => Number(route.available === false);
+	const draining = (route: WireRoute) => Number(route.draining ?? false);
 	return (
-		last(a) - last(b) ||
+		held(a) - held(b) ||
+		draining(a) - draining(b) ||
 		(b.priority ?? 0) - (a.priority ?? 0) ||
 		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
@@ -1795,10 +1844,23 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
 	// The most specific claim wins outright: an exact claim shadows broader ones shown at its path.
 	const above = (a.above ?? 0n) - (b.above ?? 0n);
-	const order = (above < 0n ? -1 : above > 0n ? 1 : 0) || compareRoutes(a, b) || routeHops(a) - routeHops(b);
-	if (order !== 0 || path === prefix) return order;
-	const [a1, a2] = routeKey(path, a);
-	const [b1, b2] = routeKey(path, b);
+	return (above < 0n ? -1 : above > 0n ? 1 : 0) || compareTier(path, { prefix, route: a }, { prefix, route: b });
+}
+
+/**
+ * Order two claims of one tier resolving `path`, each filed at its `prefix`: by preference, hop
+ * count, then the hashes of {@link compareRouteCandidates}, which a tie between two filed at the
+ * path itself skips.
+ */
+function compareTier(
+	path: Path.Valid,
+	a: { readonly prefix: Path.Valid; readonly route: WireRoute },
+	b: { readonly prefix: Path.Valid; readonly route: WireRoute },
+): number {
+	const order = compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route);
+	if (order !== 0 || (a.prefix === path && b.prefix === path)) return order;
+	const [a1, a2] = routeKey(path, a.route);
+	const [b1, b2] = routeKey(path, b.route);
 	if (a1 !== b1) return a1 < b1 ? -1 : 1;
 	return a2 < b2 ? -1 : a2 > b2 ? 1 : 0;
 }

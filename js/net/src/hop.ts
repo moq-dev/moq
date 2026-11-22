@@ -108,7 +108,7 @@ export interface RouteInfo {
 	/**
 	 * Whether a usable path reaches the route's origin. An unavailable route is held: the
 	 * network lost every path to it but may recover one, so the announcement stays. It ranks
-	 * with a draining route, below every available one, and requests through it may fail until
+	 * below every available one, a draining one included, and requests through it may fail until
 	 * it recovers: request again once it turns available.
 	 */
 	readonly available: boolean;

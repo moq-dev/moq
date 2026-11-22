@@ -2,7 +2,7 @@ import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { bestCandidate, coveringPrefixes, mostSpecific } from "./internal.ts";
+import { coveringPrefixes, mostSpecific } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Served, sameInstance } from "./wire.ts";
 
@@ -92,7 +92,7 @@ export class BroadcastCache {
 	instance(path: Path.Valid): Selection {
 		const best = mostSpecific(
 			path,
-			(prefix) => bestCandidate(path, prefix, this.#eligible(prefix), (entry) => entry.route),
+			(prefix) => this.#eligible(prefix).reverse(),
 			(entry) => entry.route,
 		);
 		if (best) {
@@ -119,10 +119,10 @@ export class BroadcastCache {
 	pinned(path: Path.Valid, instance: Instance.Valid): Selection {
 		const best = mostSpecific(
 			path,
-			(prefix) => {
-				const entries = this.#eligible(prefix).filter((entry) => entry.route.instance === instance);
-				return bestCandidate(path, prefix, entries, (entry) => entry.route);
-			},
+			(prefix) =>
+				this.#eligible(prefix)
+					.filter((entry) => entry.route.instance === instance)
+					.reverse(),
 			(entry) => entry.route,
 		);
 		return best ?? { identity: {}, route: { instance } };

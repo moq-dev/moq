@@ -250,7 +250,6 @@ changelog typo at `drafts/draft-lcurley-moq-lite.md:2380` during the cut
 - [Count lite-07 Path Keep by Path::parts](/quest/m2/lite07-path-keep-parts.md) - removes the temporary `raw_parts` / `base.split("/")` migration before lite-07 freezes
 - [A scoped peer exchanges claims](/quest/m1/lite07-routing/scoped-peer-node-id.md) - a peer with a scoped grant at the root is no longer closed Unauthorized on lite-07
 - [Route floors](/quest/m1/lite07-routing/route-floors.md) - the draft's rule for when DEAD is sent, so two sessions between a pair never black-hole routes
-- [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - bridged routes keep drain and priority, and the draft's rank text matches the code
 - [NodeId drops Start](/quest/m2/node-id-drop-start.md) - NodeId's wire shape
 - [Origin proxy in Config](/quest/m2/origin-proxy-config.md) - claims are marked and stamped the same whatever handle connects first
 

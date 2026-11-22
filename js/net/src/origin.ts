@@ -22,7 +22,6 @@ import {
 	compareRouteCandidates,
 	compareRoutes,
 	coveringPrefixes,
-	Epochs,
 	firstEligible,
 	hiddenBelow,
 	hooks,
@@ -185,25 +184,37 @@ class Scope {
 			}
 			// Hold the empty path's place in the order until every covering prefix is known.
 			if (covering.length === 0) out.set(Path.empty(), []);
-			// Each keeps its own prefix, so supersession never compares across the merged prefixes,
-			// and its claim's own prefix: raised to the root, it is that much further above it.
+			// Raised to the root, a claim is that much further above it, so its Above names its own
+			// prefix: claims of one prefix supersede each other wherever each is filed.
 			const raised = BigInt(rootDepth - Path.parts(path).length);
 			covering.push([
 				path,
-				visible.map((value) => ({
-					...value,
-					prefix: path,
-					route: raised === 0n ? value.route : { ...value.route, above: (value.route.above ?? 0n) + raised },
-				})),
+				visible.map((value) =>
+					raised === 0n
+						? value
+						: { ...value, route: { ...value.route, above: (value.route.above ?? 0n) + raised } },
+				),
 			]);
 		}
 		if (covering.length > 0) {
-			// The most specific claim first, as a request beneath the root resolves, then the deeper filing.
-			const rank = ([, visible]: [Path.Valid, Advertised[]]) => claimDepth(Path.empty(), visible[0].route);
-			covering.sort((a, b) => rank(b) - rank(a) || b[0].length - a[0].length);
+			// The most specific claim first, as a request beneath the root resolves; claims of one
+			// prefix rank against each other wherever each is filed, then the deeper filing, then each
+			// filing's own order.
+			const ranked = covering.flatMap(([path, visible], filing) =>
+				visible.map((value, order) => ({ value, depth: Path.parts(path).length, filing, order })),
+			);
+			ranked.sort(
+				(a, b) =>
+					Number((a.value.route.above ?? 0n) - (b.value.route.above ?? 0n)) ||
+					compareRoutes(a.value.route, b.value.route) ||
+					routeHops(a.value.route) - routeHops(b.value.route) ||
+					b.depth - a.depth ||
+					a.filing - b.filing ||
+					a.order - b.order,
+			);
 			out.set(
 				Path.empty(),
-				covering.flatMap(([, visible]) => visible),
+				ranked.map(({ value }) => value),
 			);
 		}
 		return out;
@@ -235,13 +246,31 @@ function frontier(node: WatchNode, out: Path.Valid[] = []): Path.Valid[] {
 }
 
 /**
+ * Whether claim `a` outranks `b`, each covering one root from where it is filed: the more specific,
+ * and of claims of one prefix, the higher epoch of one instance, else the better route, else the
+ * deeper filing.
+ */
+function outranks(
+	a: { specificity: number; depth: number; route: WireRoute },
+	b: { specificity: number; depth: number; route: WireRoute },
+): boolean {
+	if (a.specificity !== b.specificity) return a.specificity > b.specificity;
+	if (a.route.instance === b.route.instance && (a.route.epoch ?? 0n) !== (b.route.epoch ?? 0n)) {
+		return (a.route.epoch ?? 0n) > (b.route.epoch ?? 0n);
+	}
+	const order = compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route);
+	return order !== 0 ? order < 0 : a.depth >= b.depth;
+}
+
+/**
  * Presents advertised prefixes relative to a root. Every prefix at or above the root
- * collapses to the empty path, where the most specific claim wins, then the deeper filing,
- * since that is the route a request beneath the root resolves through.
+ * collapses to the empty path, where the most specific claim wins, ranked against the claims of
+ * its prefix filed elsewhere, since that is the route a request beneath the root resolves through.
  */
 class CoveringRoot {
 	readonly #root: Path.Valid;
-	#covering?: [number, number];
+	/** The claim presented at the root so far: how specific it is, how deep it is filed, and its route. */
+	#covering?: { specificity: number; depth: number; route: WireRoute };
 
 	constructor(root: Path.Valid) {
 		this.#root = root;
@@ -255,10 +284,11 @@ class CoveringRoot {
 		const relative = Path.stripPrefix(this.#root, path);
 		if (relative !== null && relative !== Path.empty()) return relative;
 		if (relative === null && !Path.hasPrefix(path, this.#root)) return undefined;
-		const rank: [number, number] = [claimDepth(path, route), Path.parts(path).length];
-		const covering = this.#covering;
-		if (covering && (rank[0] < covering[0] || (rank[0] === covering[0] && rank[1] < covering[1]))) return undefined;
-		this.#covering = rank;
+		const depth = Path.parts(path).length;
+		const next = { specificity: depth - Number(route.above ?? 0n), depth, route };
+		const held = this.#covering;
+		if (held && !outranks(next, held)) return undefined;
+		this.#covering = next;
 		return Path.empty();
 	}
 }
@@ -365,49 +395,6 @@ function compareCandidates(a: Candidate, b: Candidate): number {
 		Number(b.exact) - Number(a.exact) ||
 		routeHops(a.route) - routeHops(b.route)
 	);
-}
-
-/**
- * How many segments the claim a route at `path` shows has: the path's, less how far above it
- * the claim is. The most specific claim covering a path wins, however deep it is filed.
- */
-function claimDepth(path: Path.Valid, route: WireRoute): number {
-	return Path.parts(path).length - Number(route.above ?? 0n);
-}
-
-/**
- * The preferred of `entries` (newest first, at `prefix`) for resolving `path`, not skipped
- * nor superseded: see {@link compareRouteCandidates}, then newest.
- */
-function preferredEntry(
-	path: Path.Valid,
-	prefix: Path.Valid,
-	entries: readonly RouteEntry[],
-	skip?: (entry: RouteEntry) => boolean,
-	others: readonly WireRoute[] = [],
-): RouteEntry | undefined {
-	const admitted = entries.filter((entry) => !skip?.(entry));
-	// The most specific claims are the whole answer: a broader one shown here neither competes
-	// with them nor supersedes them, whatever its epoch.
-	const above = (entry: RouteEntry) => entry.route.peek().above ?? 0n;
-	// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
-	const narrowest = admitted.reduce((least, entry) => (above(entry) < least ? above(entry) : least), 2n ** 64n);
-	const eligible = admitted.filter((entry) => above(entry) === narrowest);
-	// `others` compete at the prefix too, such as a broadcast announced here at the path.
-	const epochs = new Epochs([...eligible.map((entry) => entry.route.peek()), ...others]);
-	let best: RouteEntry | undefined;
-	for (const entry of eligible) {
-		// Only the highest epoch of an instance is eligible, however cheap an older one is.
-		if (epochs.supersedes(entry.route.peek())) continue;
-		if (!best) {
-			best = entry;
-			continue;
-		}
-		const a = entry.route.peek();
-		const b = best.route.peek();
-		if (compareRouteCandidates(path, prefix, a, b) < 0) best = entry;
-	}
-	return best;
 }
 
 /** Whether a session received `entry`, so it is never forwarded to a peer. */
@@ -1197,18 +1184,9 @@ class OriginState {
 		const local = this.local.peek().has(path) ? this.advertisedLocal.peek().get(path) : undefined;
 		return mostSpecific(
 			path,
-			(prefix) => {
-				const entries = routes.get(prefix);
-				if (!entries) return undefined;
-				return preferredEntry(
-					path,
-					prefix,
-					entries,
-					(candidate) => !admits(candidate, path) || (skip?.(candidate) ?? false),
-					prefix === path && local ? [local] : [],
-				);
-			},
+			(prefix) => (routes.get(prefix) ?? []).filter((entry) => admits(entry, path) && !skip?.(entry)),
 			(entry) => entry.route.peek(),
+			local ? [local] : [],
 		);
 	}
 
