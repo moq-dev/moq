@@ -1509,12 +1509,13 @@ mod tests {
 
 	/// A relay origin, and the cache pool its copies are billed to.
 	fn relay() -> (origin::Producer, moq_net::cache::Pool) {
-		let config = origin::Config::default();
+		let mut config = origin::Config::default();
+		// A relay carries what it learned on to its other peers (moq-lite-07).
+		config.proxy = true;
 		let pool = config.pool.clone();
 		let (origin, driver) = origin::Producer::new(config);
 		tokio::spawn(moq_net::time::run(driver));
-		// A relay carries what it learned on to its other peers (moq-lite-07).
-		(origin.with_proxy(true), pool)
+		(origin, pool)
 	}
 
 	/// Drive `drain` until `future` resolves.

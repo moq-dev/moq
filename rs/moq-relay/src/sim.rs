@@ -275,16 +275,16 @@ impl Net {
 		accepts
 	}
 
-	/// Serve `name` as a bare server publishing `origin` to every peer it accepts,
-	/// including broadcasts it learned from its own upstream, since a test may relay
-	/// through it, and hand each session to the returned stream.
+	/// Serve `name` as a bare server publishing `origin` to every peer it accepts, and
+	/// hand each session to the returned stream. Pass a [`relay_origin`] when a test
+	/// relays through it, so it forwards what it learned from its own upstream.
 	pub fn upstream(
 		&self,
 		name: &str,
 		origin: &moq_net::origin::Producer,
 	) -> mpsc::UnboundedReceiver<moq_net::Session> {
 		let mut accepted = self.listen(name);
-		let origin = origin.clone().with_proxy(true);
+		let origin = origin.clone();
 		let (sessions, received) = mpsc::unbounded();
 		drop(kio::clock::sim::spawn(async move {
 			while let Some((link, version)) = accepted.next().await {
@@ -309,8 +309,19 @@ impl Net {
 ///
 /// Its cache never reclaims idle groups, as in [`Net::options`].
 pub fn origin() -> moq_net::origin::Producer {
+	spawn_origin(false)
+}
+
+/// An [`origin`] that forwards what it learned from one peer to the others, as a
+/// relay's does.
+pub fn relay_origin() -> moq_net::origin::Producer {
+	spawn_origin(true)
+}
+
+fn spawn_origin(proxy: bool) -> moq_net::origin::Producer {
 	let mut config = moq_net::origin::Config::default();
 	config.pool = moq_net::cache::Pool::unbounded();
+	config.proxy = proxy;
 	let (origin, driver) = moq_net::origin::Producer::new(config);
 	drop(kio::clock::sim::spawn(moq_net::time::run(driver)));
 	origin

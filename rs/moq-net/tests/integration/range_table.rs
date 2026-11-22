@@ -146,9 +146,10 @@ fn produce_origin(hop: u64, pool: Option<cache::Pool>) -> origin::Producer {
 	if let Some(pool) = pool {
 		config.pool = pool;
 	}
+	config.proxy = true;
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull what `from` publishes over lite-07, priced at `cost` when given.

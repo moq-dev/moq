@@ -10363,7 +10363,10 @@ mod serve_group_test {
 				track.start_at(0).unwrap();
 				broadcast.announce().unwrap();
 				// A relay forwards what it learned from its upstream (moq-lite-07).
-				let relay = origin(2).with_proxy(true);
+				let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
+				config.proxy = true;
+				let (relay, driver) = origin::Producer::new(config);
+				drive(driver);
 				let _upstream = connect(version, &publisher, &relay).await;
 				let remote = relay
 					.consume()

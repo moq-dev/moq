@@ -14,9 +14,11 @@ use moq_net::{
 };
 
 fn origin() -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(Default::default());
+	let mut config = origin::Config::default();
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]

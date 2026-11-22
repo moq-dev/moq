@@ -594,8 +594,7 @@ impl Backend for Model {
 	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
 		// A relay forwards the routes it learns, as moq-relay's cluster does; off, a
 		// moq-lite-07 viewer never learns the publisher's broadcasts.
-		let (origin, pool) = make_origin(id, capacity);
-		(origin.with_proxy(true), pool)
+		make_origin(id, capacity, true)
 	}
 
 	fn origin(relay: &Self::Relay) -> &origin::Producer {
@@ -631,7 +630,7 @@ impl Drop for Pair {
 	}
 }
 
-fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool) {
+fn make_origin(id: u64, capacity: Option<u64>, proxy: bool) -> (origin::Producer, cache::Pool) {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(id).unwrap());
 	let profiling = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
 	let pool = cache::Pool::new(if capacity.is_none() || profiling {
@@ -640,6 +639,7 @@ fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool
 		cache::Config::default().with_capacity(capacity)
 	});
 	config.pool = pool.clone();
+	config.proxy = proxy;
 	let (producer, driver) = origin::Producer::new(config);
 	harness::spawn(driver);
 	(producer, pool)
@@ -757,7 +757,7 @@ impl<B: Backend> Cluster<B> {
 
 	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
-		make_origin(self.next_hop, (!self.expiry).then_some(capacity))
+		make_origin(self.next_hop, (!self.expiry).then_some(capacity), false)
 	}
 
 	/// Connect a viewer session to `relay`.

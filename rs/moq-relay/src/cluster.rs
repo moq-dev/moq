@@ -1513,9 +1513,9 @@ impl Cluster {
 				work.push(Child::new("cache governor", governor));
 			}
 		}
-		let (origin, driver) = origin::Producer::new(origin_config);
 		// A relay carries every peer's traffic to every other (moq-lite-07).
-		let origin = origin.with_proxy(true);
+		origin_config.proxy = true;
+		let (origin, driver) = origin::Producer::new(origin_config);
 		work.push(Child::new("origin driver", async move {
 			moq_net::time::run(driver).await;
 		}));

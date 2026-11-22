@@ -41,9 +41,20 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAMES: u64 = 4;
 
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	produce(hop, true)
+}
+
+/// An origin that never forwards what it learned, as an application's.
+pub(super) fn produce_app(hop: u64) -> origin::Producer {
+	produce(hop, false)
+}
+
+fn produce(hop: u64, proxy: bool) -> origin::Producer {
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = proxy;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes.
