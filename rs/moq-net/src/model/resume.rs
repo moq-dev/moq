@@ -10169,6 +10169,74 @@ mod test {
 		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
 	}
 
+	/// A reader of time 5 on, which read groups 5 to 8 from copy `a` before the switch to `b`,
+	/// an empty received copy that resumes at 8: the routes, the logical track, `a`, `b`, and
+	/// the reader.
+	fn read_to_8() -> (
+		Producer,
+		track::Producer,
+		track::Producer,
+		track::Producer,
+		track::Subscriber,
+	) {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		for key in 5..=8 {
+			write(&a, key);
+		}
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(from_times(&[5]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [5, 6, 7, 8]);
+		let b = received_copy();
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		(routes, logical, a, b, sub)
+	}
+
+	/// A subscription of a range from each time, within an hour.
+	fn from_times(times: &[u64]) -> Subscription {
+		Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges(times.iter().map(|time| track::Range {
+				start: Some(*time),
+				end: None,
+			}))
+	}
+
+	/// A raised time start whose groups from its time the reader already holds is placed at
+	/// its time, with no backfill.
+	#[test]
+	fn a_raised_start_the_reader_holds_places_at_its_time() {
+		let (routes, _logical, a, _b, mut sub) = read_to_8();
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from_times(&[6])).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
+		assert_eq!(copies(&routes), 1, "nothing is backfilled");
+	}
+
+	/// As [`a_raised_start_the_reader_holds_places_at_its_time`], beside a range still waiting
+	/// on its anchors: the raised start is placed only once every other range is.
+	#[test]
+	fn a_held_raised_start_waits_for_a_range_beside_it() {
+		let (_routes, _logical, a, b, mut sub) = read_to_8();
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from_times(&[6, 20])).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert_eq!(sub.resolved_range(0), None, "waits for the range beside it");
+		write(&b, 20);
+		assert_eq!(drain(&mut sub, false), [20]);
+		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
+	}
+
 	/// As [`a_backfill_places_a_time_start_its_serving_copy_raised`], for a range that ends
 	/// past the resume point: the backfill, capped under it, places only the start, and the
 	/// read ends at the range's own end.
@@ -11240,6 +11308,38 @@ mod test {
 			got.sort_unstable();
 			assert_eq!(got, [1, 2], "serving_fails={serving_fails}");
 		}
+	}
+
+	/// A group a replaced copy got past its cap is no group it drains: a later switch asks the
+	/// next route for it, though that copy stays for a group still read from it.
+	#[test]
+	fn a_group_past_a_replaced_copys_cap_is_backfilled() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		for key in 0..=4 {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4]);
+		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
+		open.write_frame(ts(5), b"x".as_ref()).unwrap();
+		let reading = recv(&mut sub);
+		assert_eq!(reading.start, 5);
+		let b = received_copy();
+		routes.serve(b.consume());
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		// Past the cap at 5, so a never hands it out.
+		write(&a, 6);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let c = received_copy();
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		write(&c, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		drop(reading);
 	}
 
 	/// A stalled read still waiting for the new route to continue it is judged within the
