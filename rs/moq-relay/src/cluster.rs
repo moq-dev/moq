@@ -1457,6 +1457,15 @@ impl Leg {
 		Ok(())
 	}
 
+	/// Whether a session serves now, as opposed to having connected once.
+	fn serving(&self) -> bool {
+		use moq_tokio::connection::Phase;
+		matches!(
+			self.observation.phase,
+			Phase::Connected { .. } | Phase::Migrating { .. }
+		)
+	}
+
 	/// Drain a replaced session with an empty-URI GOAWAY, then clear it from `/nodes`.
 	async fn retire(self, dial: &crate::nodes::Dial, timeout: Duration) {
 		let Self {
@@ -1469,6 +1478,43 @@ impl Leg {
 			tracing::debug!(%err, "replaced session did not leave before its drain deadline");
 		}
 		dial.observe(id, &monitor.state());
+	}
+}
+
+/// Where a peer dial stands in presenting its newest tokens on the live session.
+enum Renewal {
+	/// The live session presents them, or nothing has changed.
+	Settled,
+	/// Set on the live session, awaiting its first answer.
+	Answering(futures::future::BoxFuture<'static, moq_net::Result<()>>),
+	/// A session dialed with them, which replaces the live one once it serves.
+	Replacing(Box<Leg>),
+	/// The peer refused the last replacement; the next is dialed when this sleep ends.
+	Waiting(std::pin::Pin<Box<kio::clock::Sleep>>),
+}
+
+/// What moved a [`Renewal`] along.
+enum Renewed {
+	/// The replacement has a new observation, or ended with an error.
+	Replacement(moq_tokio::Result<()>),
+	/// The live session's answer to the tokens set on it.
+	Answered(moq_net::Result<()>),
+	/// A refused replacement may be dialed again.
+	Retry,
+}
+
+impl Renewal {
+	/// The next event of the current phase; pending while settled.
+	async fn next(&mut self) -> Renewed {
+		match self {
+			Self::Settled => std::future::pending().await,
+			Self::Answering(answer) => Renewed::Answered(answer.await),
+			Self::Replacing(next) => Renewed::Replacement(next.changed().await),
+			Self::Waiting(sleep) => {
+				sleep.await;
+				Renewed::Retry
+			}
+		}
 	}
 }
 
@@ -2535,12 +2581,9 @@ impl Cluster {
 
 		let mut presented = credential.current();
 		let mut live = connect(id, presented.clone());
-		// The live session's first answer to the tokens last set on it, while awaited.
-		let mut answer: Option<futures::future::BoxFuture<'static, moq_net::Result<()>>> = None;
-		// A session presenting the newest tokens, dialed when the live one did not accept
-		// them, which replaces it once connected. The old one then drains, so the peer
-		// moves its routes over before the link it reached them by goes.
-		let mut successor: Option<Leg> = None;
+		let mut renewal = Renewal::Settled;
+		// Spaces out replacements the peer keeps refusing, while the live session serves.
+		let mut retry = Redial::default();
 		let mut retiring = futures::stream::FuturesUnordered::new();
 		let mut shutdown = self.shutdown.clone();
 		loop {
@@ -2552,60 +2595,76 @@ impl Cluster {
 				changed = live.changed() => {
 					if let Err(err) = changed {
 						// The live session gave up: a replacement already dialed carries on.
-						let Some(next) = successor.take() else {
+						let Renewal::Replacing(next) = std::mem::replace(&mut renewal, Renewal::Settled) else {
 							return Err(err.into());
 						};
-						live = next;
-						answer = None;
+						live = *next;
 					}
 				}
-				changed = async { successor.as_mut().expect("guarded").changed().await }, if successor.is_some() => {
-					let next = successor.as_ref().expect("guarded");
+				renewed = renewal.next() => match renewed {
+				Renewed::Replacement(changed) => {
+					let Renewal::Replacing(next) = &renewal else { unreachable!("only a replacement changes") };
 					match changed {
-						Ok(()) if next.observation.connects > 0 => {
-							let next = successor.take().expect("guarded");
-							let old = std::mem::replace(&mut live, next);
-							tracing::info!("a session presenting the rotated token connected; draining the old one");
+						Ok(()) if next.serving() => {
+							let Renewal::Replacing(next) = std::mem::replace(&mut renewal, Renewal::Settled) else {
+								unreachable!("checked above");
+							};
+							let old = std::mem::replace(&mut live, *next);
+							tracing::info!("a session presenting the new token connected; draining the old one");
 							retiring.push(old.retire(dial, self.shutdown.drain_timeout));
+							retry = Redial::default();
 						}
 						Ok(()) => dial.observe(next.id, &next.observation),
 						Err(err) => {
-							tracing::warn!(%err, "the peer refused a session presenting the rotated token; keeping the current one");
-							successor = None;
+							let wait = retry.next(false, &mut kio::clock::rng());
+							tracing::warn!(%err, ?wait, "the peer refused a session presenting the new token; the current one serves until a retry");
+							renewal = Renewal::Waiting(Box::pin(kio::clock::sleep(wait)));
 						}
 					}
 				}
+				Renewed::Answered(answered) => match answered {
+					Ok(()) => {
+						tracing::info!("the peer accepted the new token on the live session");
+						renewal = Renewal::Settled;
+					}
+					// Refused, or a session that carries no token in band (before lite-07):
+					// either way, a new session presenting it is the only way to renew it.
+					Err(err) => {
+						tracing::info!(%err, "the live session did not take the new token; dialing a replacement");
+						renewal = Renewal::Replacing(Box::new(connect(self.next_connection_id(), presented.clone())));
+					}
+				},
+				Renewed::Retry => {
+					renewal = Renewal::Replacing(Box::new(connect(self.next_connection_id(), presented.clone())));
+				}
+				},
 				() = credential.changed() => {
 					let tokens = credential.current();
-					if tokens != presented {
-						presented = tokens;
-						// Every later dial presents them; the live session tries them in band.
-						let set = live.connection.tokens();
-						set.set(presented.clone());
-						answer = Some(Box::pin(async move { set.answered().await }));
-						// A replacement still connecting presents what it was dialed with.
-						if successor.is_some() {
-							successor = Some(connect(self.next_connection_id(), presented.clone()));
-						}
+					if tokens == presented {
+						continue;
 					}
-				}
-				answered = async { answer.as_mut().expect("guarded").await }, if answer.is_some() => {
-					answer = None;
-					match answered {
-						Ok(()) => tracing::info!("the peer accepted the rotated token on the live session"),
-						// Refused, or a session that carries no token in band (before lite-07):
-						// either way, a new session presenting it is the only way to renew it.
-						Err(err) => {
-							tracing::info!(%err, "the live session did not take the rotated token; dialing a replacement");
-							successor = Some(connect(self.next_connection_id(), presented.clone()));
+					presented = tokens;
+					// Every later dial presents them, and the live session tries them in band.
+					let set = live.connection.tokens();
+					set.set(presented.clone());
+					retry = Redial::default();
+					renewal = match (&renewal, presented.is_empty()) {
+						// In band only adds a token: a session's connection credential lasts as long
+						// as it does, so dropping every token takes a session dialed without one. So
+						// does a replacement under way, which presents what it was dialed with.
+						(_, true) | (Renewal::Replacing(_) | Renewal::Waiting(_), false) => {
+							Renewal::Replacing(Box::new(connect(self.next_connection_id(), presented.clone())))
 						}
-					}
+						(Renewal::Settled | Renewal::Answering(_), false) => {
+							Renewal::Answering(Box::pin(async move { set.answered().await }))
+						}
+					};
 				}
 				() = async { retiring.next().await; }, if !retiring.is_empty() => {}
 			}
 		}
 		// A replacement still connecting has nothing to drain.
-		drop(successor);
+		drop(renewal);
 		// Drained like an accepted session, so the peer hears GOAWAY and moves its
 		// routes before this relay goes, rather than seeing the link drop as a crash.
 		let ((), ()) = tokio::join!(serving.drain_link(live.connection), async {
@@ -4616,11 +4675,16 @@ mod tests {
 		token: String,
 	}
 
-	/// Dial a relay at `b` over `version` with a peer token, rotate it, and report
-	/// every credential `b`'s decider saw, how many sessions `b` accepted, and whether
-	/// the first session's lease ended, all on the simulator's clock.
+	/// Dial a relay at `b` over `version` with the peer token `old`, change it to `new`,
+	/// and report every credential `b`'s decider saw, how many sessions `b` accepted,
+	/// and whether the first session's lease ended, all on the simulator's clock. The
+	/// decider refuses the first `refuse` sessions dialed after the change.
 	#[cfg(feature = "test-support")]
-	async fn rotate_over(version: &'static str) -> (Vec<Presented>, usize, bool) {
+	async fn rotate_over(
+		version: &'static str,
+		new: Option<&'static str>,
+		refuse: usize,
+	) -> (Vec<Presented>, usize, bool) {
 		use std::time::Duration;
 
 		let spawn = |options: Options| {
@@ -4647,10 +4711,18 @@ mod tests {
 							.map(|(_, value)| value.into_owned())
 							.unwrap_or_default(),
 					};
-					seen.lock().unwrap().push(Presented {
+					let mut seen = seen.lock().unwrap();
+					let fresh = !admission.attached() && !seen.is_empty();
+					seen.push(Presented {
 						attached: admission.attached(),
 						token,
 					});
+					let refused = seen.iter().skip(1).filter(|seen| !seen.attached).count();
+					drop(seen);
+					if fresh && refused <= refuse {
+						admission.refuse(crate::auth::Error::Refused(Default::default()));
+						continue;
+					}
 					let all = moq_net::Prefixes::all();
 					let mut grant = moq_auth::Grant::new(all.clone(), all);
 					grant.link = Some(moq_auth::Link::Peer);
@@ -4674,7 +4746,7 @@ mod tests {
 		));
 
 		kio::clock::sleep(Duration::from_secs(5)).await;
-		own.send_replace(Some("new".to_string()));
+		own.send_replace(new.map(str::to_string));
 		kio::clock::sleep(Duration::from_secs(60)).await;
 
 		let first = leases.lock().unwrap().remove(0);
@@ -4688,7 +4760,7 @@ mod tests {
 	#[cfg(feature = "test-support")]
 	#[test]
 	fn a_rotated_peer_token_renews_in_band_on_lite_07() {
-		let (seen, accepted, ended) = run_sim(|| rotate_over("moq-lite-07-wip"));
+		let (seen, accepted, ended) = run_sim(|| rotate_over("moq-lite-07-wip", Some("new"), 0));
 		let presented = |attached, token: &str| Presented {
 			attached,
 			token: token.to_string(),
@@ -4703,7 +4775,7 @@ mod tests {
 	#[cfg(feature = "test-support")]
 	#[test]
 	fn a_rotated_peer_token_replaces_a_lite_06_session() {
-		let (seen, accepted, ended) = run_sim(|| rotate_over("moq-lite-06"));
+		let (seen, accepted, ended) = run_sim(|| rotate_over("moq-lite-06", Some("new"), 0));
 		let presented = |attached, token: &str| Presented {
 			attached,
 			token: token.to_string(),
@@ -4711,6 +4783,30 @@ mod tests {
 		assert_eq!(seen, [presented(false, "old"), presented(false, "new")]);
 		assert_eq!(accepted, 2, "one replacement session");
 		assert!(ended, "the old session drained");
+	}
+
+	/// A replacement the peer refuses leaves the old session serving, and the next one,
+	/// after a backoff, takes over.
+	#[cfg(feature = "test-support")]
+	#[test]
+	fn a_refused_replacement_is_retried() {
+		let (seen, accepted, ended) = run_sim(|| rotate_over("moq-lite-06", Some("new"), 1));
+		let tokens: Vec<_> = seen.iter().map(|seen| (seen.attached, seen.token.as_str())).collect();
+		assert_eq!(tokens, [(false, "old"), (false, "new"), (false, "new")]);
+		assert_eq!(accepted, 3, "a refused replacement, then one that serves");
+		assert!(ended, "the old session drained once the retry served");
+	}
+
+	/// Removing the token takes a session dialed without one even on lite-07, whose
+	/// connection credential lasts as long as its session.
+	#[cfg(feature = "test-support")]
+	#[test]
+	fn a_removed_peer_token_replaces_the_session() {
+		let (seen, accepted, ended) = run_sim(|| rotate_over("moq-lite-07-wip", None, 0));
+		let tokens: Vec<_> = seen.iter().map(|seen| (seen.attached, seen.token.as_str())).collect();
+		assert_eq!(tokens, [(false, "old"), (false, "")]);
+		assert_eq!(accepted, 2);
+		assert!(ended, "the session holding the removed token drained");
 	}
 
 	/// Run `test` on the simulator, on a thread with room for the relay's large futures.
