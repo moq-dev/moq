@@ -1338,15 +1338,24 @@ impl GroupState {
 		}
 	}
 
-	/// The group's outcome once final: `Ok` once finished, which a later abort only frees
-	/// the cache of, or the abort error.
-	/// Closed, or holding a timed frame past `time`: either fixes whether the group's span
-	/// reaches past it.
-	fn places(&self, time: u64) -> bool {
-		matches!(self.timeline, Timeline::Timed { latest, .. } if latest.value() > time)
-			|| self.poll_outcome().is_ready()
+	/// The first time the group can't yet place: none once finished, else its newest frame's
+	/// timestamp, or 0 with no timed frame. A frame past a time puts the group's End past it
+	/// too, and an aborted copy may have lost the End its group was sent with.
+	fn unplaced_from(&self) -> Option<u64> {
+		match (self.poll_outcome(), &self.timeline) {
+			(Poll::Ready(Ok(())), _) => None,
+			(_, Timeline::Timed { latest, .. }) => Some(latest.value()),
+			_ => Some(0),
+		}
 	}
 
+	/// Whether the group places `time`; see [`Self::unplaced_from`].
+	fn places(&self, time: u64) -> bool {
+		self.unplaced_from().is_none_or(|from| time < from)
+	}
+
+	/// The group's outcome once final: `Ok` once finished, which a later abort only frees
+	/// the cache of, or the abort error.
 	fn poll_outcome(&self) -> Poll<Result<()>> {
 		match &self.outcome {
 			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
@@ -3397,19 +3406,23 @@ impl Handle {
 		settle(self.state.poll_ref(waiter, |state| state.poll_outcome()))
 	}
 
-	/// Poll until the group places `time`: closed, or holding a timed frame past it, which puts
-	/// its End past the time too, so it contains the time whatever it ends at.
+	/// Poll until the group places `time` (see [`Self::unplaced_from`]) or aborts: a frame past the
+	/// time puts its End past the time too, so it contains the time whatever it ends at.
 	pub(crate) fn poll_past(&self, waiter: &kio::Waiter, time: u64) -> Poll<()> {
-		(self.state.poll_ref(waiter, |state| match state.places(time) {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
+		(self.state.poll_ref(waiter, |state| {
+			match state.places(time) || state.poll_outcome().is_ready() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
 		}))
 		.map(|_| ())
 	}
 
-	/// Whether the group places `time` now; see [`Self::poll_past`].
-	pub(crate) fn places(&self, time: u64) -> bool {
-		self.state.read().places(time)
+	/// The first time the group can't place now, `None` once it finished: it places a time
+	/// it holds a timed frame past, which puts its End past the time too. An aborted copy
+	/// proves nothing of where its group ends.
+	pub(crate) fn unplaced_from(&self) -> Option<u64> {
+		self.state.read().unplaced_from()
 	}
 
 	/// Poll until the group is aborted, including by eviction and after it finished; ready
@@ -6565,6 +6578,35 @@ mod test {
 			assert_eq!(frame.payload, Bytes::from(vec![i as u8; 4]));
 		}
 		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A group places a time once it holds a frame past it or finishes, never by aborting: an
+	/// aborted copy may have lost the End its group was sent with.
+	#[test]
+	fn a_group_places_a_time_only_once_it_passes_it_or_finishes() {
+		let frame = |producer: &mut Producer, millis| {
+			producer
+				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from_static(b"x"))
+				.unwrap();
+		};
+		let mut open = Info { start: 1000 }.produce();
+		assert_eq!(open.handle().unplaced_from(), Some(0), "no frame");
+		frame(&mut open, 1000);
+		assert_eq!(open.handle().unplaced_from(), Some(1000));
+		frame(&mut open, 1800);
+		assert_eq!(open.handle().unplaced_from(), Some(1800), "places 1700, not 1800");
+
+		let mut aborted = Info { start: 1000 }.produce();
+		frame(&mut aborted, 1000);
+		let handle = aborted.handle();
+		aborted.abort(Error::Cancel).unwrap();
+		assert_eq!(handle.unplaced_from(), Some(1000), "aborted");
+
+		let mut finished = Info { start: 1000 }.produce();
+		frame(&mut finished, 1000);
+		let handle = finished.handle();
+		drop(finished.finish().unwrap());
+		assert_eq!(handle.unplaced_from(), None, "finished");
 	}
 
 	/// A finished group is still aborted once its frames are released to free memory (the

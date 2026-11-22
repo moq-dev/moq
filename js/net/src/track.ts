@@ -997,9 +997,15 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
 // Where the held group at `key` ends, once finished whole; assigned in its static block.
 let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
-// Whether the held group at `key` places `time`: closed, or holding a frame past it. Mirrors the Rust
-// `group::Handle::places`; assigned in its static block.
-let placesAt: (producer: Producer, key: bigint, time: bigint) => boolean;
+// The first time the held group at `key` can't place, undefined once it finished, and 0 with none
+// held. Mirrors the Rust `Slot::unplaced_from`; assigned in its static block.
+let unplacedFromAt: (producer: Producer, key: bigint) => bigint | undefined;
+
+// Whether the held group at `key` places `time`: finished, or holding a frame past it.
+function placesAt(producer: Producer, key: bigint, time: bigint): boolean {
+	const from = unplacedFromAt(producer, key);
+	return from === undefined || time < from;
+}
 // The first key past the group held at `key` that its own End does not give up: its End once whole,
 // even after the skip its GROUP_END recorded expired, else the next key. Mirrors the Rust
 // `TrackState::past_span`.
@@ -1623,9 +1629,9 @@ export class Producer {
 			const entry = producer.#cached.get(key);
 			return entry && hooks.groupWholeEnd(entry.group);
 		};
-		placesAt = (producer, key, time) => {
+		unplacedFromAt = (producer, key) => {
 			const entry = producer.#cached.get(key);
-			return entry !== undefined && hooks.groupPast(entry.group, time);
+			return entry === undefined ? 0n : hooks.groupUnplacedFrom(entry.group);
 		};
 		wholeAround = (producer, key) => {
 			const keys = producer.#keys;
@@ -3937,7 +3943,7 @@ export class Subscriber {
 				// Mirrors the Rust `TrackState::containing_received`.
 				if (wire) {
 					// An open group's End may yet land at or before the time, so only a frame past it, or the
-					// group closing, proves the group reaches it.
+					// group finishing, proves the group reaches it: an aborted copy may have lost its End.
 					if (
 						below !== undefined &&
 						(below === time || placesAt(producer, below, time)) &&
@@ -3970,8 +3976,16 @@ export class Subscriber {
 					// Below every group, up to the first, and above the last, past the drops after it.
 					const below = uncovered(0n);
 					if (below && below.start < first) runs.push({ start: below.start, end: first });
+					// Past the newest group, a time is unplaced until the drops reach it, and past that
+					// group's newest frame until it finishes.
 					const above = uncovered(pastSpan(producer, last));
-					if (above) runs.push(above);
+					const from = unplacedFromAt(producer, last);
+					if (from === undefined) {
+						if (above) runs.push(above);
+					} else {
+						const start = max(from, last + 1n);
+						runs.push({ start: above ? min(above.start, start) : start, end: UNBOUNDED });
+					}
 				}
 				return { runs, mark };
 			},
@@ -4141,7 +4155,10 @@ export class Subscriber {
 			// `Cursor::look_up_pass`.
 			if (answer?.kind === "group" && answer.group < lookup.time) {
 				lookup.answer ??= answer.answer;
-				if (lookup.answer !== undefined && !hooks.groupPast(lookup.answer, lookup.time)) continue;
+				const answered = lookup.answer;
+				const from = answered && hooks.groupUnplacedFrom(answered);
+				if (answered && from !== undefined && lookup.time >= from && answered.closed.peek() === undefined)
+					continue;
 			}
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			lookup.lookup?.leave();

@@ -1123,10 +1123,11 @@ export const hooks: {
 	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
 	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
 	/**
-	 * Whether a source copy places `time`: closed, or holding a timed frame past it, which puts its
-	 * End past the time too. Mirrors the Rust `group::Handle::poll_past`.
+	 * The first time a source copy can't place, undefined once it finished: it places a time it holds
+	 * a timed frame past, which puts its End past the time too. An aborted copy may have lost its End.
+	 * Mirrors the Rust `group::Handle::unplaced_from`.
 	 */
-	groupPast: (group: GroupProducer, time: bigint) => boolean;
+	groupUnplacedFrom: (group: GroupProducer) => bigint | undefined;
 	/** A source copy's frame count, bumped on each write. */
 	groupWrites: (group: GroupProducer) => Getter<number>;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
@@ -1561,7 +1562,7 @@ export const hooks: {
 	groupWholeEnd: () => {
 		throw new Error("group.ts not loaded");
 	},
-	groupPast: () => {
+	groupUnplacedFrom: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupWrites: () => {

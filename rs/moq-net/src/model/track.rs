@@ -1044,6 +1044,18 @@ impl Slot {
 		self.copies().find_map(group::Handle::end)
 	}
 
+	/// The first time no copy of this group places, `None` once one finished; see
+	/// [`group::Handle::places`].
+	fn unplaced_from(&self) -> Option<u64> {
+		self.copies()
+			.try_fold(0, |from, copy| copy.unplaced_from().map(|own| own.max(from)))
+	}
+
+	/// Whether a copy of this group places `time`; see [`group::Handle::places`].
+	fn places(&self, time: u64) -> bool {
+		self.unplaced_from().is_none_or(|from| time < from)
+	}
+
 	/// Where a range from `time` starts, this group, at `key`, being the newest starting at or
 	/// before it; see [`reached`].
 	fn reached(&self, key: u64, time: u64) -> u64 {
@@ -1224,8 +1236,17 @@ impl Holdings for TrackState {
 						0 => none.clone(),
 						_ => below,
 					};
+					// Past the newest group, a time is unplaced until the drops reach it, and past
+					// that group's newest frame until it finishes.
 					let above = match last.checked_add(1) {
-						Some(_) => uncovered(TrackState::past_span(last, slot)),
+						Some(next) => {
+							let drops = uncovered(TrackState::past_span(last, slot));
+							match slot.unplaced_from().map(|from| from.max(next)) {
+								None => drops,
+								Some(from) if drops.is_empty() => from..=u64::MAX,
+								Some(from) => from.min(*drops.start())..=u64::MAX,
+							}
+						}
 						None => none,
 					};
 					[below, above]
@@ -1471,9 +1492,9 @@ impl TrackState {
 	fn containing_received(&self, time: u64, budget: Duration) -> Containing {
 		let held = self.lookup.range(..=time).next_back();
 		// An open group's End may yet land at or before the time, so only a frame past it, or
-		// the group closing, proves the group reaches it.
+		// the group finishing, proves the group reaches it: an aborted copy may have lost its End.
 		if let Some((&key, slot)) = held
-			&& (key == time || slot.copies().any(|copy| copy.places(time)))
+			&& (key == time || slot.places(time))
 			&& self.given_up_for(Self::past_span(key, slot)..time.saturating_add(1), budget)
 		{
 			return Containing::At(slot.reached(key, time));
@@ -28796,6 +28817,59 @@ mod test {
 		}
 		assert_eq!(subscriber.resolved_range(0).map(|resolved| resolved.start), Some(1000));
 		drop(group.finish_at(1400).unwrap());
+	}
+
+	/// A looked-up group whose frames before the time outgrow the group's retained tail sheds
+	/// its head before the reader may take it. With its handler gone, nothing can serve that
+	/// head again, so the read fails with an error rather than waiting or delivering short.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_looked_up_group_shedding_its_head_before_the_time_fails_the_read() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		for start in [0, 1000, 3000] {
+			let mut group = producer.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(start).unwrap(), &b"x"[..])
+				.unwrap();
+			drop(group.finish_at(start + 400).unwrap());
+		}
+		evict(&producer, 1000);
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
+			start: crate::track::Start::Time(1300),
+			end: None,
+		}]));
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		let mut group = fill.accept(1000, None).unwrap().expect("a fresh group");
+		drop(fill);
+		drop(dynamic);
+		// Past the retained tail, all at or before the time.
+		let chunk = bytes::Bytes::from(vec![0u8; 1 << 20]);
+		let chunks = group::MAX_CACHE_BYTES / chunk.len() as u64 + 2;
+		for _ in 0..chunks {
+			group
+				.write_frame(Timestamp::from_millis(1000).unwrap(), chunk.clone())
+				.unwrap();
+		}
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new(), "still waiting");
+		group
+			.write_frame(Timestamp::from_millis(1350).unwrap(), &b"x"[..])
+			.unwrap();
+		drop(group.finish_at(1400).unwrap());
+		let mut reads = BTreeMap::new();
+		while let Poll::Ready(Ok(Some(mut read))) = subscriber.poll_recv_group(&waiter) {
+			let first = read.read_frame().now_or_never().expect("never waits");
+			reads.insert(read.start, first.is_ok());
+		}
+		assert_eq!(
+			reads,
+			BTreeMap::from([(1000, false), (3000, true)]),
+			"1000's shed head fails"
+		);
 	}
 
 	/// Two readers look up the same time in a pause: the second handler's accept finds the group

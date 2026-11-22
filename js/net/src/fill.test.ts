@@ -1765,6 +1765,44 @@ test("fill: a looked-up group with a frame past the time is read before it ends"
 	broadcast.close();
 });
 
+// A looked-up group whose frames before the time outgrow its retained tail sheds its head before the
+// reader may take it. With its handler gone, nothing serves that head again, so the read fails rather
+// than waiting or delivering short. Mirrors the Rust
+// `a_looked_up_group_shedding_its_head_before_the_time_fails_the_read`.
+test("fill: a looked-up group shedding its head before the time fails the read", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const requests = track.requests();
+	let answered: ReturnType<typeof track.createGroup> | undefined;
+	void (async () => {
+		const fill = await requests.requestedFill();
+		if (!fill) return;
+		answered = defined(fill.accept(1000n));
+		fill.close();
+		requests.close();
+	})();
+	for (const start of [0, 3000]) {
+		const held = track.createGroup(BigInt(start));
+		held.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(start) });
+		held.finishAt(BigInt(start + 400));
+	}
+	const reader = track.subscribe(fromTime(1300n));
+	const ordered = reader.ordered();
+	const next = ordered.nextGroup();
+	while (answered === undefined) await yieldNow();
+	const group = answered;
+	// Past the retained tail, all at or before the time.
+	const chunk = new Uint8Array(1 << 20);
+	for (let i = 0; i < 34; i++) group.writeFrame({ payload: chunk, timestamp: Timestamp.fromMillis(1000) });
+	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1350) });
+	group.finishAt(1400n);
+	const read = defined(await next);
+	expect(read.start).toBe(1000n);
+	await expect(read.readFrame()).rejects.toThrow();
+	reader.close();
+	broadcast.close();
+});
+
 test("fill: a time start dropped after its floor's group is evicted starts at that group", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

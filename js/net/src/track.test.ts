@@ -6026,9 +6026,12 @@ test("track: a reader's unplaced times are only times its holdings can't place",
 				else if (unknown) expect([at, received && between]).toEqual([at, true]);
 			}
 			const key = BigInt(random(48));
-			if (random(2) === 0) {
+			const op = random(3);
+			if (op < 2) {
 				try {
-					putGroup(producer, key);
+					// Finished, or left open: an open group places no time past its newest frame.
+					if (op === 0) putGroup(producer, key);
+					else producer.createGroup(key);
 				} catch {
 					// A key this copy refuses, such as one a skip covers.
 				}
