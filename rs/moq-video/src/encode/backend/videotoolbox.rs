@@ -36,7 +36,7 @@ use objc2_core_foundation::{
 	CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse, kCFBooleanTrue,
 };
 use objc2_core_media::{
-	CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+	CMFormatDescription, CMSampleBuffer, CMTime, CMVideoCodecType, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
 	CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::CVImageBuffer;
@@ -102,9 +102,67 @@ struct Sink {
 	error: Option<i32>,
 }
 
-pub(crate) struct VideoToolbox {
-	session: CFRetained<VTCompressionSession>,
+/// A compression session and the [`Sink`] its output callback writes to,
+/// owned together so the session is invalidated before the sink is freed on
+/// every path, an `open` that fails halfway included.
+struct Session {
+	raw: CFRetained<VTCompressionSession>,
 	sink: Box<Sink>,
+}
+
+impl Session {
+	fn new(config: &Config, codec_type: CMVideoCodecType) -> Result<Self, Error> {
+		let mut sink = Box::new(Sink {
+			codec: config.codec,
+			timestamp: Timestamp::ZERO,
+			ready: VecDeque::new(),
+			error: None,
+		});
+		let refcon = (&mut *sink as *mut Sink).cast::<c_void>();
+		let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
+		let status = unsafe {
+			VTCompressionSession::create(
+				None,
+				config.width as i32,
+				config.height as i32,
+				codec_type,
+				None,
+				None,
+				None,
+				Some(output_callback),
+				refcon,
+				NonNull::new(&mut session_ptr).unwrap(),
+			)
+		};
+		let raw = NonNull::new(session_ptr)
+			.filter(|_| status == 0)
+			.map(|p| unsafe { CFRetained::from_raw(p) })
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
+		Ok(Self { raw, sink })
+	}
+}
+
+impl std::ops::Deref for Session {
+	type Target = VTCompressionSession;
+
+	fn deref(&self) -> &VTCompressionSession {
+		&self.raw
+	}
+}
+
+impl Drop for Session {
+	/// Finish every frame in flight, then invalidate: a release alone leaves
+	/// VideoToolbox free to call back into the sink after it is freed.
+	fn drop(&mut self) {
+		unsafe {
+			self.raw.complete_frames(kCMTimeInvalid);
+			self.raw.invalidate();
+		}
+	}
+}
+
+pub(crate) struct VideoToolbox {
+	session: Session,
 	/// `{ ForceKeyFrame: true }`, built once and reused for forced IDRs.
 	force_keyframe: CFRetained<CFDictionary>,
 	framerate_numerator: i32,
@@ -131,35 +189,9 @@ impl VideoToolbox {
 			Codec::H265 => kCMVideoCodecType_HEVC,
 		};
 
-		let mut sink = Box::new(Sink {
-			codec: config.codec,
-			timestamp: Timestamp::ZERO,
-			ready: VecDeque::new(),
-			error: None,
-		});
-		let refcon = (&mut *sink as *mut Sink).cast::<c_void>();
-
 		let mut preset = config.preset;
 		let (session, controls) = loop {
-			let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
-			let status = unsafe {
-				VTCompressionSession::create(
-					None,
-					config.width as i32,
-					config.height as i32,
-					codec_type,
-					None,
-					None,
-					None,
-					Some(output_callback),
-					refcon,
-					NonNull::new(&mut session_ptr).unwrap(),
-				)
-			};
-			let session = NonNull::new(session_ptr)
-				.filter(|_| status == 0)
-				.map(|p| unsafe { CFRetained::from_raw(p) })
-				.ok_or_else(|| Error::codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
+			let session = Session::new(config, codec_type)?;
 
 			// Every preset forbids reordering. A failure here cannot be fixed by downgrading.
 			set_bool(
@@ -255,7 +287,6 @@ impl VideoToolbox {
 			.map_err(|_| Error::codec(anyhow::anyhow!("VideoToolbox frame-rate numerator exceeds i32")))?;
 		Ok(Self {
 			session,
-			sink,
 			force_keyframe,
 			framerate_numerator,
 			framerate_denominator: i64::from(config.framerate.denominator()),
@@ -269,11 +300,11 @@ impl VideoToolbox {
 
 impl Backend for VideoToolbox {
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
-		self.sink.error = None;
+		self.session.sink.error = None;
 		// `complete_frames` below forces this frame out before returning, so every
 		// access unit the callback sees until then came from it.
-		self.sink.timestamp = frame.timestamp;
-		let before = self.sink.ready.len();
+		self.session.sink.timestamp = frame.timestamp;
+		let before = self.session.sink.ready.len();
 
 		// Zero-copy when the capture handed us a surface; otherwise upload I420.
 		let pixel_buffer = match &frame.surface {
@@ -320,18 +351,18 @@ impl Backend for VideoToolbox {
 			)));
 		}
 
-		if let Some(status) = self.sink.error.take() {
+		if let Some(status) = self.session.sink.error.take() {
 			return Err(Error::codec(anyhow::anyhow!(
 				"VideoToolbox encode callback failed: {status}"
 			)));
 		}
 		// A dropped frame comes back with no packet and no error.
-		self.keyframe_pending = cut && self.sink.ready.len() == before;
+		self.keyframe_pending = cut && self.session.sink.ready.len() == before;
 		Ok(())
 	}
 
 	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
-		Ok(self.sink.ready.pop_front())
+		Ok(self.session.sink.ready.pop_front())
 	}
 
 	fn flush(&mut self) -> Result<(), Error> {

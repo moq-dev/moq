@@ -4644,7 +4644,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-test",
- "url",
  "webm-iterable",
  "workspace-hack",
 ]

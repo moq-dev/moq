@@ -74,7 +74,7 @@ export class Room {
 	}
 
 	/** Remote participants, keyed by identity. */
-	get remotes(): Getter<Map<Moq.Path.Valid, Remote>> {
+	get remotes(): Getter<ReadonlyMap<Moq.Path.Valid, Remote>> {
 		return this.#remotes;
 	}
 
