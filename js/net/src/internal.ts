@@ -579,6 +579,8 @@ export interface ResumeSource {
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
 	serving(): boolean;
+	/** The parts of `[start, end)` the serving copy says its publisher skipped; see `hooks.skippedIn`. */
+	skippedIn(start: bigint, end: bigint): Run[];
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
 	holeEnd(key: bigint, dropped: boolean): bigint | undefined;
 	/** Where the group the serving copy holds whole at `key` ends; see `hooks.wholeEnd`. */
@@ -964,7 +966,8 @@ export const hooks: {
 	accountsFor: (subscriber: Subscriber, delivered: Delivered, gaps: readonly Run[], ordered: boolean) => boolean;
 	/**
 	 * The parts of `[start, end)` the publisher declared skipped on the subscriber's track, never to
-	 * be produced. Mirrors the Rust crate-private `track::Consumer::skipped_in`.
+	 * be produced: a front's reader asks its serving copy. Mirrors the Rust crate-private
+	 * `track::Consumer::skipped_in`.
 	 */
 	skippedIn: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */

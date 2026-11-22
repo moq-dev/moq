@@ -456,9 +456,10 @@ class Reader implements ResumeSource {
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: bigint;
 	/**
-	 * The keys the reader lacked that a copy declared skipped as it was let go, so a key the cursor
-	 * keeps out under the serving copy's resume point counts as accounted for after the copy that
-	 * knew it is gone; see {@link accounts}.
+	 * The runs the reader lacked whole that a copy declared skipped as it was let go, so a key the
+	 * cursor keeps out under the serving copy's resume point counts as accounted for after the copy
+	 * that knew it is gone; see {@link #accounts}. Only whole gaps of what the reader handed out,
+	 * so it holds no more runs than those gaps.
 	 */
 	#skipped = new Delivered();
 	/**
@@ -1370,12 +1371,14 @@ class Reader implements ResumeSource {
 		if (window.end() === undefined || window.pending) return false;
 		const resumed = resumePoint(serving) ?? 0n;
 		const cursor = this.#shell.cursor.peek();
-		// Declared skipped by a copy held now, or by one let go.
-		const skipped = (at: bigint) =>
-			this.#copies.reduce<bigint | undefined>((longest, copy) => {
-				const past = hooks.holeEnd(copy.sub, at, false);
-				return past === undefined ? longest : max(longest ?? past, past);
-			}, undefined);
+		// Declared skipped by a copy let go, or by one held now.
+		const skipped = (open: Run) => {
+			const held = new Delivered();
+			for (const copy of this.#copies) {
+				for (const run of hooks.skippedIn(copy.sub, open.start, open.end)) held.addRun(run.start, run.end);
+			}
+			return held.covers(open.start, open.end);
+		};
 		const above: Run[] = [];
 		for (const gap of gaps) {
 			const split = min(max(resumed, gap.start), gap.end);
@@ -1386,13 +1389,7 @@ class Reader implements ResumeSource {
 			];
 			for (const run of keptOut) {
 				if (run.start >= run.end) continue;
-				for (const open of this.#skipped.gaps(run.start, run.end)) {
-					for (let at = open.start; at < open.end; ) {
-						const past = skipped(at);
-						if (past === undefined || past <= at) return false;
-						at = past;
-					}
-				}
+				if (!this.#skipped.gaps(run.start, run.end).every(skipped)) return false;
 			}
 			if (split < gap.end) above.push({ start: split, end: gap.end });
 		}
@@ -1672,7 +1669,6 @@ class Reader implements ResumeSource {
 		const edge = last && hooks.latestKey(last.sub);
 		const cursor = this.#shell.cursor.peek();
 		let waits = false;
-		const gone: Copy[] = [];
 		this.#copies = this.#copies.filter((copy) => {
 			if (!copy.replaced) {
 				if (!this.#ended || copy.lease > 0) return true;
@@ -1685,28 +1681,33 @@ class Reader implements ResumeSource {
 				if (retains === "wait") waits = true;
 				if (retains) return true;
 			}
-			gone.push(copy);
+			// Before the drop, which closes a front's copy along with its own copies.
+			this.#keepSkips(copy, delivered);
 			this.#drop(copy);
 			return false;
 		});
-		// A skip is final, and only that copy may know it: keep what it skipped of the window's gaps
-		// under its bound. Each kept run lies in a gap the reader still lacks.
-		if (gone.length > 0) {
-			const window = this.#window();
-			const from = max(window.floor() ?? 0n, delivered.runEnd(0n) ?? 0n);
-			for (const copy of gone) {
-				const end = copyEnd(copy) ?? window.end();
-				if (end === undefined) continue;
-				for (const run of window.runs(from, end)) {
-					for (const gap of delivered.gaps(run.start, run.end)) {
-						for (const skip of hooks.skippedIn(copy.sub, gap.start, gap.end))
-							this.#skipped.addRun(skip.start, skip.end);
-					}
-				}
-			}
-		}
 		this.#skipped.forgetBelow(delivered.runEnd(0n) ?? 0n);
 		return waits;
+	}
+
+	/**
+	 * Keep each gap of the window under `copy`'s bound that `delivered` lacks and `copy` skipped
+	 * whole, as it is let go: a skip is final, and only that copy may know it. A gap with a key left
+	 * open stays owed as a whole wherever the cursor keeps any of it out, so a partial skip of it
+	 * would only cost. Mirrors the Rust `Reader::let_go`.
+	 */
+	#keepSkips(copy: Copy, delivered: Delivered): void {
+		const window = this.#window();
+		const end = copyEnd(copy) ?? window.end();
+		if (end === undefined) return;
+		const from = max(window.floor() ?? 0n, delivered.runEnd(0n) ?? 0n);
+		for (const run of window.runs(from, end)) {
+			for (const gap of delivered.gaps(run.start, run.end)) {
+				const skipped = new Delivered();
+				for (const skip of hooks.skippedIn(copy.sub, gap.start, gap.end)) skipped.addRun(skip.start, skip.end);
+				if (skipped.covers(gap.start, gap.end)) this.#skipped.addRun(gap.start, gap.end);
+			}
+		}
 	}
 
 	/**
@@ -1959,6 +1960,12 @@ class Reader implements ResumeSource {
 	serving(): boolean {
 		this.sync();
 		return this.#serving() !== undefined;
+	}
+
+	// The serving route's copy holds what its publisher skipped.
+	skippedIn(start: bigint, end: bigint): Run[] {
+		const serving = this.#serving();
+		return serving ? hooks.skippedIn(serving.sub, start, end) : [];
 	}
 
 	// The serving route's copy holds what its publisher skipped or gave up.

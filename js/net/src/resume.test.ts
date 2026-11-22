@@ -1045,6 +1045,45 @@ test("a skip under the resume point the local floor keeps out ends the read", as
 });
 
 /**
+ * As above, with the replaced route behind an inner front: its skip is read through that front's
+ * serving copy, before the copy goes. Mirrors the Rust
+ * `a_skip_behind_an_inner_front_the_local_floor_keeps_out_ends_the_read`.
+ */
+test("a skip behind an inner front the local floor keeps out ends the read", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(0n);
+	ta.producer.skipGroups(1n, 2n);
+	ta.write(2n);
+	const inner = new Front();
+	inner.serve(a.consume());
+	const front = new Front();
+	front.serve(inner.consumer);
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 3n }] });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([0n, 2n]);
+		tb.write(3n);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 2n }, end: { excluded: 4n } });
+		await settle();
+		expect(drain(sub)).toEqual([3n]);
+		expect(await isPending(sub.recvGroup())).toBe(false);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		inner.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+/**
  * On one route, a group of the window that the local floor keeps out and the publisher skipped is
  * the serving copy's to account for: the read ends once the rest is read. Mirrors the Rust
  * `a_skip_under_the_local_floor_ends_a_single_route_read`.

@@ -4580,6 +4580,7 @@ export class Subscriber {
 			return subscriber.#resume.accounts(own.union(delivered), left, ordered);
 		};
 		hooks.skippedIn = (subscriber, start, end) =>
+			subscriber.#resume?.skippedIn(start, end) ??
 			subscriber.#state.drops
 				.overlapping(start, end)
 				.filter((run) => run.skip)

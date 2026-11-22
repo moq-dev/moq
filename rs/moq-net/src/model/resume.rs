@@ -1744,9 +1744,10 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: a switch's boundary is never below it.
 	newest: Option<u64>,
-	/// The keys the reader lacked that a copy declared skipped as it was let go, so a key the
-	/// local floor or cap keeps out under the serving copy's resume point counts as accounted
-	/// for after the copy that knew it is gone; see [`Reader::accounts`].
+	/// The runs the reader lacked whole that a copy declared skipped as it was let go, so a
+	/// key the local floor or cap keeps out under the serving copy's resume point counts as
+	/// accounted for after the copy that knew it is gone; see [`Reader::accounts`]. Only whole
+	/// gaps of what the reader handed out, so it holds no more runs than those gaps.
 	skipped: Delivered,
 	/// Set once the serving copy's resume point may pass over groups the reader lacks: the
 	/// route changed, or the ranges did. Kept until the gaps are backfilled: see
@@ -2298,8 +2299,9 @@ impl Reader {
 				}
 			}
 		});
-		// A skip is final, and only that copy may know it: keep what it skipped of the
-		// window's gaps under its bound. Each kept run lies in a gap the reader still lacks.
+		// A skip is final, and only that copy may know it: keep each gap of the window under
+		// its bound that it skipped whole. A gap with a key left open stays owed as a whole
+		// wherever the cursor keeps any of it out, so a partial skip of it would only cost.
 		for (track, end) in gone {
 			let end = end.unwrap_or(u64::MAX);
 			let from = self.window.floor().unwrap_or(0).max(delivered.floor());
@@ -2310,8 +2312,8 @@ impl Reader {
 				.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(end)))
 				.collect();
 			for gap in gaps {
-				for run in track.skipped_in(gap).iter() {
-					self.skipped.insert_run(run.clone());
+				if track.skipped_in(gap.clone()).gaps(&gap).next().is_none() {
+					self.skipped.insert_run(gap);
 				}
 			}
 		}
@@ -2664,12 +2666,13 @@ impl Reader {
 			return false;
 		};
 		let resumed = serving.floor.unwrap_or(0);
-		// Declared skipped by a copy held now, or by one let go.
-		let skipped = |key: u64| {
-			self.copies
-				.iter()
-				.filter_map(|copy| copy.track.hole_end(key, false))
-				.max()
+		// Declared skipped by a copy let go, or by one held now.
+		let skipped = |open: &std::ops::Range<u64>| {
+			let mut held = RangeSet::new();
+			for copy in &self.copies {
+				held.extend(copy.track.skipped_in(open.clone()).iter().cloned());
+			}
+			held.gaps(open).next().is_none()
 		};
 		let mut above = Vec::new();
 		for gap in gaps {
@@ -2683,7 +2686,7 @@ impl Reader {
 				.into_iter()
 				.filter(|run| !run.is_empty())
 				.flat_map(|run| self.skipped.gaps(run))
-				.any(|run| track::first_open(std::iter::once(run.start..=run.end - 1), skipped).is_some());
+				.any(|open| !skipped(&open));
 			if open {
 				return false;
 			}
@@ -12469,6 +12472,39 @@ mod test {
 			.unwrap()
 			.unwrap();
 		let mut sub = sub;
+		assert_eq!(drain(&mut sub, false), [0, 2]);
+		let b = copy();
+		write(&b, 3);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(2..4);
+		assert_eq!(drain(&mut sub, false), [3]);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// As above, with the replaced route behind an inner front: its skip is read through that
+	/// front's serving copy.
+	#[test]
+	fn a_skip_behind_an_inner_front_the_local_floor_keeps_out_ends_the_read() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.skip_groups(1..2);
+		write(&a, 2);
+		let inner_routes = Producer::new();
+		let inner = logical(&inner_routes);
+		inner_routes.serve(a.consume());
+		routes.serve(inner.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Some(0),
+				end: Some(3),
+			}]);
+		let mut sub = front.consume().subscribe(subscription).now_or_never().unwrap().unwrap();
 		assert_eq!(drain(&mut sub, false), [0, 2]);
 		let b = copy();
 		write(&b, 3);
