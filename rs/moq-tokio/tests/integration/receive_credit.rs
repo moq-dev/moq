@@ -1501,7 +1501,8 @@ mod steady_lag {
 					continue;
 				}
 				for i in 0..runs {
-					let r = run(rate, window, warm, Duration::from_millis(backlog), Duration::from_secs(8)).await;
+					let watch = Duration::from_secs(std::env::var("WATCH").map_or(8, |v| v.parse().unwrap()));
+					let r = run(rate, window, warm, Duration::from_millis(backlog), watch).await;
 					println!(
 						"{rate},{},{warm},{i},{},{},{},{},{},{}",
 						window >> 20,
