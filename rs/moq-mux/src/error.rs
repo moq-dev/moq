@@ -124,10 +124,6 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
 
-	/// URL parse error.
-	#[error("url: {0}")]
-	Url(String),
-
 	/// Unknown media format.
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
@@ -343,13 +339,6 @@ impl Error {
 	/// An mp4 atom error, kept opaque so an mp4-atom bump is no moq-mux break.
 	pub(crate) fn mp4(err: mp4_atom::Error) -> Self {
 		Error::Mp4(std::sync::Arc::new(err))
-	}
-}
-
-// Flattened to its message so `url` stays out of this crate's public API.
-impl From<url::ParseError> for Error {
-	fn from(err: url::ParseError) -> Self {
-		Error::Url(message(err))
 	}
 }
 

@@ -12743,11 +12743,6 @@ rec {
             name = "thiserror";
             packageId = "thiserror 2.0.21";
           }
-          {
-            name = "url";
-            packageId = "url";
-            features = [ "serde" ];
-          }
         ];
         devDependencies = [
           {
@@ -20044,10 +20039,6 @@ rec {
           {
             name = "tracing";
             packageId = "tracing";
-          }
-          {
-            name = "url";
-            packageId = "url";
           }
           {
             name = "webm-iterable";
