@@ -2067,11 +2067,11 @@ mod test {
 			Err(DecodeError::InvalidSubscribeLocation)
 		));
 
-		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a
-		// start only; type 3 is assigned to nothing, as a start or an end. Each closes the
-		// session with a PROTOCOL_VIOLATION.
+		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now; type 3
+		// is assigned to nothing, as a start or an end. Each closes the session with a
+		// PROTOCOL_VIOLATION.
 		let starts = [3, 4].map(|kind| (2, kind));
-		let ends = [2, 3, 4].map(|kind| (1, kind));
+		let ends = [3, 4].map(|kind| (1, kind));
 		for (back, kind) in starts.into_iter().chain(ends) {
 			let mut buf = encode(&msg, version).unwrap();
 			let at = buf.len() - back;

@@ -7109,7 +7109,7 @@ impl GroupServe {
 								self.ctx.version,
 								self.end,
 								&mut self.group,
-								batch.len() - *batch_pos,
+								batch.len().saturating_sub(*batch_pos),
 							) {
 								// Parked at a lite-07 Position end with the stream open, which holds
 								// its credit until an update moves the end, the group expires, or the
