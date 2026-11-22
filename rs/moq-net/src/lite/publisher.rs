@@ -5332,8 +5332,9 @@ struct TrackRun {
 	initial: u64,
 	/// Lite-07: the ranges an update added whose start no SUBSCRIBE_STARTED reported yet, by
 	/// Range ID.
-	/// Each with whether it was added as a live join, which a pin before the report replaces.
-	unstarted: std::collections::BTreeMap<u64, bool>,
+	/// Each with its budget when it was added as a live join, which a pin before the report
+	/// replaces.
+	unstarted: std::collections::BTreeMap<u64, Option<Duration>>,
 	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 }
@@ -5366,6 +5367,11 @@ impl Unpinned {
 	fn due(&self, latest: u64) -> Vec<u64> {
 		self.by_due.range(..=(latest, u64::MAX)).map(|(_, id)| *id).collect()
 	}
+}
+
+/// A live join's staleness budget, `None` for any other range.
+fn join_budget(range: &crate::track::Range) -> Option<Duration> {
+	matches!(range.start, crate::track::Start::Live { .. }).then(|| range.budget())
 }
 
 /// The lowest latest group start that could resolve `range`'s start, unless `started`, then
@@ -5605,8 +5611,7 @@ impl TrackRun {
 			self.requested.insert(id, range);
 			self.unpinned.insert(id, due(&range, false));
 			if id >= self.initial {
-				self.unstarted
-					.insert(id, matches!(range.start, crate::track::Start::Live { .. }));
+				self.unstarted.insert(id, join_budget(&range));
 			}
 		}
 		self.positions.extend(positions);
@@ -5720,13 +5725,13 @@ impl TrackRun {
 			let start = match resolved {
 				Some(resolved) => {
 					// A live join placed behind where delivery started, further from the live edge
-					// than the first ranges, starts where it was placed, even once pinned there: the
-					// subscriber reads its answer as the join's start, so its groups from there are
-					// owed, and delivery now starts there too. Any other range starts no earlier
-					// than delivery.
+					// than the first ranges, starts where it was placed, past the groups its max
+					// expired, even once pinned there: the subscriber reads its answer as the join's
+					// start, so its groups from there are owed, and delivery now starts there too.
+					// Any other range starts no earlier than delivery.
 					let start = match joins {
-						true => resolved.start,
-						false => resolved.start.max(from),
+						Some(budget) => self.track.join_start(resolved.start, budget),
+						None => resolved.start.max(from),
 					};
 					let started = resolved.end.is_none_or(|end| end > start);
 					if started {
@@ -6220,7 +6225,14 @@ impl TrackRun {
 			.map(|(id, resolved)| {
 				let waits = waiting.next_if(|(key, _)| *key == id).and_then(|(_, waits)| waits);
 				let (from, end) = match (resolved, waits) {
-					(Some(resolved), _) => (resolved.start.max(start), resolved.end),
+					// A live join starts where it was placed, past the groups its max expired,
+					// which may be below where delivery starts: a relay serves first the groups it
+					// holds, before those the join is owed arrive. Any other range starts no
+					// earlier than delivery.
+					(Some(resolved), _) => match self.requested.ranges.get(&id).and_then(join_budget) {
+						Some(budget) => (self.track.join_start(resolved.start, budget), resolved.end),
+						None => (resolved.start.max(start), resolved.end),
+					},
 					// A time start still waiting at or below the floor, as an update before the
 					// start leaves one: whichever group contains it is out of range, so the range
 					// starts where delivery does, the answer placing it would give.
@@ -6313,10 +6325,12 @@ impl TrackRun {
 			position,
 			ended: self.track.largest_finished(position),
 		});
-		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest,
-			starts: self.starts(start),
-		}))?;
+		let starts = self.starts(start);
+		// A live join placed below where delivery starts moves delivery down to it, as one an
+		// update adds does.
+		let start = starts.iter().flatten().fold(start, |start, at| start.min(*at));
+		self.start = Start::Resolved(start);
+		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart { largest, starts }))?;
 		// The subscriber now owes itself everything from the start, so a range given up
 		// above it is named as it would have been after the start. A stale run below it is
 		// never named, so a wider budget may still serve it. A final one is named all the same:
@@ -9019,6 +9033,58 @@ mod serve_group_test {
 			})
 			.collect();
 		assert_eq!(started, [Some(2000)]);
+	}
+
+	/// An added live join reaching back past groups its max already expired starts at the
+	/// first one it hasn't, as SUBSCRIBE_START names the first group delivery serves: the
+	/// subscriber owes itself every group from the start it is told.
+	#[kio::test]
+	async fn lite07_an_added_join_starts_past_the_groups_its_max_expired() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for key in 0..5 {
+			write_group(&mut track, key * 1000, key * 1000);
+		}
+		let first = lite::Range::span(Some(0), 0, Some(0), None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_max(Duration::from_secs(3600))
+				.with_range(0..1),
+		);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		while run.start.resolved().is_none() {
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		}
+
+		// Placed at group 0, four seconds behind the 4 s edge, but groups 0 and 1 can present
+		// nothing within 1.5 s of it.
+		let back = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Duration::from_secs(4),
+				max: Some(Duration::from_millis(1500)),
+			}),
+			end: None,
+		};
+		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let started: Vec<_> = responses(&mut writer, &log)
+			.await
+			.into_iter()
+			.filter_map(|msg| match msg {
+				lite::SubscribeResponse::Started(started) => Some(started),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			started,
+			[lite::SubscribeStarted {
+				id: 1,
+				start: Some(2000)
+			}]
+		);
 	}
 
 	/// A range an update adds learns where it starts from SUBSCRIBE_STARTED, after

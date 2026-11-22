@@ -2593,6 +2593,38 @@ impl TrackState {
 		key < self.cache_floor(budget) || (self.lookup.contains_key(&key) && self.drifted(key, edge, budget))
 	}
 
+	/// Where a live join placed at `placed` starts for a reader within `budget`, as its
+	/// publisher reports it: past the groups held there and after that the budget expired, as
+	/// delivery starts at the first group it serves.
+	///
+	/// A copy whose upstream answers joins reports the answer that placed it, given under a max
+	/// at least as wide: its upstream judged the groups, and those owed from there may not have
+	/// arrived yet. Any other copy starts no lower than where its upstream said its feed starts,
+	/// that wire's answer for the whole subscription, and skips a stale group only once every key
+	/// below it is given up for the reader, since a group still on its way there may be fresh.
+	fn join_start(&self, placed: u64, budget: Duration) -> u64 {
+		if self.joins_answered() {
+			return placed;
+		}
+		let budget = self.max_age_bound().map_or(budget, |bound| budget.min(bound));
+		let edge = self.drift_edge(&Servable::ALL);
+		let received = self.anchors.received();
+		let mut from = match self.start {
+			FeedStart::Declared(start) | FeedStart::Resolved(start) if received => placed.max(start),
+			_ => placed,
+		};
+		for (&key, _) in self.walked(from..) {
+			if received && !self.given_up_for(from..key, budget) {
+				break;
+			}
+			if !self.is_stale(key, &edge, budget) {
+				return key;
+			}
+			from = key.saturating_add(1);
+		}
+		from
+	}
+
 	/// A finite subscription cannot admit a cache whose reach its resumed feed cannot
 	/// bound. Unlimited history still owes it, and one-shot fetches judge their own budget.
 	fn cache_floor(&self, budget: Duration) -> u64 {
@@ -7567,6 +7599,16 @@ impl Consumer {
 		})
 	}
 
+	/// Where a live join placed at `placed` starts for a reader within `budget`, on the copy
+	/// this handle reads; see [`TrackState::join_start`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn join_start(&self, placed: u64, budget: Duration) -> u64 {
+		if let Some(serving) = self.serving() {
+			return serving.join_start(placed, budget);
+		}
+		self.with_state(|state| state.map_or(placed, |state| state.read().join_start(placed, budget)))
+	}
+
 	/// The first group the declared end excludes whole, or `None` while the track is open ended.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn final_key(&self) -> Option<u64> {
@@ -11759,6 +11801,20 @@ impl Subscriber {
 					.collect()
 			}
 			Inner::Resume(resume, _) => resume.resolved_keys(keys),
+		}
+	}
+
+	/// Where a live join this subscriber placed at `placed` starts under `budget`, as a
+	/// publisher reports it: past the groups the budget expired, unless an upstream's answer
+	/// placed it; see [`TrackState::join_start`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn join_start(&self, placed: u64, budget: Duration) -> u64 {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().join_start(placed, budget),
+			Inner::Resume(_, logical) => match logical.state.read().routes.clone() {
+				Some(routes) => routes.serving().map_or(placed, |copy| copy.join_start(placed, budget)),
+				None => placed,
+			},
 		}
 	}
 
