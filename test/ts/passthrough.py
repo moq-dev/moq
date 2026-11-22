@@ -145,6 +145,27 @@ def section(pkt: bytes) -> bytes | None:
     return body[1 + body[0] :] if body else None
 
 
+def sections(source: list[bytes]):
+    """Each whole PSI section the source carries, as (PID, section), reassembled across packets."""
+    partial: dict[int, bytes] = {}
+    for pkt in source:
+        p = pid(pkt)
+        sec = section(pkt)
+        if sec is not None:
+            partial[p] = sec
+        elif p in partial and pkt[3] & 0x10:
+            partial[p] += pkt[4 + (1 + pkt[4] if pkt[3] & 0x20 else 0) :]
+        else:
+            continue
+        buf = partial[p]
+        # Stuffing after a section, rather than another one.
+        if buf[:1] == b"\xff":
+            del partial[p]
+        elif len(buf) >= 3 and len(buf) >= (end := 3 + ((buf[1] & 0x0F) << 8 | buf[2])):
+            del partial[p]
+            yield p, buf[:end]
+
+
 @dataclass
 class Layout:
     """What the importer reads of a single-program source: where its tables and clock are."""
@@ -157,17 +178,14 @@ class Layout:
 def layout(source: list[bytes]) -> Layout:
     """The program's PMT, clock and grouping PIDs, from the source's first PAT and PMT."""
     pmt_pid = None
-    for pkt in source:
-        sec = section(pkt)
-        if sec is None:
-            continue
-        if pmt_pid is None and pid(pkt) == 0 and sec[0] == 0x00:
+    for p, sec in sections(source):
+        if pmt_pid is None and p == 0 and sec[0] == 0x00:
             end = 3 + ((sec[1] & 0x0F) << 8 | sec[2]) - 4
             programs = [(sec[i + 2] & 0x1F) << 8 | sec[i + 3] for i in range(8, end, 4) if sec[i] << 8 | sec[i + 1]]
             if len(programs) != 1:
                 raise Mismatch(f"the PAT lists {len(programs)} programs; --restart grades one")
             pmt_pid = programs[0]
-        elif pmt_pid is not None and pid(pkt) == pmt_pid and sec[0] == 0x02:
+        elif pmt_pid is not None and p == pmt_pid and sec[0] == 0x02:
             end = 3 + ((sec[1] & 0x0F) << 8 | sec[2]) - 4
             pcr_pid = (sec[8] & 0x1F) << 8 | sec[9]
             i = 12 + ((sec[10] & 0x0F) << 8 | sec[11])

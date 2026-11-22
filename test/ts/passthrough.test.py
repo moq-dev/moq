@@ -161,6 +161,18 @@ class Restart(unittest.TestCase):
         early = passthrough.place(PROGRAM, PROGRAM[: interval(50)] + PROGRAM[interval(51) :])
         self.assertIn("not the restart", passthrough.restart_shortfall(early, self.clock, self.bound))
 
+    def test_a_pmt_spanning_packets_is_reassembled(self):
+        # 170 bytes of program descriptors push the streams into the PMT's second packet.
+        info = bytes([0x05, 168]) + bytes(168)
+        body = PMT[:7] + (0xF000 | len(info)).to_bytes(2, "big") + info + PMT[9:]
+        length = len(body) + 4
+        whole = bytes([0, 0x02, 0xB0 | length >> 8, length & 0xFF]) + body + bytes(4)
+        first = bytes([0x47, 0x40, 0x20, 0x10]) + whole[:184]
+        rest = whole[184:]
+        second = bytes([0x47, 0x00, 0x20, 0x11]) + rest + b"\xff" * (184 - len(rest))
+        source = [section_packet(0, 0x00, PAT, 0), first, second]
+        self.assertEqual(passthrough.layout(source), passthrough.Layout(0x20, 0x100, 0x100))
+
     def test_the_clock_runs_on_across_a_pcr_wrap(self):
         start = passthrough.PCR_WRAP - 2 * INTERVAL
         source = [clock_packet(0x100, (start + i * INTERVAL) % passthrough.PCR_WRAP, False, i) for i in range(5)]
