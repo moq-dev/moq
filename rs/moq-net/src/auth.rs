@@ -2477,9 +2477,12 @@ impl Issued {
 
 	/// Wait for the peer to withdraw the token ([`Error::Cancel`]), the request it rode on
 	/// to end ([`Error::Cancel`]), or its stream or the session to end.
+	///
+	/// The future holds the issue, not the grant, so dropping the grant still ends it.
 	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| poll_closed(&self.issue, waiter)).await
+	pub fn closed(&self) -> impl Future<Output = Error> + Send + 'static {
+		let issue = self.issue.clone();
+		kio::wait(move |waiter| poll_closed(&issue, waiter))
 	}
 }
 
