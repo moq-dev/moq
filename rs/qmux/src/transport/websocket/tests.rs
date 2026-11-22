@@ -146,3 +146,38 @@ async fn refuses_a_text_message() {
 	peer.unbounded_send(Ok(Message::Text("hello".into()))).unwrap();
 	assert!(matches!(recv(&mut transport).await, Err(Error::ProtocolViolation)));
 }
+
+/// Marks its flag when dropped, so a test sees whether anything still holds the bytes it owns.
+struct Owner(Vec<u8>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl AsRef<[u8]> for Owner {
+	fn as_ref(&self) -> &[u8] {
+		&self.0
+	}
+}
+
+impl Drop for Owner {
+	fn drop(&mut self) {
+		self.1.store(true, std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
+/// A message sliced out of the socket's large read buffer, the way tungstenite hands one out,
+/// leaves that buffer free once the socket lets go: the record pins only what the session counts.
+#[tokio::test]
+async fn a_record_pins_none_of_the_sockets_buffer() {
+	for size in [1, READ_BUFFER, 3 * READ_BUFFER] {
+		let (peer, mut transport) = transport(None, 4 * READ_BUFFER as u64);
+		let freed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let socket = Bytes::from_owner(Owner((0..8 * READ_BUFFER).map(|i| i as u8).collect(), freed.clone()));
+		peer.unbounded_send(Ok(Message::Binary(socket.slice(5..5 + size))))
+			.unwrap();
+		let expected = socket.slice(5..5 + size);
+		drop(socket);
+
+		let record = recv(&mut transport).await.unwrap();
+		assert_eq!(record, expected, "{size} bytes");
+		drop(expected);
+		assert!(freed.load(std::sync::atomic::Ordering::Relaxed), "a {size}-byte record pins the socket's buffer");
+	}
+}

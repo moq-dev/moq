@@ -21,13 +21,17 @@ fn max_message_size(config: &Config) -> usize {
 		.max(crate::MAX_FRAME_SIZE)
 }
 
-/// The socket settings for a session under `session`: messages and frames held to
-/// [`max_message_size`].
+/// The socket settings for a session under `session`: messages, frames, and the read
+/// buffer held to [`max_message_size`].
+///
+/// The transport copies each message out, so the read buffer only needs to fit one; the
+/// default of 128 KiB costs a zero-fill on every read and stays resident per connection.
 pub(crate) fn capped(session: &Config) -> tungstenite::protocol::WebSocketConfig {
 	let max = max_message_size(session);
 	tungstenite::protocol::WebSocketConfig::default()
 		.max_message_size(Some(max))
 		.max_frame_size(Some(max))
+		.read_buffer_size(max)
 }
 
 /// Keep-alive configuration for WebSocket transports.
