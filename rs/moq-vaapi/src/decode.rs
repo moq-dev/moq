@@ -1169,7 +1169,9 @@ fn read_back(surface: &Surface<()>, timestamp: u64, width: u32, height: u32) -> 
 	// only one. Not every driver can derive every surface; fall back to
 	// vaCreateImage + vaGetImage, which always works but copies inside the driver
 	// first.
-	match Image::derive_from(surface, visible) {
+	// Safe since a decoded surface is written again only once the pool hands it
+	// out, after every handle and export of it has dropped, and the caller holds one.
+	match unsafe { Image::derive_shared(surface, visible) } {
 		Ok(image) if image.image().format.fourcc == VA_FOURCC_NV12 => {
 			return pack_nv12(&image, timestamp, width, height);
 		}

@@ -263,20 +263,6 @@ impl<S: PictureReclaimableSurface, T> Picture<S, T> {
 		}
 	}
 
-	/// Create a new derived image from this `Picture` using `vaDeriveImage`.
-	///
-	/// Derived images are a direct view (i.e. without any copy) on the buffer content of the
-	/// `Picture`. On the other hand, not all `Pictures` can be derived.
-	pub fn derive_image<'a, D: SurfaceMemoryDescriptor + 'a>(
-		&'a self,
-		visible_rect: (u32, u32),
-	) -> Result<Image<'a>, VaError>
-	where
-		T: Borrow<Surface<D>>,
-	{
-		Image::derive_from(self.surface(), visible_rect)
-	}
-
 	/// Create new image from the `Picture` using `vaCreateImage` and `vaGetImage`.
 	///
 	/// The image will contain a copy of the `Picture` in the desired `format` and `coded_resolution`.

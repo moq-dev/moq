@@ -141,7 +141,26 @@ impl<'a> Image<'a> {
 	/// `surface`. On the other hand, not all `Surface`s can be derived.
 	///
 	/// `visible_rect` is the visible rectangle inside `surface` that we want to access.
+	///
+	/// The view is the surface's own memory, so it borrows the surface mutably:
+	/// nothing, not even a GPU operation taking `&Surface`, can write it while the
+	/// view is alive.
 	pub fn derive_from<D: SurfaceMemoryDescriptor>(
+		surface: &'a mut Surface<D>,
+		visible_rect: (u32, u32),
+	) -> Result<Self, VaError> {
+		// Safe since the mutable borrow excludes every writer for `'a`.
+		unsafe { Self::derive_shared(surface, visible_rect) }
+	}
+
+	/// [`derive_from`](Self::derive_from) through a shared borrow.
+	///
+	/// # Safety
+	///
+	/// Nothing may write `surface`, through VA-API or otherwise, while the image
+	/// lives, such as a decoded picture the pool hands out again only once every
+	/// reference to it has dropped.
+	pub(crate) unsafe fn derive_shared<D: SurfaceMemoryDescriptor>(
 		surface: &'a Surface<D>,
 		visible_rect: (u32, u32),
 	) -> Result<Self, VaError> {
@@ -217,7 +236,8 @@ impl<'a> Image<'a> {
 impl AsRef<[u8]> for Image<'_> {
 	fn as_ref(&self) -> &[u8] {
 		// Safe since the buffer stays mapped for `data_size` bytes while `self` lives, and
-		// nothing writes it: every writable image of the surface needs it borrowed mutably.
+		// nothing writes it: a created image is our own copy, and a derived one excludes
+		// every writer of the surface (see `derive_from`).
 		unsafe { std::slice::from_raw_parts(self.mapping.data, self.mapping.len()) }
 	}
 }
@@ -231,9 +251,21 @@ impl AsRef<[u8]> for Image<'_> {
 ///
 /// ```compile_fail,E0502
 /// fn alias(surface: &mut moq_vaapi::Surface<()>, format: moq_vaapi::VAImageFormat) {
-/// 	let read = moq_vaapi::Image::derive_from(surface, surface.size()).unwrap();
+/// 	let read = moq_vaapi::Image::create_from(surface, format, surface.size(), surface.size()).unwrap();
 /// 	let write = moq_vaapi::ImageMut::create_uninitialized(surface, format).unwrap();
 /// 	drop((read, write));
+/// }
+/// ```
+///
+/// Nor can a derived image share its surface with anything that writes it, a
+/// GPU operation through `&Surface` included:
+///
+/// ```compile_fail,E0502
+/// fn alias(surface: &mut moq_vaapi::Surface<()>) {
+/// 	let size = surface.size();
+/// 	let view = moq_vaapi::Image::derive_from(surface, size).unwrap();
+/// 	let shared: &moq_vaapi::Surface<()> = surface;
+/// 	drop((view, shared));
 /// }
 /// ```
 ///

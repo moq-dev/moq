@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** `Image::derive_from` and `Image::create_from` return read-only images (`AsRef` only); write through `ImageMut::create_uninitialized(&mut surface, format)` and finish with `put`.
+- **Breaking:** `Image` is read-only (`AsRef` only); write through `ImageMut::create_uninitialized(&mut surface, format)` and finish with `put`. `Image::derive_from` borrows its surface mutably, since the view is the surface's own memory, and `Picture::derive_image` is gone.
 - **Breaking:** `encode::Config::gop` is a `NonZeroU32`, and `Encoder::new` refuses an odd or empty frame size.
 - Moved into [moq-dev/moq](https://github.com/moq-dev/moq) from [moq-dev/vaapi](https://github.com/moq-dev/vaapi), whose history covers 0.2.1 and earlier.
 - Logs through `tracing` instead of `log`.
