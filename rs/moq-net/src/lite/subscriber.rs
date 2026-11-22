@@ -8170,6 +8170,70 @@ mod tests {
 		}
 	}
 
+	/// Malformed bytes on a lite-07 Subscribe Stream close the session at once, even with a
+	/// group stream still being read: the close never waits on a drain that a reader leaving
+	/// meanwhile would cut short.
+	#[kio::test]
+	async fn a_malformed_subscribe_response_closes_the_session_at_once() {
+		use crate::transport::poll::{SendStream as _, Session as _};
+		let version = Version::Lite07;
+		let (session, peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_node: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			node: None,
+			name: "video".into(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
+		let reader = serving.serving.subscribe(None);
+		assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+		let Sub::Active(active) = &serving.sub else {
+			panic!("the SUBSCRIBE is on the wire");
+		};
+		// A group stream the publisher has yet to finish keeps the tail busy.
+		let _reading = Reading::open(&active.tail, Some(0), serve.subscriber.runtime.now());
+
+		// The publisher answers with an unknown response type.
+		let (mut send, _recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
+		kio::wait(|waiter| send.poll_write(waiter, &[0x3f, 0x00])).await.unwrap();
+		let _reader = reader;
+
+		let gate = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Serve(serving),
+			gate,
+			datagrams: None,
+			finished: None,
+		};
+		let _ = poll_run(&mut running, &kio::Waiter::noop());
+		let closed = peer.poll_closed(&kio::Waiter::noop());
+		let Poll::Ready(err) = closed else {
+			panic!("the session is still open");
+		};
+		assert_eq!(
+			crate::transport::Error::session_error(&err).map(|(code, _)| code),
+			Some(crate::SessionError::ProtocolViolation.to_code())
+		);
+	}
+
 	/// A PROBE stream the peer ends, by FIN or reset, leaves no estimate behind: the
 	/// session gives up probing, so a held consumer must not keep its last rate.
 	#[kio::test]
@@ -9326,6 +9390,26 @@ mod tests {
 		assert!(announced.contains(&path.clone()), "the announce was not recorded");
 		announced.withdraw(&path);
 		cursor.expect_next_ended("room/host").await;
+	}
+
+	/// lite-07 defines every message its Announce Stream carries, so an unknown type closes
+	/// the session instead of being skipped as on lite-06.
+	#[kio::test]
+	async fn an_unknown_lite07_announce_type_closes_the_session() {
+		const VERSION: Version = Version::Lite07;
+		let mut script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &announce_start(VERSION, "a")]);
+		// An unknown type with an empty body, then a start that must never be read.
+		script.extend([0x3f, 0x00]);
+		script.extend(announce_script(VERSION, &[&announce_start(VERSION, "b")]));
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let log = session.log.clone();
+		let (mut routes, _consumer) = root_prefix(VERSION, session);
+		let result = routes.poll(&kio::Waiter::noop());
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
+			"{result:?}"
+		);
+		assert_eq!(log.closes()[0].0, crate::SessionError::ProtocolViolation.to_code());
 	}
 
 	/// An unknown announce type between two starts is skipped without ending the
@@ -13541,15 +13625,12 @@ impl ServeLoop {
 								};
 								continue;
 							}
-							// Malformed bytes are a protocol violation, which closes the session; a
-							// reset gives up the subscription with its reason.
+							// Malformed bytes are a protocol violation, which closes the session at
+							// once: draining the groups first would drop the close if every reader
+							// left meanwhile. A reset gives up the subscription with its reason.
 							Recv::Malformed(err) => {
 								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								self.mode = ServeMode::Failed {
-									err: Error::ProtocolViolation,
-									tail: active.tail.consume(),
-								};
-								continue;
+								return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
 							}
 							Recv::Reset(err) => {
 								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
