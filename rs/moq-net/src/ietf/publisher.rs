@@ -7452,9 +7452,14 @@ impl FetchGroupWrite {
 		slice.until.is_some_and(|until| index >= until)
 	}
 
-	/// The result once writing stops: a slice that ends before its cap lost objects.
+	/// The result once writing stops: a slice that ends before its cap lost objects. A cap
+	/// past the group's terminal object ends at it, since that status is no frame.
 	fn finish(&self) -> Result<(), Error> {
-		match self.slice.until.is_some_and(|until| self.index < until) {
+		let cap = self
+			.slice
+			.until
+			.filter(|until| self.group.end_object().is_none_or(|end| *until <= end.id));
+		match cap.is_some_and(|until| self.index < until) {
 			true => Err(Error::NotFound),
 			false => Ok(()),
 		}
@@ -22038,6 +22043,77 @@ mod range_tests {
 			Some(Location { group: 0, object: 3 }),
 			"the floor is one past the largest, so a late object of group 0 is not stranded"
 		);
+	}
+
+	/// A fill reaching the Largest Object of a group a relay holds with its END_OF_GROUP
+	/// ends at that status, which is no frame: the objects below it are the whole fill.
+	#[test]
+	fn a_fill_through_the_terminal_object_is_complete() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"catalog",
+			crate::track::Info::timed(),
+		);
+		let group = track.create_group(group::Info { start: 7 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: false,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_object(crate::frame::Header {
+				info: crate::frame::Info {
+					size: 1,
+					timestamp: crate::Timestamp::from_millis(0).unwrap(),
+				},
+				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+					id: 0,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		frame.write(&b"x"[..]).unwrap();
+		let group = frame.finish().unwrap();
+		group
+			.set_end_object(crate::model::object::Fields {
+				id: 1,
+				properties: Default::default(),
+			})
+			.unwrap();
+		let group = group.finish().unwrap();
+
+		// The frame at object 0 is written, so the writer stands at object 1.
+		for (until, ok) in [(Some(1), true), (Some(2), true), (Some(3), true), (None, true)] {
+			let mut write =
+				FetchGroupWrite::new(group.consume(), 7, GroupSlice { skip: 0, until }, Version::Draft22, 0).unwrap();
+			write.index = 1;
+			assert_eq!(write.finish().is_ok(), ok, "until {until:?}");
+		}
+
+		// Without the terminal object the same cap lost an object.
+		let mut bare = track.create_group(group::Info { start: 8 }).unwrap();
+		bare.write_frame(bare.key_time(), &b"x"[..]).unwrap();
+		let bare = bare.finish().unwrap();
+		let mut write = FetchGroupWrite::new(
+			bare.consume(),
+			8,
+			GroupSlice {
+				skip: 0,
+				until: Some(2),
+			},
+			Version::Draft22,
+			0,
+		)
+		.unwrap();
+		write.index = 1;
+		assert!(matches!(write.finish(), Err(Error::NotFound)));
 	}
 
 	/// Anything received past the upstream's last reported Largest Object outdates it, a
