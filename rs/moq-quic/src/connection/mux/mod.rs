@@ -287,6 +287,7 @@ impl Connection {
 		if let Err(err) = self.process(payload, now) {
 			self.fail(err);
 		}
+		self.observe_send_credit(now);
 	}
 
 	/// The transport found the peer violating its framing, such as overrunning a buffer it
@@ -378,6 +379,8 @@ impl Connection {
 
 	/// The next record to write, if any, its stream data waiting on [`Self::transmitted`]
 	fn take(&mut self, now: Instant) -> Option<Bytes> {
+		// A write that blocked on the peer's credit woke this call: date its wait from here.
+		self.observe_send_credit(now);
 		if let Some((frame, streams)) = self.queued.pop_front() {
 			self.unconfirmed.push_back(streams);
 			return Some(frame);
@@ -417,6 +420,13 @@ impl Connection {
 		} else if due.ping {
 			self.ping_request = true;
 		}
+		self.observe_send_credit(now);
+	}
+
+	/// Accrue a writer's wait on the peer's connection credit up to `now`
+	fn observe_send_credit(&mut self, now: Instant) {
+		let closed = self.is_closed();
+		self.streams.observe_send_credit(now, closed);
 	}
 
 	/// Open and accept streams
@@ -458,6 +468,11 @@ impl Connection {
 	/// Receive flow control as the receiver sees it, evictions included
 	pub fn credit_stats(&self) -> super::CreditStats {
 		self.streams.credit_stats()
+	}
+
+	/// Send flow control: how long writers waited on the peer's `MAX_DATA`
+	pub fn send_credit_stats(&self) -> super::SendCreditStats {
+		self.streams.send_credit_stats()
 	}
 
 	/// Change the windows and stream counts `limits` sets, leaving the others as they are

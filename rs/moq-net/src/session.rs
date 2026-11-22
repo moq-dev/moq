@@ -139,6 +139,16 @@ pub struct Stats {
 	/// A count above zero means the receive window is too small for what the peer sends.
 	pub streams_evicted: Option<u64>,
 
+	/// Total times the sender blocked with all the peer's connection-level credit (`MAX_DATA`)
+	/// spent: an episode starts when a write blocks with every credited byte sent, and ends when
+	/// the peer grants more. A count rising while [`Self::credit_stalled`] grows means the peer
+	/// is not granting credit, rather than loss or congestion slowing the session.
+	pub credit_stalls: Option<u64>,
+
+	/// Total time the sender spent blocked on the peer's connection-level credit, across
+	/// [`Self::credit_stalls`]. A wait in progress counts up to the transport's latest step.
+	pub credit_stalled: Option<Duration>,
+
 	/// Total datagrams received for a subscription with no datagram track: one this session
 	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version without
 	/// datagrams: moq-transport and moq-lite before 05.
@@ -1019,6 +1029,8 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 		packets_received: metrics.packets_received(),
 		packets_lost: metrics.packets_lost(),
 		streams_evicted: metrics.streams_evicted(),
+		credit_stalls: wire.as_ref().map(crate::transport::Wire::credit_stalls),
+		credit_stalled: wire.as_ref().map(crate::transport::Wire::credit_stalled),
 		// Counted by the protocol, not the transport: filled in by `Session::stats`.
 		datagrams_unrouted: None,
 	}
