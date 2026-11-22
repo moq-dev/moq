@@ -423,3 +423,54 @@ async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
 	.await
 	.expect("the viewer joined live again");
 }
+
+/// A live reader whose join a relay copy asked, but the publisher hasn't answered yet, is still
+/// placed when an oldest reader joins meanwhile: the oldest reader's range hides the live one, so
+/// the update retires it with its answer, and the copy asks for the join on its own instead (the
+/// subscriber's `a_retired_unanswered_join_range_is_asked_again` pins that ask).
+#[kio::test]
+async fn a_join_asked_but_unanswered_is_placed_when_an_oldest_reader_hides_it() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = origin(1);
+	let relay = origin(2);
+	let _peer = peer(version, &publisher, &relay).await;
+	let route = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	// Nothing written yet, so no live edge answers the join.
+	let source = route.broadcast().create_track("video", info).unwrap();
+	route.announce().unwrap();
+
+	kio::clock::timeout(TIMEOUT, async {
+		let remote = relay.consume().follow("live", None).unwrap().available().await;
+		let remote = remote.unwrap().expect("the broadcast resolves");
+		let track = remote.track("video").unwrap();
+		let lag = Duration::from_secs(1);
+		let mut live = track.subscribe(joining(Some(lag))).await.unwrap().ordered();
+		let join = track::Range::from(track::Start::Live(lag));
+		let mut asked = source.clone();
+		while asked
+			.subscription()
+			.is_none_or(|subscription| !subscription.ranges.contains(&join))
+		{
+			asked.subscription_changed().await.unwrap();
+		}
+
+		// An oldest reader hides the unanswered live range before any group answers it.
+		let mut oldest = track.subscribe(joining(None)).await.unwrap().ordered();
+		while asked
+			.subscription()
+			.is_none_or(|subscription| !subscription.ranges.contains(&track::Range::default()))
+		{
+			asked.subscription_changed().await.unwrap();
+		}
+		for start in (0..=2000).step_by(500) {
+			append(&source, start);
+		}
+		assert_eq!(first(&mut oldest).await, 0, "the oldest reader reads from the oldest");
+		assert_eq!(first(&mut live).await, 1000, "1 s behind the live edge at 2 s");
+	})
+	.await
+	.expect("both readers read their start");
+}

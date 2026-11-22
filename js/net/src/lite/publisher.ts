@@ -1566,8 +1566,12 @@ export class Publisher {
 		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
 			if (startKey === undefined || unstarted.size === 0) return true;
-			// An update not taken yet retired one, and taking that update forgets it.
-			const held = [...unstarted].filter((id) => controls.holds(id));
+			// An update not taken yet retired one, and taking that update forgets it. In Range ID
+			// order, as the Rust `TrackRun::report_started` reports them.
+			const held = [...unstarted].filter((id) => controls.holds(id)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+			// Every range clamps against where delivery started before this batch, so one reported
+			// later isn't clamped against a start an earlier join in the batch lowered.
+			const from = startKey;
 			const resolution = hooks.servingResolvedKeys(track, held);
 			for (const [index, id] of held.entries()) {
 				// Or one taken while an earlier start went out.
@@ -1581,7 +1585,7 @@ export class Publisher {
 					// the join's start, so its groups from there are owed, and delivery now starts there
 					// too. Any other range starts no earlier than delivery.
 					const joins = controls.joins(id);
-					start = joins ? range.start : max(range.start, startKey);
+					start = joins ? range.start : max(range.start, from);
 					if (range.end !== undefined && range.end <= start) start = undefined;
 					else startKey = min(startKey, start);
 				}

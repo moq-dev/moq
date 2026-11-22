@@ -3908,6 +3908,61 @@ mod tests {
 		}
 	}
 
+	/// A live demand range still unanswered answers the join it asks only while the edit going
+	/// out keeps it. One a wider range hides, or a collapse merges away, is retired with its
+	/// answer, so the join is asked by a probe of its own rather than left with no ask in flight.
+	#[kio::test]
+	async fn a_retired_unanswered_join_range_is_asked_again() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
+		let probe = join_probe(Duration::from_secs(1), None);
+		let mut sub = SubStream {
+			order: crate::track::Order::Ascending,
+			stream,
+			id: 0,
+			max_delay: None,
+			stale_budget: Duration::ZERO,
+			start: None,
+			priority: 0,
+			requested: None,
+			live: lite::LiveRanges::new(VERSION, &[probe]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			probe_ids: Default::default(),
+			budgets: Default::default(),
+			fill_groups: Default::default(),
+			tail: Default::default(),
+			started: None,
+			finishing: None,
+			parked: false,
+			starts: Default::default(),
+			join_ticks: Default::default(),
+			declared: None,
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+		let (id, _) = sub.live.iter().next().unwrap();
+		sub.budgets.insert(id, Duration::MAX);
+		let join = track::JoinAsk {
+			min: Duration::from_secs(1),
+			end: None,
+			budget: Duration::from_secs(30),
+			since: 0,
+		};
+
+		// Kept, the unanswered demand range still answers the join.
+		let (probes, _) = join_probes(Some(&sub), &[join], &[probe], Duration::MAX);
+		assert_eq!(probes, [], "the kept demand range answers the join");
+
+		// Hidden by an oldest range, it is retired, so the join is asked by a probe.
+		let (probes, _) = join_probes(Some(&sub), &[join], &[lite::Range { start: None, end: None }], Duration::MAX);
+		assert_eq!(probes, [probe], "the retired demand range answers nothing");
+	}
+
 	/// The owed groups start at the floor the demand last asked for, which an update can move
 	/// either way after SUBSCRIBE_START answered the SUBSCRIBE.
 	#[kio::test]
@@ -10700,8 +10755,11 @@ fn join_probes(
 					.map(|(id, _)| (id, active.probe_ids.contains(&id)))
 			})
 			.collect();
-		let demand_answers = live.iter().any(|&(id, probe)| !probe && answers(id));
-		let added = ranges.contains(&probe) && !live.iter().any(|&(_, probe)| !probe) && budget >= join.budget;
+		// A demand range answers only while this edit keeps it: one the going-out ranges no longer
+		// ask, hidden by a wider range or collapsed into another, is retired with its answer.
+		let kept = ranges.contains(&probe);
+		let demand_answers = kept && live.iter().any(|&(id, probe)| !probe && answers(id));
+		let added = kept && !live.iter().any(|&(_, probe)| !probe) && budget >= join.budget;
 		if demand_answers || added {
 			continue;
 		}

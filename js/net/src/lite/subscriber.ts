@@ -3544,9 +3544,11 @@ function joinProbes(
 		const live: [bigint, boolean][] = [];
 		for (const [id, held] of entry.live.entries())
 			if (!entry.fillIds.has(id) && rangeKey(held) === key) live.push([id, entry.probeIds.has(id)]);
-		const demandAnswers = live.some(([id, probe]) => !probe && answers(id));
-		const added =
-			ranges.some((held) => rangeKey(held) === key) && !live.some(([, probe]) => !probe) && budget >= join.budget;
+		// A demand range answers only while this edit keeps it: one the going-out ranges no longer
+		// ask, hidden by a wider range or collapsed into another, is retired with its answer.
+		const kept = ranges.some((held) => rangeKey(held) === key);
+		const demandAnswers = kept && live.some(([id, probe]) => !probe && answers(id));
+		const added = kept && !live.some(([, probe]) => !probe) && budget >= join.budget;
 		if (demandAnswers || added) continue;
 		const probing = live.filter(([, probe]) => probe).map(([id]) => id);
 		if (!probing.some(answers)) reasked.push(...probing);
