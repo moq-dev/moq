@@ -442,6 +442,11 @@ export interface Within {
 export interface ResumeShell {
 	/** The reader's own preferences, mirrored into every copy it subscribes. */
 	readonly subscription: Getter<Subscription | undefined>;
+	/**
+	 * The join tick each of the reader's ranges was added at, in order, 0 for one that doesn't join
+	 * live: each copy it asks takes an answer recorded since (see `hooks.stampSubscriber`).
+	 */
+	since(): readonly number[];
 	/** The reader's group cursor: an inclusive start and an exclusive end. */
 	readonly cursor: Getter<{ start: bigint; end?: bigint }>;
 	/** Settles once the logical track ends. */
@@ -941,6 +946,12 @@ export const hooks: {
 	 */
 	editSubscriber: (subscriber: Subscriber, edit: Edit) => void;
 	/**
+	 * Note each of a subscriber's live join ranges keyed in `since` as added at its tick instead: a
+	 * front's reader stamps each copy it asks with the tick it added the range at, so an answer the
+	 * copy recorded since places it. Mirrors the Rust `Preferences::stamp`. Assigned by `track.ts`.
+	 */
+	stampSubscriber: (subscriber: Subscriber, since: Iterable<readonly [bigint, number]>) => void;
+	/**
 	 * A subscriber's preferences, whose scalars and revision read without materializing every
 	 * range as {@link Subscriber.subscription} does. Assigned by `track.ts`.
 	 */
@@ -1324,6 +1335,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	editSubscriber: () => {
+		throw new Error("track.ts not loaded");
+	},
+	stampSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	preferences: () => {

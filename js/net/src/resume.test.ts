@@ -963,6 +963,35 @@ test("a routed reader serves its live join as the serving copy resolves it", asy
 	}
 });
 
+// A front's reader subscribes to a copy only once a route serves it, which may be after the copy's
+// upstream answered the reader's live join. The copy takes the tick the reader added its range at,
+// not its own later one, so it places the join from that answer rather than asking again. Mirrors
+// the Rust fix behind `Copy::stamp`.
+test("a front's reader places a live join from an answer its copy recorded before subscribing", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	hooks.answersJoins(ta.producer);
+	for (let key = 0n; key < 5n; key++) ta.write(key);
+	const front = new Front();
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] });
+	try {
+		// The copy's upstream answered the join after the reader added it, before any copy asked.
+		hooks.answerJoin(ta.producer, 0, undefined, 3n, NO_MAX_DELAY);
+		front.serve(a.consume());
+		await settle();
+		await settle();
+		expect(drain(sub)).toEqual([3n, 4n]);
+		expect(hooks.requested(ta.producer).joins()).toEqual([]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
 // Mirrors the Rust `Reader::exhausted`: the serving copy judges the window from its resume point,
 // and a group under it the local floor keeps out stays owed.
 test("a bounded read through routes ends once its window is read, across a route change", async () => {
