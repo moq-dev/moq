@@ -2732,6 +2732,7 @@ mod tests {
 				announce: route,
 				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 

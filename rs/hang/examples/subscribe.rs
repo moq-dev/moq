@@ -63,6 +63,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 					old.abort();
 				}
 			}
+			_ => {}
 		}
 	}
 	anyhow::bail!("origin closed")
