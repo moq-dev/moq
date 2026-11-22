@@ -11816,10 +11816,10 @@ mod tests {
 		let case = format!("{} over {version:?}, waiting on the {wait:?}, {close:?}", R::KIND);
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		// Held, never answered.
-		let mut _route = None;
+		let mut claim = None;
 		let mut held = None;
 		match wait {
-			Wait::Broadcast => _route = Some(origin.forward("room", crate::origin::RouteInfo::new()).unwrap()),
+			Wait::Broadcast => claim = Some(origin.forward("room", crate::origin::RouteInfo::new()).unwrap()),
 			Wait::Track => {
 				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 				let dynamic = broadcast.broadcast().requests();
@@ -11874,9 +11874,27 @@ mod tests {
 			track
 		});
 
+		// The lookup reached the claim, whose request stays wanted while the requester waits.
+		let request = claim.as_ref().map(|claim| {
+			let request = claim
+				.requested()
+				.now_or_never()
+				.expect("broadcast requested")
+				.expect("claim open");
+			assert!(
+				request.poll_unwanted(&kio::Waiter::noop()).is_pending(),
+				"{case}: nobody wants the broadcast"
+			);
+			request
+		});
+
 		session.close(close);
 		assert!(drive(&mut serve).await, "{case}: still serving");
 		drop(serve);
+		if let Some(request) = request {
+			let unwanted = kio::clock::timeout(Duration::from_millis(1), request.unwanted());
+			assert!(unwanted.await.is_ok(), "{case}: the broadcast is still wanted");
+		}
 		if let Some(track) = track {
 			let mut demand = track.demand();
 			let unused = kio::clock::timeout(

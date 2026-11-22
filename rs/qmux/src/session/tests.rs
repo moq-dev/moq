@@ -161,7 +161,8 @@ async fn reading_returns_flow_control_credit() {
 
 /// A writer the peer gives no more credit counts one stall, timed while the peer holds it back,
 /// with nothing else on the wire but pings, and ended by the credit reading returns. The
-/// reader, which never ran out of credit, counts none.
+/// reader, which never ran out of credit, counts none, and counts its window held by a reader
+/// that has not looked for the same time.
 #[tokio::test(start_paused = true)]
 async fn a_writer_out_of_credit_counts_one_stall() {
 	for &version in Version::ALL {
@@ -205,6 +206,14 @@ async fn a_writer_out_of_credit_counts_one_stall() {
 			(received.credit_stalls(), received.credit_stalled()),
 			(0, Duration::ZERO)
 		);
+		// The reader looked only at 5s, so until then the receiver's window was held by it.
+		let held = received.credit_held_readers();
+		assert!(
+			(Duration::from_secs(5)..Duration::from_secs(6)).contains(&held),
+			"{version:?}: held {held:?}, until the read at 5s"
+		);
+		assert_eq!(received.credit_held_evicted(), Duration::ZERO, "{version:?}");
+		assert_eq!(sent.credit_held_readers(), Duration::ZERO, "{version:?}");
 	}
 }
 

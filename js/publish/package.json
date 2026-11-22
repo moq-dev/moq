@@ -23,7 +23,7 @@
 	],
 	"scripts": {
 		"build": "rm -rf dist && vite build && tsc -p tsconfig.build.json && bun ../common/package.ts && tsc --project test-dts/tsconfig.json",
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test --pass-with-no-tests",
 		"release": "bun ../common/release.ts"
 	},

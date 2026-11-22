@@ -784,11 +784,13 @@ struct PresenceTrack {
 }
 
 /// The presence fields read from connections' wire counters.
-const WIRE: [fn(&mut Presence) -> &mut u64; 4] = [
+const WIRE: [fn(&mut Presence) -> &mut u64; 6] = [
 	|presence| &mut presence.wire_tx,
 	|presence| &mut presence.wire_rx,
 	|presence| &mut presence.credit_stalls,
 	|presence| &mut presence.credit_stalled_us,
+	|presence| &mut presence.credit_held_readers_us,
+	|presence| &mut presence.credit_held_evicted_us,
 ];
 
 impl PresenceTrack {

@@ -10670,29 +10670,51 @@ fn probes(
 	ranges: &[lite::Range],
 	budget: Duration,
 ) -> (Vec<lite::Range>, std::collections::BTreeSet<u64>) {
-	// The live ranges of a kind equal to `range`, each with the budget it was asked under.
-	let live = |range: lite::Range, probe: bool| {
-		active.into_iter().flat_map(move |active| {
-			(active.live.iter())
-				.filter(move |(id, live)| {
-					**live == range && active.probe_ids.contains(id) == probe && !active.fill_ids.contains(id)
-				})
-				.map(|(id, _)| (id, active.budgets.get(&id).copied().unwrap_or(Duration::ZERO)))
-		})
-	};
+	if asks.is_empty() {
+		return (Vec::new(), std::collections::BTreeSet::new());
+	}
+	// Index live demand ranges by their widest recorded budget and live probes by range so
+	// checking every ask stays linear instead of scanning all live ranges per ask.
+	let mut live_demand: HashMap<lite::Range, Duration> = HashMap::new();
+	let mut live_probes: HashMap<lite::Range, Vec<(u64, Duration)>> = HashMap::new();
+	if let Some(active) = active {
+		for (id, live) in active.live.iter() {
+			if active.fill_ids.contains(&id) {
+				continue;
+			}
+			let asked = active.budgets.get(&id).copied().unwrap_or(Duration::ZERO);
+			if active.probe_ids.contains(&id) {
+				live_probes.entry(*live).or_default().push((id, asked));
+			} else {
+				live_demand
+					.entry(*live)
+					.and_modify(|max| *max = (*max).max(asked))
+					.or_insert(asked);
+			}
+		}
+	}
+	// Asked under this budget unless live already, under the one it was recorded with.
+	let mut answered: HashMap<u64, Duration> = HashMap::new();
+	for range in ranges {
+		let Some(lite::Anchor::Absolute(start)) = range.start else {
+			continue;
+		};
+		let asked = live_demand.get(range).copied().unwrap_or(budget);
+		answered
+			.entry(start.group)
+			.and_modify(|max| *max = (*max).max(asked))
+			.or_insert(asked);
+	}
 	let mut probes = Vec::new();
 	let mut reasked = std::collections::BTreeSet::new();
 	for &(time, wanted) in asks {
-		let from =
-			|range: &lite::Range| matches!(range.start, Some(lite::Anchor::Absolute(start)) if start.group == time);
-		// Asked under this budget unless live already, under the one it was recorded with.
-		let answers =
-			|range: &lite::Range| live(*range, false).map(|(_, asked)| asked).max().unwrap_or(budget) >= wanted;
-		if ranges.iter().any(|range| from(range) && answers(range)) {
+		if answered.get(&time).is_some_and(|&asked| asked >= wanted) {
 			continue;
 		}
 		let probe = probe(time);
-		reasked.extend(live(probe, true).filter(|(_, asked)| *asked < wanted).map(|(id, _)| id));
+		if let Some(entries) = live_probes.get(&probe) {
+			reasked.extend(entries.iter().filter(|(_, asked)| *asked < wanted).map(|(id, _)| *id));
+		}
 		probes.push(probe);
 	}
 	(probes, reasked)
@@ -11160,13 +11182,18 @@ impl TrackServe {
 				let (probes, reasked) = probes(active, asks, &demand_ranges, asked);
 				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
-				let reasked = (reasked.into_iter())
-					.filter(|id| {
-						active
-							.and_then(|active| active.live.get(*id))
-							.is_some_and(|range| probes.contains(range))
-					})
-					.collect();
+				let reasked = if reasked.is_empty() {
+					reasked
+				} else {
+					let kept: std::collections::HashSet<_> = probes.iter().copied().collect();
+					(reasked.into_iter())
+						.filter(|id| {
+							active
+								.and_then(|active| active.live.get(*id))
+								.is_some_and(|range| kept.contains(range))
+						})
+						.collect()
+				};
 				(demand.map(|demand| (demand, demand_ranges, probes, reasked)), groups)
 			}
 			false => (
@@ -12935,6 +12962,43 @@ impl ServeLoop {
 		Ok(())
 	}
 
+	/// Record a single SUBSCRIBE_STARTED without yet publishing the full starts table to
+	/// the track, returning whether the range is still live and needs `report_starts`/`declare`.
+	fn record_started(&mut self, serve: &TrackServe, started: &lite::SubscribeStarted) -> Result<bool, Error> {
+		let Sub::Active(active) = &mut self.sub else {
+			return Ok(false);
+		};
+		let id = started.id;
+		if active.started.is_none()
+			|| !active.live.assigned(id)
+			|| active.live.initial(id)
+			|| active.starts.contains_key(&id)
+		{
+			tracing::warn!(track = %serve.name, id, "unexpected subscribe started");
+			return Err(Error::ProtocolViolation);
+		}
+		// One retired since is owed nothing.
+		if active.live.get(id).is_some() {
+			active.starts.insert(id, started.start);
+			active.mins.insert(id, active.min_delay);
+			let now = serve.subscriber.runtime.now();
+			// A fill's range starting past where it asked skips groups it will not deliver.
+			if let Some(groups) = active.fill_range(id) {
+				let skipped = groups.start..started.start.unwrap_or(groups.end).clamp(groups.start, groups.end);
+				if let Ok(mut tail) = active.tail.write() {
+					tail.account(skipped.clone(), now);
+				}
+				self.range_fills.skip(groups, skipped);
+			}
+			// The tail judges what is owed again.
+			if let Ok(mut tail) = active.tail.write() {
+				tail.expire(now);
+			}
+			return Ok(true);
+		}
+		Ok(false)
+	}
+
 	/// Apply one response read from the upstream subscription.
 	fn apply_response(&mut self, serve: &TrackServe, msg: lite::SubscribeResponse) -> Result<(), Error> {
 		let Sub::Active(active) = &mut self.sub else {
@@ -13089,32 +13153,9 @@ impl ServeLoop {
 			}
 			// Where a range an update added starts, from which its groups are owed.
 			lite::SubscribeResponse::Started(started) => {
-				let id = started.id;
-				if active.started.is_none()
-					|| !active.live.assigned(id)
-					|| active.live.initial(id)
-					|| active.starts.contains_key(&id)
+				if self.record_started(serve, started)?
+					&& let Sub::Active(active) = &mut self.sub
 				{
-					tracing::warn!(track = %serve.name, id, "unexpected subscribe started");
-					return Err(Error::ProtocolViolation);
-				}
-				// One retired since is owed nothing.
-				if active.live.get(id).is_some() {
-					active.starts.insert(id, started.start);
-					active.mins.insert(id, active.min_delay);
-					let now = serve.subscriber.runtime.now();
-					// A fill's range starting past where it asked skips groups it will not deliver.
-					if let Some(groups) = active.fill_range(id) {
-						let skipped = groups.start..started.start.unwrap_or(groups.end).clamp(groups.start, groups.end);
-						if let Ok(mut tail) = active.tail.write() {
-							tail.account(skipped.clone(), now);
-						}
-						self.range_fills.skip(groups, skipped);
-					}
-					// The tail judges what is owed again.
-					if let Ok(mut tail) = active.tail.write() {
-						tail.expire(now);
-					}
 					active.report_starts(&self.serving);
 					active.declare(&mut self.serving);
 				}
@@ -13210,6 +13251,9 @@ impl ServeLoop {
 		let Sub::Active(active) = &mut self.sub else {
 			return Poll::Pending;
 		};
+		if active.finishing.is_none() {
+			return Poll::Pending;
+		}
 		// Nothing says which groups are owed until SUBSCRIBE_START says where delivery starts,
 		// so until then only the grace settles.
 		let owed = match active.awaits_start() {
@@ -13511,55 +13555,103 @@ impl ServeLoop {
 						// stays local: nothing reopens the TRACK for it.
 						self.held = None;
 						active.unanswered = None;
-						match res {
-							Recv::Message(msg) => {
-								if let Err(err) = self.apply_response(serve, msg) {
-									return Poll::Ready(ServeEnd::GiveBack(err));
+						let mut next = Some(res);
+						while let Some(res) = next.take() {
+							match res {
+								Recv::Message(lite::SubscribeResponse::Started(first)) => {
+									let mut dirty = match self.record_started(serve, &first) {
+										Ok(changed) => changed,
+										Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
+									};
+									// Drain any further ready SUBSCRIBE_STARTED messages in one pass
+									// before publishing the starts table, avoiding O(N^2) rebuilds when
+									// a multi-range update is answered in a burst.
+									let mut yielded = false;
+									loop {
+										if budget.poll_yield(waiter).is_pending() {
+											yielded = true;
+											break;
+										}
+										let Sub::Active(active) = &mut self.sub else {
+											break;
+										};
+										match active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter) {
+											Poll::Ready(Recv::Message(lite::SubscribeResponse::Started(started))) => {
+												match self.record_started(serve, &started) {
+													Ok(changed) => dirty |= changed,
+													Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
+												}
+											}
+											Poll::Ready(other) => {
+												next = Some(other);
+												break;
+											}
+											Poll::Pending => break,
+										}
+									}
+									if dirty && let Sub::Active(active) = &mut self.sub {
+										active.report_starts(&self.serving);
+										active.declare(&mut self.serving);
+									}
+									if next.is_none() && yielded {
+										return Poll::Pending;
+									}
 								}
-								// Each pass re-polls the whole loop, so a peer streaming
-								// responses must not hold the session's other tasks.
-								ready!(budget.poll_yield(waiter));
-								continue;
-							}
-							Recv::Ended => {
-								// The publisher ends the subscription only once it declared the
-								// track's end: with SUBSCRIBE_FINISH from lite-05, which lite-07
-								// reads into the tail without a FIN.
-								if serve.subscriber.version.has_track_stream() && active.end.is_none() {
-									return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
+								Recv::Message(msg) => {
+									if let Err(err) = self.apply_response(serve, msg) {
+										return Poll::Ready(ServeEnd::GiveBack(err));
+									}
+									// Each pass re-polls the whole loop, so a peer streaming
+									// responses must not hold the session's other tasks.
+									ready!(budget.poll_yield(waiter));
 								}
-								tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
-								// Upstream FIN'd the subscription: the publisher only FINs
-								// once the track's final key is known and every group
-								// stream finished, so the logical track is over for good
-								// (bounded demand alone never FINs; the publisher parks, since
-								// a cap can be raised). Those streams can still be in flight,
-								// so wait for the tail before finishing.
-								self.mode = ServeMode::Tail {
-									settle: Self::settle(serve, &self.serving, active),
-									requested_end: self.serving.subscription().and_then(|sub| sub.end()),
-								};
-								continue;
-							}
-							// Malformed bytes are a protocol violation, which closes the session; a
-							// reset gives up the subscription with its reason.
-							Recv::Malformed(err) => {
-								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								self.mode = ServeMode::Failed {
-									err: Error::ProtocolViolation,
-									tail: active.tail.consume(),
-								};
-								continue;
-							}
-							Recv::Reset(err) => {
-								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								self.mode = ServeMode::Failed {
-									err,
-									tail: active.tail.consume(),
-								};
-								continue;
+								Recv::Ended => {
+									let Sub::Active(active) = &mut self.sub else {
+										break;
+									};
+									// The publisher ends the subscription only once it declared the
+									// track's end: with SUBSCRIBE_FINISH from lite-05, which lite-07
+									// reads into the tail without a FIN.
+									if serve.subscriber.version.has_track_stream() && active.end.is_none() {
+										return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
+									}
+									tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
+									// Upstream FIN'd the subscription: the publisher only FINs
+									// once the track's final key is known and every group
+									// stream finished, so the logical track is over for good
+									// (bounded demand alone never FINs; the publisher parks, since
+									// a cap can be raised). Those streams can still be in flight,
+									// so wait for the tail before finishing.
+									self.mode = ServeMode::Tail {
+										settle: Self::settle(serve, &self.serving, active),
+										requested_end: self.serving.subscription().and_then(|sub| sub.end()),
+									};
+								}
+								// Malformed bytes are a protocol violation, which closes the session; a
+								// reset gives up the subscription with its reason.
+								Recv::Malformed(err) => {
+									let Sub::Active(active) = &mut self.sub else {
+										break;
+									};
+									tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
+									self.mode = ServeMode::Failed {
+										err: Error::ProtocolViolation,
+										tail: active.tail.consume(),
+									};
+								}
+								Recv::Reset(err) => {
+									let Sub::Active(active) = &mut self.sub else {
+										break;
+									};
+									tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
+									self.mode = ServeMode::Failed {
+										err,
+										tail: active.tail.consume(),
+									};
+								}
 							}
 						}
+						continue;
 					}
 
 					// Every response that beat the accept is read.

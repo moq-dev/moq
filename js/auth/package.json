@@ -18,7 +18,7 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
-		"check": "tsc --noEmit && tsc -b examples/tsconfig.json",
+		"check": "bun check --no-script && bun check --no-script -p examples/tsconfig.json",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
