@@ -75,7 +75,18 @@ import { grace } from "./ledger.ts";
 import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
-import { AT_KEYS, clamped, EMPTY, isEmpty, type Resolved, sameRanges, UNHELD, Window } from "./window.ts";
+import {
+	AT_KEYS,
+	clamped,
+	EMPTY,
+	isEmpty,
+	liveMillis,
+	type Resolved,
+	rangeTime,
+	sameRanges,
+	UNHELD,
+	Window,
+} from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
@@ -426,7 +437,7 @@ function resumePoint(copy: Pick<Copy, "floor" | "dropped">): bigint | undefined 
  * Mirrors the Rust `raised`.
  */
 function raised(range: track.Range | undefined, floor: bigint | undefined): bigint | undefined {
-	const start = range?.start;
+	const start = range && rangeTime(range);
 	return floor !== undefined && start !== undefined && start < floor ? start : undefined;
 }
 
@@ -761,7 +772,7 @@ class Reader implements ResumeSource {
 		const ranges = this.#ranges();
 		let resolution = this.#resolution;
 		if (!resolution || (resolution.from !== ranges && !sameRanges(resolution.from, ranges))) {
-			resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD, this.#min()) };
+			resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD) };
 			this.#resolution = resolution;
 		}
 		if (resolution.window.settled) return resolution.window;
@@ -825,7 +836,7 @@ class Reader implements ResumeSource {
 			if (!at) {
 				// A range the copy left unresolved keeps its time start or live join, which only a copy
 				// can place.
-				const unplaced = (range.start ?? 0n) > 0n || (range.start === undefined && this.#min() !== undefined);
+				const unplaced = (rangeTime(range) ?? 0n) > 0n || liveMillis(range) !== undefined;
 				// Placed as it is: nothing of it waits on a copy.
 				if (!unplaced || isEmpty(range)) placed.push([key, range]);
 				continue;
@@ -842,11 +853,6 @@ class Reader implements ResumeSource {
 			placed.push([key, out]);
 		}
 		if (placed.length > 0) resolution.window.edit([], placed, undefined, AT_KEYS);
-	}
-
-	/** The reader's Min Age, undefined when not stated, which makes a range with no start a live join. */
-	#min(): Duration | undefined {
-		return this.#shell.subscription.peek()?.delay?.min ?? undefined;
 	}
 
 	/** The reader's ranges, as its preferences name them. */
@@ -907,7 +913,7 @@ class Reader implements ResumeSource {
 			if (this.#resolution && !sameRanges(this.#resolution.from, ranges)) {
 				// The serving copy's resume point may cut off groups the new ranges cover.
 				this.#resumed = true;
-				this.#resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD, this.#min()) };
+				this.#resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD) };
 				for (let index = this.#copies.length - 1; index >= 0; index--) {
 					if (this.#resolution.window.settled) break;
 					const copy = this.#copies[index];
@@ -1086,9 +1092,10 @@ class Reader implements ResumeSource {
 		if (start === undefined) return;
 		// The group holding a time start at or past where it is asked from may lie under it.
 		const from = start;
-		const raised = this.#ranges().some(
-			(range) => range.start !== undefined && from <= range.start && range.start < resumed,
-		);
+		const raised = this.#ranges().some((range) => {
+			const time = rangeTime(range);
+			return time !== undefined && from <= time && time < resumed;
+		});
 		this.#backfill(start, resumed, raised);
 	}
 

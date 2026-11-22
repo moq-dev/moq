@@ -601,14 +601,14 @@ class Unpinned {
  */
 function due(range: WireRange, started: boolean): bigint | undefined {
 	if (isEmpty(requestedRange(range))) return undefined;
-	if (!started && range.start?.absolute === undefined) return 0n;
+	if (!started && range.start !== undefined && range.start.absolute === undefined) return 0n;
 	if (range.end?.time !== undefined) return range.end.time + 1n;
 	return undefined;
 }
 
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
 // an update that leaves it live never looks a time start up again in newer holdings, nor places a
-// live join again under a newer Min Age. A start reaching back to the oldest group held stays as
+// live join again against a newer live edge. A start reaching back to the oldest group held stays as
 // it was, since an absolute start would turn it into a floor the subscriber never named.
 function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	if (!resolved) return asked;
@@ -1097,10 +1097,7 @@ export class Publisher {
 		const subscription = (ranges: track.Range[]): track.Subscription => ({
 			priority: msg.priority,
 			order: msg.order,
-			delay: {
-				max: servingMaxDelay(msg.maxDelay),
-				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
-			},
+			delay: { max: servingMaxDelay(msg.maxDelay) },
 			ranges,
 		});
 		let ranges: track.Range[];
@@ -1235,7 +1232,7 @@ export class Publisher {
 				for (const [id, range] of asked.entries()) unpinned.insert(BigInt(id), due(range, false));
 			// Each live range due once the latest group reached where it may resolve, with its start and
 			// end replaced by the groups they resolved to: a range resolves once, so an update that
-			// leaves it live never places a live join again under a newer Min Age, nor looks a time
+			// leaves it live never places a live join again against a newer live edge, nor looks a time
 			// start up again in newer holdings, here or on a relay's copies. Only the ranges still
 			// waiting are asked, and each is let go once its anchors settle, so this costs those ranges
 			// rather than every range. Mirrors the Rust `TrackRun::pin`.
@@ -1280,10 +1277,7 @@ export class Publisher {
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
 						hooks.askSubscriber(track, "refresh");
-					const delay = {
-						max: servingMaxDelay(update.maxDelay),
-						min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
-					};
+					const delay = { max: servingMaxDelay(update.maxDelay) };
 					if (!hasRanges(this.version)) {
 						// An older update restates its one span, replacing every range.
 						track.update({
