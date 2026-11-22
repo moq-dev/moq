@@ -187,9 +187,9 @@ pub(crate) fn close_duration(frame: &mut Frame, bound: moq_net::Timestamp) {
 #[error("missing keyframe: a group must open on a keyframe")]
 pub struct MissingKeyframe;
 
-/// An explicit endpoint precedes the last frame of an ordered video group.
+/// An explicit endpoint precedes a frame of the group it ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("video group endpoint precedes its last frame")]
+#[error("group endpoint precedes a frame of its own")]
 pub struct InvalidEnd;
 
 /// A group starts before the previous group did: the source restarted, which is a new broadcast.

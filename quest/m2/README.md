@@ -71,7 +71,7 @@ scale-less tracks aging by arrival ([moq-dev/moq#9266](https://github.com/moq-de
 Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),
 with GROUP_END's end back as a delta;
 [time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md);
-and [first-party producers keeping those spans apart](/quest/m2/producer-spans.md).
+and first-party producers keeping those spans apart ([moq-dev/moq#9317](https://github.com/moq-dev/moq/pull/9317)).
 [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
 [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since
 relative starts and the bare GROUP_END are gone.

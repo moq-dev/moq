@@ -36,6 +36,30 @@ pub(crate) fn next(
 	}
 }
 
+/// The start of a group whose first frame is at `timestamp` on `track`, and the timestamp to stamp
+/// it with, when no group may start below `floor`, such as the End of a group that ended whole:
+/// `timestamp` when it passes the newest start and `floor`, else the first start past both, so a
+/// frame resuming right at a marker, or just inside an End its group's last frame overshot, still
+/// opens a group. Refused with [`TimestampRewind`](crate::container::TimestampRewind) below the
+/// newest start.
+pub(crate) fn resume(
+	track: &moq_net::track::Producer,
+	timestamp: moq_net::Timestamp,
+	floor: Option<moq_net::Timestamp>,
+) -> crate::Result<(u64, moq_net::Timestamp)> {
+	let (start, scale, newest) = of(track, timestamp)?;
+	if let Some(newest) = newest
+		&& start.value() < newest
+	{
+		let floor = moq_net::Timestamp::new(newest, scale).unwrap_or(start);
+		return Err(crate::container::TimestampRewind { timestamp, floor }.into());
+	}
+	match floor {
+		Some(floor) if start.value() < of(track, floor)?.0.value() => next(track, floor),
+		_ => next(track, timestamp),
+	}
+}
+
 /// [`next`] for a group stamped one unit of the track's timescale before `timestamp`, so a group
 /// whose first frame is at `timestamp` can still follow it, but never below `floor`.
 pub(crate) fn before(
@@ -81,10 +105,13 @@ pub(crate) fn after(track: &moq_net::track::Producer, timestamp: moq_net::Timest
 
 /// Where a group ends whole on `track` when its content stops at `timestamp`: `timestamp` in the
 /// track's timescale, or `None` when that doesn't pass `start` or won't convert.
-pub(crate) fn end(track: &moq_net::track::Producer, start: u64, timestamp: moq_net::Timestamp) -> Option<u64> {
+pub(crate) fn end(
+	track: &moq_net::track::Producer,
+	start: u64,
+	timestamp: moq_net::Timestamp,
+) -> Option<moq_net::Timestamp> {
 	let end = track.info().rescale(timestamp).ok()?;
 	// A scale-less track's key is no time.
 	end.scale()?;
-	let end = end.value();
-	(end > start).then_some(end)
+	(end.value() > start).then_some(end)
 }

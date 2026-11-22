@@ -744,6 +744,9 @@ impl Producer {
 			duration: None,
 		})?;
 
+		// The group ends where the source does, unless the padding the codec needs to finish it
+		// starts past that: a group never ends below a frame of its own.
+		let mut end = terminal.end;
 		for (index, packet) in terminal.packets.into_iter().enumerate() {
 			let offset = Timestamp::from_scale((index * terminal.frame_size) as u64, terminal.codec_rate as u64)?
 				.convert(terminal.start.scale().ok_or(moq_net::TimeOverflow)?)?;
@@ -755,9 +758,12 @@ impl Producer {
 				keyframe: false,
 				duration: None,
 			})?;
+			if timestamp > end {
+				end = timestamp;
+			}
 		}
 
-		track.cut(Some(terminal.end))?;
+		track.cut(Some(end))?;
 		Ok(())
 	}
 
@@ -2387,9 +2393,10 @@ mod tests {
 			pts.split_off(4)
 		}
 
-		// Priming would start at 1_006_000.
-		assert_eq!(pts(1_050_000).await, vec![1_041_333, 1_041_333, 1_048_666, 1_070_000]);
-		assert_eq!(pts(1_000_000).await, vec![1_041_333, 1_041_333, 1_041_333, 1_061_333]);
+		// Priming would start at 1_006_000. The break's marker starts where the packets before it
+		// end, so the group after it starts a microsecond later.
+		assert_eq!(pts(1_050_000).await, vec![1_041_334, 1_041_333, 1_048_666, 1_070_000]);
+		assert_eq!(pts(1_000_000).await, vec![1_041_334, 1_041_333, 1_041_333, 1_061_333]);
 	}
 
 	/// A codec that holds frames returns their packets late, and each still goes out at the stamp

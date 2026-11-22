@@ -254,13 +254,16 @@ export class Producer {
 	 *
 	 * `end` is where the content stops. Without one the group closes with no end estimated from the
 	 * frame cadence, since whatever resumes may land sooner than one frame later and an end past it
-	 * reads as a rewind. After closing the group, this publishes a marker group of one empty frame at
-	 * `end`, or at the live edge without one. Without the marker, a group's reach runs to its
-	 * successor's first frame, so the group before a pause reads as live until whatever resumes it,
-	 * and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it is
-	 * the latest group a joiner lands on. An empty payload is data on a data track, so its marker is one
-	 * object with no bytes at all. No marker is written until a frame follows the last one. Throws if
-	 * `end` precedes the last video frame.
+	 * reads as a rewind. After closing the group, this publishes a marker group of one empty frame
+	 * just before `end`, or before the live edge without one, so media resuming there starts after
+	 * it, and the closing group ends whole at the marker. Without the marker, a group's reach runs to
+	 * its successor's first frame, so the group before a pause reads as live until whatever resumes
+	 * it, and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it
+	 * is the latest group a joiner lands on. The marker never starts below a frame the closing group
+	 * holds, a video track's end marker at `end` included, so on a video track what resumes starts
+	 * after `end`. An empty payload is data on a data track, so its marker is one object with no bytes
+	 * at all. No marker is written until a frame follows the last one. Throws if `end` precedes a
+	 * frame of the open group.
 	 */
 	discontinuity(endpoint?: Duration) {
 		const end = endpoint === undefined ? undefined : micros(endpoint);
@@ -271,12 +274,14 @@ export class Producer {
 		const written = this.#group && this.#end !== undefined ? this.#end : undefined;
 		const edge = end ?? (written === undefined ? this.#liveEdge : Math.max(this.#liveEdge ?? written, written));
 		// The marker starts one unit of the track's timescale before the live edge, so media resuming
-		// right at the edge still starts after it, but not below the newest frame, which it would
-		// otherwise claim to end before; and past the newest group, since starts strictly increase.
+		// right at the edge still starts after it, but not below the newest frame, nor a video
+		// track's end marker at `end`, since the closing group ends whole at the marker and never
+		// below a frame of its own; and past the newest group, since starts strictly increase.
 		let marker: Time.Timestamp | undefined;
 		if (!this.#marked && edge !== undefined) {
 			let start = keyOf(this.#track, edge) - 1n;
-			const newest = keyOf(this.#track, this.#newest ?? 0);
+			const endpoint = this.#group && this.#format.kind === "video" && !this.#reordered ? end : undefined;
+			const newest = keyOf(this.#track, Math.max(this.#newest ?? 0, endpoint ?? 0));
 			if (start < newest) start = newest;
 			const largest = this.#track.largest()?.group;
 			if (largest !== undefined && start <= largest) start = largest + 1n;
@@ -307,27 +312,18 @@ export class Producer {
 	// `whole` marker start when one follows it.
 	#close(end?: number, whole?: Time.Timestamp) {
 		if (!this.#group) return;
-		if (
-			this.#format.kind === "video" &&
-			!this.#reordered &&
-			end !== undefined &&
-			this.#previous !== undefined &&
-			end < this.#previous
-		) {
-			throw new Error("video group endpoint precedes its last frame");
+		// A group never ends below a frame of its own.
+		if (end !== undefined && this.#end !== undefined && end < this.#end) {
+			throw new Error("group endpoint precedes a frame of its own");
 		}
 		end ??= this.#end !== undefined && this.#interval !== undefined ? this.#end + this.#interval : undefined;
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		const bound = this.#reordered ? undefined : end;
 		this.#format.finishGroup(this.#group, bound === undefined ? undefined : Duration.micros(bound));
-		// A group ends whole where its content stops, which bounds its reach without a successor. It
-		// never ends below a frame of its own, here the newest written or the endpoint marker, so one
-		// whose end falls below either closes without one.
+		// A group ends whole where its content stops, which bounds its reach without a successor.
 		const at =
 			whole !== undefined ? BigInt(whole.value) : bound === undefined ? undefined : keyOf(this.#track, bound);
-		const newest = Math.max(this.#end ?? Number.NEGATIVE_INFINITY, bound ?? Number.NEGATIVE_INFINITY);
-		const floor = Number.isFinite(newest) ? keyOf(this.#track, newest) : this.#group.start;
-		if (at !== undefined && at > this.#group.start && at >= floor) this.#group.finishAt(at);
+		if (at !== undefined && at > this.#group.start) this.#group.finishAt(at);
 		else this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
