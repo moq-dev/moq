@@ -38,7 +38,23 @@ class QueryTests(unittest.TestCase):
             path.chmod(0o755)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for command in ("bash", "git", "sort", "mktemp", "rm", "grep", "cat", "sed", "tr", "xargs", "sleep"):
+        for command in (
+            "bash",
+            "git",
+            "sort",
+            "mktemp",
+            "rm",
+            "grep",
+            "cat",
+            "sed",
+            "tr",
+            "xargs",
+            "sleep",
+            "awk",
+            "env",
+            "mkdir",
+            "mv",
+        ):
             (self.bin / command).symlink_to(shutil.which(command))
         self.env = dispatch_env(
             LOCAL_SUPERVISED="1",
@@ -519,8 +535,6 @@ class QueryTests(unittest.TestCase):
                 self.assertFalse(any(call.startswith("js test-changed ") for call in calls))
 
     def test_check_skips_a_memo_phase_that_passed_on_the_same_inputs(self):
-        for command in ("awk", "cp", "env", "mkdir", "mv"):
-            (self.bin / command).symlink_to(shutil.which(command))
         self.env.pop("CI_STRICT")
         calls = self.root / "calls"
 

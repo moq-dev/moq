@@ -591,20 +591,22 @@ lane_cpu() {
 
 # A tree of the working tree as `git add -A` would stage it, tracked and new
 # files alike, written without touching the real index.
-snapshot() {
-    local index
+# Errexit does not reach into a command substitution, so it is set here.
+snapshot() (
+    set -e
     index=$(mktemp "$logs/index.XXXXXX")
-    cp "$(git rev-parse --git-path index)" "$index"
+    trap 'rm -f "$index"' EXIT
+    cat "$(git rev-parse --git-path index)" >"$index"
     GIT_INDEX_FILE=$index git add -A
     GIT_INDEX_FILE=$index git write-tree
-    rm -f "$index"
-}
+)
 
 # A hash of what one phase of a module reads, from a snapshot: the files its
 # pattern matches with the slice of the diff that selected it, the scripts that
 # orchestrate it, and the environment that picks and configures its tools.
-memo_key() {
-    local phase=$1 module=$2 tree=$3
+memo_key() (
+    set -e
+    phase=$1 module=$2 tree=$3
     {
         echo "$phase $module ${all:+all}"
         [[ -n "$all" ]] || grep -E "${scope[$module]}" "$changed" || true
@@ -613,6 +615,17 @@ memo_key() {
         git -c core.quotePath=false ls-tree -r --format='%(path)%x09%(objectname)' "$tree" |
             PATTERN=${scope[$module]} awk -F '\t' '$1 ~ ENVIRON["PATTERN"]'
     } | git hash-object --stdin
+)
+
+# The phases a module runs for this verb: a check also runs the tests of the
+# modules that have them.
+phases_of() {
+    phases=("$verb")
+    if [[ "$verb" == check ]]; then
+        case "$1" in
+            rs | js | py) phases+=(test) ;;
+        esac
+    fi
 }
 
 # Run one lane's modules in order, appending each phase's wall seconds and CPU
@@ -628,12 +641,7 @@ run_lane() {
     lane_status=0
     trap 'stop; cancelled; exit 143' TERM
     for module in "$@"; do
-        phases=("$verb")
-        if [[ "$verb" == check ]]; then
-            case "$module" in
-                rs | js | py) phases+=(test) ;;
-            esac
-        fi
+        phases_of "$module"
         for phase in "${phases[@]}"; do
             current="$phase $module"
             began=$SECONDS
@@ -641,9 +649,8 @@ run_lane() {
             cpu_began=$cpu
             if github; then echo "::group::$current"; else echo "==> $current"; fi
             echo "$action: $current started" >&3
-            key=
-            if [[ -n "$memo_dir" && -v "memo[$module]" ]]; then
-                key=$(memo_key "$phase" "$module" "$tree")
+            key=${keys["$phase $module"]:-}
+            if [[ -n "$key" ]]; then
                 if [[ -f "$memo_dir/$phase-$module" && "$(<"$memo_dir/$phase-$module")" == "$key" ]]; then
                     echo "$action: $current passed on these same inputs; skipping it (CHECK_RERUN=1 runs it)"
                     record unchanged
@@ -681,7 +688,8 @@ run_lane() {
             record
             current=
             # Recorded only when nothing it reads changed while it ran.
-            if [[ -n "$key" && "$(memo_key "$phase" "$module" "$(snapshot)")" == "$key" ]]; then
+            if [[ -n "$key" ]] && after=$(snapshot) && after=$(memo_key "$phase" "$module" "$after") &&
+                [[ "$after" == "$key" ]]; then
                 mkdir -p "$memo_dir"
                 echo "$key" >"$memo_dir/$phase-$module.$BASHPID"
                 mv -f "$memo_dir/$phase-$module.$BASHPID" "$memo_dir/$phase-$module"
@@ -746,14 +754,22 @@ logs=$(mktemp -d)
 
 # The memo lives in this worktree's git directory, so it goes with the worktree.
 # CI and `just ci` (CI_STRICT) always run every phase.
+# Each memo phase's key is taken here, before any phase runs, where errexit
+# stops the run if one cannot be computed.
 memo_dir=
 tree=
+declare -A keys=()
 if [[ "$action" == check && -z "${CI_STRICT:-}${GITHUB_ACTIONS:-}${CHECK_RERUN:-}" ]]; then
     for module in "${selected[@]}"; do
         [[ -v "memo[$module]" ]] || continue
-        memo_dir=$(git rev-parse --path-format=absolute --git-path moq-check)
-        tree=$(snapshot)
-        break
+        if [[ -z "$tree" ]]; then
+            memo_dir=$(git rev-parse --path-format=absolute --git-path moq-check)
+            tree=$(snapshot)
+        fi
+        phases_of "$module"
+        for phase in "${phases[@]}"; do
+            keys["$phase $module"]=$(memo_key "$phase" "$module" "$tree")
+        done
     done
 fi
 declare -A running=()
