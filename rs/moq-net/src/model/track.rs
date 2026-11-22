@@ -8038,7 +8038,7 @@ impl Fetching {
 /// - [`Subscription::ranges`], set via [`Self::update`], are both a **request to the
 ///   publisher** and **this subscriber's read filter**. The publisher sees the union across
 ///   every live subscriber, but each subscriber reads only the groups its own ranges cover,
-///   resolved where it is served: a live join placed by [`Delay::min`] behind the latest
+///   resolved where it is served: a live join placed by its [`Start::Live`] lag behind the latest
 ///   group (or at the first to arrive, before any exists), again whenever the ranges are
 ///   replaced.
 /// - [`Self::with_range`] narrows **this subscriber's reads** further, without changing the
@@ -9393,7 +9393,7 @@ struct Filter {
 
 impl Cursor {
 	fn new(state: kio::Consumer<TrackState>, subscription: Preferences) -> Self {
-		// The ranges floor the cursor, raised for a live join by its Min Age, and the budget
+		// The ranges floor the cursor, raised for a live join by its lag, and the budget
 		// picks where above it to start, timed or not: delivery skips the cached groups it
 		// already judges stale, on whichever clock convicts them.
 		if subscription.read().joins_live() {
@@ -9664,7 +9664,7 @@ impl Cursor {
 			None if self.filter.window.is_settled() => false,
 			// The live feed had no group when the ranges resolved, so the newest one then was
 			// the first to arrive, or the newest once it went live, however many have arrived
-			// or left since. A live join not yet started reaches back by the Min Age stated now.
+			// or left since. A live join not yet started reaches back by its lag.
 			None if self.filter.window.is_pending() => {
 				self.filter.window.set_delay(delay);
 				self.filter.window.settle(state.first_live(), holdings)

@@ -782,7 +782,9 @@ impl Copy {
 		}
 		// Each live join as the reader added it, so an answer the copy recorded since places
 		// it, even one recorded before this subscription.
-		let _ = pending.preferences().stamp(reader.since.iter().map(|(key, since)| (*key, *since)));
+		let _ = pending
+			.preferences()
+			.stamp(reader.since.iter().map(|(key, since)| (*key, *since)));
 		Sub::Pending(Box::new(pending))
 	}
 
@@ -934,7 +936,9 @@ impl Copy {
 	/// Note each live join the copy is asked for as the reader added it: see
 	/// [`track::Preferences::stamp`].
 	fn stamp(&self, reader: &Mirrored) {
-		let _ = self.preferences().stamp(reader.since.iter().map(|(key, since)| (*key, *since)));
+		let _ = self
+			.preferences()
+			.stamp(reader.since.iter().map(|(key, since)| (*key, *since)));
 	}
 
 	/// The subscription, once the copy answered. `Err` once it refused.
@@ -1991,7 +1995,6 @@ impl Reader {
 			self.revision = revision;
 			let mirrored = &mut self.mirrored;
 			(mirrored.priority, mirrored.delay, mirrored.order, mirrored.feed) = scalars;
-			// A join not yet placed waits on a copy only while its Min Age is stated.
 			self.window.set_delay(mirrored.delay);
 			let change = match ranges {
 				None => Change::Scalars,
@@ -2031,7 +2034,12 @@ impl Reader {
 					}
 					Change::Edit(edited.into_iter().map(|(key, _)| key).collect())
 				}
-				Some(Err(ranges)) if ranges.iter().map(|(key, (range, _))| (key, range)).eq(&self.mirrored.ranges) => {
+				Some(Err(ranges))
+					if ranges
+						.iter()
+						.map(|(key, (range, _))| (key, range))
+						.eq(&self.mirrored.ranges) =>
+				{
 					Change::Scalars
 				}
 				Some(Err(ranges)) => {
@@ -4973,7 +4981,7 @@ mod test {
 		reason = "the runs and accounted groups are lists, here one"
 	)]
 	fn a_front_reader_reports_its_ranges_as_a_plain_reader_does() {
-		// No start and no Min Age: from the oldest group.
+		// No start: from the oldest group.
 		let range = track::Range {
 			start: crate::track::Start::Oldest,
 			end: Some(5),
@@ -9932,7 +9940,7 @@ mod test {
 		routes.serve(b.consume());
 		// The read subscribes the replacement, which has not answered yet.
 		assert!(sub.recv_group().now_or_never().is_none());
-		// No start and no Min Age: from the oldest group.
+		// No start: from the oldest group.
 		let back = sub.subscription().with_ranges([track::Range::default()]);
 		sub.update(back).unwrap();
 		assert!(sub.recv_group().now_or_never().is_none());

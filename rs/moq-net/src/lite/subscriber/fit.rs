@@ -130,7 +130,7 @@ pub(super) fn fit(
 	let spans = Spans::new(spans, budget, |_| false);
 	let fills = Spans::new(fills.iter().map(fill).collect(), budget, |gap| avoid.overlaps(&gap));
 
-	// The other ranges start at a time or where the Min Age or max age places them, so no gap
+	// The other ranges start at a time or where a live join's lag or the max age places them, so no gap
 	// between them is measured: when even one span per list leaves them no room, each kind
 	// collapses to the one range covering it.
 	let cost = |ranges: &[Range]| -> usize {

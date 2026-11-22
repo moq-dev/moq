@@ -5595,7 +5595,7 @@ impl TrackRun {
 
 	/// Each live range whose start or end resolved since the last update, with them replaced
 	/// by the groups they resolved to: a range resolves once, so an update that leaves it live
-	/// never places a live join again by a newer live edge or Min Age, nor looks a time start
+	/// never places a live join again by a newer live edge, nor looks a time start
 	/// up again in newer groups, here or on a relay's copies, and its start names the group it
 	/// resolved to for the read cursor's floor. A start reaching back to the oldest group held
 	/// stays as it was, since an absolute start would turn it into a floor the subscriber never

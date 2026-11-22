@@ -8312,7 +8312,7 @@ mod tests {
 		}]);
 		assert_eq!(wire_ranges(&empty), None);
 
-		// No start goes out as none, for the Min Age or max age to place upstream.
+		// No start goes out as none, for the max age to place upstream.
 		assert_eq!(wire_ranges(&Subscription::default()), Some(vec![lite::Range::OPEN]));
 	}
 
