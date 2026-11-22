@@ -1191,7 +1191,8 @@ pub struct Limits {
 	/// The cache never evicts a live track's newest group, so a peer holding many quiet
 	/// tracks would otherwise hold one group each past any cache capacity. Past this, the
 	/// session sheds the frames of its own live edges, the one that moved longest ago first,
-	/// and then the older frames of the one being written. `None` leaves them unbounded.
+	/// then the older frames of the one being written, and only then aborts the edges still
+	/// receiving a frame, which no shed can free. `None` leaves them unbounded.
 	pub live_edges: Option<u64>,
 }
 

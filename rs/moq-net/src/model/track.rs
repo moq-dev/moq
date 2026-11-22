@@ -3457,27 +3457,38 @@ impl TrackState {
 		paid
 	}
 
-	/// Shed every frame of the live edge its session queued at its `moves`th move, if it is
-	/// still the edge: the session holds more live edges than its budget, and this one moved
-	/// longest ago.
+	/// Shed every committed frame of the live edge its session queued at its `moves`th move,
+	/// if it is still the edge, and return whether a copy still holds a frame arriving: the
+	/// session holds more live edges than its budget, and this one moved longest ago.
 	///
 	/// The group stays cached, its timeline intact, so it still marks where the live edge is:
 	/// a live join is placed and staleness is judged as before, and a reader reaching a shed
 	/// frame reads [`Error::Evicted`], as after any shed.
-	pub(super) fn shed_edge_all(&mut self, moves: u64) {
-		if !self.cache.edge_is(moves) {
-			return;
+	pub(super) fn shed_edge_committed(&mut self, moves: u64) -> bool {
+		let mut arriving = false;
+		for group in self.edge_copies(moves) {
+			arriving |= group.shed_committed();
 		}
-		let Some(slot) = self
-			.latest_group
-			.filter(|latest| self.protects(*latest))
-			.and_then(|latest| self.lookup.get(&latest))
-		else {
-			return;
-		};
-		for group in slot.copies() {
+		arriving
+	}
+
+	/// Shed every frame of the live edge queued at its `moves`th move, as
+	/// [`Self::shed_edge_committed`] does, and abort each copy still receiving a frame, which
+	/// cannot be shed: the session is past its budget with nothing else left to shed.
+	pub(super) fn shed_edge_all(&mut self, moves: u64) {
+		for group in self.edge_copies(moves) {
 			group.shed_all();
 		}
+	}
+
+	/// The copies of the live edge its session queued at its `moves`th move, if it is still
+	/// the edge.
+	fn edge_copies(&self, moves: u64) -> impl Iterator<Item = &group::Handle> {
+		self.latest_group
+			.filter(|latest| self.cache.edge_is(moves) && self.protects(*latest))
+			.and_then(|latest| self.lookup.get(&latest))
+			.into_iter()
+			.flat_map(Slot::copies)
 	}
 
 	/// Shed up to `excess` bytes of the live edge's older frames, keeping the newest of an

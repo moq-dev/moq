@@ -1120,6 +1120,13 @@ impl GroupState {
 		}
 	}
 
+	/// Whether a frame still arriving bills the session: its payload or its header's fields.
+	fn arriving(&self) -> bool {
+		self.partial
+			.as_ref()
+			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
+	}
+
 	/// Whether this copy holds no committed frame.
 	fn is_empty(&self) -> bool {
 		self.front.is_empty() && self.log.base() == self.log.end()
@@ -2801,14 +2808,19 @@ impl Handle {
 			return;
 		};
 		state.shed_all();
-		// Its payload and its header's fields both bill the session.
-		if state
-			.partial
-			.as_ref()
-			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
-		{
+		if state.arriving() {
 			self.commit_abort(state, Error::Evicted);
 		}
+	}
+
+	/// Shed every committed frame this copy holds, as [`GroupState::shed_all`] does, keeping
+	/// a frame still arriving, and return whether one is.
+	pub(super) fn shed_committed(&self) -> bool {
+		let Ok(mut state) = self.state.write() else {
+			return false;
+		};
+		state.shed_all();
+		state.arriving()
 	}
 
 	pub(super) fn delivery_size(&self) -> u64 {

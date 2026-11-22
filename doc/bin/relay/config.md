@@ -212,7 +212,8 @@ Zero admits no entries of that kind, not unlimited entries.
 relay. The cache keeps that group whatever its `capacity` or `headroom`, so a
 publisher holding many quiet tracks would otherwise hold one group each past
 any budget. Past the bound, the frames of the session's own live edges are
-shed, the one that moved longest ago first. A viewer reaching a shed frame
+shed, the one that moved longest ago first. A group still receiving a frame
+is dropped only once nothing else is left to shed. A viewer reaching a shed frame
 meets it as it would any frame the cache dropped; the group's place on the
 timeline stays, so live joins land where they did. Another session's edges
 are never touched. Here zero means no bound.
