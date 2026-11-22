@@ -156,7 +156,8 @@ fn asked(pair: &MockPair) -> (usize, usize) {
 	(count(2), count(3))
 }
 
-/// A reader of `ranges` with max delay `budget`.
+/// A reader of `ranges` under `budget`: a range from the oldest group takes every group still
+/// within it, and a time start stays history (see [`crate::WithMax`]).
 fn reading(budget: impl Into<Option<Duration>>, ranges: impl IntoIterator<Item = Range>) -> Subscription {
 	Subscription::default()
 		.with_ranges(ranges)
@@ -572,8 +573,8 @@ async fn relay_pool_pressure_folds_every_reported_run() {
 		kio::clock::timeout(TIMEOUT * 10, async {
 			let pool = cache::Pool::new(cache::Config::default().with_expiry(None));
 			let chain = Chain::new([LITE07, LITE07], [forever(), pool.clone(), forever()]).await;
-			let mut local = chain.subscribe_relay(reading(budget, [support::keys(0..)])).await;
-			let mut remote = chain.subscribe(reading(budget, [support::keys(0..)])).await;
+			let mut local = chain.subscribe_relay(reading(budget, [Range::ALL])).await;
+			let mut remote = chain.subscribe(reading(budget, [Range::ALL])).await;
 			let odd = write_odd(&chain, RUNS);
 			for (reader, name) in [(&mut local, "local"), (&mut remote, "remote")] {
 				assert_eq!(received(reader).await, odd, "stale={stale}: the {name} reader");

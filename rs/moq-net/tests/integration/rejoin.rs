@@ -521,7 +521,7 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 /// first frame. Shown in between, it would leave the cached group without a stamped
 /// successor, and a reader at the live edge would be handed that older group first.
 #[kio::test]
-async fn rejoin_waits_for_the_answers_first_frame() {
+async fn rejoin_never_hands_the_cached_group_before_the_answer() {
 	// Lite01/02 carry no max age, so the publisher serves the relay's cached head again and
 	// that answer is what makes the cache current.
 	let unbudgeted = ["moq-lite-01", "moq-lite-02"];
@@ -572,15 +572,21 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 
 			pair.server_transport.split_unis();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-			let early = kio::clock::timeout(Duration::from_secs(1), sub.recv_group()).await;
-			assert!(
-				early.is_err(),
-				"{version}: the rejoining reader got the cached group {:?} first",
-				early.map(|group| group.unwrap().unwrap().start)
-			);
+			// A live join the route's answer placed may hand the route's group as its header
+			// lands, but never the cached group before it.
+			let early = kio::clock::timeout(Duration::from_secs(1), sub.recv_group())
+				.await
+				.ok()
+				.map(|group| group.unwrap().unwrap());
+			if let Some(group) = &early {
+				assert_eq!(group.start, 1, "{version}: the rejoining reader got the cached group first");
+			}
 
 			pair.server_transport.release_split();
-			let mut group = sub.recv_group().await.unwrap().unwrap();
+			let mut group = match early {
+				Some(group) => group,
+				None => sub.recv_group().await.unwrap().unwrap(),
+			};
 			// A track that arrives untimed has no media age to skip the cached group by, so
 			// its reader starts at the newest group cached and reads on from there.
 			if sub.info().timescale.is_none() && group.start == 0 {
