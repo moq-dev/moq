@@ -1,14 +1,14 @@
 [page] negotiated protocol: moqt-16
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4219-28335.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4219-28335.hang track=catalog.json
+[page] announced: broadcast=smoke-rust-4195-25021.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4195-25021.hang track=catalog.json
 [page] announced: broadcast=openmoq/ffmpeg/artemis active=true
 [page] announced: broadcast=com/wowza/techdemos/moqrelay/relay1 active=true
-[page] subscribe written: id=2 broadcast=smoke-rust-4219-28335.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4219-28335.hang track=catalog.json
-[page] received catalog hang smoke-rust-4219-28335.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4219-28335.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4219-28335.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4219-28335.hang track=0.avc3
+[page] subscribe written: id=2 broadcast=smoke-rust-4195-25021.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4195-25021.hang track=catalog.json
+[page] received catalog hang smoke-rust-4195-25021.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4195-25021.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4195-25021.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4195-25021.hang track=0.avc3
 [page] dropping a group with no head: alias=4 group=2
-decoded 5 frames from smoke-rust-4219-28335.hang (vite)
+decoded 5 frames from smoke-rust-4195-25021.hang (vite)
