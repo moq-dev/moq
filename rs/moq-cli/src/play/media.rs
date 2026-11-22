@@ -247,9 +247,23 @@ impl<O: Output> Media<O> {
 									}
 								}
 							};
+							// A better rendition still pending was never tried, so a half left with
+							// nothing reads its snapshot again and waits on it rather than staying blank.
 							match kind {
-								Kind::Video => playback.ended(&mut video, task, finished),
-								Kind::Audio => playback.ended(&mut audio, task, finished),
+								Kind::Video => {
+									let outranked = video.running().is_some_and(|running| running.task == task && running.data.outranked.is_some());
+									playback.ended(&mut video, task, finished);
+									if outranked && !video.busy() {
+										video.repick();
+									}
+								}
+								Kind::Audio => {
+									let outranked = audio.running().is_some_and(|running| running.task == task && running.data.outranked.is_some());
+									playback.ended(&mut audio, task, finished);
+									if outranked && !audio.busy() {
+										audio.repick();
+									}
+								}
 							}
 						}
 					}
@@ -323,13 +337,28 @@ impl<O: Output> Media<O> {
 							// out what its sink holds, which it fills behind, as after a move. Played
 							// side by side, both would drive the speaker's playhead.
 							Some(ready) if audio.switching() == Some(Switch::Upgrade) => {
+								// Only the rendition that opened, so a snapshot arriving while what
+								// plays retires is checked against it alone.
+								let candidates: Vec<AudioCandidate> = audio
+									.opening()
+									.map(|opening| {
+										opening
+											.candidates
+											.lock()
+											.unwrap()
+											.iter()
+											.filter(|(name, ..)| *name == ready.name)
+											.cloned()
+											.collect()
+									})
+									.unwrap_or_default();
 								let next = Opened {
 									ready: Some(ready),
 									rejected: Vec::new(),
 									outranked,
 								};
 								let next = Opening {
-									candidates: Default::default(),
+									candidates: Arc::new(Mutex::new(candidates)),
 									future: Box::pin(std::future::ready(next)),
 								};
 								if audio.hand_over(next)
@@ -458,6 +487,19 @@ impl<O: Output> Media<O> {
 								}) {
 									audio.cancel_opening();
 								}
+								// The replacement an upgrade handed over to plays once what plays
+								// retires, unless this snapshot disabled or moved it.
+								if audio.next().is_some_and(|next| {
+									next.candidates.lock().unwrap().iter().any(|(name, _, track)| {
+										snapshot
+											.audio
+											.renditions
+											.get(name)
+											.is_some_and(|config| !config.enabled || Track::of(&source, config, name) != *track)
+									})
+								}) {
+									audio.drop_next();
+								}
 								selection.retain(&mut snapshot);
 								// Video holds no tail beyond the frames queued for the window, so the
 								// rendition it left plays on until its replacement is ready. Only a move
@@ -566,9 +608,9 @@ impl<O: Output> Media<O> {
 						.collect();
 					let mut candidates = arrange(&snapshot.video, available.clone(), orientation, turning);
 					if upgrading && let Some(running) = video.running() {
-						if let Some(rank) = candidates.iter().position(|(_, _, track)| *track == running.track) {
-							candidates.truncate(rank);
-						}
+						// One the catalog dropped has no rank left to beat, so nothing is an upgrade.
+						let rank = candidates.iter().position(|(_, _, track)| *track == running.track);
+						candidates.truncate(rank.unwrap_or(0));
 						available.clone_from(&candidates);
 					}
 					if candidates.is_empty() {
@@ -600,11 +642,10 @@ impl<O: Output> Media<O> {
 					// A finished track has only its newest group left, which already played.
 					.filter(|(_, _, reference)| !playback.finished(reference))
 					.collect();
-				if upgrading
-					&& let Some(running) = audio.running()
-					&& let Some(rank) = candidates.iter().position(|(_, _, track)| *track == running.track)
-				{
-					candidates.truncate(rank);
+				if upgrading && let Some(running) = audio.running() {
+					// One the catalog dropped has no rank left to beat, so nothing is an upgrade.
+					let rank = candidates.iter().position(|(_, _, track)| *track == running.track);
+					candidates.truncate(rank.unwrap_or(0));
 				}
 				if candidates.is_empty() {
 					audio.give_up();
@@ -742,10 +783,13 @@ impl<O: Output> Media<O> {
 /// Open the first of `candidates`, in rank order, that `open` takes, trying each once its
 /// broadcast resolves. A rendition on a broadcast nothing has answered for yet holds back none
 /// ranked below it whose broadcast already resolved, so a pending sibling never blanks a half
-/// that has something to play: the lower one is tried, and a better one resolving meanwhile cuts
-/// that attempt short to try it instead. Only with every broadcast left pending does it wait.
-/// A rendition pointing at a broadcast we can't reach is that rendition's problem, not the
-/// catalog's: it falls through to the next like an unsupported codec does.
+/// that has something to play: the lower one is tried, and a better one resolving meanwhile is
+/// tried beside it rather than in its place, so a better broadcast that announces before its
+/// track answers leaves the lower one free to play. The first attempt to open wins, reporting
+/// any better rendition still opening or pending as outranking it. Only with every broadcast
+/// left pending does it wait. A rendition pointing at a broadcast we can't reach is that
+/// rendition's problem, not the catalog's: it falls through to the next like an unsupported
+/// codec does.
 async fn open_first<C, T, F>(
 	source: &moq_mux::Source,
 	kind: &str,
@@ -756,6 +800,15 @@ where
 	C: hang::catalog::Reference + Clone,
 	F: Future<Output = anyhow::Result<T>>,
 {
+	/// Where a candidate is in being tried.
+	#[derive(Clone, Copy, PartialEq, Eq)]
+	enum Attempt {
+		/// Not tried yet, as its broadcast may still be pending.
+		Waiting,
+		Opening,
+		Rejected,
+	}
+
 	let mut rejected = Vec::new();
 	let mut reject = |name: &str, err: &dyn std::fmt::Display| {
 		tracing::warn!(track = name, %err, "cannot play {kind} rendition");
@@ -765,51 +818,80 @@ where
 	let mut bound = Vec::new();
 	for (name, config, reference) in candidates {
 		match source.bind(config.broadcast(), config.instance()) {
-			Ok(binding) => bound.push((name, config, reference, binding)),
+			Ok(binding) => bound.push((name, config, reference, binding, Attempt::Waiting)),
 			Err(err) => reject(&name, &err),
 		}
 	}
+	// The rank of the best attempt opening: only a candidate ranked above it is worth starting.
+	let best = |bound: &[(String, C, Track, moq_mux::Binding, Attempt)]| {
+		bound
+			.iter()
+			.position(|(.., attempt)| *attempt == Attempt::Opening)
+			.unwrap_or(bound.len())
+	};
+	let mut attempts = futures::stream::FuturesUnordered::new();
 	loop {
-		// The best candidate whose broadcast answered, any ranked above it still pending.
-		let resolved = bound.iter().enumerate().find_map(|(index, (.., binding))| {
+		// Start the best candidate whose broadcast answered, if it ranks above every attempt
+		// opening; any ranked above it are still pending.
+		let above = best(&bound);
+		for (index, (name, config, reference, binding, attempt)) in bound[..above].iter_mut().enumerate() {
+			if *attempt != Attempt::Waiting {
+				continue;
+			}
 			match binding.poll_broadcast(&kio::Waiter::noop()) {
-				Poll::Ready(result) => Some((index, result)),
-				Poll::Pending => None,
+				Poll::Pending => {}
+				Poll::Ready(Err(err)) => {
+					*attempt = Attempt::Rejected;
+					reject(name, &err);
+				}
+				Poll::Ready(Ok(rendition)) => {
+					*attempt = Attempt::Opening;
+					let opening = open(rendition, name.clone(), config.clone(), reference.clone());
+					attempts.push(Box::pin(async move { (index, opening.await) }));
+					break;
+				}
 			}
-		});
-		let Some((index, resolved)) = resolved else {
-			if bound.is_empty() {
-				return Opened {
-					ready: None,
-					rejected,
-					outranked: None,
-				};
-			}
-			kio::wait(|waiter| poll_any(bound.iter().map(|(.., binding)| binding), waiter)).await;
-			continue;
+		}
+		let above = best(&bound);
+		let watching = bound[..above].iter().any(|(.., attempt)| *attempt == Attempt::Waiting);
+		if attempts.is_empty() && !watching {
+			return Opened {
+				ready: None,
+				rejected,
+				outranked: None,
+			};
+		}
+		let finished = tokio::select! {
+			Some(finished) = futures::StreamExt::next(&mut attempts), if !attempts.is_empty() => Some(finished),
+			// A better rendition's broadcast landed, so it opens beside any attempt under way.
+			() = kio::wait(|waiter| poll_any(
+				bound[..above]
+					.iter()
+					.filter(|(.., attempt)| *attempt == Attempt::Waiting)
+					.map(|(.., binding, _)| binding),
+				waiter,
+			)), if watching => None,
 		};
-		let (name, config, reference, _) = &bound[index];
-		let opened = match resolved {
-			Ok(rendition) => tokio::select! {
-				opened = open(rendition, name.clone(), config.clone(), reference.clone()) => Some(opened),
-				// A better rendition's broadcast landed while this one opened.
-				() = kio::wait(|waiter| poll_any(bound[..index].iter().map(|(.., binding)| binding), waiter)), if index > 0 => None,
-			},
-			Err(err) => Some(Err(err.into())),
-		};
-		match opened {
-			None => continue,
-			Some(Ok(ready)) => {
-				let pending: Vec<_> = bound.drain(..index).map(|(.., binding)| binding).collect();
+		match finished {
+			None => {}
+			Some((index, Ok(ready))) => {
+				// Dropping the attempts still opening cancels them. A better one among them has
+				// landed, so it outranks what opened, and its upgrade tries it again at once.
+				let pending: Vec<_> = bound
+					.drain(..index)
+					.filter(|(.., attempt)| *attempt != Attempt::Rejected)
+					.map(|(.., binding, _)| binding)
+					.collect();
 				return Opened {
 					ready: Some(ready),
 					rejected,
 					outranked: (!pending.is_empty()).then(|| Outranked(Arc::new(pending))),
 				};
 			}
-			Some(Err(err)) => {
-				let (name, ..) = bound.remove(index);
-				reject(&name, &format!("{err:#}"));
+			Some((index, Err(err))) => {
+				let (name, .., attempt) = &mut bound[index];
+				*attempt = Attempt::Rejected;
+				reject(name, &format!("{err:#}"));
 			}
 		}
 	}
@@ -2833,7 +2915,7 @@ mod tests {
 
 	/// A rendition on a pending broadcast holds back none ranked below it that resolves, and
 	/// reports itself outranking what opened. If it lands while a lower one is still opening, it
-	/// cuts that attempt short and opens instead.
+	/// opens beside that attempt and wins once it opens first.
 	#[tokio::test(start_paused = true)]
 	async fn a_pending_broadcast_holds_back_no_lower_rendition() {
 		let origin = moq_tokio::origin::spawn();
@@ -2869,6 +2951,51 @@ mod tests {
 			.unwrap();
 		assert_eq!(opened.ready.as_deref(), Some("high"));
 		assert!(opened.outranked.is_none(), "nothing ranks above the best");
+	}
+
+	/// A better broadcast that lands before its track answers leaves the lower attempt opening,
+	/// so the lower one plays once it opens, and the better one outranks it at once.
+	#[tokio::test(start_paused = true)]
+	async fn a_landed_broadcast_still_opening_holds_back_no_lower_rendition() {
+		let origin = moq_tokio::origin::spawn();
+		let room = origin.route("room", moq_net::origin::RouteOptions::default()).unwrap();
+		let source = moq_mux::Source::new(origin.consume(), room.broadcast().consume());
+		let candidates = vec![candidate("high", Some("./other")), candidate("low", None)];
+
+		let release = Arc::new(tokio::sync::Notify::new());
+		let opening = tokio::spawn({
+			let source = source.clone();
+			let release = release.clone();
+			async move {
+				open_first(&source, "audio", candidates, |_, name, _, _| {
+					let release = release.clone();
+					async move {
+						match name.as_str() {
+							"high" => std::future::pending::<()>().await,
+							_ => release.notified().await,
+						}
+						Ok(name)
+					}
+				})
+				.await
+			}
+		});
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let other = origin.route("other", moq_net::origin::RouteOptions::hidden()).unwrap();
+		other.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert!(!opening.is_finished(), "neither attempt opened yet");
+
+		release.notify_one();
+		let opened = kio::clock::timeout(Duration::from_secs(1), opening)
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(opened.ready.as_deref(), Some("low"), "the lower attempt was cut short");
+		let outranked = opened.outranked.expect("the better rendition outranks the fallback");
+		kio::clock::timeout(Duration::from_secs(1), outranked.landed())
+			.await
+			.expect("the better broadcast already landed");
 	}
 
 	/// A publisher retires an audio rendition by naming its replacement and then

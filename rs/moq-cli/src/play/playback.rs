@@ -148,7 +148,7 @@ impl<D, O> Half<D, O> {
 	}
 
 	/// Whether a task is driving this half or a rendition is opening for it.
-	fn busy(&self) -> bool {
+	pub(super) fn busy(&self) -> bool {
 		!matches!(self.phase, Phase::Idle { opening: None })
 	}
 
@@ -208,6 +208,22 @@ impl<D, O> Half<D, O> {
 				opening.as_mut()
 			}
 			Phase::Playing { .. } | Phase::Retiring { .. } => None,
+		}
+	}
+
+	/// The replacement an upgrade handed over to, waiting for the rendition it replaces to end.
+	pub(super) fn next(&self) -> Option<&O> {
+		match &self.phase {
+			Phase::Retiring { next, .. } => next.as_ref(),
+			_ => None,
+		}
+	}
+
+	/// Drop the replacement an upgrade handed over to, as when the catalog disabled or moved it:
+	/// the half picks again once the rendition it would have replaced ends.
+	pub(super) fn drop_next(&mut self) {
+		if let Phase::Retiring { next, .. } = &mut self.phase {
+			*next = None;
 		}
 	}
 
@@ -496,9 +512,12 @@ impl Playback {
 				opening,
 			} if switch.keeps_track() => (Some(running.track), opening),
 			Phase::Switching { opening, .. } | Phase::Stopping { opening, .. } => (None, opening),
-			// The replacement it handed over to plays now, from the read the upgrade narrowed.
+			// The replacement it handed over to plays now, from the read the upgrade narrowed. A
+			// snapshot that arrived meanwhile was checked against it, and one that disabled or moved
+			// it dropped it, so it covers that snapshot too rather than being picked over.
 			Phase::Retiring { next: Some(next), .. } => {
 				half.phase = Phase::Idle { opening: Some(next) };
+				half.read = Read::Narrowed(self.snapshots);
 				return;
 			}
 			Phase::Retiring { .. } | Phase::Idle { .. } => (None, None),
@@ -809,7 +828,10 @@ mod tests {
 		assert!(audio.opening().is_none(), "the replacement waits for the end");
 		assert!(audio.running().is_some(), "what plays plays out");
 		assert!(!playback.wants(&audio));
+		assert_eq!(audio.next(), Some(&"high"));
 
+		// A snapshot arriving while what plays retires left the replacement in place.
+		playback.received(Default::default());
 		playback.ended(&mut audio, 1, true);
 		assert!(
 			!playback.finished(&track("low")),
@@ -819,6 +841,17 @@ mod tests {
 		assert!(!playback.wants(&audio), "the replacement is not picked over");
 
 		assert!(!audio.hand_over("other"), "only an upgrade hands over");
+
+		// One the catalog disabled or moved is dropped, so the half picks again once what plays ends.
+		playback.read(&mut audio, false);
+		playback.started(&mut audio, running(2, "high"));
+		audio.upgrade();
+		playback.read(&mut audio, true);
+		assert!(audio.hand_over("higher"));
+		audio.drop_next();
+		playback.ended(&mut audio, 2, true);
+		assert!(audio.opening().is_none());
+		assert!(playback.wants(&audio), "the dropped replacement is picked again");
 	}
 
 	/// A task a replacement stopped no longer drives the half, but if it finished its own track
