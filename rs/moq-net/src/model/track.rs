@@ -8144,8 +8144,12 @@ struct Logical {
 impl Logical {
 	/// Take back what the copies took back after a widening (see [`Cursor::rejudge`]): a run
 	/// still to report leaves the queue, and one reported is untold, for the owner to forget.
-	/// What the owner settled stays settled, since the copies were told of it.
+	/// What the owner settled stays settled, since the copies were told of it. Only an owner
+	/// that may take a report back lets the copies take theirs back.
 	fn take_back(&mut self, resume: &mut super::resume::Subscriber) {
+		let Some(withdrawn) = &mut self.withdrawn else {
+			return;
+		};
 		for run in resume.take_withdrawn().iter() {
 			let record = &mut self.record;
 			let stale: Vec<_> = record
@@ -8157,9 +8161,6 @@ impl Logical {
 			for range in stale {
 				record.pending.remove(range);
 			}
-			let Some(withdrawn) = &mut self.withdrawn else {
-				continue;
-			};
 			let dropped: Vec<_> = record
 				.reported
 				.overlapping(run)
@@ -11754,8 +11755,8 @@ impl Subscriber {
 		}
 	}
 
-	/// The drops reported to an [`Ordered`] and taken back since the last call, which a
-	/// widened budget asks again (see [`Cursor::rejudge`]).
+	/// The drops reported to an [`Ordered`] or a front's reader and taken back since the last
+	/// call, which a widened budget asks again (see [`Cursor::rejudge`]).
 	pub(super) fn take_withdrawn(&mut self) -> RangeSet<u64> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.withdrawn.as_mut().map(std::mem::take).unwrap_or_default(),
@@ -12094,10 +12095,7 @@ impl Subscriber {
 			// Each copy reports to its own route; the logical record keeps one route's run from
 			// going out over what another's already settled.
 			Inner::Resume(resume, logical) => loop {
-				// Only an owner that may take a report back lets the copies take theirs back.
-				if logical.withdrawn.is_some() {
-					logical.take_back(resume);
-				}
+				logical.take_back(resume);
 				if let Some(next) = logical.record.next_pending() {
 					return Poll::Ready(next);
 				}
