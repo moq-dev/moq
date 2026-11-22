@@ -80,13 +80,14 @@ impl Prefix {
 		self.text.is_empty()
 	}
 
-	/// Whether `path`, spelled as a broadcast path, is this prefix or beneath it.
+	/// Whether `path` is this prefix or beneath it. The path is normalized like a broadcast
+	/// path (slashes trimmed and collapsed), as [`Pattern::matches`] does.
 	pub fn matches(&self, path: &str) -> bool {
 		beneath(path, &self.text)
 	}
 
-	/// Whether this prefix covers some path at or beneath the canonical `path`: one lies
-	/// beneath the other.
+	/// Whether this prefix covers some path at or beneath `path`: one lies beneath the other.
+	/// The path is normalized like a broadcast path.
 	pub fn overlaps(&self, path: &str) -> bool {
 		beneath(path, &self.text) || beneath(&self.text, path)
 	}
@@ -141,13 +142,16 @@ impl Prefix {
 	}
 }
 
-/// Whether the canonical path `path` is `prefix` or beneath it.
-///
-/// A valid prefix never ends inside an escape, so the byte after it is a separator exactly
-/// when it is a `/`.
+/// Whether `path` is `prefix` or beneath it, segment by segment with both normalized like a
+/// broadcast path, so neither has to be canonical.
 fn beneath(path: &str, prefix: &str) -> bool {
-	prefix.is_empty()
-		|| (path.starts_with(prefix) && (path.len() == prefix.len() || path.as_bytes()[prefix.len()] == b'/'))
+	let mut path = segments(path);
+	segments(prefix).all(|segment| path.next() == Some(segment))
+}
+
+/// The segments of `path` normalized like a broadcast path: empty ones dropped.
+fn segments(path: &str) -> impl Iterator<Item = &str> {
+	parts(path).filter(|part| !part.is_empty())
 }
 
 /// `path` with its slashes trimmed and collapsed, as a broadcast path is normalized.
@@ -155,11 +159,7 @@ fn normalize(path: &str) -> std::borrow::Cow<'_, str> {
 	if parts(path).all(|part| !part.is_empty()) {
 		return path.into();
 	}
-	parts(path)
-		.filter(|part| !part.is_empty())
-		.collect::<Vec<_>>()
-		.join("/")
-		.into()
+	segments(path).collect::<Vec<_>>().join("/").into()
 }
 
 /// Segment-by-segment order of two canonical paths.
@@ -291,23 +291,20 @@ impl Prefixes {
 		true
 	}
 
-	/// Whether some member covers the canonical `path`.
+	/// Whether some member covers `path`, normalized like a broadcast path.
 	pub fn matches(&self, path: &str) -> bool {
-		self.covering(path).is_some()
+		!self.0.is_empty() && self.covering(&normalize(path)).is_some()
 	}
 
-	/// The member covering the canonical `path`, if any.
+	/// The member covering the normalized `path`, if any.
 	fn covering(&self, path: &str) -> Option<&Prefix> {
-		if self.0.is_empty() {
-			return None;
-		}
-		// Each prefix of the path at a segment boundary, the empty one first.
-		let mut end = 0;
-		let mut ancestors = std::iter::once(0).chain(parts(path).map(move |part| {
-			end += usize::from(end > 0) + part.len();
-			end
+		// Each prefix of the path at a segment boundary, the empty one first. No member is
+		// deeper than a prefix may be, so the ancestors past that depth are never searched.
+		let ancestors = std::iter::once(0).chain(parts(path).enumerate().scan(0, |end, (i, part)| {
+			*end += usize::from(i > 0) + part.len();
+			Some(*end)
 		}));
-		ancestors.find_map(|end| {
+		ancestors.take(Pattern::MAX_SEGMENTS + 1).find_map(|end| {
 			let ancestor = &path[..end];
 			let index = self.0.binary_search_by(|member| order(&member.text, ancestor)).ok()?;
 			Some(&self.0[index])
@@ -320,9 +317,15 @@ impl Prefixes {
 		other.0.iter().all(|prefix| self.matches(&prefix.text))
 	}
 
-	/// Whether some member covers a path at or beneath the canonical `path`.
+	/// Whether some member covers a path at or beneath `path`, normalized like a broadcast
+	/// path.
 	pub fn overlaps(&self, path: &str) -> bool {
-		if self.matches(path) {
+		if self.0.is_empty() {
+			return false;
+		}
+		let path = normalize(path);
+		let path = path.as_ref();
+		if self.covering(path).is_some() {
 			return true;
 		}
 		// Members beneath it sort right after it.
@@ -603,6 +606,77 @@ mod tests {
 		assert_eq!(serde_json::to_string(&set).unwrap(), r#"["a","c"]"#);
 		let err = serde_json::from_str::<Prefixes>(r#"["a/**"]"#).unwrap_err().to_string();
 		assert!(err.contains("`a` covers"), "{err}");
+	}
+
+	#[test]
+	fn normalizes_a_path_it_is_asked_about() {
+		let accent = prefix("é");
+		let set = prefixes(&["é", "a/ü"]);
+		for path in ["é", "/é", "é/", "//é//x", "é//x/"] {
+			assert!(accent.matches(path), "{path}");
+			assert!(set.matches(path), "{path}");
+			assert!(set.overlaps(path), "{path}");
+		}
+		for path in ["/a", "a/", "//a//"] {
+			assert!(!set.matches(path), "{path}");
+			assert!(set.overlaps(path), "{path}");
+			assert!(prefix("a/ü").overlaps(path), "{path}");
+		}
+		assert!(set.matches("/a//ü/"));
+		assert!(!set.matches("/éa"));
+		assert!(!set.overlaps("/ü"));
+		// Slashes collapse, but an escaped `/` still never splits a segment.
+		assert!(!prefix("a").matches(r"/a\/b"));
+		assert!(!prefix(r"a\/b").overlaps(r"a\"));
+		assert!(prefix(r"a\/b").overlaps(r"/a\/b//"));
+	}
+
+	/// Over every short path built from separators, escapes, and multi-byte characters, a
+	/// query never panics, answers as it does for the path normalized, and agrees with the
+	/// prefix's pattern and with each member alone.
+	#[test]
+	fn agrees_with_patterns_on_any_path() {
+		let pieces = ["", "/", "a", "é", r"\/", r"\\", r"\"];
+		let mut paths = vec![String::new()];
+		for _ in 0..4 {
+			let longer: Vec<String> = paths
+				.iter()
+				.flat_map(|path| pieces.iter().map(move |piece| format!("{path}{piece}")))
+				.collect();
+			paths.extend(longer);
+		}
+		paths.sort();
+		paths.dedup();
+		let members = ["", "a", "é", "a/é", "é/a", r"a\/é", r"\\", "é/é"];
+		let sets: Vec<Prefixes> = (0..1u32 << members.len())
+			.step_by(7)
+			.map(|mask| {
+				(0..members.len())
+					.filter(|bit| mask & (1 << bit) != 0)
+					.map(|bit| prefix(members[bit]))
+					.collect()
+			})
+			.collect();
+		for path in &paths {
+			let normal = normalize(path);
+			for member in members.map(prefix) {
+				assert_eq!(member.matches(path), member.pattern().matches(path), "{member:?} {path}");
+				assert_eq!(member.matches(path), member.matches(&normal), "{member:?} {path}");
+				assert_eq!(member.overlaps(path), member.overlaps(&normal), "{member:?} {path}");
+			}
+			for set in &sets {
+				assert_eq!(
+					set.matches(path),
+					set.iter().any(|member| member.matches(path)),
+					"{set:?} {path}"
+				);
+				assert_eq!(
+					set.overlaps(path),
+					set.iter().any(|member| member.overlaps(path)),
+					"{set:?} {path}"
+				);
+			}
+		}
 	}
 
 	/// Every operation agrees with a brute-force reading over a small universe of paths.
