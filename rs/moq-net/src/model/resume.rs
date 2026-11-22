@@ -5084,6 +5084,38 @@ mod test {
 		);
 	}
 
+	/// A verdict from the copy serving now ends the group, though the replaced copy it moved
+	/// off still holds the rest: only a newer route or a delivery failure looks past it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_serving_copys_verdict_stands_over_a_replaced_copy_holding_the_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		let b = copy();
+		let mut repeat = b.create_group(group::Info { start: 0 }).unwrap();
+		for (ms, frame) in [(0, b"a"), (1, b"b")] {
+			repeat.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()), "the stall moved to b");
+
+		for (ms, frame) in [(1, b"b"), (2, b"c")] {
+			open.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		open.finish().unwrap();
+		repeat.abort(Error::WrongSize).unwrap();
+		let res = reading.read_frame().now_or_never();
+		assert!(matches!(res, Some(Err(Error::WrongSize))), "{res:?}");
+	}
+
 	/// A group the replaced copy closed short (a FIN without GROUP_END) continues from the
 	/// replacement at the next frame, whichever of the close and the switch the reader sees
 	/// first, and ends where the replacement ends it.
@@ -10169,6 +10201,74 @@ mod test {
 		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
 	}
 
+	/// A reader of time 5 on, which read groups 5 to 8 from copy `a` before the switch to `b`,
+	/// an empty received copy that resumes at 8: the routes, the logical track, `a`, `b`, and
+	/// the reader.
+	fn read_to_8() -> (
+		Producer,
+		track::Producer,
+		track::Producer,
+		track::Producer,
+		track::Subscriber,
+	) {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		for key in 5..=8 {
+			write(&a, key);
+		}
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(from_times(&[5]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [5, 6, 7, 8]);
+		let b = received_copy();
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		(routes, logical, a, b, sub)
+	}
+
+	/// A subscription of a range from each time, within an hour.
+	fn from_times(times: &[u64]) -> Subscription {
+		Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges(times.iter().map(|time| track::Range {
+				start: Some(*time),
+				end: None,
+			}))
+	}
+
+	/// A raised time start whose groups from its time the reader already holds is placed at
+	/// its time, with no backfill.
+	#[test]
+	fn a_raised_start_the_reader_holds_places_at_its_time() {
+		let (routes, _logical, a, _b, mut sub) = read_to_8();
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from_times(&[6])).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
+		assert_eq!(copies(&routes), 1, "nothing is backfilled");
+	}
+
+	/// As [`a_raised_start_the_reader_holds_places_at_its_time`], beside a range still waiting
+	/// on its anchors: the raised start is placed only once every other range is.
+	#[test]
+	fn a_held_raised_start_waits_for_a_range_beside_it() {
+		let (_routes, _logical, a, b, mut sub) = read_to_8();
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from_times(&[6, 20])).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert_eq!(sub.resolved_range(0), None, "waits for the range beside it");
+		write(&b, 20);
+		assert_eq!(drain(&mut sub, false), [20]);
+		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
+	}
+
 	/// As [`a_backfill_places_a_time_start_its_serving_copy_raised`], for a range that ends
 	/// past the resume point: the backfill, capped under it, places only the start, and the
 	/// read ends at the range's own end.
@@ -11239,6 +11339,113 @@ mod test {
 			let mut got = drain(&mut sub, false);
 			got.sort_unstable();
 			assert_eq!(got, [1, 2], "serving_fails={serving_fails}");
+		}
+	}
+
+	/// A group a replaced copy got past its cap is no group it drains: a later switch asks the
+	/// next route for it, though that copy stays for a group still read from it.
+	#[test]
+	fn a_group_past_a_replaced_copys_cap_is_backfilled() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		for key in 0..=4 {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4]);
+		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
+		open.write_frame(ts(5), b"x".as_ref()).unwrap();
+		let reading = recv(&mut sub);
+		assert_eq!(reading.start, 5);
+		let b = received_copy();
+		routes.serve(b.consume());
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		// Past the cap at 5, so a never hands it out.
+		write(&a, 6);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let c = received_copy();
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		write(&c, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		drop(reading);
+	}
+
+	/// A group one route refused to backfill is still asked of the next route, though the
+	/// reader's preferences never changed.
+	#[test]
+	fn a_group_one_route_refused_is_backfilled_by_the_next() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		for key in 0..=4 {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4]);
+		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
+		open.write_frame(ts(5), b"x".as_ref()).unwrap();
+		let reading = recv(&mut sub);
+		let b = received_copy();
+		routes.serve(b.consume());
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		write(&a, 6);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		// c's backfill of group 6 fails with its route.
+		let c = received_copy();
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		c.abort(Error::Cancel).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let d = received_copy();
+		routes.serve(d.consume());
+		write(&d, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		drop(reading);
+	}
+
+	/// A front asks its next route from the lowest boundary among its readers, though only one
+	/// still keeps a replaced copy holding a group past that copy's cap.
+	#[test]
+	fn the_fronts_subscription_resumes_at_the_lowest_boundary_when_one_reader_keeps_a_replaced_copy() {
+		for keeper_first in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = received_copy();
+			routes.serve(a.consume());
+			let mut first = subscribe(&front, HOUR);
+			let mut second = subscribe(&front, HOUR);
+			for key in 0..=4 {
+				write(&a, key);
+			}
+			assert_eq!(drain(&mut first, false), [0, 1, 2, 3, 4]);
+			assert_eq!(drain(&mut second, false), [0, 1, 2, 3, 4]);
+			let mut open = a.create_group(group::Info { start: 5 }).unwrap();
+			open.write_frame(ts(5), b"x".as_ref()).unwrap();
+			let (keeper, other) = match keeper_first {
+				true => (&mut first, &mut second),
+				false => (&mut second, &mut first),
+			};
+			// Only the keeper still reads group 5, so only it keeps `a` after the switch.
+			let reading = recv(keeper);
+			drop(recv(other));
+			let b = received_copy();
+			routes.serve(b.consume());
+			write(&b, 7);
+			assert_eq!(drain(keeper, false), [7]);
+			assert_eq!(drain(other, false), [7]);
+			// Past a's cap: only the keeper's boundary sees it.
+			write(&a, 8);
+			assert_eq!(drain(keeper, false), Vec::<u64>::new());
+			assert_eq!(drain(other, false), Vec::<u64>::new());
+			let resume = routes.subscription(front.subscription().unwrap(), 2).resume;
+			assert_eq!(resume, Some(Position::new(7, 1)), "keeper_first={keeper_first}");
+			drop(reading);
 		}
 	}
 
