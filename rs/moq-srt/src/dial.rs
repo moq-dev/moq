@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use srt_tokio::SrtSocket;
 
-use crate::server::{DEFAULT_LATENCY, configure, serve_publish, serve_subscribe, track};
+use crate::server::{DEFAULT_LATENCY, configure, serve_publish, serve_subscribe, settled, track};
 use crate::{Export, Import, Result};
 
 /// An SRT caller that can publish a MoQ broadcast or pull a remote stream.
@@ -57,13 +57,17 @@ impl Client {
 	/// Push the [`Export`]'s broadcast out to the remote as MPEG-TS until the broadcast ends.
 	pub async fn publish(&self, export: Export<'_>) -> Result<()> {
 		let mut socket = self.call(Mode::Publish).await?;
-		track(&mut socket, export.wire.clone());
+		let tracking = track(&mut socket, export.wire.clone());
 		let options = crate::ts::Options {
 			latency: self.latency,
 			follow: export.follow,
 			stitch: export.stitch,
 		};
-		serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options).await
+		settled(
+			tracking,
+			serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options),
+		)
+		.await
 	}
 
 	/// Pull a remote MPEG-TS stream into the [`Import`]'s broadcast, published as its ingest
@@ -80,8 +84,12 @@ impl Client {
 			wire,
 		} = import;
 		let mut socket = self.call(Mode::Request).await?;
-		track(&mut socket, wire);
-		serve_publish(publisher, broadcast.as_str(), socket, &ingest, program).await
+		let tracking = track(&mut socket, wire);
+		settled(
+			tracking,
+			serve_publish(publisher, broadcast.as_str(), socket, &ingest, program),
+		)
+		.await
 	}
 
 	async fn call(&self, mode: Mode) -> Result<SrtSocket> {

@@ -200,6 +200,16 @@ pub(crate) fn track(socket: &mut SrtSocket, wire: Wire) -> tokio::task::JoinHand
 	tokio::spawn(record(socket.statistics().clone(), wire))
 }
 
+/// Run `serve`, which owns the socket and drops it, then wait for `tracking` to apply the
+/// connection's last report, so an embedder that drops its stats guard once this returns
+/// has every report counted.
+pub(crate) async fn settled<T>(tracking: tokio::task::JoinHandle<()>, serve: impl Future<Output = T>) -> T {
+	let result = serve.await;
+	// The task only copies counters, so it ends with the connection and cannot fail.
+	let _ = tracking.await;
+	result
+}
+
 async fn record(mut reports: impl Stream<Item = SocketStatistics> + Unpin, wire: Wire) {
 	while let Some(stats) = reports.next().await {
 		wire.set_sent_bytes(srt_bytes(stats.tx_all_bytes, stats.tx_all_packets));
@@ -403,8 +413,12 @@ impl Publish {
 			program,
 			wire,
 		} = import;
-		track(&mut socket, wire);
-		serve_publish(publisher, broadcast.as_str(), socket, &ingest, program).await
+		let tracking = track(&mut socket, wire);
+		settled(
+			tracking,
+			serve_publish(publisher, broadcast.as_str(), socket, &ingest, program),
+		)
+		.await
 	}
 
 	/// Reject the publish with a verdict the client can distinguish on the wire.
@@ -453,14 +467,18 @@ impl Play {
 	/// resolves when playback ends, so callers usually run it on its own task.
 	pub async fn accept(self, export: Export<'_>) -> Result<()> {
 		let mut socket = self.0.request.accept(None).await?;
-		track(&mut socket, export.wire.clone());
+		let tracking = track(&mut socket, export.wire.clone());
 		tracing::info!(peer = %self.0.peer, path = %export.broadcast, "SRT play accepted");
 		let options = crate::ts::Options {
 			latency: self.0.latency,
 			follow: export.follow,
 			stitch: export.stitch,
 		};
-		serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options).await
+		settled(
+			tracking,
+			serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options),
+		)
+		.await
 	}
 
 	/// Reject the play with a verdict the client can distinguish on the wire.
@@ -486,7 +504,8 @@ pub struct Import<'a> {
 	/// more than one.
 	pub program: Option<Program>,
 	/// Where the connection's wire bytes are counted, which an embedder registers a clone of
-	/// with [`stats::Session::wire`](moq_net::stats::Session::wire) before accepting.
+	/// with [`stats::Session::wire`](moq_net::stats::Session::wire) before accepting, and holds the
+	/// guard it returns until the accepting future resolves, since dropping it ends the registration.
 	/// It holds SRT packet bytes, headers and retransmits included, without IP and UDP.
 	pub wire: Wire,
 }
@@ -522,7 +541,8 @@ pub struct Export<'a> {
 	/// [`moq_mux::Error::Replaced`].
 	pub stitch: bool,
 	/// Where the connection's wire bytes are counted, which an embedder registers a clone of
-	/// with [`stats::Session::wire`](moq_net::stats::Session::wire) before accepting.
+	/// with [`stats::Session::wire`](moq_net::stats::Session::wire) before accepting, and holds the
+	/// guard it returns until the accepting future resolves, since dropping it ends the registration.
 	/// It holds SRT packet bytes, headers and retransmits included, without IP and UDP.
 	pub wire: Wire,
 }
@@ -821,6 +841,7 @@ mod tests {
 	/// header, once the 28 byte IP and UDP estimate is gone.
 	#[tokio::test]
 	async fn wire_covers_the_payload_a_connection_carried() {
+		kio::clock::host_time(); // real SRT sockets
 		const MESSAGES: u64 = 64;
 		const PAYLOAD: u64 = SRT_PAYLOAD as u64;
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), Duration::from_millis(50))

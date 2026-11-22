@@ -19,7 +19,8 @@
 //!
 //! Each connection's wire bytes, the SRT packets without IP and UDP headers, accumulate in the
 //! [`Import::wire`] or [`Export::wire`] it was accepted with. Register a clone of it with
-//! `moq_net::stats::Session::wire` before accepting to count them in the relay's stats.
+//! `moq_net::stats::Session::wire` before accepting to count them in the relay's stats, and keep
+//! the guard it returns until the accepting future resolves: dropping it ends the registration.
 //!
 //! Beyond the listener, [`Client`] is the *dial-out* role: name a remote SRT
 //! listener and either [`Client::publish`] a MoQ broadcast to it (restream MoQ
