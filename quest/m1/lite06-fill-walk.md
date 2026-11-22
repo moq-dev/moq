@@ -76,7 +76,5 @@ Recommended, not decided:
 
 ## Related
 
-- [A lite-06 reader keeps open-GOP leading pictures across a group step](/quest/m1/lite06-group-step.md) -
-  the same unproven group step on lite-06, seen by the container consumer
 - [A relay rides out a receive blackout its subscriber's delay covers](/quest/m1/relay-blackout-old.md) -
   another path where a relay resets groups `Old`

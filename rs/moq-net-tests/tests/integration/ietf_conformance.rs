@@ -12,9 +12,11 @@ const PREFIX: &str = "moq-test-00";
 const NAMESPACE: &str = "moq-test-00/0/0/0/1/2/2/1024/100/50/1/1/1/-1/-1/0";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn routing(version: &str, cluster: bool) {

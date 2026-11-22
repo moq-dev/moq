@@ -3714,7 +3714,7 @@ impl Plan {
 	/// What `target` asks for.
 	fn new(target: &Target, version: Version) -> Self {
 		let subscription = target.subscription();
-		let start = subscription.as_ref().and_then(|s| s.start());
+		let start = subscription.as_ref().and_then(wire_start);
 		let join = subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), version);
 		Self {
 			live: !matches!(join.filter, Filter::Absolute { .. }),
@@ -4584,10 +4584,13 @@ impl SubscribeOnce {
 		}
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
-		// may still arrive after a higher one's. This resolves the pending start.
-		let _ = match plan.live {
-			true => track.start_at(largest.map_or(0, |largest| largest.group)),
-			false => track.start_at(plan.start),
+		// may still arrive after a higher one's. This resolves the pending start. The publisher
+		// placed a live join at its edge, so the groups below stay fillable for whatever each
+		// reader's budget reaches, even one from the oldest group, which names none of them.
+		let _ = match (plan.live, largest) {
+			(true, Some(largest)) => track.start_resolved(largest.group),
+			(true, None) => track.start_at(0),
+			(false, _) => track.start_at(plan.start),
 		};
 		let shared = match (this.session.max_datagram_size() > 0, &self.source) {
 			(true, Some(source)) => Shared::new(this, source, self.key.clone(), &track),
@@ -14469,12 +14472,11 @@ struct Update {
 type WireBounds = (Option<u64>, Option<u64>);
 
 /// The single wire span covering `subscription`'s ranges: mixed starts and ranges without one
-/// from group zero. A live join started
-/// at the group it `joined`: one that holds every start keeps the live join, so a reader
-/// adding a range the join already delivers widens nothing.
+/// from group zero. A live join started at the group it `joined`: one that holds every start
+/// keeps the live join, so a reader adding a range the join already delivers widens nothing.
 fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireBounds {
 	let end = subscription.end();
-	if let Some(start) = subscription.start() {
+	if let Some(start) = wire_start(subscription) {
 		return (Some(start), end);
 	}
 	let first = subscription
@@ -14483,16 +14485,26 @@ fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireB
 		.filter(|range| !range.is_empty())
 		.filter_map(|range| range.time())
 		.min();
-	// Every range without a time start joins live, so none reaches back past the join.
-	let joins = (subscription.ranges.iter())
-		.filter(|range| !range.is_empty())
-		.all(|range| range.start != track::Start::Oldest);
-	let covered = joins && joined.is_some_and(|joined| first.is_none_or(|first| first >= joined));
+	let covered = joined.is_some_and(|joined| first.is_none_or(|first| first >= joined));
 	let start = match covered {
 		true => None,
 		false => first.map(|_| 0),
 	};
 	(start, end)
+}
+
+/// The start group a SUBSCRIBE asks from before it knows the live edge, `None` for a live join.
+/// A range from the oldest group whose budget reaches back asks from group zero, so the
+/// publisher delivers the backlog it holds: a wire without ranges can't name the oldest any other
+/// way. A zero budget keeps only the latest group, which a live join already delivers.
+fn wire_start(subscription: &track::Subscription) -> Option<u64> {
+	let reaches = subscription.delay.max != Some(Duration::ZERO);
+	// Only a time start can be empty, so every Oldest range delivers something.
+	let oldest = reaches && (subscription.ranges.iter()).any(|range| range.start == track::Start::Oldest);
+	match oldest {
+		true => Some(0),
+		false => subscription.start(),
+	}
 }
 
 /// What a SUBSCRIBE asks for: the range it delivers, and the backfill covering a head that
@@ -14615,7 +14627,8 @@ mod filter_tests {
 
 	/// A live join with a range starting at or after the group it joined keeps its bounds, so
 	/// the copy sends no update widening it from group zero; a range below that group, or one
-	/// beside a range reaching back to the oldest group, widens the span to group zero.
+	/// beside a range reaching back to the oldest group under a budget that keeps it, widens the
+	/// span to group zero.
 	#[test]
 	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
 		let live = |min: Option<Duration>, start: u64| {
@@ -14636,7 +14649,51 @@ mod filter_tests {
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), joined), (None, None));
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 9), joined), (Some(0), None));
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), None), (Some(0), None));
-		assert_eq!(wire_bounds(&live(None, 19), joined), (Some(0), None));
+		// The oldest group reaches back only under a budget that keeps more than the latest.
+		let patient = track::Delay::default().with_max(None);
+		assert_eq!(
+			wire_bounds(&live(None, 19).with_delay(patient), joined),
+			(Some(0), None)
+		);
+		assert_eq!(wire_bounds(&live(None, 19), joined), (None, None));
+	}
+
+	/// A range from the oldest group whose budget reaches back asks from group zero, alone or
+	/// beside a live join, before and after the join is placed, so the publisher delivers the
+	/// backlog it holds.
+	#[test]
+	fn an_oldest_range_asks_from_group_zero() {
+		let oldest = track::Range::from(track::Start::Oldest);
+		let live = track::Range::from(track::Start::Live(Duration::ZERO));
+		let reaching = |ranges: &[track::Range], max: Option<Duration>| {
+			track::Subscription::default()
+				.with_ranges(ranges.iter().copied())
+				.with_delay(track::Delay::default().with_max(max))
+		};
+		for ranges in [vec![oldest], vec![oldest, live], vec![live, oldest]] {
+			for max in [None, Some(Duration::from_secs(10))] {
+				let subscription = reaching(&ranges, max);
+				assert_eq!(wire_start(&subscription), Some(0), "{ranges:?} {max:?}");
+				for joined in [None, Some(10)] {
+					assert_eq!(
+						wire_bounds(&subscription, joined),
+						(Some(0), None),
+						"{ranges:?} {joined:?}"
+					);
+				}
+			}
+		}
+		let bounded = [track::Range {
+			start: track::Start::Oldest,
+			end: Some(4),
+		}];
+		assert_eq!(wire_bounds(&reaching(&bounded, None), None), (Some(0), Some(5)));
+		// A zero budget keeps only the latest group, which a live join delivers, as does a live
+		// join alone.
+		for subscription in [reaching(&[oldest], Some(Duration::ZERO)), reaching(&[live], None)] {
+			assert_eq!(wire_start(&subscription), None, "{subscription:?}");
+			assert_eq!(wire_bounds(&subscription, Some(10)), (None, None), "{subscription:?}");
+		}
 	}
 
 	/// The live join is the draft's own: the subscription starts after the live edge and a
@@ -17715,6 +17772,17 @@ mod joining_fetch_tests {
 		}
 
 		async fn subscribe(version: Version, start: Option<u64>, session: ScriptedSession, control: Control) -> Self {
+			let subscription = start.map(|start| track::Subscription::default().with_start(start));
+			Self::subscribe_to(version, subscription, session, control).await
+		}
+
+		/// Serve the SUBSCRIBE a reader of `subscription` asks for, or demand alone for `None`.
+		async fn subscribe_to(
+			version: Version,
+			subscription: Option<track::Subscription>,
+			session: ScriptedSession,
+			control: Control,
+		) -> Self {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
@@ -17734,10 +17802,7 @@ mod joining_fetch_tests {
 			let mut dynamic = producer.requests();
 			let consumer = producer.consume();
 			let track = consumer.track("video").unwrap();
-			let subscription = match start {
-				None => track.subscribe(None),
-				Some(start) => track.subscribe(track::Subscription::default().with_start(start)),
-			};
+			let subscription = track.subscribe(subscription);
 			let request = dynamic.requested_track().await.expect("no track requested");
 
 			let mut serving_subscriber = subscriber.clone();
@@ -18146,6 +18211,70 @@ mod joining_fetch_tests {
 				"{version}: no head to join"
 			);
 			assert!(!run.fill_outstanding(), "{version}");
+		}
+	}
+
+	/// A reader from the oldest group joins as one from time 0 does: a filterless SUBSCRIBE,
+	/// then once the copy is current one range FETCH for the groups below Largest, so a
+	/// publisher that answers it delivers the backlog it holds rather than only the live group.
+	#[kio::test]
+	async fn an_oldest_reader_fetches_the_groups_below_largest() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 9, object: 0 });
+		for start in [track::Start::Time(0), track::Start::Oldest] {
+			let subscription = track::Subscription::default()
+				.with_ranges([track::Range::from(start)])
+				.with_delay(track::Delay::default().with_max(None));
+			let session = ScriptedSession::per_stream(vec![
+				subscribe_ok(version, largest),
+				super::stitch_tests::tail_stream(10, 0, &[b"live"]),
+				fetch_ok(version),
+			]);
+			let run = JoinRun::subscribe_to(
+				version,
+				Some(subscription.clone()),
+				session.clone(),
+				Control::new(false),
+			)
+			.await;
+			let mut reader = run._hold.1.subscribe(subscription).await.unwrap();
+
+			// A group past Largest makes the copy current, which is when its readers judge
+			// what they miss below it.
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut live = Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
+			let mut ingesting = run.subscriber.clone();
+			let ingest = ingesting.recv_group(&mut live);
+			futures::select_biased! {
+				_ = reader.recv_group().fuse() => {},
+				_ = ingest.fuse() => {},
+				_ = settle().fuse() => {},
+			}
+			settle().await;
+
+			let messages = decode_messages(&run.session.log, version);
+			let subscribe = messages
+				.iter()
+				.find(|(id, _)| *id == ietf::Subscribe::ID)
+				.expect("SUBSCRIBE");
+			let msg = crate::coding::decode_from(&mut &subscribe.1[..], version, ietf::Subscribe::decode_msg).unwrap();
+			assert_eq!(msg.filter, Filter::Unfiltered, "{start:?}");
+			let fetch = messages
+				.iter()
+				.find(|(id, _)| *id == ietf::Fetch::ID)
+				.unwrap_or_else(|| panic!("{start:?}: no FETCH for the backlog"));
+			let msg = crate::coding::decode_from(&mut &fetch.1[..], version, ietf::Fetch::decode_msg).unwrap();
+			let FetchType::Filtered { filter, .. } = msg.fetch_type else {
+				panic!("{start:?}: a standalone FETCH, got {:?}", msg.fetch_type);
+			};
+			assert_eq!(
+				filter,
+				Filter::Absolute {
+					start: ietf::Location { group: 0, object: 0 },
+					end: Some(ietf::EndLocation { group: 8, object: None }),
+				},
+				"{start:?}: every group below Largest"
+			);
 		}
 	}
 

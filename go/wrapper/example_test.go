@@ -93,7 +93,7 @@ func ExampleClient_Route() {
 	defer route.Cancel()
 	broadcast := route.Broadcast()
 
-	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: opusHead()})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func Example_mediaVideoHint() {
 	}
 	defer broadcast.Close()
 
-	media, err := moqmedia.NewVideoTrackProducer(broadcast, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatH264, Data: nil, Hint: &moqmedia.VideoHint{}})
+	media, err := moqmedia.NewVideoTrackProducer(broadcast, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.H264VideoFormat(), Data: nil, Hint: &moqmedia.VideoHint{}})
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -394,6 +394,7 @@ interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Required with stats enabled on a clustered relay, so nodes do not overwrite each other.
 depth = 1                            # One bucket track per first N path segments (per tenant).
 linger = "5m"                        # Keep an empty bucket's track listed this long. Default.
+roots = true                         # Also give each root its own stats under <root>/<prefix>. Default false.
 ```
 
 Each node publishes its traffic and session counters as MoQ tracks, split by a
@@ -407,7 +408,10 @@ node's totals count everything since its run began, so billing reads those;
 a bucket's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
-[Stats](/concept/stats) describes the paths, tracks, and encodings; read them
+With `roots`, a session also reads its own root's stats at `<prefix>/node/<node>`
+under that root with a grant on the root alone, and sees nothing of other roots;
+leave it off when a root's members should not see its traffic.
+[Stats](/concept/stats#root-broadcasts) describes the paths, tracks, and encodings; read them
 with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## Shutdown
