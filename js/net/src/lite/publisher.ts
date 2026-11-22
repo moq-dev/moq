@@ -1823,28 +1823,6 @@ export class Publisher {
 						else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
-						// A start past everything the track has (a subscriber resuming just after
-						// what it holds) is answered at once with the largest position, on
-						// versions that carry it: a quiet track may not reach that start for a
-						// while, and the subscriber judges what it holds against the answer.
-						if (emitRange && !startSent && hasLargest(this.version) && bounds.startGroup !== undefined) {
-							const startFrame = bounds.startFrame;
-							if (
-								largest !== undefined &&
-								(bounds.startGroup > largest.group ||
-									(bounds.startGroup === largest.group && startFrame > largest.frame))
-							) {
-								startSent = true;
-								startKey = bounds.startGroup;
-								if (!hasRanges(this.version)) raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(rangeStarts(bounds.startGroup), answered(largest));
-								if (
-									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
-								)
-									return false;
-								continue;
-							}
-						}
 						// A lite-07 window whose bounded ranges all resolved empty owes nothing: say so at
 						// once, and the subscription ends as covered below. No group would ever answer it.
 						if (emitRange && !startSent && hasRanges(this.version)) {
