@@ -2257,7 +2257,6 @@ export class Subscriber {
 						priority: msg.priority,
 						order: msg.order,
 						maxDelay: msg.maxDelay,
-						minDelay: msg.minDelay,
 						startGroup: msg.startGroup,
 						endGroup: inclusiveGroupEnd(groups.end),
 					});
