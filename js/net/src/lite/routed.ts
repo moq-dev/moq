@@ -307,8 +307,8 @@ export class Routed {
 		return found;
 	}
 
-	// A claim through this session: its cost past this session's link cost of 1, as Rust's
-	// default, ranked last while the peer or a node on its way drains, then by the lowest
+	// A claim through this session: its cost past a local link cost of 1, which the draft
+	// lets a receiver charge whatever the peer declared, ranked last while the peer or a node on its way drains, then by the lowest
 	// priority on its way, past this link's 0, and unavailable while no route reaches it.
 	#candidate(live: Live, claim: Claim): WireRoute {
 		return this.#session.drained(
