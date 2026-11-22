@@ -264,7 +264,7 @@ for (const job of ["release-swift-lib", "release-dart-ffi", "release-dart", "rel
 assert.deepEqual((await workflow("obs")).on.push.branches, ["release"]);
 
 // Release Dart FFI only runs on release PRs and nightly, so it packages every platform.
-const targets = JSON.parse(dart.jobs.ffi.with.targets);
+const targets = JSON.parse(dart.jobs.plan.steps[0].env.ALL);
 assert.ok(targets.some((target: string) => target.includes("-apple-")));
 assert.ok(targets.some((target: string) => target.includes("-windows-")));
 

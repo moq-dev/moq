@@ -43,8 +43,32 @@ test("shared default builds cover each consumer exactly once", async () => {
 	}
 	expect([...new Set(all)].sort()).toEqual(targets.toSorted());
 	expect(shared.on.push?.tags).toEqual(["moq-ffi-v*"]);
+});
+
+test("Dart reuses the shared libraries and builds only what they lack", async () => {
+	const shared = await read("release-shared-ffi");
 	const dart = await read("release-dart-ffi");
-	expect(dart.on.push?.tags).toEqual(["moq-ffi-v*"]);
+	expect(dart.on.push).toBeUndefined();
+	expect(dart.on.workflow_call).toBeDefined();
+	expect(shared.jobs.dart.uses).toBe("./.github/workflows/release-dart-ffi.yml");
+	expect(shared.jobs.dart.with?.["reuse-native"]).toBe(true);
+	expect(shared.jobs.dart.if).toContain("always()");
+	expect(shared.jobs.dart.if).toContain("!cancelled()");
+	// The shared run checks out as the tag, which pub.dev's trusted publishing admits.
+	expect(shared.jobs.dart.permissions).toEqual({ contents: "write", "id-token": "write" });
+	const env = dart.jobs.plan.steps?.find((step) => step.name === "Plan")?.env ?? {};
+	const reused = JSON.parse(env.SHARED) as string[];
+	const all = JSON.parse(env.ALL) as string[];
+	expect(reused.toSorted()).toEqual(JSON.parse(shared.jobs.native.with?.targets as string).toSorted());
+	for (const target of reused) expect(all).toContain(target);
+	expect(new Set(all).size).toBe(all.length);
+	// The staging step fails on a missing library, so a reused artifact cannot silently drop a platform.
+	const stage = dart.jobs.assets.steps?.find((step) => step.name === "Stage");
+	expect(stage?.env?.TARGETS).toBe("${{ needs.plan.outputs.all }}");
+	expect(stage?.run).toContain("missing native library artifact");
+	const nightly = await read("nightly");
+	expect(nightly.jobs["release-dart-ffi"].needs).toEqual(["release-shared-ffi"]);
+	expect(nightly.jobs["release-dart-ffi"].with?.["reuse-native"]).toBe(true);
 });
 
 test("wrapper gates preserve trusted tag inputs and inspect only their publisher", async () => {
