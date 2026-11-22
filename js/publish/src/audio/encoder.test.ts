@@ -1499,19 +1499,19 @@ test("default audio replays the last second after three seconds without a subscr
 
 // Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old: a
 // live viewer rejoining after seconds idle would otherwise wade through all of them first. A live
-// join states how far back it plays as its min delay, which bounds the replay however far its max
-// delay reaches; one that states none (moq-transport, moq-lite before 07) is bounded by its max
+// join states how far back it plays as its lag, which bounds the replay however far its max delay
+// reaches; a reader from the oldest group (moq-transport, moq-lite before 07) is bounded by its max
 // alone, as is a reader asking for history.
-const LIVE = [{}];
+const live = (ms: number) => [{ start: { live: Duration.millis(ms) } }];
 for (const [name, subscription] of [
-	["a live join's min delay", { delay: { min: Duration.millis(130), max: Duration.millis(10_000) }, ranges: LIVE }],
-	["an oldest reader's max delay, stating no min", { delay: { min: null, max: Duration.millis(130) }, ranges: LIVE }],
+	["a live join's lag", { delay: { max: Duration.millis(10_000) }, ranges: live(130) }],
+	["an oldest reader's max delay", { delay: { max: Duration.millis(130) }, ranges: [{}] }],
 	[
-		"a live join's max delay when that is shorter than its min",
-		{ delay: { min: Duration.millis(10_000), max: Duration.millis(130) }, ranges: LIVE },
+		"a live join's max delay when that is shorter than its lag",
+		{ delay: { max: Duration.millis(130) }, ranges: live(10_000) },
 	],
 	["a history reader's max delay", { delay: { max: Duration.millis(130) } }],
-] as const) {
+] as [string, Moq.Track.Subscription][]) {
 	test(`demand replays only the retained audio ${name} still wants`, async () => {
 		using _webcodecs = installFakeWebCodecs();
 		const clock = new Manual();

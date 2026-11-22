@@ -493,6 +493,10 @@ struct Side {
 	probe: moq_net::transport::Probe,
 	/// What [`poll::Session::receive_window`] reports instead of the memory transport's, if set.
 	receive_window: Mutex<Option<Option<moq_net::transport::ReceiveWindow>>>,
+	/// Whether this side's own close goes unconfirmed; see [`MockSession::withhold_close_confirmation`].
+	withhold_close: AtomicBool,
+	/// Whether this side closed the transport.
+	closed_here: AtomicBool,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -659,10 +663,14 @@ impl poll::Session for MockSession {
 	}
 
 	fn close(&self, code: u32, reason: &str) {
+		self.side.closed_here.store(true, Ordering::Relaxed);
 		self.inner.close(code, reason);
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		if self.side.withhold_close.load(Ordering::Relaxed) && self.side.closed_here.load(Ordering::Relaxed) {
+			return Poll::Pending;
+		}
 		self.inner.poll_closed(waiter)
 	}
 
@@ -754,6 +762,12 @@ impl MockSession {
 	/// read requests.
 	pub fn panic_on_stats(&self) {
 		self.side.panic_on_stats.store(true, Ordering::Relaxed);
+	}
+
+	/// Never confirm a close this side makes, as a WebTransport close waits for a peer
+	/// that is gone to acknowledge its capsule.
+	pub fn withhold_close_confirmation(&self) {
+		self.side.withhold_close.store(true, Ordering::Relaxed);
 	}
 
 	/// Drop the FIN of the bidi streams this side opens, keeping them open.
@@ -994,6 +1008,8 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			wire: Default::default(),
 			probing: Default::default(),
 			probe: Default::default(),
+			withhold_close: Default::default(),
+			closed_here: Default::default(),
 		}),
 	};
 

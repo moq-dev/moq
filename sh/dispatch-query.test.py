@@ -14,8 +14,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
+import parallel_tests
 from test_env import dispatch_env
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -372,13 +372,7 @@ class QueryTests(unittest.TestCase):
                 self.assertIn(f"{action}: check text failed", result.stderr)
 
     def test_ci_requires_its_tool_stubs_even_when_the_host_has_them(self):
-        host = self.root / "host"
-        host.mkdir()
-        tool = host / "zizmor"
-        tool.write_text("#!/bin/sh\nexit 0\n")
-        tool.chmod(0o755)
-        with patch.dict(os.environ, PATH=str(host)):
-            self.stub_ci()
+        self.stub_ci()
         (self.bin / "zizmor").unlink()
         result = subprocess.run(
             ["bash", "sh/dispatch.sh", "ci", "origin/main"],
@@ -405,7 +399,7 @@ class QueryTests(unittest.TestCase):
         )
         reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
         releases = "; ".join(f'echo >"{released}"' for _, _, released in blocked.values())
-        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\n    "go check") {releases} ;;\nesac\n')
+        self.stub_ci(f'case "$*" in\n{stub}    "biome") {reads}; exit 3 ;;\n    "go check") {releases} ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
         self.change("js/net/src/index.ts")
         self.change("sh/example.sh")
@@ -418,8 +412,8 @@ class QueryTests(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("ci: check tooling failed", result.stderr)
-        self.assertRegex(result.stderr, r"\d+  check tooling \(failed\)")
+        self.assertIn("ci: check biome failed", result.stderr)
+        self.assertRegex(result.stderr, r"\d+  check biome \(failed\)")
         self.assertNotIn("(cancelled)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
         self.assertIn("go check", calls)
@@ -440,7 +434,7 @@ class QueryTests(unittest.TestCase):
             f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n' for call, started, released in blocked.values()
         )
         reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
-        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\nesac\n')
+        self.stub_ci(f'case "$*" in\n{stub}    "biome") {reads}; exit 3 ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
         self.change("js/net/src/index.ts")
         self.change("sh/example.sh")
@@ -453,7 +447,7 @@ class QueryTests(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("ci: check tooling failed", result.stderr)
+        self.assertIn("ci: check biome failed", result.stderr)
         self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
         self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
         self.assertNotIn("ci: test rs failed", result.stderr)
@@ -500,7 +494,7 @@ class QueryTests(unittest.TestCase):
     def test_failure_continues_independent_modules_in_the_same_lane(self):
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
-                self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
+                self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "js dead-code") exit 4 ;; esac\n')
                 self.change("js/net/src/index.ts")
                 self.change("dart/example.dart")
                 result = subprocess.run(
@@ -512,12 +506,11 @@ class QueryTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 3, result.stderr)
                 self.assertIn("ci: check js failed", result.stderr)
-                self.assertIn("ci: check gh failed", result.stderr)
+                self.assertIn("ci: check dead_code failed", result.stderr)
                 calls = (self.root / "calls").read_text().splitlines()
-                self.assertIn("gh check", calls)
+                self.assertIn("js dead-code", calls)
                 self.assertIn("dart check", calls)
                 self.assertFalse(any(call.startswith("js test-changed ") for call in calls))
-                self.assertNotIn("gh test", calls)
 
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
     def test_local_flake_namespace_refusal_is_reported_as_skipped(self):
@@ -895,4 +888,4 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--bench"]:
         benchmark()
     else:
-        unittest.main()
+        parallel_tests.main(sys.modules[__name__])

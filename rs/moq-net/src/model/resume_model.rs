@@ -1812,10 +1812,9 @@ fn regressions() {
 			],
 			finish: false,
 		},
-		// The JS model runs these ops on a local route, whose ordered read passes key 0 once group 1
-		// lands past its range. On this received route the read waits for key 0 instead, and the
-		// oracle accepts either: `an_ordered_read_of_a_received_copy_waits_below_a_later_group` in
-		// `track.rs` pins the wait.
+		// An ordered read of a received route waits for key 0 below group 1, which landed past its
+		// range, rather than passing it: `an_ordered_read_of_a_received_copy_waits_below_a_later_group`
+		// in `track.rs` pins the wait.
 		Case {
 			ops: vec![
 				Op::Join {
