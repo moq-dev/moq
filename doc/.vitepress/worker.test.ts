@@ -17,6 +17,9 @@ const env = {
 			const { pathname } = new URL(request.url);
 			// The assets binding serves /foo from foo.html and /foo/ from foo/index.html.
 			const html = pathname.endsWith("/") ? `${pathname}index.html` : `${pathname}.html`;
+			if (request.headers.get("If-None-Match") === `"${pathname}"` && files.has(pathname)) {
+				return new Response(null, { status: 304 });
+			}
 			const body = files.get(pathname) ?? files.get(html);
 			return body === undefined ? new Response("missing", { status: 404 }) : new Response(body);
 		},
@@ -69,6 +72,17 @@ test("a page without a Markdown copy, or a static file, falls through", async ()
 	expect((await get("/logo.svg", "text/markdown")).text).toBe("<svg/>");
 	expect((await get("/", "text/markdown")).text).toBe("<h1>Home</h1>");
 	expect((await get("/nope", "text/markdown")).response.status).toBe(404);
+});
+
+test("a conditional request revalidates the Markdown it holds, not the HTML", async () => {
+	const response = await worker.fetch(
+		new Request("https://doc.moq.dev/setup/install", {
+			headers: { Accept: "text/markdown", "If-None-Match": '"/setup/install.md"' },
+		}),
+		env,
+	);
+	expect(response.status).toBe(304);
+	expect(response.headers.get("Vary")).toBe("Accept");
 });
 
 test("a moved page redirects whatever the Accept", async () => {

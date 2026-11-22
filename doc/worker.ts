@@ -114,7 +114,8 @@ async function serve(request: Request, env: Env): Promise<Response> {
 		if (path) {
 			url.pathname = path;
 			const response = await env.ASSETS.fetch(new Request(url, request));
-			if (response.ok) return response;
+			// Only a missing twin falls through: a 304 revalidates the Markdown the client holds.
+			if (response.status !== 404) return response;
 		}
 	}
 	return env.ASSETS.fetch(request);
