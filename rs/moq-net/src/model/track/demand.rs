@@ -1,7 +1,10 @@
 //! Incremental demand, separate from the track's cached content.
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 	task::Poll,
 	time::Duration,
 };
@@ -10,6 +13,23 @@ use super::{Delay, JoinAsk, Order, Position, Range, Start, Subscription, TrackSt
 
 mod ranges;
 use ranges::Ranges;
+
+/// How many answers to a received copy's live joins were recorded, on any track: a live join
+/// range a reader adds notes it, and takes only an answer recorded since (see
+/// [`Prefs::since`]). Counted process-wide, so a front's reader and the copies it reads
+/// compare their ticks.
+static JOIN_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// How many join answers were recorded: see [`answered`].
+pub(in crate::model) fn join_tick() -> u64 {
+	JOIN_TICK.load(Ordering::SeqCst)
+}
+
+/// Note an answer to a live join recorded, returning its tick: greater than that of every
+/// range added before.
+pub(super) fn answered() -> u64 {
+	JOIN_TICK.fetch_add(1, Ordering::SeqCst) + 1
+}
 
 #[derive(Default)]
 pub(super) struct Subscriptions {
@@ -31,9 +51,6 @@ pub(super) struct Subscriptions {
 	/// The live joins a received copy's readers wait on, by lag and end: see
 	/// [`Subscription::joins`].
 	joins: BTreeMap<(Duration, Option<u64>), Waiting>,
-	/// How many answers to a received copy's live joins were recorded: a live join range a
-	/// reader adds notes it, and takes only an answer recorded since (see [`Prefs::since`]).
-	join_tick: u64,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -109,18 +126,6 @@ impl Subscriptions {
 				})
 			})
 			.collect()
-	}
-
-	/// How many join answers were recorded: see [`Self::answered`].
-	pub(super) fn join_tick(&self) -> u64 {
-		self.join_tick
-	}
-
-	/// Note an answer to a live join recorded, returning its tick: greater than that of every
-	/// range added before.
-	pub(super) fn answered(&mut self) -> u64 {
-		self.join_tick += 1;
-		self.join_tick
 	}
 
 	/// Count a reader waiting on `join`, or uncount one when not `waits`, waking the
@@ -678,8 +683,7 @@ impl Preferences {
 	pub(super) fn register(state: kio::Ref<'_, TrackState>, value: Subscription) -> Self {
 		let subscriptions = (!state.is_closed()).then(|| state.subscriptions.clone());
 		drop(state);
-		let tick = subscriptions.as_ref().map_or(0, |subs| subs.lock().join_tick());
-		let value = Prefs::new(value, tick);
+		let value = Prefs::new(value, join_tick());
 		if let Some(subs) = &subscriptions {
 			let ranges: Vec<Range> = value.ranges.values().copied().collect();
 			let mut wakes = subs.lock().replace(None, Some(value.contribution()), (&[], &ranges));
@@ -709,13 +713,11 @@ impl Preferences {
 		}
 		// Found before taking the lock every subscriber shares.
 		let (gone, came) = moved(&old, &next.ranges);
-		let mut tick = 0;
 		let mut wakes = self.0.subscriptions.as_ref().map(|subs| {
-			let mut subs = subs.lock();
-			tick = subs.join_tick();
-			subs.replace(Some(contribution), Some(next_contribution), (&gone, &came))
+			subs.lock()
+				.replace(Some(contribution), Some(next_contribution), (&gone, &came))
 		});
-		value.replace(next, tick);
+		value.replace(next, join_tick());
 		drop(value);
 		if let Some(wakes) = &mut wakes {
 			wakes.wake();
@@ -737,7 +739,7 @@ impl Preferences {
 		if contribution == scalars && edit.retire.is_empty() && edit.add.is_empty() {
 			return Ok(());
 		}
-		let tick = (self.0.subscriptions.as_ref()).map_or(0, |subs| subs.lock().join_tick());
+		let tick = join_tick();
 		let mut gone = Vec::new();
 		let mut came = Vec::new();
 		let mut touched = Vec::with_capacity(edit.retire.len() + edit.add.len());
@@ -779,6 +781,19 @@ impl Preferences {
 	pub(in crate::model) fn rekey(&self, keys: impl IntoIterator<Item = u64>) -> crate::Result<()> {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
 		value.rekey(keys);
+		Ok(())
+	}
+
+	/// Note each live join range keyed in `since` as added at its tick instead, such as the
+	/// one a front's reader added it at, which the copy it reads asked for: an answer recorded
+	/// since then places it. Other ranges are left as they are.
+	pub(in crate::model) fn stamp(&self, since: impl IntoIterator<Item = (u64, u64)>) -> crate::Result<()> {
+		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
+		for (key, tick) in since {
+			if let Some(stamped) = value.since.get_mut(&key) {
+				*stamped = tick;
+			}
+		}
 		Ok(())
 	}
 

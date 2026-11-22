@@ -563,7 +563,7 @@ impl Consumer {
 			// Only the ranges: the first sync mirrors the scalars, before it asks any copy.
 			let mut mirrored = Mirrored::default();
 			for (key, range) in prefs.ranges() {
-				mirrored.insert(key, range);
+				mirrored.insert(key, range, prefs.since(key));
 			}
 			(mirrored, prefs.revision, prefs.delay)
 		};
@@ -780,6 +780,9 @@ impl Copy {
 		if !reader.ranges.keys().copied().eq(0..reader.ranges.len() as u64) {
 			let _ = pending.preferences().rekey(reader.ranges.keys().copied());
 		}
+		// Each live join as the reader added it, so an answer the copy recorded since places
+		// it, even one recorded before this subscription.
+		let _ = pending.preferences().stamp(reader.since.iter().map(|(key, since)| (*key, *since)));
 		Sub::Pending(Box::new(pending))
 	}
 
@@ -856,6 +859,7 @@ impl Copy {
 		if !keyed {
 			let _ = self.preferences().rekey(reader.ranges.keys().copied());
 		}
+		self.stamp(reader);
 	}
 
 	/// Take nothing past group `until` from this replaced copy, and ask for nothing past it on
@@ -924,6 +928,13 @@ impl Copy {
 			Sub::Pending(pending) => pending.preferences().edit(edit),
 			Sub::Ready(sub) => sub.edit(edit),
 		};
+		self.stamp(reader);
+	}
+
+	/// Note each live join the copy is asked for as the reader added it: see
+	/// [`track::Preferences::stamp`].
+	fn stamp(&self, reader: &Mirrored) {
+		let _ = self.preferences().stamp(reader.since.iter().map(|(key, since)| (*key, *since)));
 	}
 
 	/// The subscription, once the copy answered. `Err` once it refused.
@@ -1611,15 +1622,23 @@ struct Mirrored {
 	order: track::Order,
 	feed: bool,
 	ranges: BTreeMap<u64, track::Range>,
+	/// The join tick each live join range was added at in the reader's own preferences, which
+	/// each copy asked for it places it from: an answer the copy recorded since then.
+	since: BTreeMap<u64, u64>,
 }
 
 impl Mirrored {
-	fn insert(&mut self, key: u64, range: track::Range) {
+	fn insert(&mut self, key: u64, range: track::Range, since: u64) {
 		self.ranges.insert(key, range);
+		match range.start {
+			track::Start::Live(_) => _ = self.since.insert(key, since),
+			track::Start::Oldest | track::Start::Time(_) => _ = self.since.remove(&key),
+		}
 	}
 
 	fn remove(&mut self, key: u64) {
 		self.ranges.remove(&key);
+		self.since.remove(&key);
 	}
 
 	fn budget(&self) -> Duration {
@@ -1669,7 +1688,7 @@ impl Mirrored {
 			..Default::default()
 		};
 		for (key, range) in (0..).zip(&subscription.ranges) {
-			mirrored.insert(key, *range);
+			mirrored.insert(key, *range, 0);
 		}
 		mirrored
 	}
@@ -1953,8 +1972,14 @@ impl Reader {
 				// The keys the changes since touched, each with its range now, or every range
 				// once the log no longer reaches back that far.
 				let ranges = match sub.changes(revision) {
-					Some(keys) => Ok(keys.into_iter().map(|key| (key, sub.range(key))).collect::<Vec<_>>()),
-					None => Err(sub.ranges().collect::<BTreeMap<_, _>>()),
+					Some(keys) => Ok(keys
+						.into_iter()
+						.map(|key| (key, sub.range(key).map(|range| (range, sub.since(key)))))
+						.collect::<Vec<_>>()),
+					None => Err(sub
+						.ranges()
+						.map(|(key, range)| (key, (range, sub.since(key))))
+						.collect::<BTreeMap<_, _>>()),
 				};
 				changed = Some((scalars, Some(ranges), sub.revision));
 			} else if moved {
@@ -1973,13 +1998,13 @@ impl Reader {
 				Some(Ok(edited)) => {
 					for (key, range) in &edited {
 						match range {
-							Some(range) => self.mirrored.insert(*key, *range),
+							Some((range, since)) => self.mirrored.insert(*key, *range, *since),
 							None => self.mirrored.remove(*key),
 						}
 					}
 					let added: Vec<(u64, track::Range)> = edited
 						.iter()
-						.filter_map(|(key, range)| Some((*key, (*range)?)))
+						.filter_map(|(key, range)| Some((*key, (*range)?.0)))
 						.collect();
 					self.window
 						.edit(edited.iter().map(|(key, _)| *key), &added, None, &Unheld);
@@ -2006,14 +2031,17 @@ impl Reader {
 					}
 					Change::Edit(edited.into_iter().map(|(key, _)| key).collect())
 				}
-				Some(Err(ranges)) if ranges == self.mirrored.ranges => Change::Scalars,
+				Some(Err(ranges)) if ranges.iter().map(|(key, (range, _))| (key, range)).eq(&self.mirrored.ranges) => {
+					Change::Scalars
+				}
 				Some(Err(ranges)) => {
 					let mut mirrored = Mirrored {
 						ranges: BTreeMap::new(),
+						since: BTreeMap::new(),
 						..std::mem::take(&mut self.mirrored)
 					};
-					for (key, range) in ranges {
-						mirrored.insert(key, range);
+					for (key, (range, since)) in ranges {
+						mirrored.insert(key, range, since);
 					}
 					self.mirrored = mirrored;
 					self.window = keyed(

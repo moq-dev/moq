@@ -615,8 +615,8 @@ struct JoinAnswer {
 	/// The narrowest budget the range was asked under before its answer: a start the budget
 	/// moved past older groups holds only for a reader within it.
 	budget: Duration,
-	/// When it was recorded, by [`TrackState::join_tick`]: a reader that began waiting later
-	/// takes only a newer answer, since the live edge moved on.
+	/// When it was recorded, by the join tick (see [`demand::Prefs::since`]): a reader that
+	/// began waiting later takes only a newer answer, since the live edge moved on.
 	tick: u64,
 }
 
@@ -5248,10 +5248,9 @@ impl Producer {
 	/// Returns the tick it was recorded at.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn answer_join(&self, min: Duration, end: Option<u64>, start: Option<u64>, budget: Duration) -> u64 {
-		// Ticked first, apart from the track's lock, so the two never nest: a range added once
-		// the tick moved takes no answer recorded at it, and asks again.
-		let subscriptions = self.state.read().subscriptions.clone();
-		let tick = subscriptions.lock().answered();
+		// Ticked first: a range added once the tick moved takes no answer recorded at it, and
+		// asks again.
+		let tick = demand::answered();
 		let Ok(mut state) = self.modify() else {
 			return tick;
 		};
@@ -11911,9 +11910,7 @@ impl Subscriber {
 	pub(super) fn resolve_ranges(&self, subscription: &Subscription) -> Vec<Option<Resolved>> {
 		match &self.inner {
 			Inner::Plain(cursor) => {
-				// Read apart from the track's lock, so the two never nest.
-				let subscriptions = cursor.state.read().subscriptions.clone();
-				let tick = subscriptions.lock().join_tick();
+				let tick = demand::join_tick();
 				let state = cursor.state.read();
 				let delay = placing(subscription.delay, state.demand_bound());
 				let ranges = (0..).zip(subscription.ranges.iter().copied());
