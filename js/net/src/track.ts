@@ -4125,7 +4125,7 @@ export class Subscriber {
 				answer?.kind === "group" && answer.group < lookup.time && producer
 					? openAt(producer, answer.group)
 					: undefined;
-			if (lookup.ending) continue;
+			if (lookup.ending !== undefined) continue;
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			lookup.lookup?.leave();
 			// Where the time falls is unknown, so the reads fail rather than guess from the cache. The
