@@ -674,7 +674,8 @@ class Reader implements ResumeSource {
 
 	/**
 	 * Take nothing past group `until` from replaced `copy`, and ask for nothing past it on the wire:
-	 * the copy replacing it starts there. A cap only narrows. Mirrors the Rust `Copy::cap`.
+	 * the copy replacing it starts there. A cap only narrows. Mirrors the Rust `Copy::cap`, by group
+	 * only: a JS switch resumes no group partway, so it has no frame to stop the old copy at.
 	 */
 	#cap(copy: Copy, until: bigint): void {
 		if (copy.until === null || (copy.until !== undefined && copy.until <= until)) return;

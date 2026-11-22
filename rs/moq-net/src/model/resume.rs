@@ -10,8 +10,9 @@
 //! holds, never below the newest handed out. Each reader subscribes to the new copy from the
 //! boundary, past the frames of it a copy holds from its first, which that copy adopts once
 //! the rest lands so a later reader finds the group whole. Each copy it replaces is capped at
-//! the boundary on the wire at once, so it finishes the groups up to it and sends nothing
-//! newer. A replaced copy is kept while it may still deliver a group under its cap the
+//! the boundary on the wire at once, stopping the boundary group at that same frame, so it
+//! finishes the groups up to it and sends nothing newer. A replaced copy is kept while it
+//! may still deliver a group under its cap the
 //! reader lacks (unread, or still landing within the grace a passed group is waited for),
 //! and while a group still read is read from it or may continue from it (it holds that
 //! group, or may yet get it). Nothing under the cap is waited for past the reader's budget,
