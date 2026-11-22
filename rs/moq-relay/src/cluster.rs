@@ -4582,6 +4582,119 @@ mod tests {
 		watch.abort();
 	}
 
+	/// What the peer's decider saw for one credential: whether it was presented in
+	/// band on a live session, and the token, from SETUP or the dialed `?jwt=`.
+	#[cfg(feature = "test-support")]
+	#[derive(Clone, Debug, PartialEq, Eq)]
+	struct Presented {
+		attached: bool,
+		token: String,
+	}
+
+	/// Dial a relay at `b` over `version` with a peer token, rotate it, and report
+	/// every credential `b`'s decider saw, how many sessions `b` accepted, and whether
+	/// the first session's lease ended, all on the simulator's clock.
+	#[cfg(feature = "test-support")]
+	async fn rotate_over(version: &'static str) -> (Vec<Presented>, usize, bool) {
+		use std::time::Duration;
+
+		let spawn = |options: Options| {
+			let (cluster, driver) = Cluster::new(options).expect("cluster");
+			drop(kio::clock::sim::spawn(async move { driver.run().await.expect("driver") }));
+			cluster
+		};
+		let net = crate::sim::Net::new();
+		let b = spawn(net.options("b", &[]));
+		let (auth, mut admissions) = crate::auth::Auth::embedded("b");
+		let seen = Arc::new(Mutex::new(Vec::new()));
+		let leases = Arc::new(Mutex::new(Vec::new()));
+		drop(kio::clock::sim::spawn({
+			let (seen, leases) = (seen.clone(), leases.clone());
+			async move {
+				while let Some(admission) = admissions.next().await {
+					let request = &admission.request;
+					let token = match &request.token {
+						Some(token) => String::from_utf8(token.value.clone()).unwrap(),
+						None => url::form_urlencoded::parse(request.query.as_deref().unwrap_or_default().as_bytes())
+							.find(|(key, _)| key == "jwt")
+							.map(|(_, value)| value.into_owned())
+							.unwrap_or_default(),
+					};
+					seen.lock().unwrap().push(Presented {
+						attached: admission.attached(),
+						token,
+					});
+					let all = moq_net::Prefixes::all();
+					let mut grant = moq_auth::Grant::new(all.clone(), all);
+					grant.link = Some(moq_auth::Link::Peer);
+					let (producer, consumer) = moq_auth::lease::Producer::new(grant);
+					leases.lock().unwrap().push(producer);
+					admission.grant(consumer);
+				}
+			}
+		}));
+		let _accepted = net.relay("b", &b, &auth, &crate::shutdown::Observer::disabled());
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.version = vec![version.parse().unwrap()];
+		let a = spawn(net.options("a", &[])).with_connect(connect, Default::default());
+		let target = DialTarget::parse(&net.url("b")).unwrap();
+		let own = tokio::sync::watch::Sender::new(Some("old".to_string()));
+		let credential = Credential::new(&target, own.subscribe(), &no_token());
+		let dial = a.nodes.dial(&target.key);
+		drop(kio::clock::sim::spawn(a.clone().supervise_remote(credential, target, dial)));
+
+		kio::clock::sleep(Duration::from_secs(5)).await;
+		own.send_replace(Some("new".to_string()));
+		kio::clock::sleep(Duration::from_secs(60)).await;
+
+		let first = leases.lock().unwrap().remove(0);
+		let ended = first.closed().now_or_never().is_some();
+		let seen = seen.lock().unwrap().clone();
+		(seen, net.accepted("b"), ended)
+	}
+
+	/// lite-07 renews a rotated peer token in band: one session, which the peer
+	/// asks its decider about the new token on, and which lives on.
+	#[cfg(feature = "test-support")]
+	#[test]
+	fn a_rotated_peer_token_renews_in_band_on_lite_07() {
+		let (seen, accepted, ended) = run_sim(|| rotate_over("moq-lite-07-wip"));
+		let presented = |attached, token: &str| Presented {
+			attached,
+			token: token.to_string(),
+		};
+		assert_eq!(seen, [presented(false, "old"), presented(true, "new")]);
+		assert_eq!(accepted, 1, "renewed without a redial");
+		assert!(!ended, "the session lives on");
+	}
+
+	/// A session that carries no token in band is replaced by one presenting the new
+	/// token, which connects before the old one drains.
+	#[cfg(feature = "test-support")]
+	#[test]
+	fn a_rotated_peer_token_replaces_a_lite_06_session() {
+		let (seen, accepted, ended) = run_sim(|| rotate_over("moq-lite-06"));
+		let presented = |attached, token: &str| Presented {
+			attached,
+			token: token.to_string(),
+		};
+		assert_eq!(seen, [presented(false, "old"), presented(false, "new")]);
+		assert_eq!(accepted, 2, "one replacement session");
+		assert!(ended, "the old session drained");
+	}
+
+	/// Run `test` on the simulator, on a thread with room for the relay's large futures.
+	#[cfg(feature = "test-support")]
+	fn run_sim<T: Send + 'static, F: std::future::Future<Output = T> + 'static>(test: fn() -> F) -> T {
+		std::thread::Builder::new()
+			.stack_size(32 * 1024 * 1024)
+			.spawn(move || kio::clock::sim::run(test()))
+			.expect("spawn test thread")
+			.join()
+			.expect("test thread panicked")
+	}
+
 	/// A fragment is never sent, so a list naming one peer with and without one
 	/// dedupes instead of conflicting.
 	#[test]
