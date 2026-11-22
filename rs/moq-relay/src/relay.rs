@@ -365,7 +365,6 @@ impl Relay {
 			.with_shutdown(shutdown.clone())
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health())
-			.with_listeners(peers.iter().flat_map(moq_tokio::Listener::accept_health))
 			.bind()?;
 		let internal = internal.with_demux(demux.as_ref().map(|demux| demux.counters().clone()));
 		// Bound but not yet serving: registering here (rather than after the

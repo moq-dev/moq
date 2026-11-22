@@ -347,8 +347,10 @@ capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
 The cluster port is QUIC only and refuses any client without a certificate at
 the handshake, so the public `listen` can ask for none: some browsers abort a
 connection whose server asks, even optionally. Peers name the port in the URL
-they dial, such as `https://relay.example.com:4443`. `listen.tls.root` instead
-makes the certificate optional on the public port.
+they dial, such as `https://relay.example.com:4443`, and each relay's
+`cluster.node` names its own cluster port too, so a shared peer list still
+skips itself. `listen.tls.root` instead makes the certificate optional on the
+public port.
 
 The NixOS module (`services.moq-relay` in this repository's flake) wires the
 same setup: `cluster.ca` and `auth.enable` on the relay peers dial into, and
