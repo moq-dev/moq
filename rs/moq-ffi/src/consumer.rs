@@ -535,7 +535,7 @@ impl TrackInner {
 pub struct MoqTrackConsumer {
 	/// Reads poll in place without holding a lock across a wait.
 	reads: Polled<TrackInner>,
-	control: moq_net::track::Control,
+	pub(crate) control: moq_net::track::Control,
 	info: moq_net::track::Info,
 	/// The owner whose panic ends this track's reads, handed to every group and reader taken from it.
 	driver: Background,
@@ -634,11 +634,15 @@ impl MoqTrackConsumer {
 
 	/// Change this subscriber's delivery preferences.
 	///
+	/// A range with no start that the subscription already asks, with the same end, keeps the
+	/// live join it was subscribed with: a changed `delay.min` joins only the ranges it adds.
+	///
 	/// Silently ignored if the track already ended; the update is meaningless at
 	/// that point. Errors on a range time the track can't serve, leaving the
 	/// preferences as they were.
 	pub fn update(&self, subscription: MoqSubscription) -> Result<(), MoqError> {
-		let subscription: moq_net::track::Subscription = subscription.try_into()?;
+		let (subscription, delay) = subscription.resolve()?;
+		let subscription = delay.update(&self.control.subscription(), subscription);
 		match self.control.update(subscription) {
 			Ok(()) | Err(moq_net::Error::Closed) => {}
 			Err(err) => return Err(err.into()),

@@ -212,10 +212,14 @@ struct RawTaskEntry {
 	alive: kio::Producer<()>,
 }
 
+/// A raw reader's preferences as the caller states them, `None` for the defaults.
+type RawSubscription = Option<(moq_net::track::Subscription, moq_mux::container::Delay)>;
+
 /// Where a raw track's subscription updates go.
 enum RawControl {
-	/// Waiting on SUBSCRIBE_OK, holding the latest update to apply once it arrives.
-	Pending(Option<moq_net::track::Subscription>),
+	/// Waiting on SUBSCRIBE_OK, holding the latest update to apply once it arrives, as the
+	/// caller stated it: it keeps the joins the subscription resolved with.
+	Pending(Option<RawSubscription>),
 	/// Subscribed: updates apply at once, so a refusal reaches the caller.
 	Live(moq_net::track::Control),
 }
@@ -810,7 +814,7 @@ impl Consume {
 		&mut self,
 		broadcast: Id,
 		name: &str,
-		subscription: Option<(moq_net::track::Subscription, moq_mux::container::Delay)>,
+		subscription: RawSubscription,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
@@ -833,8 +837,9 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				// Subscribed with the raw preferences from the start: an update that only
-				// states the minimum delay doesn't place a range that already resolved.
+				// Subscribed with the raw preferences from the start: an update that changes the
+				// minimum delay doesn't place a range that already resolved (see
+				// `raw_update`).
 				let subscribe = Self::subscribe(&broadcast, &name, Self::raw_subscription(subscription));
 				let Some(track) = Self::until_closed(&mut close, subscribe).await? else {
 					return Ok(());
@@ -845,7 +850,7 @@ impl Consume {
 				if let Some(entry) = State::lock().consume.raw_task.get_mut(id) {
 					let pending = std::mem::replace(&mut entry.control, RawControl::Live(control.clone()));
 					if let RawControl::Pending(Some(subscription)) = pending {
-						Self::update_raw(&control, subscription)?;
+						Self::update_raw(&control, Self::raw_update(&control, subscription))?;
 					}
 				}
 				Self::run_raw(on_frame, track, close).await
@@ -867,11 +872,24 @@ impl Consume {
 	/// at the stated minimum delay, or the latest group without one. Only a range with no
 	/// start reads the minimum, so stating it changes nothing else.
 	fn raw_subscription(
-		subscription: Option<(moq_net::track::Subscription, moq_mux::container::Delay)>,
+		subscription: RawSubscription,
 	) -> moq_net::track::Subscription {
-		let (subscription, delay) = subscription.unwrap_or_default();
-		let delay = delay.with_min(delay.min.unwrap_or_default());
+		let (subscription, delay) = Self::raw_delay(subscription);
 		delay.subscription(subscription)
+	}
+
+	/// A raw reader's preferences as an update to what `control` subscribed: each range with no
+	/// start keeps the live join it was subscribed with, so a changed minimum delay joins only
+	/// the ranges the update adds, as a media reader's `set_delay` does.
+	fn raw_update(control: &moq_net::track::Control, subscription: RawSubscription) -> moq_net::track::Subscription {
+		let (subscription, delay) = Self::raw_delay(subscription);
+		delay.update(&control.subscription(), subscription)
+	}
+
+	/// The caller's preferences, joining live at the latest group without a stated minimum.
+	fn raw_delay(subscription: RawSubscription) -> (moq_net::track::Subscription, moq_mux::container::Delay) {
+		let (subscription, delay) = subscription.unwrap_or_default();
+		(subscription, delay.with_min(delay.min.unwrap_or_default()))
 	}
 
 	fn update_raw(control: &moq_net::track::Control, subscription: moq_net::track::Subscription) -> Result<(), Error> {
@@ -956,13 +974,12 @@ impl Consume {
 	pub fn raw_track_update(
 		&mut self,
 		track: Id,
-		subscription: Option<(moq_net::track::Subscription, moq_mux::container::Delay)>,
+		subscription: RawSubscription,
 	) -> Result<(), Error> {
 		let entry = self.raw_task.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let subscription = Self::raw_subscription(subscription);
 		match &mut entry.control {
 			RawControl::Pending(pending) => *pending = Some(subscription),
-			RawControl::Live(control) => Self::update_raw(control, subscription)?,
+			RawControl::Live(control) => Self::update_raw(control, Self::raw_update(control, subscription))?,
 		}
 		Ok(())
 	}

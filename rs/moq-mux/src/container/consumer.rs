@@ -360,6 +360,36 @@ impl Delay {
 			.with_delay(moq_net::track::Delay::default().with_max(self.max))
 			.with_ranges(ranges)
 	}
+
+	/// [`Self::subscription`] as an update to `current`, the subscription it replaces: a range
+	/// starting at the oldest group that `current` already asks with the same end keeps the
+	/// start it was subscribed with, so changing [`Self::min`] places only the ranges it adds.
+	/// A live join that already resolved stays where it started, as
+	/// [`Consumer::set_delay`] leaves it.
+	pub fn update(
+		&self,
+		current: &moq_net::track::Subscription,
+		subscription: moq_net::track::Subscription,
+	) -> moq_net::track::Subscription {
+		use moq_net::track::Start;
+		let starts: Vec<_> = subscription.ranges.iter().map(|range| (range.start, range.end)).collect();
+		let mut updated = self.subscription(subscription);
+		for (range, (start, end)) in updated.ranges.iter_mut().zip(starts) {
+			if start != Start::Oldest {
+				continue;
+			}
+			// For a caller whose own ranges start at the oldest group or a time, as the bindings'
+			// do, a live or oldest start in `current` is one a delay placed.
+			let held = current
+				.ranges
+				.iter()
+				.find(|held| held.end == end && matches!(held.start, Start::Oldest | Start::Live(_)));
+			if let Some(held) = held {
+				range.start = held.start;
+			}
+		}
+		updated
+	}
 }
 
 /// The playout delay `subscription` states: the furthest back any of its ranges joins live, or

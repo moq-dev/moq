@@ -5013,6 +5013,9 @@ pub unsafe extern "C" fn moq_consume_track(
 ///
 /// Pass NULL for `subscription` to reset to moq-net defaults.
 ///
+/// A range with no start that the subscription already asks, with the same end, keeps the live
+/// join it was subscribed with: a changed `delay.min_us` joins only the ranges the update adds.
+///
 /// Returns a zero on success, or a negative code on failure, such as a range time on an
 /// untimed track, which leaves the subscription as it was. An update made before the
 /// subscription is established applies once it is, so a refusal then ends the consumer
