@@ -452,7 +452,10 @@ pub async fn supervise(
 		}
 	};
 	// Abort requests are executed by the driver, so observe the transport close first.
-	session.closed().await;
+	// Past the drain deadline only for a grace: a peer that is gone never confirms it.
+	if shutdown.until_deadline(session.closed()).await.is_none() {
+		crate::shutdown::confirm_close(&session).await;
+	}
 	serving.closed();
 	if let Some(registration) = &registration {
 		registration.closed();
