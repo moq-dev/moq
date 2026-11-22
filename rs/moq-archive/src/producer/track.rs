@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::Instant;
-use moq_net::track::{Delay, Order, Position, Range, Subscription};
+use moq_net::track::{Delay, Order, Position, Range, Start, Subscription};
 use moq_net::{StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
@@ -160,10 +160,7 @@ impl<S: ObjectStore> Track<S> {
 		let shared = self.shared.clone();
 		let config = &shared.config;
 		let range = match self.next {
-			Some(next) => Range {
-				start: Some(next.group),
-				end: None,
-			},
+			Some(next) => Range::from(Start::Time(next.group)),
 			None => Range::default(),
 		};
 		// The cap, since `info` may describe an older instance than the one subscribed, and a

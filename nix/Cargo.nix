@@ -12743,11 +12743,6 @@ rec {
             name = "thiserror";
             packageId = "thiserror 2.0.21";
           }
-          {
-            name = "url";
-            packageId = "url";
-            features = [ "serde" ];
-          }
         ];
         devDependencies = [
           {
@@ -18048,6 +18043,7 @@ rec {
             features = [
               "CMSampleBuffer"
               "CMBlockBuffer"
+              "CMFormatDescription"
               "CMSync"
               "objc2-core-audio-types"
             ];
@@ -20044,10 +20040,6 @@ rec {
           {
             name = "tracing";
             packageId = "tracing";
-          }
-          {
-            name = "url";
-            packageId = "url";
           }
           {
             name = "webm-iterable";

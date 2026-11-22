@@ -776,8 +776,6 @@ async function servedSubscription(
 		pending?: boolean;
 		// The `Subscriber Max Age` as decoded, in place of the scheduling tests' wide one.
 		maxDelay?: number | null;
-		// The `Subscriber Min Age` as decoded, which places a range with no start.
-		minDelay?: number;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -845,7 +843,6 @@ async function servedSubscription(
 	// rejecting.
 	msg.ranges = options.ranges;
 	if (options.maxDelay !== undefined) msg.maxDelay = options.maxDelay;
-	msg.minDelay = options.minDelay;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -991,16 +988,15 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		version,
 		prefill: [0n, 1n, 2n, 3n, 4n],
 		maxAge: Duration.millis(3_600_000),
-		// A live join 1 ms behind the newest frame, at 4 ms.
-		minDelay: 1,
 		ranges: [
-			{},
+			// A live join 1 ms behind the newest frame, at 4 ms.
+			{ start: { live: 1 } },
 			// Group 1 starts at 1 ms.
 			{ start: { time: 1n }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
-			// Empty only once its start resolves to group 3.
-			{ end: { absolute: 2n } },
+			// Empty only once its join resolves to group 3.
+			{ start: { live: 1 }, end: { absolute: 2n } },
 		],
 	});
 	try {
@@ -1048,8 +1044,7 @@ test.each([
 });
 
 // A range an update adds learns where it starts from SUBSCRIBE_STARTED, and keeps that start however
-// many later updates leave it live, rather than joining again from a newer live edge under a newer
-// Min Age.
+// many later updates leave it live, rather than joining again from a newer live edge.
 test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later updates keep", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
@@ -1070,24 +1065,21 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 		expect(start.start.starts).toEqual([0n]);
 
 		// A live join 2 ms behind the newest frame, at group 2, which takes Range ID 1.
-		await replayUpdate({ priority: 0, minDelay: 2, ranges: [{}] }).encode(sub.client.writer, version);
+		await replayUpdate({ priority: 0, ranges: [{ start: { live: 2 } }] }).encode(sub.client.writer, version);
 		const started = await next();
 		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([started.started.id, started.started.start]).toEqual([1n, 2n]);
 
-		// Newer groups arrive, and another update under a larger Min Age leaves the range live: it
-		// still starts at 2. The added range starts at time 9, which the live group 7 contains.
+		// Newer groups arrive, and another update leaves the range live: it still starts at 2. The
+		// added range starts at time 9, which the live group 7 contains.
 		for (const key of [5n, 6n, 7n]) sub.serve(key);
-		await replayUpdate({ priority: 0, minDelay: 4, ranges: [{ start: { absolute: 9n } }] }).encode(
-			sub.client.writer,
-			version,
-		);
+		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
 		const pinned = await next();
 		if (!("started" in pinned)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([pinned.started.id, pinned.started.start]).toEqual([2n, 7n]);
 		const ranges = sub.track.subscription.peek()?.ranges ?? [];
 		expect(ranges.some((range) => range.start === 2n)).toBe(true);
-		expect(ranges.some((range) => range.start === undefined)).toBe(false);
+		expect(ranges.some((range) => typeof range.start === "object")).toBe(false);
 	} finally {
 		await sub.close();
 	}
@@ -1118,8 +1110,7 @@ test("lite-07 answers a bounded window that resolves empty and FINs in reply", a
 			prefill: [0n, 1n, 2n, 3n, 4n, 5n],
 			maxAge: Duration.millis(3_600_000),
 			// A live join at the latest group, past its end.
-			minDelay: 0,
-			ranges: [{ end: { absolute: 3n } }],
+			ranges: [{ start: { live: 0 }, end: { absolute: 3n } }],
 		});
 		try {
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
@@ -2284,6 +2275,92 @@ test("lite-07 an update moves frame starts with the live ranges", async () => {
 	}
 });
 
+test("lite-07 a Position end parks the group, the stream open, until an update moves it", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		sub.serve(0n);
+		let served: Served | undefined;
+		const serving = sub.servedGroup().then((group) => {
+			served = group;
+		});
+		await flush();
+		expect(served).toBeUndefined();
+
+		// Moved past the group, the rest goes out on the same stream, which then ends.
+		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
+			sub.client.writer,
+			version,
+		);
+		await serving;
+		expect(served).toMatchObject({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+	} finally {
+		await sub.close();
+	}
+
+	// A group ending at the end ends its stream as usual.
+	const ending = await servedSubscription({
+		version,
+		frames: ["a", "b"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		ending.serve(0n);
+		expect(await ending.servedGroup()).toMatchObject({ key: 0n, payloads: ["a", "b"] });
+	} finally {
+		await ending.close();
+	}
+
+	// A track that ends while a group is parked still applies the update that moves its stop.
+	const ended = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		ended.serve(0n);
+		let served: Served | undefined;
+		const serving = ended.servedGroup().then((group) => {
+			served = group;
+		});
+		ended.track.finish();
+		await flush();
+		expect(served).toBeUndefined();
+		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
+			ended.client.writer,
+			version,
+		);
+		await serving;
+		expect(served).toMatchObject({ key: 0n, payloads: ["a", "b", "c"] });
+	} finally {
+		await ended.close();
+	}
+
+	// The subscriber leaving resets a parked stream: no update will move its stop.
+	const leaving = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		const reset = leaving.stall();
+		leaving.serve(0n);
+		expect(await leaving.servedHeader()).toBe(0n);
+		leaving.client.close();
+		expect(await reset).toBeDefined();
+	} finally {
+		await leaving.close();
+	}
+});
+
 // The update and group are both ready when the write unblocks. Control is drained first, then
 // the group is popped and positioned synchronously under the new frame cap.
 test("lite draft-06: a queued frame update applies before the next group pop", async () => {
@@ -2444,7 +2521,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
 			// Lite-06 cannot state a minimum.
-			delay: { min: null, max: Duration.millis(TEST_MAX_DELAY_MS) },
+			delay: { max: Duration.millis(TEST_MAX_DELAY_MS) },
 			order: "descending",
 			ranges: [{ end: 5n }],
 		});

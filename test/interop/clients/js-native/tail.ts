@@ -132,7 +132,7 @@ try {
 		const broadcastPublication = origin.route(Moq.Path.from(path), { hidden: true });
 		const broadcast = broadcastPublication.broadcast;
 		if (datagram) {
-			// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber checks the payload alone.
+			// Untimed: each datagram's timestamp is unscaled at its sequence, which the OBJECT_DATAGRAM carries as its group ID.
 			const track = broadcast.createDatagrams("tail");
 			if (!track) throw new Error("the track already exists");
 			broadcastPublication.announce();
@@ -221,7 +221,8 @@ try {
 						frame.payload.every((byte) => byte === sequence),
 						"corrupt datagram",
 					);
-					assert.equal(frame.timestamp, undefined, "unexpected IETF timestamp");
+					// An untimed datagram's timestamp is unscaled at its sequence.
+					assert.equal(frame.timestamp.key, BigInt(sequence), "datagram timestamp is not its sequence");
 					process.stdout.write(`datagram ${sequence}\n`);
 				}
 				console.error("datagram clean groups=0,1,2,3 bytes=3600");

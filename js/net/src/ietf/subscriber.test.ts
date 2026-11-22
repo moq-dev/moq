@@ -744,8 +744,8 @@ async function subscribeTrack({
 		.subscribe(
 			subscription ?? {
 				...track.Subscription.default(),
-				delay: { min: Duration.ZERO, max: Duration.ZERO },
-				ranges: [{}],
+				delay: { max: Duration.ZERO },
+				ranges: [{ start: { live: Duration.ZERO } }],
 			},
 		);
 
@@ -1226,9 +1226,20 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 	},
 );
 
-test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
-	"a start of group 0 joins live with no filter and fetches the groups below Largest (%s)",
-	async (version) => {
+// A range from the oldest group asks the same as one from time 0, so a publisher that answers
+// the FETCH delivers the backlog it holds.
+test.each(
+	[Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22].flatMap((version) =>
+		(
+			[
+				["time 0", { start: 0n }],
+				["the oldest group", {}],
+			] as const satisfies readonly (readonly [string, track.Range])[]
+		).map(([name, range]) => [name, version, range as track.Range] as const),
+	),
+)(
+	"a start of group 0 joins live with no filter and fetches the groups below Largest (from %s, draft %d)",
+	async (_name, version, range) => {
 		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const subscriber = new Subscriber({ session: new NativeSession(pair.server, version, true) });
 		const consumer = subscriber
@@ -1236,7 +1247,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: 0n }],
+				ranges: [range],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1284,6 +1295,75 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			fetch?.close();
 			peer.close();
 			consumer.close();
+		}
+	},
+);
+
+// No update re-asks a live join's range, so a reader from the oldest group joining it later reaches
+// the backlog through the copy's fills.
+test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
+	"a reader from the oldest group joining a live copy fetches the groups below Largest (draft %d)",
+	async (version) => {
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
+		const subscriber = new Subscriber({ session: new NativeSession(pair.server, version, true) });
+		const video = subscriber.consume(Path.from("room")).track("video");
+		const live = video.subscribe({ ...track.Subscription.default(), ranges: [{ start: { live: Duration.ZERO } }] });
+		const peer = await nextStream(pair.client, version);
+		let oldest: track.Subscriber | undefined;
+		let fetch: Stream | undefined;
+		try {
+			expect(await peer.reader.u53()).toBe(Subscribe.id);
+			const msg = await Subscribe.decode(peer.reader, version);
+			expect(msg.filter).toEqual({ kind: "nextObject" });
+			await peer.writer.u53(SubscribeOk.id);
+			await new SubscribeOk({ trackAlias: ALIAS, largest: { groupId: 2n, objectId: 1n } }).encode(
+				peer.writer,
+				version,
+			);
+			await subscriber.handleGroup(
+				new GroupMessage({
+					trackAlias: ALIAS,
+					groupId: 3n,
+					subGroupId: 0n,
+					publisherPriority: 0,
+					flags: groupFlags(true),
+				}),
+				new Reader(undefined, encodeObjects([0, 0]), version),
+			);
+			// Draft 18 fetched the live group's head; any other stream is the backlog's.
+			if (version === Version.DRAFT_18) {
+				const head = await nextStream(pair.client, version);
+				expect(await head.reader.u53()).toBe(Fetch.id);
+				await Fetch.decode(head.reader, version);
+				await head.writer.u53(RequestError.id);
+				await new RequestError({ errorCode: 0x4, reasonPhrase: "no head" }).encode(head.writer, version);
+			}
+			oldest = video.subscribe({
+				...track.Subscription.default(),
+				ranges: [{}],
+				delay: { max: null },
+			});
+			// The live group is held already; the next read misses the ones below it.
+			expect((await oldest.recvGroup())?.start).toBe(3n);
+			void oldest.recvGroup().catch(() => {});
+			fetch = await nextStream(pair.client, version);
+			expect(await fetch.reader.u53()).toBe(Fetch.id);
+			const { type } = await Fetch.decode(fetch.reader, version);
+			// One range for groups 0 and 1, below the live join at group 2.
+			if (type.kind === "standalone") {
+				expect(version).toBe(Version.DRAFT_18);
+				expect([type.start, type.end.group]).toEqual([{ group: 0n, object: 0n }, 1n]);
+			} else {
+				expect(type).toMatchObject({
+					kind: "filtered",
+					filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 1n },
+				});
+			}
+		} finally {
+			fetch?.close();
+			oldest?.close();
+			peer.close();
+			live.close();
 		}
 	},
 );

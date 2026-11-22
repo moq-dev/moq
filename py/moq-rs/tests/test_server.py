@@ -41,7 +41,7 @@ async def test_server_client_roundtrip():
         published = server.route("hello", hidden=True)
         broadcast = published.broadcast
         media = moq.media.TrackProducer.audio(
-            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
         )
         published.announce()
 

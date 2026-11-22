@@ -67,7 +67,7 @@ void main() {
       () => moq_media.ContainerProducer(
         broadcast: other,
         init: moq_media.ContainerInit(
-          format: moq_media.ContainerFormat.fmp4,
+          format: moq_media.ContainerFormat.fmp4(),
           data: Uint8List(0),
           timebase: timebase,
         ),
@@ -1149,7 +1149,7 @@ void main() {
       catalog: moq_media.CatalogProducer(broadcast: broadcast),
       options: moq_video.ProducerOptions(
         input: moq_video.EncoderInput(
-          format: moq_video.PixelFormat.rgba,
+          format: moq_video.PixelFormat.rgba(),
           width: 320,
           height: 240,
           framerate: moq_video.FrameRate(numerator: 30000, denominator: 1001),
@@ -1204,10 +1204,10 @@ void main() {
     decoder.cancel();
     final pixels = frame.width() * frame.height();
     expect(
-      frame.pixels(format: moq_video.PixelFormat.i420).length,
+      frame.pixels(format: moq_video.PixelFormat.i420()).length,
       pixels * 3 ~/ 2,
     );
-    final packed = frame.pixels(format: moq_video.PixelFormat.rgba);
+    final packed = frame.pixels(format: moq_video.PixelFormat.rgba());
     expect(packed.length, pixels * 4);
     for (var i = 3; i < packed.length; i += 4) {
       expect(packed[i], 0xFF);

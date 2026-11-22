@@ -356,6 +356,8 @@ impl Mergeable for Presence {
 			|| self.wire_rx < prev.wire_rx
 			|| self.credit_stalls < prev.credit_stalls
 			|| self.credit_stalled_us < prev.credit_stalled_us
+			|| self.credit_held_readers_us < prev.credit_held_readers_us
+			|| self.credit_held_evicted_us < prev.credit_held_evicted_us
 			|| self.sessions_refused.regressed(&prev.sessions_refused)
 			|| self.sessions_failed.regressed(&prev.sessions_failed)
 			|| self.requests < prev.requests
