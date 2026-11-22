@@ -1044,6 +1044,9 @@ export class Consumer {
 	#attempt?: Attempt;
 	// The frame a replacement copy resumes at: frames below it were read from an earlier copy.
 	#skip = 0;
+	// One past the last frame handed to this reader's caller: frames a filtered read discarded
+	// below its `from` were never delivered.
+	#delivered = 0;
 	// This reader's own failure, set once, including a budget that gave up on the group: it
 	// ends the consumer whatever its copy does. See `#fail`.
 	#verdict = new Once<Error>();
@@ -1185,16 +1188,16 @@ export class Consumer {
 		return false;
 	}
 
-	// Judge a short close final. One below the frames an earlier copy delivered is no end of
+	// Judge a short close final. One below a frame an earlier copy delivered is no end of
 	// this read, since no route said the group ends there, so it fails the reader instead: with
 	// the error a recovery that found nothing `failed` with, Old once its budget gave up, or
 	// NotFound.
 	#end(expired = false, failed?: unknown): void {
-		if (this.#skip > this.#state.total.peek()) {
+		if (this.#delivered > this.#state.total.peek()) {
 			this.#fail(
 				failed ??
 					new StreamError(expired ? StreamCode.Old : StreamCode.NotFound, {
-						message: `group ${this.start} closed below frame ${this.#skip}`,
+						message: `group ${this.start} closed below frame ${this.#delivered}`,
 					}),
 			);
 		} else {
@@ -1460,6 +1463,7 @@ export class Consumer {
 			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
 				frames.shift();
 				const index = this.#state.index++;
+				this.#delivered = index + 1;
 				this.#streamed = front;
 				this.#refresh();
 				this.#state.charge?.touch();
@@ -1484,6 +1488,7 @@ export class Consumer {
 		}
 		if (frames.length === 0 && this.#state.closed.peek() !== undefined) this.#state.flate = undefined;
 		const index = this.#state.index++;
+		this.#delivered = index + 1;
 		this.#refresh();
 		this.#state.charge?.touch();
 		return { index, frame, inflated: slice?.inflated };
@@ -1598,10 +1603,12 @@ export class Consumer {
 
 			// A whole read streams a frame still being written into its own buffer, rather
 			// than waiting for it whole while the group sheds its head.
+			const delivered = this.#delivered;
 			const read = this.#readBufferedFrame(compressed, streaming ? "stream" : "collect");
 			if (read) {
 				if (read.index < from) {
 					if (read.chunks) this.#streamed = undefined;
+					this.#delivered = delivered;
 					continue;
 				}
 				if (read.chunks && !streaming) return this.#join(read.index, read.chunks);
