@@ -12731,7 +12731,10 @@ mod serve_tests {
 			served(&h, serving.as_mut()).await;
 			let wire = Wire::read(&h.log, version);
 			assert!(wire.publish_done.is_some(), "{version}: no PUBLISH_DONE");
-			assert!(wire.sent(ietf::RequestOk::ID).is_none(), "{version}: the update was answered");
+			assert!(
+				wire.sent(ietf::RequestOk::ID).is_none(),
+				"{version}: the update was answered"
+			);
 			assert_eq!(h.log.closes(), Vec::new(), "{version}: the session closed");
 		}
 	}
