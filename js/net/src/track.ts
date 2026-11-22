@@ -8,7 +8,7 @@ import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as cache from "./cache.ts";
 import { Delivered } from "./delivered.ts";
-import { type Change, type Edit, type JoinAsk, Prefs, Subscriptions } from "./demand.ts";
+import { answered, type Change, type Edit, type JoinAsk, joinTick, Prefs, Subscriptions } from "./demand.ts";
 import { DropSet, Runs } from "./drops.ts";
 import {
 	GroupTooLarge,
@@ -1649,7 +1649,7 @@ export class Producer {
 		};
 		hooks.answerJoin = (producer, min, end, start, budget) => {
 			// Every range added before now takes this answer.
-			const tick = producer.#requested.answered();
+			const tick = answered();
 			producer.#joinAnswers.set(joinKey(min, end), { start, budget, tick });
 			producer.#placing++;
 			// A reader's join waiting on the upstream's answer places now.
@@ -2191,8 +2191,6 @@ export class Producer {
 	// applies its own, as each reader's budget does, so the demand asked upstream is the same
 	// before and after the info lands.
 	#join(sink: TrackState): void {
-		// Its live join ranges take only an answer recorded from now on.
-		sink.update.ticking(() => this.#requested.joinTick());
 		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: [...sink.update.ranges()] }, true);
 		sink.update.watch = (change) => this.#moved(sink, change);
 		this.#subscribed();
@@ -4631,11 +4629,11 @@ export class Subscriber {
 			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
+		hooks.stampSubscriber = (subscriber, since) => subscriber.#stamp(since);
 		hooks.preferences = (subscriber) => subscriber.#state.update;
 		hooks.resolveRanges = (subscriber, subscription) => {
 			// A preview never takes an answer recorded before it: the live edge has moved since.
-			const producer = subscriber.#state.producer;
-			const tick = producer ? hooks.requested(producer).joinTick() : 0;
+			const tick = joinTick();
 			const ranges = (subscription.ranges ?? [{}]).map((range, index) => [BigInt(index), range] as const);
 			return Window.keyed(
 				ranges,
@@ -4749,6 +4747,7 @@ export class Subscriber {
 			const subscriber = new Subscriber(name, state);
 			subscriber.#resume = source({
 				subscription: state.update,
+				since: () => Array.from(state.update.entries(), ([key]) => state.update.since(key)),
 				cursor: subscriber.#cursor,
 				closed: state.closed,
 				info: () => state.info.peek(),
@@ -6085,6 +6084,20 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (options?.signal?.aborted) return Promise.reject(options.signal.reason);
 		return producer ? hooks.requestProducer(producer, options?.signal) : Promise.resolve();
+	}
+
+	// Note each live join range keyed in `since` as added at its tick instead, as a front's reader
+	// stamps the copy it asks with the tick it added the range at, so an answer the copy recorded
+	// since then places it, even one recorded before this subscription. Mirrors the Rust
+	// `Preferences::stamp`.
+	#stamp(since: Iterable<readonly [bigint, number]>): void {
+		if (this.#resume) return;
+		const update = this.#state.update;
+		const moved = update.stamp(since);
+		if (moved.length === 0 || this.#refusal) return;
+		const stamped = moved.map((key) => [key, update.since(key)] as const);
+		if (this.#window.stamp(stamped, this.#latestGroup(), this.#holdings())) this.#moved();
+		else this.#ask();
 	}
 
 	// Edit the ranges by key, as `hooks.editSubscriber` does: only the ranges it adds resolve, and

@@ -534,6 +534,27 @@ export class Window {
 		}
 	}
 
+	/**
+	 * Note each live join range keyed in `since` as added at its tick instead (see
+	 * `Prefs.stamp`), placing again any still waiting on an answer, which an answer recorded since
+	 * that tick may now place. One already placed stays where it started. Returns whether the groups
+	 * in range moved.
+	 */
+	stamp(
+		since: Iterable<readonly [bigint, number]>,
+		latest: bigint | undefined,
+		holdings: Holdings = UNHELD,
+	): boolean {
+		const placed = this.#spans.size;
+		for (const [key, tick] of since) {
+			if (!this.#since.has(key)) continue;
+			this.#since.set(key, tick);
+			if (!this.#reaching.delete(key)) continue;
+			this.#placeRange(key, latest, holdings);
+		}
+		return this.#spans.size > placed;
+	}
+
 	// Take out what the range keyed `key` placed, leaving the range itself.
 	#retire(key: bigint): void {
 		this.#pending.delete(key);

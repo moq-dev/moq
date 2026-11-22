@@ -3,6 +3,7 @@ import { Duration, Instant, Wall, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race } from "@moq/signals";
 import { DEFAULT_EXPIRY } from "./cache.ts";
+import { joinTick } from "./demand.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -5724,7 +5725,9 @@ test("track: a received copy places a live join only from a fresh answer", () =>
 	const join = { delay: { max: null }, ranges: [{ start: { live: Duration.millis(200) }, end: 9000n }] };
 	try {
 		const first = producer.subscribe(join);
-		expect(hooks.requested(producer).joins()).toEqual([{ min: 200, end: 9000n, budget: NO_MAX_DELAY, since: 0 }]);
+		expect(hooks.requested(producer).joins()).toEqual([
+			{ min: 200, end: 9000n, budget: NO_MAX_DELAY, since: joinTick() },
+		]);
 		putGroup(producer, 1000n, 1000);
 		putGroup(producer, 2000n, 2000);
 		// The groups held place nothing.
@@ -5783,7 +5786,9 @@ test("track: readers with the same lag and end share one pending join", () => {
 	try {
 		const a = producer.subscribe(join(9000n));
 		const b = producer.subscribe(join(9000n));
-		expect(hooks.requested(producer).joins()).toEqual([{ min: 200, end: 9000n, budget: NO_MAX_DELAY, since: 0 }]);
+		expect(hooks.requested(producer).joins()).toEqual([
+			{ min: 200, end: 9000n, budget: NO_MAX_DELAY, since: joinTick() },
+		]);
 		expect(producer.subscription.peek()?.ranges).toEqual([{ start: { live: Duration.millis(200) }, end: 9000n }]);
 		const c = producer.subscribe(join());
 		// Sorted by lag, then by end, an open one first.

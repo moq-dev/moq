@@ -690,6 +690,7 @@ class Reader implements ResumeSource {
 	/** Read `copy` as the newest one, or at `index`, recording the properties it commits. */
 	#add(copy: Copy, index = this.#copies.length): void {
 		const { source } = copy;
+		this.#stamp(copy);
 		source.retain();
 		this.#readWhole(copy);
 		this.#bound(copy);
@@ -891,7 +892,20 @@ class Reader implements ResumeSource {
 	#update(copy: Copy): void {
 		// A closed copy still resolves replaced ranges against the groups it holds, for the window.
 		const wire = this.#wire(copy);
-		if (copy.sub.closed.peek() === undefined) copy.sub.update(wire);
+		if (copy.sub.closed.peek() === undefined) {
+			copy.sub.update(wire);
+			this.#stamp(copy);
+		}
+	}
+
+	/**
+	 * Note each live join `copy` is asked for as the reader added it, so an answer the copy recorded
+	 * since places it, even one recorded before this subscription. The copy keys its ranges by
+	 * position, as the reader's are ordered. Mirrors the Rust `Copy::stamp`.
+	 */
+	#stamp(copy: Copy): void {
+		const since = this.#shell.since().map((tick, index) => [BigInt(index), tick] as const);
+		hooks.stampSubscriber(copy.sub, since);
 	}
 
 	/**

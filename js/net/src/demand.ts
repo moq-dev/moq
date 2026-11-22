@@ -96,6 +96,25 @@ function moved(old: readonly Range[], next: readonly Range[]): [Range[], Range[]
 	return [gone, came];
 }
 
+// How many answers to a received copy's live joins were recorded, on any track: a live join range a
+// reader adds notes it, and takes only an answer recorded since (see {@link Prefs.since}). Counted
+// process-wide, so a front's reader and the copies it reads compare their ticks. Mirrors the Rust
+// `JOIN_TICK`.
+let JOIN_TICK = 0;
+
+/** How many join answers were recorded: see {@link answered}. Mirrors the Rust `join_tick`. */
+export function joinTick(): number {
+	return JOIN_TICK;
+}
+
+/**
+ * Note an answer to a live join recorded, returning its tick: greater than that of every range
+ * added before. Mirrors the Rust `answered`.
+ */
+export function answered(): number {
+	return ++JOIN_TICK;
+}
+
 /**
  * A subscriber's preferences, the ranges keyed so an {@link Edit} costs only what it names. Reads
  * as the {@link Subscription} last given, its ranges in key order, materialized only when read.
@@ -107,9 +126,6 @@ export class Prefs implements Getter<Subscription | undefined> {
 	#ranges = new Map<bigint, Range>();
 	// The join tick each live join range was added at, by key: see {@link since}.
 	#since = new Map<bigint, number>();
-	// The join tick a range added now is added at: the producer's {@link Subscriptions.joinTick}
-	// once these join its aggregate, 0 before.
-	#tick: () => number = () => 0;
 	// The preferences as last read, until they change.
 	#value?: Subscription;
 	/** Bumped on every change, so a reader wakes without reading the ranges. */
@@ -170,15 +186,20 @@ export class Prefs implements Getter<Subscription | undefined> {
 	}
 
 	/**
-	 * Add the ranges from now on at the join tick `tick` reads, and the ranges held at the current
-	 * one: these join the aggregate that counts the answers, as the Rust `Preferences::register`
-	 * reads its tick.
+	 * Note each live join range keyed in `since` as added at its tick instead, such as the one a
+	 * front's reader added it at, which the copy it reads asked for: an answer recorded since then
+	 * places it. Other ranges are left as they are. Returns the keys whose tick moved. Mirrors the
+	 * Rust `Preferences::stamp`.
 	 */
-	ticking(tick: () => number): void {
-		this.#tick = tick;
-		this.#since.clear();
-		const now = tick();
-		for (const [key, range] of this.#ranges) if (liveMillis(range) !== undefined) this.#since.set(key, now);
+	stamp(since: Iterable<readonly [bigint, number]>): bigint[] {
+		const moved: bigint[] = [];
+		for (const [key, tick] of since) {
+			const held = this.#since.get(key);
+			if (held === undefined || held === tick) continue;
+			this.#since.set(key, tick);
+			moved.push(key);
+		}
+		return moved;
 	}
 
 	/** Wake every reader, as a change would, without changing anything. */
@@ -210,7 +231,7 @@ export class Prefs implements Getter<Subscription | undefined> {
 		const readded = new Set(add.map(([key]) => key));
 		const gone: Range[] = [];
 		const came: Range[] = [];
-		const tick = this.#tick();
+		const tick = joinTick();
 		for (const key of retire) {
 			const range = this.#ranges.get(key);
 			// One added again is replaced in place below, keeping its order.
@@ -241,7 +262,7 @@ export class Prefs implements Getter<Subscription | undefined> {
 		this.#scalars = rest as Scalars;
 		if (!sameRanges([...this.#ranges.values()], ranges ?? [])) {
 			this.#ranges = new Map((ranges ?? []).map((range, index) => [BigInt(index), range]));
-			const tick = this.#tick();
+			const tick = joinTick();
 			this.#since.clear();
 			for (const [key, range] of this.#ranges) if (liveMillis(range) !== undefined) this.#since.set(key, tick);
 		}
@@ -271,9 +292,6 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		string,
 		{ min: number; end: bigint | undefined; budgets: Counts<number>; since: Counts<number> }
 	>();
-	// How many answers to a received copy's live joins were recorded: a live join range a reader
-	// adds notes it, and takes only an answer recorded since (see {@link Prefs.since}).
-	#joinTick = 0;
 	#revision = new Signal(0);
 	// The aggregate as last read, until it changes; null for none read yet.
 	#value: Subscription | undefined | null = null;
@@ -383,19 +401,6 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	 * and the newest answer tick one saw before it began: its session asks its upstream to place each
 	 * with a range of its own. Mirrors the Rust `Subscription::joins`.
 	 */
-	/** How many join answers were recorded: see {@link answered}. Mirrors the Rust `Subscriptions::join_tick`. */
-	joinTick(): number {
-		return this.#joinTick;
-	}
-
-	/**
-	 * Note an answer to a live join recorded, returning its tick: greater than that of every range
-	 * added before. Mirrors the Rust `Subscriptions::answered`.
-	 */
-	answered(): number {
-		return ++this.#joinTick;
-	}
-
 	joins(): JoinAsk[] {
 		const joins: JoinAsk[] = [];
 		for (const { min, end, budgets, since } of this.#joins.values()) {
