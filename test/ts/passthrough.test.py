@@ -172,6 +172,11 @@ class Restart(unittest.TestCase):
         second = bytes([0x47, 0x00, 0x20, 0x11]) + rest + b"\xff" * (184 - len(rest))
         source = [section_packet(0, 0x00, PAT, 0), first, second]
         self.assertEqual(passthrough.layout(source), passthrough.Layout(0x20, 0x100, 0x100))
+        # The PMT's tail before the pointer of a packet that starts the next section.
+        tail = bytes([0x47, 0x40, 0x20, 0x11, len(rest)]) + rest + whole[:4]
+        tail += b"\xff" * (188 - len(tail))
+        source = [section_packet(0, 0x00, PAT, 0), first, tail]
+        self.assertEqual(passthrough.layout(source), passthrough.Layout(0x20, 0x100, 0x100))
 
     def test_the_clock_runs_on_across_a_pcr_wrap(self):
         start = passthrough.PCR_WRAP - 2 * INTERVAL

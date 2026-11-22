@@ -148,22 +148,39 @@ def section(pkt: bytes) -> bytes | None:
 def sections(source: list[bytes]):
     """Each whole PSI section the source carries, as (PID, section), reassembled across packets."""
     partial: dict[int, bytes] = {}
-    for pkt in source:
-        p = pid(pkt)
-        sec = section(pkt)
-        if sec is not None:
-            partial[p] = sec
-        elif p in partial and pkt[3] & 0x10:
-            partial[p] += pkt[4 + (1 + pkt[4] if pkt[3] & 0x20 else 0) :]
-        else:
-            continue
+
+    def whole(p: int):
         buf = partial[p]
         # Stuffing after a section, rather than another one.
         if buf[:1] == b"\xff":
             del partial[p]
         elif len(buf) >= 3 and len(buf) >= (end := 3 + ((buf[1] & 0x0F) << 8 | buf[2])):
             del partial[p]
-            yield p, buf[:end]
+            return buf[:end]
+        return None
+
+    for pkt in source:
+        p = pid(pkt)
+        if not pkt[3] & 0x10:
+            continue
+        payload = pkt[4 + (1 + pkt[4] if pkt[3] & 0x20 else 0) :]
+        if not payload:
+            continue
+        if pkt[1] & 0x40:
+            # The bytes before the pointer finish the section already pending.
+            pointer = payload[0]
+            if p in partial:
+                partial[p] += payload[1 : 1 + pointer]
+                if (sec := whole(p)) is not None:
+                    yield p, sec
+                partial.pop(p, None)
+            partial[p] = payload[1 + pointer :]
+        elif p in partial:
+            partial[p] += payload
+        else:
+            continue
+        if (sec := whole(p)) is not None:
+            yield p, sec
 
 
 @dataclass
