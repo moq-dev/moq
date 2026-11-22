@@ -1286,10 +1286,19 @@ impl Holdings for TrackState {
 		)
 		.unwrap_or(u64::MAX);
 		if self.anchors == Anchors::Refused || self.starts_at_keys {
-			// Keys that aren't times: by when each group's first frame presented.
-			let Some(target) = newest.map(|newest| newest.saturating_sub(back)) else {
-				return Join::Unknown;
+			// Keys that aren't times: by when each group's first frame presented. No group
+			// presents before time 0, so a join reaching back that far starts as the oldest group
+			// does, taking a lower group that arrives late rather than starting at the oldest group
+			// this hop happens to hold. One past every group needs no frame to measure it by, so
+			// groups whose frames are still on their way place it all the same.
+			let target = match newest {
+				_ if min >= subscription::PAST_EVERY_GROUP => 0,
+				Some(newest) => newest.saturating_sub(back),
+				None => return Join::Unknown,
 			};
+			if target == 0 {
+				return Join::Oldest;
+			}
 			let started = |slot: &Slot| {
 				self.started_at(slot)
 					.and_then(|start| start.convert(scale).ok())

@@ -4953,10 +4953,11 @@ impl Bounds {
 	/// one on each live start instead.
 	///
 	/// An absent start takes every group still within that max age, or every group with none,
-	/// as lite01/02 never carry one. Lite-06 resolves it there; before lite-06 an absent start
-	/// is the latest group, which [`cursor_floor`] places rather than a live join, since
-	/// lite01/02 keep the newest group known on arrival. A named start is a history floor on
-	/// every wire, bounded by the publisher's max age.
+	/// as lite01/02 never carry one. Lite-06 resolves it there. Before lite-06 an absent start
+	/// is the latest group, which [`TrackRun::start`] places as the floor once the source's feed
+	/// says where it starts, so a group arriving ahead of an older one doesn't drop it, as a
+	/// live join placed at the first arrival would. A named start is a history floor on every
+	/// wire, bounded by the publisher's max age.
 	fn legacy(version: Version, max_delay: Option<Duration>) -> Option<crate::track::Start> {
 		use crate::track::Start;
 		if version.has_ranges() {
@@ -12558,7 +12559,8 @@ mod tests {
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 						priority: 0,
-						max_delay: Some(Duration::from_secs(60)),
+						// Lite01/02 carry no max age.
+						max_delay: (version != Version::Lite01).then_some(Duration::from_secs(60)),
 						ranges: vec![lite::Range::span(start, 0, None, None)],
 					};
 					let mut serve =

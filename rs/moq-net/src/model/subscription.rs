@@ -228,9 +228,8 @@ impl Start {
 	/// of the live edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and
 	/// no start.
 	pub(crate) const fn within(max: Duration) -> Self {
-		// The largest lag every implementation carries losslessly, long past any group.
 		Self::Live {
-			min: Duration::from_millis((1 << 53) - 1),
+			min: PAST_EVERY_GROUP,
 			max: Some(max),
 		}
 	}
@@ -314,6 +313,10 @@ impl Range {
 		(!range.is_empty()).then_some(range)
 	}
 }
+
+/// A lag long past any group, so a join this far behind takes every group still within its
+/// `max`: the largest every implementation carries losslessly.
+pub(crate) const PAST_EVERY_GROUP: Duration = Duration::from_millis((1 << 53) - 1);
 
 /// A live join's lag in whole milliseconds, rounded up, as the wire carries it, so a start is
 /// never newer than the lag allows.
@@ -751,7 +754,12 @@ mod tests {
 
 		let sub = Subscription::default().with_start(5).with_end(10);
 		assert_eq!((sub.start(), sub.end()), (Some(5), Some(10)));
-		assert_eq!(sub.with_start(None).with_end(None), Subscription::default());
+		// No start and no end is every group, which a wire without ranges can't tell from no
+		// start at all.
+		assert_eq!(
+			sub.with_start(None).with_end(None),
+			Subscription::default().with_ranges([Range::ALL])
+		);
 	}
 
 	/// The aggregate is the union: overlapping and adjacent time ranges merge, an open range
@@ -779,10 +787,7 @@ mod tests {
 			ranges(&[sub(&[groups(2, 5), groups(9, None)]), sub(&[groups(4, None)])]),
 			vec![groups(2, None)]
 		);
-		assert_eq!(
-			ranges(&[sub(&[groups(2, 5)]), Subscription::default()]),
-			vec![Range::ALL]
-		);
+		assert_eq!(ranges(&[sub(&[groups(2, 5)]), sub(&[Range::ALL])]), vec![Range::ALL]);
 
 		// A live join reaches back only by its lag, so the history beside it stays asked, and
 		// each lag is a range of its own.
@@ -804,7 +809,7 @@ mod tests {
 		);
 		// Unless another reader starts at the oldest group.
 		assert_eq!(
-			ranges(&[sub(&[groups(2, 5)]), joining(two), Subscription::default()]),
+			ranges(&[sub(&[groups(2, 5)]), joining(two), sub(&[Range::ALL])]),
 			vec![Range::ALL]
 		);
 
