@@ -28,11 +28,10 @@ use crate::jitter::{self, Arrival, Push};
 /// jump; the bytes carry the break as the source sent it.
 ///
 /// A [`Follower`](super::Follower) carries it across its broadcast's returns and, when
-/// stitching, onto another publisher instance. The same instance resumes its track on the same
-/// clock, so what it missed is a gap like any other. Another instance's track opens a new
-/// clock from its first group, once what was already buffered has gone out, and its packets
-/// follow verbatim: the output shows the seam as each PID's continuity break, as the source
-/// would show a splice.
+/// stitching, onto another publisher instance, whose track it reads from its first group once
+/// what was already buffered has gone out. Its packets follow verbatim, so the output shows the
+/// seam as each PID's continuity break, as the source would show a splice, and its timeline
+/// keeps the clock or steps to a new one as an encoder changeover does.
 pub struct Release {
 	source: crate::Source,
 	/// The format of the catalog being read, kept for following another instance.
@@ -48,10 +47,10 @@ pub struct Release {
 	/// however long the cache held it.
 	subscribed: Instant,
 	finished: bool,
-	/// An object of the stream being read has gone out, so the next need not open a group.
+	/// An object has gone out.
 	released: bool,
-	/// Timeline restarts and gaps counted by tracks read before the current one: its own
-	/// counts start over, and another instance is a restart of its own.
+	/// Timeline restarts and gaps counted by tracks read before the current one, whose own
+	/// counts start over.
 	restarts: u64,
 	gaps: u64,
 	delay: Duration,
@@ -260,8 +259,7 @@ impl super::follower::sealed::Followed for Release {
 	}
 
 	/// Drop the track being read and read the passthrough track `catalog` names next. What the
-	/// jitter buffer holds still goes out on its clock; another instance is a restart, so its
-	/// objects open a new clock after it.
+	/// jitter buffer holds still goes out on its clock.
 	fn followed(
 		&mut self,
 		broadcast: &moq_net::broadcast::Consumer,
@@ -278,8 +276,6 @@ impl super::follower::sealed::Followed for Release {
 		} else {
 			self.source = self.source.switched(broadcast);
 			self.instance = broadcast.info().instance.clone();
-			self.restarts += 1;
-			self.released = false;
 		}
 		self.catalog = Some(catalog);
 		self.cataloged = false;

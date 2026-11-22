@@ -124,8 +124,44 @@ fn republish_cut(
 	cut: &[u64],
 	at: impl Fn(usize, &Object) -> Duration + Send + 'static,
 ) -> Republished {
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	publish(broadcast, (), objects, skips, cut, at, Ending::Finish)
+}
+
+/// How a republished track ends once its objects are out.
+enum Ending {
+	/// Finished, its broadcast staying up.
+	Finish,
+	/// Silent, as a killed publisher whose route lingers until its session times out.
+	Silent,
+	/// Gone with this error, its route withdrawn, as a relay's lost upstream.
+	Abort(moq_net::Error),
+}
+
+/// [`republish`] onto the route `options` names at `live` on `origin`, ending as `ending` says.
+fn republish_route(
+	origin: &moq_net::origin::Producer,
+	options: moq_net::origin::RouteOptions,
+	objects: Vec<Object>,
+	at: impl Fn(usize, &Object) -> Duration + Send + 'static,
+	ending: Ending,
+) -> Republished {
+	let route = origin.route("live", options).unwrap();
+	let skips = skips(&objects);
+	publish(route.broadcast().clone(), route, objects, skips, &[], at, ending)
+}
+
+/// [`republish_cut`] onto `broadcast`, holding `keep` until the track ends as `ending` says.
+fn publish(
+	mut broadcast: moq_net::broadcast::Producer,
+	keep: impl Send + 'static,
+	objects: Vec<Object>,
+	skips: Vec<std::ops::Range<u64>>,
+	cut: &[u64],
+	at: impl Fn(usize, &Object) -> Duration + Send + 'static,
+	ending: Ending,
+) -> Republished {
 	let cut = cut.to_vec();
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video));
 	let name = track.name().to_string();
@@ -138,7 +174,7 @@ fn republish_cut(
 	let consumer = broadcast.consume();
 	let start = Instant::now();
 	let task = tokio::spawn(async move {
-		let _keep = (&broadcast, &catalog);
+		let _keep = (&broadcast, &keep);
 		let mut group: Option<(u64, moq_net::group::Producer)> = None;
 		let mut skips = skips.into_iter().peekable();
 		let mut due = Duration::ZERO;
@@ -170,8 +206,21 @@ fn republish_cut(
 		if let Some((sequence, group)) = group {
 			end(sequence, group, &cut);
 		}
-		let _track = track.finish().unwrap();
-		std::future::pending::<()>().await;
+		match ending {
+			Ending::Finish => {
+				let _finished = track.finish().unwrap();
+				std::future::pending::<()>().await
+			}
+			// Held unfinished, so its route lingers.
+			Ending::Silent => {
+				let _track = track;
+				std::future::pending::<()>().await
+			}
+			Ending::Abort(err) => {
+				track.abort(err.clone()).unwrap();
+				catalog.abort(err);
+			}
+		}
 	});
 	Republished { consumer, task }
 }
@@ -574,4 +623,156 @@ async fn a_backlog_stays_in_the_source_until_due() {
 			"the sink's stall does not make arrived objects late"
 		);
 	}
+}
+
+/// The instance that takes the path once the first stops, and when.
+struct Restart {
+	instance: moq_net::Instance,
+	/// How long after the first's last object it starts.
+	after: Duration,
+	/// How far behind the first's last object its clock starts, or `None` to carry on from the
+	/// source's own.
+	back: Option<Duration>,
+}
+
+impl Restart {
+	/// `instance` a second after the first stops, on the source's clock.
+	fn new(instance: moq_net::Instance) -> Self {
+		Self {
+			instance,
+			after: Duration::from_secs(1),
+			back: None,
+		}
+	}
+}
+
+/// A clip into its second group published as instance `first`, ending as `ending` says, then
+/// from its fourth group on as `second` says, released through a [`Follower`](super::Follower)
+/// with `stitch`. Returns what it released, how it ended, and the objects each instance
+/// published.
+async fn follow(
+	first: moq_net::Instance,
+	ending: Ending,
+	second: Restart,
+	stitch: bool,
+) -> (Vec<(Instant, Frame)>, Option<crate::Result<()>>, Vec<Object>, Vec<Object>) {
+	// Six groups of a second each, from 10 s on the clock.
+	let objects = import(&fixture::assorted(10_000 * fixture::MS, 150, 25)).await.objects;
+	let mut groups: Vec<u64> = objects.iter().map(|object| object.group).collect();
+	groups.dedup();
+	assert!(groups.len() >= 5, "{} groups", groups.len());
+	// The first instance stops partway into its second group; the second opens on its fourth.
+	let before = objects.iter().position(|object| object.group == groups[1]).unwrap() + 2;
+	let from = objects.iter().position(|object| object.group == groups[3]).unwrap();
+	let (head, mut tail) = (objects[..before].to_vec(), objects[from..].to_vec());
+	if let Some(back) = second.back {
+		let rewind = tail[0].micros - head.last().unwrap().micros + back.as_micros() as u64;
+		for object in &mut tail {
+			object.micros -= rewind;
+		}
+	}
+
+	let origin = crate::source::produce_origin();
+	let pcr = |base: u64| move |_: usize, object: &Object| Duration::from_micros(object.micros - base);
+	let paced = pcr(head[0].micros);
+	let _first = republish_route(
+		&origin,
+		moq_net::origin::RouteOptions::default().with_instance(first, 0),
+		head.clone(),
+		move |i, object| paced(i, object) + Duration::from_millis(40),
+		ending,
+	);
+	let source = crate::source::resolved(&origin, "live").await;
+	let release = Release::new(source, CatalogFormat::Hang, Duration::from_millis(500))
+		.await
+		.unwrap();
+	let mut follower = super::Follower::new(release)
+		.unwrap()
+		.with_stitch(stitch)
+		.with_follow(Duration::from_secs(5));
+	let drain = tokio::spawn(async move {
+		let mut released = Vec::new();
+		loop {
+			match kio::clock::timeout(STALL, follower.next()).await {
+				Ok(Ok(Some(frame))) => released.push((Instant::now(), frame)),
+				Ok(Ok(None)) => return (released, Some(Ok(()))),
+				Ok(Err(err)) => return (released, Some(Err(err))),
+				Err(_) => return (released, None),
+			}
+		}
+	});
+
+	// The second instance starts after the first's last object, at its own PCR pace.
+	let down = Duration::from_micros(head.last().unwrap().micros - head[0].micros) + second.after;
+	kio::clock::sleep(down).await;
+	let paced = pcr(tail[0].micros);
+	let _second = republish_route(
+		&origin,
+		moq_net::origin::RouteOptions::default().with_instance(second.instance, 0),
+		tail.clone(),
+		move |i, object| paced(i, object) + Duration::from_millis(40),
+		Ending::Finish,
+	);
+	let (released, end) = drain.await.unwrap();
+	(released, end, head, tail)
+}
+
+/// An import killed under the release leaves its route lingering, silent, while its restart, a
+/// new instance, takes the path: stitching, the release switches to it at once and writes its
+/// packets from its first group, after everything the first instance delivered, none of it late.
+#[tokio::test(start_paused = true)]
+async fn a_stitched_release_carries_on_into_a_restarted_import() {
+	let (first, second) = (moq_net::Instance::random(), moq_net::Instance::random());
+	let (released, end, head, tail) = follow(first, Ending::Silent, Restart::new(second), true).await;
+	assert!(
+		payloads(&released) == bytes(head.iter().chain(&tail).map(|object| &object.payload)),
+		"the first instance's objects, then the second's from its first group"
+	);
+	let pauses = released.windows(2).map(|pair| pair[1].0.duration_since(pair[0].0));
+	assert!(
+		pauses.max().unwrap() < Duration::from_secs(2),
+		"the output resumes within the downtime and the delay"
+	);
+	assert!(matches!(end, Some(Ok(()))), "the second instance's finish ends it: {end:?}");
+}
+
+/// A replacement's clock may start behind the first's, as a restarted encoder's does: arriving
+/// while the first's last objects still wait out the delay, a step back by less than the delay
+/// carries no marker of its own, yet the replacement goes out whole on a clock of its own after
+/// them, none of it late.
+#[tokio::test(start_paused = true)]
+async fn a_stitched_release_carries_on_into_a_rewound_clock() {
+	let (first, second) = (moq_net::Instance::random(), moq_net::Instance::random());
+	// It starts at once, while the first's last objects still wait out the delay.
+	let second = Restart {
+		instance: second,
+		after: Duration::from_millis(40),
+		back: Some(Duration::from_millis(300)),
+	};
+	let (released, end, head, tail) = follow(first, Ending::Silent, second, true).await;
+	assert!(
+		payloads(&released) == bytes(head.iter().chain(&tail).map(|object| &object.payload)),
+		"the first instance's objects, then the second's from its first group"
+	);
+	assert!(matches!(end, Some(Ok(()))), "{end:?}");
+}
+
+/// Without stitching the release stays on the silent instance, so the restart is never written.
+#[tokio::test(start_paused = true)]
+async fn an_unstitched_release_stays_on_the_instance_it_started_on() {
+	let (first, second) = (moq_net::Instance::random(), moq_net::Instance::random());
+	let (released, end, head, _) = follow(first, Ending::Silent, Restart::new(second), false).await;
+	assert!(payloads(&released) == bytes(head.iter().map(|object| &object.payload)));
+	assert!(end.is_none(), "still waiting on the first instance: {end:?}");
+}
+
+/// The same instance returning on a new route after its first went resumes on the same clock:
+/// what it missed is a gap, and both runs go out, stitching or not.
+#[tokio::test(start_paused = true)]
+async fn the_same_instance_returning_resumes_the_release() {
+	let instance = moq_net::Instance::random();
+	let gone = Ending::Abort(moq_net::Error::Unroutable);
+	let (released, end, head, tail) = follow(instance.clone(), gone, Restart::new(instance), false).await;
+	assert!(payloads(&released) == bytes(head.iter().chain(&tail).map(|object| &object.payload)));
+	assert!(matches!(end, Some(Ok(()))), "the return's finish ends it: {end:?}");
 }
