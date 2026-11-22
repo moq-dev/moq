@@ -68,12 +68,22 @@ async fn setup(version: &str, transport: driver::transport::Config) -> Setup {
 	setup_through(version, transport, None).await
 }
 
-/// [`setup`], with the client reaching the server through a shaper treating both ways to
-/// `profile`.
+/// [`setup_through`], with the server's QUIC settings.
 async fn setup_through(
 	version: &str,
 	transport: driver::transport::Config,
 	profile: Option<moq_shaper::Profile>,
+) -> Setup {
+	setup_served(version, transport, profile, Default::default()).await
+}
+
+/// [`setup`], with the client reaching the server through a shaper treating both ways to
+/// `profile`.
+async fn setup_served(
+	version: &str,
+	transport: driver::transport::Config,
+	profile: Option<moq_shaper::Profile>,
+	quic: moq_tokio::quic::Config,
 ) -> Setup {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
@@ -88,7 +98,7 @@ async fn setup_through(
 	config.tls.generate = vec!["localhost".into()];
 	config.version = vec![version];
 	let mut server = config
-		.init(Default::default())
+		.init(quic)
 		.expect("init server")
 		.listen()
 		.await
@@ -1330,5 +1340,185 @@ impl rustls::client::danger::ServerCertVerifier for AnyCert {
 			.unwrap()
 			.signature_verification_algorithms
 			.supported_schemes()
+	}
+}
+
+/// SCRATCH: steady-state lag of a live track on a warm, long, bufferbloated path.
+mod steady_lag {
+	use super::*;
+
+	const FRAME: usize = 66_666;
+	const PERIOD: Duration = Duration::from_millis(33);
+
+	struct Run {
+		first: Duration,
+		caught: Option<Duration>,
+		steady_p50: Duration,
+		steady_max: Duration,
+		overshoot: Duration,
+		overflowed: u64,
+		lags: Vec<(Duration, Duration)>,
+	}
+
+	async fn run(rate: u64, stream_window: u64, warm: usize, backlog: Duration, watch: Duration) -> Run {
+		let mut transport = transport(64 << 20);
+		transport.limits.max_streams = std::num::NonZeroU64::new(moq_tokio::quic::DEFAULT_MAX_STREAMS);
+		transport.limits.stream_receive_window = std::num::NonZeroU64::new(stream_window);
+		transport.limits.send_window = std::num::NonZeroU64::new(64 << 20);
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.receive_window = Some(64 << 20);
+		quic.send_window = Some(64 << 20);
+		quic.stream_receive_window = Some(stream_window);
+		let profile = moq_shaper::Profile {
+			delay: Duration::from_millis(125),
+			rate: Some(moq_shaper::Rate {
+				bits_per_second: rate,
+				burst: 1500,
+				queue: Duration::from_millis(250),
+			}),
+			..Default::default()
+		};
+		let setup = setup_served("moq-lite-06", transport, Some(profile), quic).await;
+
+		if warm > 0 {
+			let track = setup
+				.broadcast
+				.broadcast()
+				.create_track("warm", timed().with_max_age(None))
+				.unwrap();
+			let subscription = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60)));
+			let mut sub = setup.remote.track("warm").unwrap().subscribe(subscription).await.unwrap();
+			let chunk = Bytes::from(vec![1u8; 1 << 20]);
+			let writer = tokio::spawn(async move {
+				for i in 0..warm >> 20 {
+					let mut group = track.append_group(Timestamp::from_millis(i as u64).unwrap()).unwrap();
+					group.write_frame(Timestamp::from_millis(i as u64).unwrap(), chunk.clone()).unwrap();
+					group.finish().unwrap();
+					kio::clock::sleep(Duration::from_millis(5)).await;
+				}
+				track
+			});
+			for _ in 0..warm >> 20 {
+				let mut g = kio::clock::timeout(Duration::from_secs(60), sub.recv_group())
+					.await
+					.expect("warm group")
+					.unwrap()
+					.unwrap();
+				kio::clock::timeout(Duration::from_secs(60), g.read_frame())
+					.await
+					.expect("warm frame")
+					.unwrap()
+					.unwrap();
+			}
+			let track = writer.await.unwrap();
+			drop(track);
+		}
+
+		eprintln!("mark live {:?}", kio::clock::now());
+		let track = setup
+			.broadcast
+			.broadcast()
+			.create_track("live", timed().with_max_age(None))
+			.unwrap();
+		let sent = Arc::new(std::sync::Mutex::new(Vec::<kio::clock::Instant>::new()));
+		let overshoot = Arc::new(std::sync::Mutex::new(Duration::ZERO));
+		let total = ((backlog + watch).as_millis() / PERIOD.as_millis()) as usize;
+		let writer = tokio::spawn({
+			let (sent, overshoot) = (sent.clone(), overshoot.clone());
+			async move {
+				let payload = Bytes::from(vec![7u8; FRAME]);
+				let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+				let start = kio::clock::now();
+				for i in 0..total {
+					let due = start.saturating_add(PERIOD * i as u32);
+					kio::clock::sleep_until(due).await;
+					let now = kio::clock::now();
+					let mut o = overshoot.lock().unwrap();
+					*o = (*o).max(now.saturating_duration_since(due));
+					drop(o);
+					sent.lock().unwrap().push(now);
+					group
+						.write_frame(Timestamp::from_millis(i as u64 * 33).unwrap(), payload.clone())
+						.unwrap();
+				}
+				group.finish().unwrap();
+				track
+			}
+		});
+		kio::clock::sleep(backlog).await;
+		let subscribed = kio::clock::now();
+		eprintln!("mark subscribed {subscribed:?}");
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60)));
+		let mut sub = setup.remote.track("live").unwrap().subscribe(subscription).await.unwrap();
+		let mut group = next_group(&mut sub).await;
+		let mut lags = Vec::new();
+		let mut first = None;
+		let mut caught = None;
+		while let Some(frame) = kio::clock::timeout(Duration::from_secs(20), group.read_frame())
+			.await
+			.expect("frame timed out")
+			.expect("frame")
+		{
+			assert_eq!(frame.payload.len(), FRAME);
+			let now = kio::clock::now();
+			let index = (frame.timestamp.as_millis().unwrap() / 33) as usize;
+			let lag = now - sent.lock().unwrap()[index];
+			let since = now - subscribed;
+			first.get_or_insert(since);
+			if caught.is_none() && lag < Duration::from_millis(191) {
+				caught = Some(since);
+			}
+			lags.push((since, lag));
+		}
+		drop(writer.await.unwrap());
+		let tail = watch.saturating_sub(Duration::from_secs(3));
+		let mut steady: Vec<_> = lags.iter().filter(|(since, _)| *since >= tail).map(|(_, lag)| *lag).collect();
+		steady.sort();
+		Run {
+			first: first.unwrap(),
+			caught,
+			steady_p50: steady[steady.len() / 2],
+			steady_max: *steady.last().unwrap(),
+			overshoot: *overshoot.lock().unwrap(),
+			overflowed: setup.verify().map_or(0, |s| s.down.overflowed + s.up.overflowed),
+			lags,
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "scratch"]
+	async fn steady_lag() {
+		let runs: usize = std::env::var("RUNS").map_or(3, |v| v.parse().unwrap());
+		let warm: usize = std::env::var("WARM").map_or(32 << 20, |v| v.parse().unwrap());
+		let dump = std::env::var("DUMP").is_ok();
+		println!("rate,stream_window,warm,run,first_ms,caught_ms,steady_p50_ms,steady_max_ms,timer_overshoot_ms,overflowed");
+		for (rate, backlog) in [(1_000_000_000u64, 1500u64), (200_000_000, 2000)] {
+			if std::env::var("RATE").is_ok_and(|r| r.parse::<u64>().unwrap() != rate) {
+				continue;
+			}
+			for window in [1u64 << 20, 4 << 20, 64 << 20] {
+				if std::env::var("WIN").is_ok_and(|w| w.parse::<u64>().unwrap() << 20 != window) {
+					continue;
+				}
+				for i in 0..runs {
+					let r = run(rate, window, warm, Duration::from_millis(backlog), Duration::from_secs(8)).await;
+					println!(
+						"{rate},{},{warm},{i},{},{},{},{},{},{}",
+						window >> 20,
+						r.first.as_millis(),
+						r.caught.map_or(-1, |c| c.as_millis() as i64),
+						r.steady_p50.as_millis(),
+						r.steady_max.as_millis(),
+						r.overshoot.as_millis(),
+						r.overflowed,
+					);
+					if dump {
+						for (since, lag) in &r.lags {
+							eprintln!("lag {rate} {window} {i} {} {}", since.as_millis(), lag.as_millis());
+						}
+					}
+				}
+			}
+		}
 	}
 }
