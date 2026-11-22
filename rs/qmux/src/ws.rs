@@ -21,17 +21,18 @@ fn max_message_size(config: &Config) -> usize {
 		.max(crate::MAX_FRAME_SIZE)
 }
 
-/// The socket settings for a session under `session`: messages, frames, and the read
-/// buffer held to [`max_message_size`].
+/// The socket settings for a session under `session`: messages and frames held to
+/// [`max_message_size`], read in chunks of one default record.
 ///
-/// The transport copies each message out, so the read buffer only needs to fit one; the
-/// default of 128 KiB costs a zero-fill on every read and stays resident per connection.
+/// The transport copies each message out, so the read buffer never backs a record. tungstenite
+/// allocates it up front and zero-fills it on every read, so it stays one default record
+/// rather than its 128 KiB default or a large record limit; a larger message grows it.
 pub(crate) fn capped(session: &Config) -> tungstenite::protocol::WebSocketConfig {
 	let max = max_message_size(session);
 	tungstenite::protocol::WebSocketConfig::default()
 		.max_message_size(Some(max))
 		.max_frame_size(Some(max))
-		.read_buffer_size(max)
+		.read_buffer_size(crate::transport::READ_BUFFER)
 }
 
 /// Keep-alive configuration for WebSocket transports.
@@ -541,5 +542,18 @@ mod tests {
 			"{:?}",
 			accepted.map(|_| ())
 		);
+	}
+
+	/// A large record limit bounds messages, not the read buffer tungstenite allocates and
+	/// zero-fills on every read.
+	#[test]
+	fn a_large_record_limit_keeps_the_read_buffer_small() {
+		let config = Config {
+			max_record_size: 64 << 20,
+			..Config::default()
+		};
+		let ws = capped(&config);
+		assert_eq!(ws.read_buffer_size, crate::transport::READ_BUFFER);
+		assert_eq!(ws.max_message_size, Some(64 << 20));
 	}
 }
