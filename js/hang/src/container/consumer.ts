@@ -1070,7 +1070,8 @@ export class Consumer {
 					// `poll_continues` does, and otherwise waits for the hole like any other.
 					if (key === this.#active) {
 						this.#pass(head, key + 1n);
-						if (settled === null && head.end !== undefined && this.#start?.group === key) this.#reachedEnd(head.end);
+						if (settled === null && head.end !== undefined && this.#start?.group === key)
+							this.#reachedEnd(head.end);
 					}
 					head.consumer.close();
 					this.#release(head);

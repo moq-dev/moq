@@ -97,7 +97,11 @@ pub(crate) enum Item {
 ///
 /// [`poll_read`](Self::poll_read) yields [`Read::Gap`] wherever media after an item already read
 /// will never arrive: a latency skip, an evicted current group, or keys between two groups the
-/// publisher did not declare skipped whose boundary is not contiguous within 1 ms. A local track
+/// publisher did not declare skipped whose boundary is not contiguous within 1 ms. The later group
+/// continues the earlier when any of its frames presents by where the earlier ended, so an open
+/// GOP's leading pictures count, and its first frame waits until one shows it, at most as many frames
+/// as the track has reordered. Frames without a duration end one picture past the highest: the
+/// largest step between the group's latest presentation times. A local track
 /// owes nothing, so there a discontinuous run is a gap the moment the group past it lands. Whatever is lost before the first item is no
 /// gap, since nothing was read before it. A marker group (no decodable frames: one empty
 /// payload, or on a data track one object with no bytes) is the publisher declaring a stop,
@@ -3159,7 +3163,10 @@ mod tests {
 		let mut open = track.create_group(moq_net::group::Info { start: 280_000 }).unwrap();
 		wire.write(&mut open, &[frame(280_000, true)]).unwrap();
 		let waiter = kio::Waiter::noop();
-		assert!(reader.poll_read(&waiter).is_pending(), "the keyframe waits for the next frame");
+		assert!(
+			reader.poll_read(&waiter).is_pending(),
+			"the keyframe waits for the next frame"
+		);
 		wire.write(&mut open, &[frame(160_000, false)]).unwrap();
 		let Some(Read::Frame { frame: keyframe, .. }) = reader.read().await.unwrap() else {
 			panic!("the keyframe reads, with no gap ahead of it");
