@@ -3,6 +3,7 @@
 //! A reader stalled before its first read, behind a relay serving it one stream at a time,
 //! loses none of the groups its budget covers: they wait at the relay for stream credit.
 
+use crate::WithMax as _;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -63,7 +64,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let consumer = viewer.consume();
 	crate::support::announced(&consumer, "live").await;
 	let remote = consumer.request("live", None).await.unwrap();
-	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
+	let subscription = track::Subscription::default().with_max(budget);
 	let mut reader = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 	kio::clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
 

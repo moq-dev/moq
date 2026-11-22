@@ -3,11 +3,12 @@
 //! moq-transport carries group keys verbatim as Group IDs through a relay on every
 //! supported draft.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Subscription};
+use moq_net::track::{Info, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -65,8 +66,8 @@ async fn a_relay_keeps_keys_and_the_gaps_between_them() {
 				.unwrap()
 				.subscribe(
 					Subscription::default()
-						.with_delay(Delay::default().with_max(None))
-						.with_ranges([support::keys(2..=8)]),
+						.with_ranges([support::keys(2..=8)])
+						.with_max(None),
 				)
 				.await
 				.unwrap();

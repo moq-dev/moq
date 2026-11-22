@@ -1,7 +1,8 @@
 #![cfg(feature = "async")]
 
-//! Relays forward their subscribers' delay: the most tolerant negotiated max, and the largest stated min.
+//! Relays forward their subscribers' live joins: the most tolerant max age wins.
 
+use crate::WithMax as _;
 use std::time::Duration;
 
 use moq_net::{Version, origin, track};
@@ -16,12 +17,23 @@ fn origin(hop: u64) -> origin::Producer {
 	origin.with_proxy(true)
 }
 
+/// The widest max age any live join of `subscription` asks, `Duration::MAX` for no limit.
+fn widest(subscription: &track::Subscription) -> Duration {
+	(subscription.ranges.iter())
+		.filter_map(|range| match range.start {
+			track::Start::Live { max, .. } => Some(max.unwrap_or(Duration::MAX)),
+			_ => None,
+		})
+		.max()
+		.unwrap_or_default()
+}
+
 async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 	kio::clock::timeout(Duration::from_secs(5), async {
 		loop {
 			if track
 				.subscription()
-				.is_some_and(|subscription| subscription.delay.max == Some(Duration::from_millis(millis)))
+				.is_some_and(|subscription| widest(&subscription) == Duration::from_millis(millis))
 			{
 				return;
 			}
@@ -66,7 +78,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 			.unwrap();
 		let cache = remote.track("catalog").unwrap();
 		let prefs = |millis| {
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_millis(millis)))
+			track::Subscription::default().with_max(Duration::from_millis(millis))
 		};
 		let mut short = cache.subscribe(prefs(250)).await.unwrap();
 		budget(&mut source, 250, version).await;

@@ -3200,7 +3200,6 @@ mod tests {
 	use crate::coding::{Decode, Encode};
 	use crate::lite::test_transport::{Sent, SinkSession};
 	use crate::model::ProduceTest;
-	use crate::track::Delay;
 	use futures::FutureExt;
 
 	const VERSION: Version = Version::Lite05;
@@ -3235,7 +3234,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
@@ -3336,8 +3334,6 @@ mod tests {
 			],
 		);
 		active.starts = [(0, None), (1, None), (2, Some(66))].into();
-		// Asked with no limit, so an empty answer holds for every reader.
-		active.budgets = [(0, Duration::MAX), (1, Duration::MAX), (2, Duration::MAX)].into();
 		let info = track::Info::default().with_timescale(None).with_max_age(None);
 		let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 		serving.received();
@@ -3357,7 +3353,7 @@ mod tests {
 							start: crate::track::Start::Time(time),
 							end: None,
 						}])
-						.with_delay(Delay::default().with_max(None)),
+						.with_max(None),
 				)
 				.ordered();
 			match ordered.next_item().now_or_never() {
@@ -3453,7 +3449,6 @@ mod tests {
 				demand: Some(Subscription::default()),
 				fill_ids: Default::default(),
 				probe_ids: Default::default(),
-				budgets: Default::default(),
 				fill_groups: Default::default(),
 				tail: Default::default(),
 				started: None,
@@ -3696,7 +3691,7 @@ mod tests {
 		let mut reader = track.subscribe(
 			Subscription::default()
 				.with_range(0..)
-				.with_delay(Delay::default().with_max(Duration::from_secs(30))),
+				.with_max(Duration::from_secs(30)),
 		);
 		track.start_at(WIDE).unwrap();
 		arrive(&track, &tail, WIDE, start);
@@ -3917,8 +3912,14 @@ mod tests {
 		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
-		let probe = join_probe(Duration::from_secs(1), None);
-		let mut sub = SubStream {
+		let join = track::JoinAsk {
+			min: Duration::from_secs(1),
+			end: None,
+			budget: Duration::from_secs(30),
+			since: 0,
+		};
+		let probe = join_probe(&join);
+		let sub = SubStream {
 			order: crate::track::Order::Ascending,
 			stream,
 			id: 0,
@@ -3931,7 +3932,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
@@ -3945,17 +3945,9 @@ mod tests {
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
 		};
-		let (id, _) = sub.live.iter().next().unwrap();
-		sub.budgets.insert(id, Duration::MAX);
-		let join = track::JoinAsk {
-			min: Duration::from_secs(1),
-			end: None,
-			budget: Duration::from_secs(30),
-			since: 0,
-		};
 
 		// Kept, the unanswered demand range still answers the join.
-		let (probes, _) = join_probes(Some(&sub), &[join], &[probe], Duration::MAX);
+		let (probes, _) = join_probes(Some(&sub), &[join], &[probe]);
 		assert_eq!(probes, [], "the kept demand range answers the join");
 
 		// Hidden by an oldest range, it is retired, so the join is asked by a probe.
@@ -3963,7 +3955,6 @@ mod tests {
 			Some(&sub),
 			&[join],
 			&[lite::Range { start: None, end: None }],
-			Duration::MAX,
 		);
 		assert_eq!(probes, [probe], "the retired demand range answers nothing");
 	}
@@ -3993,7 +3984,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
@@ -4016,7 +4006,7 @@ mod tests {
 		// An update moves the floor and the ranges together, as `begin_subscription` does.
 		let update = |sub: &mut SubStream, start: Option<u64>, ranges: Vec<lite::Range>| {
 			sub.start = start;
-			sub.edit(&ranges, (0, 0), &Default::default(), Duration::MAX).unwrap();
+			sub.edit(&ranges, (0, 0), &Default::default()).unwrap();
 		};
 		sub.started = Some(None);
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
@@ -4034,7 +4024,6 @@ mod tests {
 			],
 			(0, 0),
 			&Default::default(),
-			Duration::MAX,
 		)
 		.unwrap();
 		assert_eq!(
@@ -4113,7 +4102,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
@@ -4130,20 +4118,20 @@ mod tests {
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
 		// The same bounds again, as a fill.
-		sub.edit(&[demand, demand], (0, 1), &Default::default(), Duration::MAX)
+		sub.edit(&[demand, demand], (0, 1), &Default::default())
 			.unwrap();
 		assert_eq!(sub.fill_range(0), None, "the demand keeps its range");
 		assert_eq!(sub.fill_range(1), Some(4..8), "the copy the edit added is the fill");
 
 		// Another fill joins, and the first keeps its Range ID.
 		let other = groups(10..12);
-		sub.edit(&[demand, demand, other], (0, 2), &Default::default(), Duration::MAX)
+		sub.edit(&[demand, demand, other], (0, 2), &Default::default())
 			.unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 
 		// The demand moves away while the fill stays: the fill keeps Range ID 1.
 		let moved = lite::Range::span(Some(20), 0, None, None);
-		sub.edit(&[moved, demand, other], (0, 2), &Default::default(), Duration::MAX)
+		sub.edit(&[moved, demand, other], (0, 2), &Default::default())
 			.unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 		assert_eq!(sub.fill_range(1), Some(4..8));
@@ -4152,12 +4140,12 @@ mod tests {
 		// Before SUBSCRIBE_START, a fill an update retires keeps its Range ID, since the start
 		// still names it, and it must not count as the demand's.
 		sub.started = None;
-		sub.edit(&[moved, demand], (0, 1), &Default::default(), Duration::MAX)
+		sub.edit(&[moved, demand], (0, 1), &Default::default())
 			.unwrap();
 		assert_eq!(sub.fill_range(2), None, "retired");
 		assert!(sub.fill_ids.contains(&2), "still a fill's");
 		sub.started = Some(Some(4));
-		sub.edit(&[moved, demand], (0, 1), &Default::default(), Duration::MAX)
+		sub.edit(&[moved, demand], (0, 1), &Default::default())
 			.unwrap();
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
@@ -4188,7 +4176,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
@@ -4206,18 +4193,19 @@ mod tests {
 
 		// A live join, which only the publisher can place.
 		let back = lite::Range {
-			start: Some(lite::Anchor::Live(Duration::ZERO)),
+			start: Some(lite::Anchor::Live { min: Duration::ZERO, max: None }),
 			end: None,
 		};
 		let (edit, changed) = sub
-			.edit(&[first, back], (0, 0), &Default::default(), Duration::MAX)
+			.edit(&[first, back], (0, 0), &Default::default())
 			.unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
 			lite::RangeEdit::Edit {
 				remove: vec![],
-				add: vec![back]
+				add: vec![back],
+				retune: Vec::new(),
 			}
 		);
 		assert_eq!(sub.owed(None), None, "nothing says yet where it starts");
@@ -4225,18 +4213,19 @@ mod tests {
 		assert_eq!(sub.owed(None), Some(vec![4..10, 1..10]));
 
 		// Retiring the first range forgets its start.
-		sub.edit(&[back], (0, 0), &Default::default(), Duration::MAX).unwrap();
+		sub.edit(&[back], (0, 0), &Default::default()).unwrap();
 		assert_eq!(sub.starts.keys().copied().collect::<Vec<_>>(), [1]);
 		assert_eq!(sub.owed(Some(8)), Some(vec![1..8]));
 
 		// A join asked afresh is placed again, as a range of its own.
-		let (edit, changed) = sub.edit(&[back], (0, 0), &[1].into(), Duration::MAX).unwrap();
+		let (edit, changed) = sub.edit(&[back], (0, 0), &[1].into()).unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
 			lite::RangeEdit::Edit {
 				remove: vec![1],
-				add: vec![back]
+				add: vec![back],
+				retune: Vec::new(),
 			}
 		);
 		assert!(sub.starts.is_empty(), "the new range waits on its own start");
@@ -5133,7 +5122,7 @@ mod tests {
 			assert!(track.is_live(), "header first: {header_first}");
 
 			let subscription = crate::track::Subscription::default()
-				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+				.with_max(std::time::Duration::from_secs(10))
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription);
 			let mut keys = Vec::new();
@@ -5342,7 +5331,7 @@ mod tests {
 				crate::track::Info::timed(),
 			);
 			let subscription = crate::track::Subscription::default()
-				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+				.with_max(std::time::Duration::from_secs(10))
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription.clone());
 			// The original copy, still arriving: one frame in, no end yet.
@@ -5465,7 +5454,7 @@ mod tests {
 				crate::track::Info::timed(),
 			);
 			let subscription = crate::track::Subscription::default()
-				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+				.with_max(std::time::Duration::from_secs(10))
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription);
 			let tail = kio::Producer::new(Tail::default());
@@ -5806,7 +5795,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
@@ -5854,7 +5842,7 @@ mod tests {
 		let mut reader = copy
 			.subscribe(
 				crate::track::Subscription::default()
-					.with_delay(crate::track::Delay::default().with_max(None))
+					.with_max(None)
 					.with_range(0..4),
 			)
 			.ordered();
@@ -5887,8 +5875,8 @@ mod tests {
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
 		let mut reader = serving.serving.subscribe(
 			crate::track::Subscription::default()
-				.with_delay(crate::track::Delay::default().with_max(budget))
-				.with_ranges([crate::track::Range::groups(0..)]),
+				.with_ranges([crate::track::Range::groups(0..)])
+				.with_max(budget),
 		);
 		let waiter = kio::Waiter::noop();
 		let old = |groups: std::ops::Range<u64>| {
@@ -6994,7 +6982,7 @@ mod tests {
 			let wait = Duration::from_secs(10);
 			let (waiting, mut run) = subscribing(
 				&subscriber,
-				Subscription::default().with_delay(Delay::default().with_max(wait)),
+				Subscription::default().with_max(wait),
 			);
 			for _ in 0..4 {
 				let _ = kio::Task::poll(&mut run, &kio::Waiter::noop());
@@ -7076,7 +7064,7 @@ mod tests {
 		let every = Subscription::default()
 			.with_order(crate::track::Order::Ascending)
 			.with_start(0)
-			.with_delay(Delay::default().with_max(Duration::from_secs(60)));
+			.with_max(Duration::from_secs(60));
 		let mut consumer = track.consume().subscribe(every).await.unwrap();
 		let framing = lite::Framing::new(track.info(), version);
 		subscriber.subscribes.lock().get_mut(&0).unwrap().accept(
@@ -7138,7 +7126,7 @@ mod tests {
 				.with_timescale(Timescale::MILLI)
 				.with_max_age(None),
 		);
-		let live = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60)));
+		let live = Subscription::default().with_max(Duration::from_secs(60));
 		let mut consumer = track.consume().subscribe(live).await.unwrap();
 		let mut entry = TrackEntry::new(None, Default::default());
 		let framing = lite::Framing::new(track.info(), version);
@@ -7189,7 +7177,7 @@ mod tests {
 		let every = Subscription::default()
 			.with_order(crate::track::Order::Ascending)
 			.with_start(0)
-			.with_delay(Delay::default().with_max(Duration::from_secs(60)));
+			.with_max(Duration::from_secs(60));
 		let mut consumer = track.consume().subscribe(every).await.unwrap();
 		let framing = lite::Framing::new(track.info(), version);
 		entry.accept(
@@ -8381,7 +8369,7 @@ mod tests {
 	#[test]
 	fn wire_span_covers_mixed_starts_from_group_zero() {
 		let mixed = Subscription {
-			ranges: vec![track::Range::default(), track::Range::groups(5..6)],
+			ranges: vec![track::Range::ALL, track::Range::groups(5..6)],
 			..Default::default()
 		};
 		let span = wire_span(mixed);

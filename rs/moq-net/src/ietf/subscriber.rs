@@ -14620,8 +14620,8 @@ mod filter_tests {
 	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
 		let live = |min: Option<Duration>, start: u64| {
 			let first = match min {
-				Some(min) => track::Range::from(track::Start::Live(min)),
-				None => track::Range::default(),
+				Some(min) => track::Range::from(track::Start::Live { min, max: Some(std::time::Duration::ZERO) }),
+				None => track::Range::ALL,
 			};
 			track::Subscription::default().with_ranges([
 				first,
@@ -15134,7 +15134,7 @@ mod stitch_tests {
 			.subscribe(Some(
 				track::Subscription::default()
 					.with_order(crate::track::Order::Ascending)
-					.with_delay(track::Delay::default().with_max(None)),
+					.with_max(None),
 			))
 			.with_range(..);
 		let mut fill = h.stream().await;
@@ -16526,7 +16526,7 @@ mod stitch_tests {
 			.subscribe(Some(
 				track::Subscription::default()
 					.with_order(crate::track::Order::Ascending)
-					.with_delay(track::Delay::default().with_max(None)),
+					.with_max(None),
 			))
 			.with_range(0..)
 			.ordered();
@@ -17221,7 +17221,7 @@ mod stitch_tests {
 						track::Subscription::default()
 							.with_range(0..last + 1)
 							.with_order(crate::track::Order::Ascending)
-							.with_delay(track::Delay::default().with_max(None)),
+							.with_max(None),
 					))
 					.await
 					.unwrap();
@@ -17318,7 +17318,7 @@ mod stitch_tests {
 			let mut reader = run.track.subscribe(
 				track::Subscription::default()
 					.with_range(0..3)
-					.with_delay(track::Delay::default().with_max(None)),
+					.with_max(None),
 			);
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_drop(&waiter).is_pending());
@@ -17369,7 +17369,7 @@ mod stitch_tests {
 					track::Subscription::default()
 						.with_range(0..7)
 						.with_order(crate::track::Order::Ascending)
-						.with_delay(track::Delay::default().with_max(None)),
+						.with_max(None),
 				))
 				.await
 				.unwrap();
@@ -18727,7 +18727,7 @@ mod joining_fetch_tests {
 			);
 			assert!(subscriber.state.lock().group_fetches.is_empty());
 			assert!(matches!(
-				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
+				outcome.read().refused(GROUP).cloned(),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 			return;
@@ -18745,7 +18745,7 @@ mod joining_fetch_tests {
 				"{version:?}: unanswered FETCH stays alive"
 			);
 			assert!(matches!(
-				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
+				outcome.read().refused(GROUP).cloned(),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 		} else {

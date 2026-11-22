@@ -4,11 +4,12 @@
 //! drives them: the publisher writes group 66, a viewer fetches group 67, which the publisher
 //! serves only from a fill, and a viewer then subscribes from time 66.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Item, Order, Range, Subscription};
+use moq_net::track::{Item, Order, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -119,7 +120,7 @@ impl Fixture {
 	/// An ordered reader on viewer `index` from time [`LIVE`], with no budget.
 	async fn subscribe(&self, index: usize) -> moq_net::track::Ordered {
 		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(None))
+			.with_max(None)
 			.with_order(Order::Ascending)
 			.with_ranges([Range {
 				start: moq_net::track::Start::Time(LIVE),
@@ -200,7 +201,7 @@ async fn a_range_before_every_group_reads_past_it() {
 	let fixture = Fixture::new().await;
 	fixture.write_live();
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(None))
+		.with_max(None)
 		.with_order(Order::Ascending)
 		.with_ranges([
 			Range {
@@ -257,7 +258,7 @@ async fn a_wider_reader_reads_what_a_narrower_one_expired() {
 		.unwrap();
 	let from = |budget: Option<Duration>| {
 		Subscription::default()
-			.with_delay(Delay::default().with_max(budget))
+			.with_max(budget)
 			.with_order(Order::Ascending)
 			.with_ranges([Range {
 				start: moq_net::track::Start::Time(10),
@@ -342,7 +343,7 @@ async fn a_time_between_held_groups_starts_where_the_publisher_would() {
 	}
 
 	let from = Subscription::default()
-		.with_delay(Delay::default().with_max(None))
+		.with_max(None)
 		.with_order(Order::Ascending)
 		.with_ranges([Range {
 			start: moq_net::track::Start::Time(18),

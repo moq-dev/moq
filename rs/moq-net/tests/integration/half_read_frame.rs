@@ -8,6 +8,7 @@
 //! session to `E` dies. `B`'s subscription starts at group 1, so `E` FETCHes the frame from
 //! `B`.
 
+use crate::WithMax as _;
 use crate::route_change::{link, priced_link, produce_origin, settle, timed};
 use crate::support::harness::{MockConnectOptions, connect_mock};
 
@@ -58,7 +59,7 @@ async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 		.unwrap()
 		.unwrap();
 	let prefs =
-		track::Subscription::default().with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(60)));
+		track::Subscription::default().with_max(std::time::Duration::from_secs(60));
 	let mut sub = remote.track("file").unwrap().subscribe(prefs).await.unwrap();
 
 	let payload = pattern(SIZE);

@@ -181,12 +181,12 @@ mod test {
 		assert_eq!(skipped.runs(), 2);
 		assert_eq!(skipped.lowest(), Some(1));
 
-		assert!(skipped.widened(NARROW).is_empty(), "the same budget reverses nothing");
-		assert_eq!(skipped.widened(WIDE), vec![1..=2]);
-		assert!(skipped.widened(WIDE).is_empty(), "a run judged at the budget stays");
+		assert!(skipped.widened(&Budget::uniform(NARROW)).is_empty(), "the same budget reverses nothing");
+		assert_eq!(skipped.widened(&Budget::uniform(WIDE)), vec![1..=2]);
+		assert!(skipped.widened(&Budget::uniform(WIDE)).is_empty(), "a run judged at the budget stays");
 		assert_eq!(skipped.lowest(), Some(1), "a widened run stays until it is handed out");
 		// Rejudged under WIDE, the widened run now merges with the run already judged there.
-		assert_eq!(skipped.widened(WIDE * 2), vec![1..=2, 4..=4]);
+		assert_eq!(skipped.widened(&Budget::uniform(WIDE * 2)), vec![1..=2, 4..=4]);
 		skipped.remove(1);
 		skipped.remove(2);
 		assert_eq!(skipped.lowest(), Some(4));
@@ -199,7 +199,7 @@ mod test {
 			skipped.insert(key, NARROW);
 		}
 		skipped.remove(4);
-		assert_eq!(skipped.widened(WIDE), vec![3..=3, 5..=5]);
+		assert_eq!(skipped.widened(&Budget::uniform(WIDE)), vec![3..=3, 5..=5]);
 	}
 
 	#[test]
@@ -215,7 +215,7 @@ mod test {
 
 		// More runs than twice the cache prunes every one that holds nothing.
 		skipped.prune(0, |run| *run.start() != 5);
-		assert_eq!(skipped.widened(WIDE), vec![5..=5]);
+		assert_eq!(skipped.widened(&Budget::uniform(WIDE)), vec![5..=5]);
 	}
 
 	#[test]

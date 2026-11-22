@@ -881,7 +881,10 @@ mod tests {
 			let index = rng.random_range(0..slots.len());
 			let start = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
 				0 => Start::Oldest,
-				1 => Start::Live(Duration::from_millis(rng.random_range(0..8))),
+				1 => Start::Live {
+					min: Duration::from_millis(rng.random_range(0..8)),
+					max: rng.random_bool(0.8).then(|| Duration::from_millis(rng.random_range(0..8))),
+				},
 				_ => Start::Time(rng.random_range(0..8)),
 			};
 			let ranges: Vec<Range> = (0..rng.random_range(0..3))
@@ -892,9 +895,6 @@ mod tests {
 				.collect();
 			let next = Subscription {
 				priority: rng.random_range(0..8),
-				delay: Delay {
-					max: Some(Duration::from_millis(rng.random_range(0..8))),
-				},
 				ranges,
 				order: if rng.random_bool(0.5) {
 					Order::Ascending
@@ -948,7 +948,7 @@ mod tests {
 		let strong = producer.subscribe(
 			Subscription::default()
 				.with_priority(10)
-				.with_delay(Delay::default().with_max(Duration::from_secs(1))),
+				.with_max(Duration::from_secs(1)),
 		);
 		let count = Arc::new(Count(AtomicUsize::new(0)));
 		let waiter = kio::Waiter::new(std::task::Waker::from(count.clone()));

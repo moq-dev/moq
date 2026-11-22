@@ -1974,6 +1974,7 @@ mod test {
 		let edit = |remove: &[u64], add: &[Range]| RangeEdit::Edit {
 			remove: remove.to_vec(),
 			add: add.to_vec(),
+			retune: Vec::new(),
 		};
 		step(&[b, a], edit(&[], &[]));
 		step(&[a, c], edit(&[1], &[c]));
@@ -1991,7 +1992,11 @@ mod test {
 	#[test]
 	fn lite07_refuses_edits_it_cannot_apply() {
 		let version = Version::Lite07;
-		let edit = |remove: Vec<u64>, add: Vec<Range>| RangeEdit::Edit { remove, add };
+		let edit = |remove: Vec<u64>, add: Vec<Range>| RangeEdit::Edit {
+			remove,
+			add,
+			retune: Vec::new(),
+		};
 		let fresh = || LiveRanges::new(version, &[Range::OPEN]);
 		assert!(
 			fresh().apply(edit(vec![1], vec![Range::OPEN])).is_err(),
@@ -2036,6 +2041,7 @@ mod test {
 			.apply(RangeEdit::Edit {
 				remove: vec![0],
 				add: vec![range(4), range(5)],
+				retune: Vec::new(),
 			})
 			.unwrap();
 		assert_eq!(
@@ -2043,12 +2049,14 @@ mod test {
 			Applied::Edit {
 				retired: vec![0],
 				added: vec![(1, range(4)), (2, range(5))],
+				retuned: Vec::new(),
 			}
 		);
 		let second = live
 			.apply(RangeEdit::Edit {
 				remove: vec![1],
 				add: vec![range(6)],
+				retune: Vec::new(),
 			})
 			.unwrap();
 		assert_eq!(
@@ -2056,6 +2064,7 @@ mod test {
 			Applied::Edit {
 				retired: vec![0],
 				added: vec![(2, range(5)), (3, range(6))],
+				retuned: Vec::new(),
 			}
 		);
 	}
@@ -2079,6 +2088,7 @@ mod test {
 			RangeEdit::Edit {
 				remove: vec![0],
 				add: wide[..2].to_vec(),
+				retune: Vec::new(),
 			}
 		);
 	}
@@ -2252,7 +2262,7 @@ mod test {
 	fn a_live_start_roundtrips_only_on_lite07() {
 		let ms = std::time::Duration::from_millis;
 		let live = |min| Range {
-			start: Some(Anchor::Live(min)),
+			start: Some(Anchor::Live { min, max: None }),
 			end: Some(Anchor::Time(9)),
 		};
 		for (min, wire) in [
@@ -2281,7 +2291,7 @@ mod test {
 		// No start on a wire without the Anchor.
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![Range {
-			start: Some(Anchor::Live(ms(250))),
+			start: Some(Anchor::Live { min: ms(250), max: None }),
 			end: None,
 		}];
 		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, vec![Range::OPEN]);
@@ -2289,7 +2299,7 @@ mod test {
 		// A live end is refused both ways.
 		msg.ranges = vec![Range {
 			start: None,
-			end: Some(Anchor::Live(ms(250))),
+			end: Some(Anchor::Live { min: ms(250), max: None }),
 		}];
 		assert!(msg.encode_bytes(Version::Lite07).is_err());
 		let mut buf = Vec::new();

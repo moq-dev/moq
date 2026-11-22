@@ -837,7 +837,7 @@ mod tests {
 		let mut reader = producer
 			.subscribe(
 				Subscription::default()
-					.with_delay(Delay::default().with_max(None))
+					.with_max(None)
 					.with_range(0..3),
 			)
 			.ordered();
@@ -885,7 +885,7 @@ mod tests {
 		let mut reader = producer
 			.subscribe(
 				Subscription::default()
-					.with_delay(Delay::default().with_max(None))
+					.with_max(None)
 					.with_range(0..3),
 			)
 			.ordered();

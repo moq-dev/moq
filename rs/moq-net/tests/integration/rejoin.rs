@@ -2,6 +2,7 @@
 
 //! A reader leaving and rejoining a track relayed over the in-memory mock transport.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 use support::AtStart;
@@ -73,7 +74,7 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 
 				let ts = |ms| Timestamp::from_millis(ms).unwrap();
 				let prefs = || {
-					track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)))
+					track::Subscription::default().with_max(Duration::from_secs(10))
 				};
 
 				let mut group = track.append_next().unwrap();
@@ -240,7 +241,7 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 				.unwrap();
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
 			let prefs =
-				|| track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
+				|| track::Subscription::default().with_max(Duration::from_secs(10));
 
 			// Held for fetches only: it keeps the relay's copy without subscribing.
 			let _held = remote.track("video").unwrap();

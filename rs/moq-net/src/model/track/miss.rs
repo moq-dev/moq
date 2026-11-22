@@ -1700,7 +1700,8 @@ impl super::super::record::Beside for Misses {
 
 #[cfg(test)]
 mod tests {
-	use super::super::{Delay, Servable, Subscription};
+	use super::super::{Servable, Subscription};
+	use crate::Error;
 	use super::*;
 
 	/// A refusal starts a deferred grace after the judge returned: either no handler
@@ -1725,7 +1726,7 @@ mod tests {
 			let noop = kio::Waiter::noop();
 			pool.poll(opened, &noop);
 			let budget = Duration::from_secs(1);
-			let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+			let _reader = track.subscribe(Subscription::default().with_max(budget));
 			for key in [0, 2] {
 				track
 					.create_group(crate::group::Info { start: key })
@@ -1744,21 +1745,20 @@ mod tests {
 				&RangeSet::from_iter(std::iter::once(1..2)),
 				&Asking {
 					priority: 0,
-					max_delay: Some(budget),
 					order: Order::Ascending,
 				},
 				&mut given_up,
 			);
 			let flag = Arc::new(Flag::default());
 			let waiter = kio::Waiter::new(flag.clone().into());
-			assert!(misses.resolve(&state, Some(budget), &mut given_up, &waiter).is_empty());
+			misses.resolve(&state, &mut given_up, &waiter);
 			if let Some(requests) = requests {
 				pool.poll(opened.saturating_add(budget / 2), &noop);
 				let Poll::Ready(Ok(fill)) = requests.poll_requested_fill_group(&noop) else {
 					panic!("the queued fill");
 				};
 				fill.reject(Error::NotFound);
-				assert!(misses.resolve(&state, Some(budget), &mut given_up, &waiter).is_empty());
+				misses.resolve(&state, &mut given_up, &waiter);
 			}
 			assert!(misses.refused.contains(&1));
 			assert!(given_up.is_empty(), "the live feed may still deliver the group");
@@ -1784,7 +1784,7 @@ mod tests {
 			.create_track("recreated", crate::track::Info::default())
 			.unwrap();
 		let budget = Duration::from_secs(5);
-		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		// Newest first, so the publisher skips nothing below it: group 2 is a live gap a fill
 		// may answer.
 		for key in [4, 0] {
@@ -1800,7 +1800,8 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let state = track.state.read();
 		let drift = Drift {
-			budget,
+			budget: Budget::uniform(budget),
+			bound: None,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};
@@ -1824,7 +1825,6 @@ mod tests {
 			&asks,
 			&Asking {
 				priority: 0,
-				max_delay: Some(budget),
 				order: Order::Ascending,
 			},
 			&mut given_up,
@@ -1906,7 +1906,6 @@ mod tests {
 			&RangeSet::from_iter(std::iter::once(0..3)),
 			&Asking {
 				priority: 0,
-				max_delay: None,
 				order: Order::Ascending,
 			},
 			&mut given_up,
@@ -1928,7 +1927,7 @@ mod tests {
 			.create_track("aborted", crate::track::Info::default())
 			.unwrap();
 		let budget = Duration::from_secs(5);
-		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		// Newest first, so the publisher skips nothing below it: group 2 is a live gap a fill
 		// may answer.
 		for key in [4, 0] {
@@ -1944,7 +1943,8 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let state = track.state.read();
 		let drift = Drift {
-			budget,
+			budget: Budget::uniform(budget),
+			bound: None,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};
@@ -1968,7 +1968,6 @@ mod tests {
 			&asks,
 			&Asking {
 				priority: 0,
-				max_delay: Some(budget),
 				order: Order::Ascending,
 			},
 			&mut given_up,
@@ -2006,7 +2005,7 @@ mod tests {
 		// A received copy, whose live gaps are filled or waited for, not skipped.
 		track.received();
 		let budget = Duration::from_secs(5);
-		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		for key in [0, 2, 4] {
 			track
 				.create_group(crate::group::Info { start: key })
@@ -2019,7 +2018,8 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let state = track.state.read();
 		let drift = Drift {
-			budget,
+			budget: Budget::uniform(budget),
+			bound: None,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};
@@ -2100,7 +2100,7 @@ mod tests {
 		assert!(asks.is_empty(), "the successor has aged past this reader's budget too");
 		assert_eq!(
 			given_up,
-			vec![(3..4, Some(drift.budget))],
+			vec![(3..4, Some(drift.budget.widest()))],
 			"judged stale under the reader's budget"
 		);
 		assert!(misses.deferred.runs.is_empty());
@@ -2117,7 +2117,7 @@ mod tests {
 		// A received copy, whose live gaps are filled or waited for, not skipped.
 		track.received();
 		let budget = Duration::from_secs(5);
-		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		for key in 0..3 {
 			track
 				.create_group(crate::group::Info { start: key })
@@ -2130,7 +2130,8 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let state = track.state.read();
 		let drift = Drift {
-			budget,
+			budget: Budget::uniform(budget),
+			bound: None,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};
@@ -2155,7 +2156,7 @@ mod tests {
 		drop(state);
 
 		let wider = Duration::from_secs(20);
-		let _wide = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(wider)));
+		let _wide = track.subscribe(Subscription::default().with_max(wider));
 		let state = track.state.read();
 		assert_eq!(state.arrival_grace(), wider);
 		assert!(
@@ -2228,7 +2229,7 @@ mod tests {
 					.filter(|(_, slot)| slot.is_walked())
 					.map(|(&key, _)| key);
 				for at in cached.chain(std::iter::once(run.end)) {
-					if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, None, &waiter) {
+					if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget.at(from), None, &waiter) {
 						stale.insert(from..at);
 					}
 					if at < run.end {
@@ -2312,7 +2313,8 @@ mod tests {
 				}
 				let state = track.state.read();
 				let drift = Drift {
-					budget,
+					budget: Budget::uniform(budget),
+					bound: None,
 					edge: state.drift_edge(&servable),
 					coverage: None,
 				};
@@ -2380,7 +2382,7 @@ mod tests {
 			let broadcast = crate::broadcast::Info::default().produce();
 			let mut track = broadcast.create_track("moved", crate::track::Info::default()).unwrap();
 			let budget = Duration::from_secs(5);
-			let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+			let _reader = track.subscribe(Subscription::default().with_max(budget));
 			// A feed with holes, some of them under where it starts, created newest first so the
 			// publisher skips none of them.
 			let keys: Vec<_> = (0..KEYS).filter(|_| next(3) > 0).collect();
@@ -2402,7 +2404,6 @@ mod tests {
 			let cap = (next(3) == 0).then(|| next(KEYS + 4));
 			let asking = Asking {
 				priority: 0,
-				max_delay: Some(budget),
 				order: Order::Ascending,
 			};
 			let (mut moved, mut whole) = (Misses::default(), Misses::default());
@@ -2435,7 +2436,8 @@ mod tests {
 					misses.retain(id, Some(view), || target(0..=u64::MAX - 1));
 					let state = track.state.read();
 					let drift = Drift {
-						budget,
+						budget: Budget::uniform(budget),
+						bound: None,
 						edge: state.drift_edge(&Servable::ALL),
 						coverage: None,
 					};
@@ -2500,8 +2502,8 @@ mod tests {
 		let ranges = [0..2, 2..4, 4..6, 6..8].map(crate::track::Range::groups);
 		let mut reader = track.subscribe(
 			Subscription::default()
-				.with_delay(Delay::default().with_max(Duration::from_secs(60)))
-				.with_ranges(ranges.into_iter().chain([crate::track::Range::groups(8..)])),
+				.with_ranges(ranges.into_iter().chain([crate::track::Range::groups(8..)]))
+				.with_max(Duration::from_secs(60)),
 		);
 		let (first, second) = (Arc::new(Count::default()), Arc::new(Count::default()));
 		let waiter = |count: &Arc<Count>| kio::Waiter::new(Waker::from(count.clone()));
@@ -2576,8 +2578,8 @@ mod tests {
 		let ranges = [crate::track::Range::groups(0..1), crate::track::Range::groups(8..)];
 		let mut reader = track.subscribe(
 			Subscription::default()
-				.with_delay(Delay::default().with_max(Duration::from_secs(60)))
-				.with_ranges(ranges),
+				.with_ranges(ranges)
+				.with_max(Duration::from_secs(60)),
 		);
 		let (read, drops) = (Arc::new(Count::default()), Arc::new(Count::default()));
 		let read_waiter = kio::Waiter::new(Waker::from(read.clone()));

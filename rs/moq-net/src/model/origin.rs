@@ -14687,7 +14687,7 @@ mod tests {
 		let resolved = pending.await.expect("resolves");
 
 		let budget =
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600)));
+			track::Subscription::default().with_max(Duration::from_secs(3600));
 		for name in ["a", "b"] {
 			let mut subscription = resolved
 				.track(name)
@@ -16169,7 +16169,7 @@ mod tests {
 			.track("video")
 			.unwrap()
 			.subscribe(
-				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+				track::Subscription::default().with_max(Duration::from_secs(3600)),
 			)
 			.await
 			.expect("resubscribe");
@@ -16327,7 +16327,7 @@ mod tests {
 			.track("video")
 			.unwrap()
 			.subscribe(
-				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+				track::Subscription::default().with_max(Duration::from_secs(3600)),
 			)
 			.await
 			.expect("resubscribe");

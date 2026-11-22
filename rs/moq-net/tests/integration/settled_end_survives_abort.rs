@@ -5,6 +5,7 @@
 //! the session dying, ends the track cleanly but must not throw those groups away: a
 //! consumer that has not read them yet still gets them, then the clean end.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 use support::AtStart;
@@ -39,7 +40,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
 		.with_ranges([support::keys(0..)])
-		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
+		.with_max(std::time::Duration::from_secs(30));
 	let mut consumer = track.subscribe(subscription);
 
 	for _ in 0..GROUPS {

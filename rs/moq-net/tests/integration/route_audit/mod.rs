@@ -15,6 +15,7 @@ mod domains;
 mod failures;
 mod ingest;
 
+use crate::WithMax as _;
 use crate::path_routes::{DEBOUNCE, HOLD, cut, land, lite07};
 use crate::route_change::{produce_origin, timed};
 use crate::support;
@@ -352,8 +353,8 @@ impl Reader {
 				let instance = broadcast.info().instance.clone();
 				// From the live edge, and never skipping a group however late.
 				let prefs = track::Subscription::default()
-					.with_delay(track::Delay::default().with_max(Duration::from_secs(60)))
-					.with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
+					.with_ranges([track::Range::from(track::Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })])
+					.with_max(Duration::from_secs(60));
 				let Ok(mut sub) = broadcast.track(TRACK).unwrap().subscribe(prefs).await else {
 					continue;
 				};

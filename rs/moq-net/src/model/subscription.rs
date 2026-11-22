@@ -682,7 +682,7 @@ mod tests {
 	}
 
 	fn joining(min: Duration) -> Subscription {
-		Subscription::default().with_ranges([Range::from(Start::Live(min))])
+		Subscription::default().with_ranges([Range::from(Start::Live { min, max: Some(std::time::Duration::ZERO) })])
 	}
 
 	/// A legacy span becomes inclusive times: an exclusive end of 0 holds nothing, whatever
@@ -692,7 +692,7 @@ mod tests {
 		assert_eq!(Range::span(Some(2), Some(6)), Some(range(2, 5)));
 		assert_eq!(Range::span(None, Some(6)), Some(range(None, 5)));
 		assert_eq!(Range::span(Some(2), None), Some(range(2, None)));
-		assert_eq!(Range::span(None, None), Some(Range::default()));
+		assert_eq!(Range::span(None, None), Some(Range::ALL));
 		assert_eq!(Range::span(Some(0), Some(0)), None);
 		assert_eq!(Range::span(None, Some(0)), None);
 		assert_eq!(Range::span(Some(5), Some(5)), None);
@@ -725,7 +725,7 @@ mod tests {
 		let sub = Subscription::default().with_ranges([groups(0, None)]);
 		assert_eq!((sub.start(), sub.end()), (Some(0), None));
 
-		let sub = Subscription::default().with_ranges([groups(2, 4), Range::default()]);
+		let sub = Subscription::default().with_ranges([groups(2, 4), Range::ALL]);
 		assert_eq!((sub.start(), sub.end()), (None, None));
 
 		// Nothing asked for is the empty range.
@@ -764,7 +764,7 @@ mod tests {
 		);
 		assert_eq!(
 			ranges(&[sub(&[groups(2, 5)]), Subscription::default()]),
-			vec![Range::default()]
+			vec![Range::ALL]
 		);
 
 		// A live join reaches back only by its lag, so the history beside it stays asked, and
@@ -775,14 +775,14 @@ mod tests {
 			ranges(&[sub(&[groups(2, 5)]), joining(two), joining(five), joining(two)]),
 			vec![
 				groups(2, 5),
-				Range::from(Start::Live(two)),
-				Range::from(Start::Live(five))
+				Range::from(Start::Live { min: two, max: Some(std::time::Duration::ZERO) }),
+				Range::from(Start::Live { min: five, max: Some(std::time::Duration::ZERO) })
 			]
 		);
 		// Unless another reader starts at the oldest group.
 		assert_eq!(
 			ranges(&[sub(&[groups(2, 5)]), joining(two), Subscription::default()]),
-			vec![Range::default()]
+			vec![Range::ALL]
 		);
 
 		// Empty ranges ask for nothing.
@@ -793,7 +793,7 @@ mod tests {
 	/// Combining is order-independent and stops changing once it covers everyone.
 	#[test]
 	fn combined_ranges_settle() {
-		let a = Subscription::default().with_ranges([groups(2, 5), Range::default()]);
+		let a = Subscription::default().with_ranges([groups(2, 5), Range::ALL]);
 		let b = Subscription::default().with_ranges([groups(4, 9)]);
 		assert_eq!(combine(&[a.clone(), b.clone()]), combine(&[b.clone(), a.clone()]));
 

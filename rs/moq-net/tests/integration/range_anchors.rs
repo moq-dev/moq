@@ -7,8 +7,8 @@
 //! by the Min Age: a live join that far behind the live edge where lite-07 carries it, the
 //! oldest group when it is not stated.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -113,13 +113,13 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	// A range with no start joins live, `how.min` behind the live edge, when one is given.
 	let range = match (range.start, how.min) {
 		(moq_net::track::Start::Oldest, Some(min)) => Range {
-			start: moq_net::track::Start::Live(min),
+			start: moq_net::track::Start::Live { min, max: Some(std::time::Duration::ZERO) },
 			..range
 		},
 		_ => range,
 	};
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(FOREVER))
+		.with_max(FOREVER)
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
 	let reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
@@ -226,13 +226,13 @@ async fn every_wire_carries_the_live_and_oldest_starts() {
 			min: Some(Duration::ZERO),
 			..Read::default()
 		};
-		let live = read_as(Some(version), Range::default(), live).await;
+		let live = read_as(Some(version), Range::ALL, live).await;
 		assert_eq!(
 			live.unwrap().groups.last(),
 			Some(&4000),
 			"{version}: live reads the latest group"
 		);
-		let mut oldest = read(Some(version), Range::default()).await.unwrap();
+		let mut oldest = read(Some(version), Range::ALL).await.unwrap();
 		oldest.sort_unstable();
 		let want: &[u64] = match *version {
 			"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4000],
@@ -252,7 +252,7 @@ async fn a_live_join_reaches_back_by_its_min_age_where_the_wire_carries_it() {
 		..Read::default()
 	};
 	for version in std::iter::once(None).chain(VERSIONS.iter().copied().map(Some)) {
-		let read = read_as(version, Range::default(), join).await.unwrap().groups;
+		let read = read_as(version, Range::ALL, join).await.unwrap().groups;
 		match version {
 			None | Some("moq-lite-07-wip") => assert_eq!(read, [2000, 3000, 4000], "{version:?}"),
 			_ => assert_eq!(read.last(), Some(&4000), "{version:?}: joins at the live edge"),
@@ -292,8 +292,8 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 		.expect("broadcast resolves")
 		.unwrap();
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(FOREVER))
-		.with_ranges([Range::from(moq_net::track::Start::Live(Duration::ZERO))]);
+		.with_ranges([Range::from(moq_net::track::Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })])
+		.with_max(FOREVER);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -349,11 +349,11 @@ async fn a_sparse_request_places_its_live_join_as_the_publisher_did() {
 		.unwrap();
 	// The live edge is at 9 ms, so a 2 ms lag joins at group 7.
 	let join = Range {
-		start: moq_net::track::Start::Live(Duration::from_millis(2)),
+		start: moq_net::track::Start::Live { min: Duration::from_millis(2), max: Some(std::time::Duration::ZERO) },
 		end: Some(8),
 	};
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(FOREVER))
+		.with_max(FOREVER)
 		.with_order(Order::Ascending)
 		.with_ranges([range(Some(1), Some(2)), join]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))

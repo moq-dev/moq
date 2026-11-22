@@ -5820,7 +5820,7 @@ mod test {
 		let track = broadcast.create_track("parked", track::Info::timed()).unwrap();
 		let mut subscriber = track.subscribe(
 			track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
+				.with_max(std::time::Duration::from_secs(3600)),
 		);
 		let groups: Vec<_> = (0..3)
 			.map(|key| {

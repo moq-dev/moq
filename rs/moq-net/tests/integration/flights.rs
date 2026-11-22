@@ -5,6 +5,7 @@
 //! shed, and the origin's handler serves it. The joiner hands over to the live copy once it
 //! catches up, and every flight in the chain then stops.
 
+use crate::WithMax as _;
 use std::sync::{
 	Arc,
 	atomic::{AtomicU64, Ordering},
@@ -246,7 +247,7 @@ async fn chain(version: &str, replay: Replay) {
 	let subscription = || {
 		track::Subscription::default()
 			.with_ranges([crate::support::keys(0..)])
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+			.with_max(Duration::from_secs(3600))
 	};
 	let mut live_sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription()))
 		.await

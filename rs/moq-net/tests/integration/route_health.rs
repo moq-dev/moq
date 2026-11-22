@@ -7,6 +7,7 @@
 //! by. These fixtures pin what `E` gets today; a route-health standby on `M2` is meant
 //! to change each of them.
 
+use crate::WithMax as _;
 use super::route_change::{Delivery, link, payload, priced_link, produce_origin, read, settle, timed};
 
 use std::collections::BTreeSet;
@@ -72,7 +73,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 		.await
 		.unwrap()
 		.unwrap();
-	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
+	let prefs = track::Subscription::default().with_max(budget);
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
 	settle().await;
@@ -218,7 +219,7 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 			.await
 			.unwrap()
 			.unwrap();
-		let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(2)));
+		let prefs = track::Subscription::default().with_max(Duration::from_secs(2));
 		remote.track("video").unwrap().subscribe(prefs).await.unwrap()
 	}
 	let mut e_sub = subscribe(&e).await;

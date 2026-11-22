@@ -3,6 +3,7 @@
 //! A peer granting few streams still gets everything asked of it, on each protocol: opens
 //! wait their turn for credit rather than failing.
 
+use crate::WithMax as _;
 use std::time::Duration;
 
 use moq_net::{Version, origin, track};
@@ -55,7 +56,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 			.unwrap()
 			.unwrap();
 		let prefs =
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			track::Subscription::default().with_max(Duration::from_secs(30));
 		let mut subscribers = Vec::new();
 		for i in 0..tracks.len() {
 			let track = remote.track(&format!("{i}")).unwrap();
@@ -120,7 +121,7 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 			.unwrap();
 		let prefs = track::Subscription::default()
 			.with_order(track::Order::Descending)
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
 		// Never finished, so its stream holds the only credit.
@@ -187,7 +188,7 @@ async fn a_reset_group_is_fetched_whole() {
 			.unwrap();
 		let prefs = track::Subscription::default()
 			.with_order(track::Order::Descending)
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			.with_max(Duration::from_secs(30));
 		let remote = remote.track("0").unwrap();
 		let mut subscriber = remote.subscribe(prefs).await.unwrap();
 
@@ -283,7 +284,7 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 			.unwrap()
 			.unwrap();
 		let prefs =
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			track::Subscription::default().with_max(Duration::from_secs(30));
 		let held = remote.track("first").unwrap().subscribe(prefs.clone()).await.unwrap();
 		let mut waiting = std::pin::pin!(remote.track("second").unwrap().subscribe(prefs));
 		assert!(
@@ -345,7 +346,7 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 			.unwrap()
 			.unwrap();
 		let prefs =
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			track::Subscription::default().with_max(Duration::from_secs(30));
 		let held = remote.track("first").unwrap().subscribe(prefs.clone()).await.unwrap();
 		let mut waiting = Box::pin(remote.track("second").unwrap().subscribe(prefs.clone()));
 		assert!(
@@ -422,7 +423,7 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 			.unwrap();
 		let prefs = track::Subscription::default()
 			.with_order(track::Order::Descending)
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 		macro_rules! next {
 			($what:literal) => {
@@ -494,7 +495,7 @@ async fn a_shed_late_group_lets_a_newer_group_through() {
 			.unwrap();
 		let prefs = track::Subscription::default()
 			.with_order(track::Order::Descending)
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 		macro_rules! next {
 			($what:literal) => {
@@ -564,7 +565,7 @@ async fn an_ascending_backlog_waits_behind_a_waiting_group() {
 			.unwrap();
 		let prefs = track::Subscription::default()
 			.with_order(track::Order::Ascending)
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 		macro_rules! next {
 			($what:literal) => {
@@ -637,7 +638,7 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 			.unwrap();
 		let prefs = track::Subscription::default()
 			.with_order(track::Order::Descending)
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
 		// Group 7 finishes, so its stream waits for the acknowledgement; group 10 holds the other.

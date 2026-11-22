@@ -4,6 +4,7 @@
 //! tokens union, and a publication outside the grant fails loud, on moq-lite-07-wip.
 //! moq-transport carries tokens only on the requests that name them.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 
@@ -1255,7 +1256,7 @@ async fn a_prefix_grant_admits_its_broadcast(version: &'static str) {
 				.unwrap()
 				.unwrap();
 			let prefs = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+				.with_max(Duration::from_secs(10));
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 			sub.recv_group().await.unwrap().expect("a group");
 
@@ -1359,7 +1360,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 		let prefs = || {
 			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+				.with_max(Duration::from_secs(10))
 		};
 
 		// The server publishes room/x to the client; the client publishes up/y to the server.
@@ -1791,7 +1792,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 		let prefs = || {
 			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+				.with_max(Duration::from_secs(10))
 		};
 
 		let relay = produce_origin(1);
@@ -1885,7 +1886,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 		let prefs = || {
 			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+				.with_max(Duration::from_secs(10))
 		};
 
 		let client_origin = produce_origin(2);
@@ -2029,7 +2030,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 		let prefs = || {
 			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+				.with_max(Duration::from_secs(10))
 		};
 
 		let relay = produce_origin(1);
@@ -2105,7 +2106,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 		let prefs = || {
 			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+				.with_max(Duration::from_secs(10))
 		};
 
 		let client_origin = produce_origin(2);
@@ -2416,7 +2417,7 @@ async fn a_broadcast_relayed_from_another_client_is_not_ours_to_check(version: &
 			.unwrap()
 			.unwrap();
 		let prefs = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+			.with_max(Duration::from_secs(10));
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 		sub.recv_group().await.unwrap().expect("a group");
 

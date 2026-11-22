@@ -4,12 +4,13 @@
 //! than FETCH, and recovers on a SUBSCRIBE of its own what its live subscription will never
 //! send again.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Range, Subscription};
+use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timescale, Timestamp, Version, cache};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -111,8 +112,8 @@ impl Fixture {
 			.unwrap()
 			.subscribe(
 				Subscription::default()
-					.with_delay(Delay::default().with_max(None))
-					.with_ranges(ranges),
+					.with_ranges(ranges)
+					.with_max(None),
 			)
 			.await
 			.unwrap()
@@ -140,7 +141,7 @@ async fn receive(reader: &mut moq_net::track::Subscriber, count: usize) -> BTree
 async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 	kio::clock::timeout(TIMEOUT + cache::DEFAULT_EXPIRY * 6, async {
 		let fixture = Fixture::new(6).await;
-		let mut first = fixture.subscribe([Range::default()]).await;
+		let mut first = fixture.subscribe([Range::ALL]).await;
 		assert_eq!(receive(&mut first, 6).await, (0..6).collect());
 
 		// Superseded, the copy expires them, while the reader keeps the subscription live.
@@ -181,7 +182,7 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 async fn sparse_history_is_recovered_across_its_skips() {
 	kio::clock::timeout(TIMEOUT + cache::DEFAULT_EXPIRY * 3, async {
 		let fixture = Fixture::spaced(6, 1000).await;
-		let mut first = fixture.subscribe([Range::default()]).await;
+		let mut first = fixture.subscribe([Range::ALL]).await;
 		let keys: BTreeSet<u64> = (0..6).map(|index| index * 1000).collect();
 		assert_eq!(receive(&mut first, 6).await, keys);
 
@@ -215,7 +216,7 @@ async fn sparse_history_is_recovered_across_its_skips() {
 async fn a_recovery_outlives_the_track_finishing() {
 	kio::clock::timeout(TIMEOUT + cache::DEFAULT_EXPIRY * 3, async {
 		let fixture = Fixture::new(6).await;
-		let mut first = fixture.subscribe([Range::default()]).await;
+		let mut first = fixture.subscribe([Range::ALL]).await;
 		assert_eq!(receive(&mut first, 6).await, (0..6).collect());
 
 		// Superseded, the copy expires them, while the reader keeps the subscription live.
@@ -242,7 +243,7 @@ async fn a_recovery_takes_a_skip_inside_it() {
 				.unwrap();
 			group.finish().unwrap();
 		}
-		let mut first = fixture.subscribe([Range::default()]).await;
+		let mut first = fixture.subscribe([Range::ALL]).await;
 		assert_eq!(receive(&mut first, 5).await, [0, 1, 3, 4, 5].into());
 
 		// Superseded, the copy expires them, skip and all, while the reader keeps the

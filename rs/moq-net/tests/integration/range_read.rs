@@ -4,12 +4,13 @@
 //! ends, on every wire, from the publisher directly or through a relay. A range reaching
 //! past the live edge ends once the groups up to its end arrive.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Order, Subscription};
+use moq_net::track::{Order, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -110,7 +111,7 @@ async fn fixture(
 fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 	Subscription::default()
 		.with_ranges([support::keys(groups)])
-		.with_delay(Delay::default().with_max(None))
+		.with_max(None)
 		.with_order(Order::Ascending)
 }
 

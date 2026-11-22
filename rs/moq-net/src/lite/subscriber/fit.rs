@@ -418,6 +418,7 @@ mod tests {
 		let empty = lite::RangeEdit::Edit {
 			remove: Vec::new(),
 			add: Vec::new(),
+			retune: Vec::new(),
 		};
 		assert!(widest(empty).encode_bytes(version).unwrap().len() <= UPDATE_FIELDS);
 

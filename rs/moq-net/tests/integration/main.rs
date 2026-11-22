@@ -113,3 +113,29 @@ mod warm_backfill;
 mod wide_key;
 mod widened_max_age;
 mod zero_copy;
+
+/// A subscription under one staleness budget, as a subscription-wide max age once applied.
+pub(crate) trait WithMax {
+	/// A range from the oldest or the latest group joins `max` behind the live edge and goes
+	/// stale past it, or takes every group for `None`; another live join keeps its lag and takes
+	/// `max`; a time start stays history.
+	fn with_max(self, max: impl Into<Option<std::time::Duration>>) -> Self;
+}
+
+impl WithMax for moq_net::track::Subscription {
+	fn with_max(mut self, max: impl Into<Option<std::time::Duration>>) -> Self {
+		use moq_net::track::Start;
+		let max = max.into();
+		for range in &mut self.ranges {
+			range.start = match range.start {
+				Start::Oldest | Start::LATEST => match max {
+					Some(max) => Start::Live { min: max, max: Some(max) },
+					None => Start::Oldest,
+				},
+				Start::Live { min, .. } => Start::Live { min, max },
+				Start::Time(time) => Start::Time(time),
+			};
+		}
+		self
+	}
+}

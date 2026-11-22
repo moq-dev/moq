@@ -514,7 +514,7 @@ async fn read_broadcast(broadcast: broadcast::Consumer, read: Rc<RefCell<Vec<Vec
 		return;
 	};
 	// History from the oldest group skips nothing, so every one the publisher wrote must arrive.
-	let every = track::Subscription::default();
+	let every = track::Subscription::default().with_ranges([track::Range::ALL]);
 	let Ok(mut subscriber) = track.subscribe(every).await else {
 		return;
 	};
