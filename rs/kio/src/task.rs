@@ -155,6 +155,8 @@ impl Shared {
 
 	/// Deliver a wake [`Polling::hold`] kept back, unless the set was polled since.
 	fn release(&self) {
+		// The held wake set `true` on this thread, so `false` means a pass since took
+		// its bit, and any wake after that pass saw `false` and woke the parent itself.
 		if !self.pending.load(Ordering::Acquire) {
 			return;
 		}
@@ -501,9 +503,20 @@ impl<T: Task> Tasks<T> {
 			// Re-arm before sweeping: a wake landing mid-pass must nudge the owner
 			// again, since its word will already have been snapshotted. The same
 			// flag tells the loop whether the pass woke anything.
+			//
+			// Acquire/release is enough, though this store is followed by reads of
+			// other atomics: the pass takes each level with an RMW, as a waker marks
+			// it. A waker's mark either precedes the pass's `swap(0)` of that level
+			// in the level's modification order, so the pass takes it, or reads from
+			// that swap (directly or through other wakers' RMWs), which orders this
+			// store before the waker's `pending.swap`. That swap then reads `false`
+			// and wakes the parent, or a later waker's `true`, a waker that did. A
+			// plain load on either side would be the store-buffering (Dekker) shape
+			// that loses wakes, so keep both sides RMWs.
 			self.shared.pending.store(false, Ordering::Release);
 			self.pass(done);
 			ran += 1;
+			// A `true` this misses belongs to a waker that saw `false` and woke the parent.
 			if ran == budget.get() || !self.shared.pending.load(Ordering::Acquire) {
 				return ran;
 			}
