@@ -40,9 +40,7 @@ native crates, and public APIs:
   rename `moq-gst`'s retired `tls-disable-verify` property to
   `connect-tls-insecure` ([gst-tls-insecure-prop](/quest/m2/gst-tls-insecure-prop.md)),
   narrow `@moq/room`'s `Room.remotes` to `ReadonlyMap`
-  ([room-remotes-readonly](/quest/m2/room-remotes-readonly.md)), and open
-  `moq-ffi`'s 5 closed extensible enums while deriving `Debug`/`Eq`/`Hash` on
-  its codec types ([ffi-open-enums](/quest/m2/ffi-open-enums.md)).
+  ([room-remotes-readonly](/quest/m2/room-remotes-readonly.md)).
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),
