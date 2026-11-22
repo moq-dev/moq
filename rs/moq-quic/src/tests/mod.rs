@@ -4241,6 +4241,15 @@ fn client_requests_lost_server_hello() {
 	pair.server.outbound.pop_front();
 	pair.drive_server();
 
+	// The client asks by repeating its ClientHello, whose ACK was in the lost datagram: a server
+	// following RFC 9002 §6.2.3's text re-sends on duplicate CRYPTO but only ACKs a PING
+	let tx = pair.client_conn_mut(client_ch).stats().frame_tx;
+	while pair.client_conn_mut(client_ch).stats().frame_tx.crypto == tx.crypto {
+		assert!(pair.step());
+	}
+	let asked = pair.client_conn_mut(client_ch).stats().frame_tx;
+	assert_eq!((asked.crypto, asked.ping), (tx.crypto + 1, tx.ping));
+
 	while !has_handshake_data(pair.client_conn_mut(client_ch)) {
 		assert!(pair.step());
 	}

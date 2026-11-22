@@ -2113,38 +2113,51 @@ impl Connection {
 		{
 			return;
 		}
-		let mut sent = false;
-		match missing {
+		let sent = match missing {
 			Missing::Ours => {
-				for space_id in [SpaceId::Initial, SpaceId::Handshake] {
-					let space = &mut self.spaces[space_id];
-					if space.crypto.is_none() {
-						continue;
-					}
-					for packet in space.sent_packets.values_mut() {
-						if packet.retransmits.get().is_some_and(|x| !x.crypto.is_empty()) {
-							let crypto = mem::take(&mut packet.retransmits.get_or_create().crypto);
-							space.pending.crypto.extend(crypto);
-							sent = true;
-						}
-					}
-				}
+				let initial = self.requeue_crypto(SpaceId::Initial);
+				self.requeue_crypto(SpaceId::Handshake) || initial
 			}
+			// A client without the ServerHello repeats its ClientHello if unacknowledged: the
+			// RFC's server heuristic keys on duplicate Initial CRYPTO, and a server following
+			// only that text just ACKs a PING. A server lacking the Finished only PINGs, since
+			// the client already holds its whole flight.
 			Missing::Theirs => {
 				let space = match self.spaces[SpaceId::Handshake].crypto {
 					Some(_) => SpaceId::Handshake,
 					None => SpaceId::Initial,
 				};
-				if self.spaces[space].crypto.is_some() {
+				if space == SpaceId::Initial && self.requeue_crypto(space) {
+					true
+				} else if self.spaces[space].crypto.is_some() {
 					self.spaces[space].ping_pending = true;
-					sent = true;
+					true
+				} else {
+					false
 				}
 			}
-		}
+		};
 		if sent {
 			trace!(?missing, "recovering handshake CRYPTO ahead of the PTO");
 			self.early_crypto_sent = Some(now);
 		}
+	}
+
+	/// Move a handshake space's unacknowledged CRYPTO back to pending, reporting whether there was any
+	fn requeue_crypto(&mut self, space_id: SpaceId) -> bool {
+		let space = &mut self.spaces[space_id];
+		if space.crypto.is_none() {
+			return false;
+		}
+		let mut any = false;
+		for packet in space.sent_packets.values_mut() {
+			if packet.retransmits.get().is_some_and(|x| !x.crypto.is_empty()) {
+				let crypto = mem::take(&mut packet.retransmits.get_or_create().crypto);
+				space.pending.crypto.extend(crypto);
+				any = true;
+			}
+		}
+		any
 	}
 
 	/// Send the next probe now if the peer, silent through the last probe timeout, is heard
