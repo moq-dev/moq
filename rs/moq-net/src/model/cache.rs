@@ -290,7 +290,10 @@ impl Pool {
 	/// None in a pool held past its capacity by what it pins, where the room a reader frees by
 	/// ending is room nothing may use.
 	pub(super) fn room(&self) -> u64 {
-		self.inner.capacity.load(Ordering::Relaxed).saturating_sub(self.pinned())
+		self.inner
+			.capacity
+			.load(Ordering::Relaxed)
+			.saturating_sub(self.pinned())
 	}
 
 	/// Change the capacity. `None` makes the pool unbounded.
@@ -2369,7 +2372,11 @@ mod test {
 		charge.add(1_000);
 		assert_eq!(pool.pinned(), 0, "not the live edge yet");
 		charge.promote();
-		assert_eq!(pool.pinned(), ENTRY_OVERHEAD, "a growing edge may still shed its content");
+		assert_eq!(
+			pool.pinned(),
+			ENTRY_OVERHEAD,
+			"a growing edge may still shed its content"
+		);
 		let extra = charge.extra();
 		extra.add(500);
 		extra.add_state(100);
@@ -2387,7 +2394,11 @@ mod test {
 		let mut cold = track.charge();
 		cold.add(200);
 		cold.demote();
-		assert_eq!(pool.excess(), Some(ENTRY_OVERHEAD + 200), "only what eviction can reclaim");
+		assert_eq!(
+			pool.excess(),
+			Some(ENTRY_OVERHEAD + 200),
+			"only what eviction can reclaim"
+		);
 
 		charge.demote();
 		assert_eq!(pool.pinned(), 0);
