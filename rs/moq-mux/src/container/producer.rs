@@ -13,6 +13,17 @@ fn timestamp_lt(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
 	matches!((left.as_micros(), right.as_micros()), (Ok(left), Ok(right)) if left < right)
 }
 
+/// Whether `left` is before `right` at full precision, a tie across scales included as not
+/// before; false when either is unscaled.
+fn timestamp_before(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
+	match (left.scale(), right.scale()) {
+		(Some(lhs), Some(rhs)) => {
+			(left.value() as u128) * (rhs.as_u64() as u128) < (right.value() as u128) * (lhs.as_u64() as u128)
+		}
+		_ => false,
+	}
+}
+
 /// Refuse a frame without a time with [`TimestampMismatch`](moq_net::Error::TimestampMismatch):
 /// media is timed, and a scale-less track's [unscaled](moq_net::Timestamp::unscaled) key is not.
 fn timed(timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) -> Result<(), moq_net::Error> {
@@ -761,6 +772,13 @@ where
 		{
 			return Err(super::TimestampRewind { timestamp, floor }.into());
 		}
+		// A seek's start is checked on the track the keyframe lands on, before anything can drop
+		// it, so a seek below the latest group's start refuses this keyframe rather than a later
+		// one. A seek has no group open, so cutting it changes nothing this depends on.
+		let sought = match (keyframe, self.pending_start) {
+			(true, Some(start)) => Some((start, self.sought(start)?)),
+			_ => None,
+		};
 
 		// Every frame of a group presents after every frame of the groups before it, so a keyframe
 		// that doesn't start after the newest frame written continues the open group: a splice whose
@@ -789,23 +807,16 @@ where
 		// is stamped at the first start past both. One below the latest group's start is refused,
 		// before anything changes.
 		let mut timestamp = timestamp;
-		// A seek has no group open, so cutting it changes nothing this depends on.
-		let sought = match (keyframe, self.pending_start) {
-			(true, Some(start)) => {
-				let sought = self.sought(start)?;
-				// A start moved past a span takes a keyframe below it along, as a keyframe the
-				// track's spans hold is moved, so it never presents below its own group's start.
-				if sought != start
-					&& let Some(scale) = self.inner.info().timescale
-					&& crate::start::key(&self.inner, timestamp)? < sought
-				{
-					timestamp =
-						moq_net::Timestamp::new(sought, scale).map_err(|_| moq_net::Error::TimestampMismatch)?;
-				}
-				Some(sought)
-			}
-			_ => None,
-		};
+		// A start moved past a span takes a keyframe below it along, as a keyframe the track's
+		// spans hold is moved, so it never presents below its own group's start.
+		if let Some((start, sought)) = sought
+			&& sought != start
+			&& let Some(scale) = self.inner.info().timescale
+			&& crate::start::key(&self.inner, timestamp)? < sought
+		{
+			timestamp = moq_net::Timestamp::new(sought, scale).map_err(|_| moq_net::Error::TimestampMismatch)?;
+		}
+		let sought = sought.map(|(_, sought)| sought);
 		let start = match (keyframe && self.pending_start.is_none(), &self.group) {
 			(false, _) => None,
 			(true, Some(_)) => match crate::start::opens(&self.inner, timestamp)? {
@@ -1034,7 +1045,7 @@ where
 		// publish below it, so the source's order alone misses it.
 		self.reordered |= self
 			.previous_timestamp
-			.is_some_and(|(previous, published)| timestamp < previous || timestamp_lt(at, published));
+			.is_some_and(|(previous, published)| timestamp < previous || timestamp_before(at, published));
 		if let Some((previous, _)) = self.previous_timestamp
 			&& let Ok(delta) = timestamp.checked_sub(previous)
 			&& !delta.is_zero()
@@ -3000,6 +3011,54 @@ mod tests {
 			.collect();
 		assert_eq!(timestamps[..3], [132_000, 132_000, 166_000]);
 		copy(&groups, [1, 0]).unwrap();
+	}
+
+	/// A seek below the latest group's start refuses the next keyframe even when that keyframe
+	/// overlaps the frames written and would otherwise be dropped.
+	#[tokio::test]
+	async fn a_seek_below_the_latest_start_refuses_an_overlapping_keyframe() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		producer.seek(90_000).unwrap();
+		// Past the group's start but below its newest frame, so dropped were the seek valid.
+		let rewind = producer.write(frame(150_000, true)).unwrap_err();
+		assert!(
+			matches!(&rewind, crate::Error::TimestampRewind(rewind) if rewind.timestamp.as_micros().unwrap() == 90_000),
+			"{rewind:?}"
+		);
+	}
+
+	/// Published order is compared at the track's own precision: on a nanosecond track, a frame a
+	/// nanosecond below its moved keyframe reorders the group though both share a microsecond.
+	#[tokio::test]
+	async fn a_frame_a_nanosecond_below_a_moved_keyframe_reorders_its_group() {
+		let nanos = moq_net::Timescale::new(1_000_000_000).unwrap();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(nanos);
+		let track = track_producer("test", info);
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Stamped);
+		let at = |nanoseconds: u64, keyframe: bool| Frame {
+			timestamp: Timestamp::new(nanoseconds, nanos).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		producer.write(at(1_000_000, true)).unwrap();
+		producer.write(at(1_500_000, false)).unwrap();
+		producer.cut(Some(Timestamp::new(2_000_002, nanos).unwrap())).unwrap();
+		// Below the End the cut set, so moved to it, while the frame after it stays a nanosecond
+		// below.
+		producer.write(at(1_900_000, true)).unwrap();
+		producer.write(at(2_000_001, false)).unwrap();
+		producer.cut(None).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_published(consumer).await;
+		let timestamps: Vec<_> = groups[1].1.iter().map(|frame| frame.timestamp.value()).collect();
+		assert_eq!(timestamps, [2_000_002, 2_000_001]);
+		assert_eq!(groups[1].2, None, "a reordered group ends without an estimated End");
 	}
 
 	/// A frame after a moved keyframe that publishes below it reorders the group as published, so
