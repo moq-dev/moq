@@ -317,6 +317,28 @@ class SelectTest(unittest.TestCase):
                 ],
             )
 
+    def test_reads_sees_an_include_that_opens_on_the_line_before_its_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / "rs/a/src").mkdir(parents=True)
+            (repo / "rs/a/Cargo.toml").write_text('[package]\nname = "a"\n')
+            (repo / "rs/a/src/lib.rs").write_text(
+                'const A: &str = include_str!(\n    "../../shared.txt",\n);\n'
+                'const DIR: &str = env!("CARGO_MANIFEST_DIR");\n'
+                'fn f() { let _ = std::fs::read(format!("{}/../fixture.bin", DIR)); }\n'
+            )
+            result = subprocess.run(
+                ["bash", str(ROOT / "sh/rs/reads.sh")], cwd=repo, check=True, capture_output=True, text=True
+            )
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    "rs/a rs/fixture.bin rs/a/src/lib.rs:5",
+                    "rs/a rs/shared.txt rs/a/src/lib.rs:1",
+                ],
+            )
+
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = dispatch_scope()
         metadata = json.loads(
