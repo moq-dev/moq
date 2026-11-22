@@ -450,6 +450,9 @@ struct Relay {
 	wire: Option<Wire>,
 	// The terminal object, learned at the stream tail.
 	end_object: Option<Arc<super::object::Fields>>,
+	// The newest object ID before the terminal object, which a publisher's Largest names
+	// instead of the terminal object it sends past it.
+	last_before_end: Option<u64>,
 	// Heap charged for this box, its frames' fields, and the terminal object.
 	bytes: u64,
 }
@@ -2625,6 +2628,7 @@ impl Handle {
 		let relay = state.relay();
 		relay.bytes += bytes;
 		if let Some(wire) = &mut relay.wire {
+			relay.last_before_end = wire.last;
 			wire.last = Some(fields.id);
 		}
 		relay.end_object = Some(Arc::new(fields));
@@ -2949,6 +2953,19 @@ impl Handle {
 		let state = self.state.read();
 		match state.wire() {
 			Some(wire) => wire.last,
+			None => (state.next_index as u64).checked_sub(1),
+		}
+	}
+
+	/// [`Self::last_object`] without a terminal object: the newest object a publisher's
+	/// Largest can name, since it never counts the END_OF_GROUP it sends past the last.
+	pub(crate) fn last_data_object(&self) -> Option<u64> {
+		let state = self.state.read();
+		match state.wire() {
+			Some(wire) => match state.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
+				Some(relay) => relay.last_before_end,
+				None => wire.last,
+			},
 			None => (state.next_index as u64).checked_sub(1),
 		}
 	}
