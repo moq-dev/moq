@@ -172,7 +172,11 @@ echo "== system packages are the renamed moq, at the latest release =="
 # The CLI ships as the `moq` apt package and brew formula; `moq-cli` is the frozen
 # pre-rename name (a transitional apt package, a migrated formula) and only the
 # crates.io crate keeps it. Installing it would test a stale or redirected package.
-if grep -qE '(apt-get install|brew install)[^#]*moq-cli' ../../.github/workflows/smoke.yml; then
+# `brew list` resolves the tap's moq-cli -> moq rename, so the frozen-formula check
+# looks for a real moq-cli rack in the Cellar instead.
+# Join backslash continuations first so a split install line can't slip past.
+if sed -e ':a' -e '/\\$/{N;s/\\\n[[:space:]]*/ /;ba}' ../../.github/workflows/smoke.yml |
+    grep -qE '(apt-get install|brew install)[^#]*moq-cli'; then
     note FAIL "smoke.yml installs moq-cli from apt/brew (install moq: the package was renamed)"
     fail=1
 else
@@ -194,7 +198,7 @@ case "${SMOKE_CHANNEL:-}" in
         elif dpkg-query -W -f='${Status}' moq-cli 2>/dev/null | grep -q 'install ok installed'; then
             note FAIL "apt channel still has the frozen moq-cli package installed"
             fail=1
-        elif ! moq --version | grep -qF "${installed%%-*}"; then
+        elif [[ "$(moq --version | awk 'NR==1 {print $NF}')" != "$installed" ]]; then
             note FAIL "moq --version does not report the installed apt version $installed"
             fail=1
         else
@@ -210,11 +214,11 @@ case "${SMOKE_CHANNEL:-}" in
         elif [[ "${installed%%_*}" != "$latest" ]]; then
             note FAIL "brew moq $installed is not the tap's latest ($latest)"
             fail=1
-        elif brew list --versions moq-cli >/dev/null 2>&1; then
+        elif [[ -d "$(brew --cellar)/moq-cli" ]]; then
             note FAIL "brew channel still has the frozen moq-cli formula installed"
             fail=1
-        elif ! moq --version | grep -qF "$latest"; then
-            note FAIL "moq --version does not report the installed brew version $latest"
+        elif [[ "$(moq --version | awk 'NR==1 {print $NF}')" != "${installed%%_*}" ]]; then
+            note FAIL "moq --version does not report the installed brew version ${installed%%_*}"
             fail=1
         else
             note ok "brew moq $installed is the latest and moq --version agrees"
