@@ -1554,6 +1554,52 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A serving copy whose floor lies above every group the reader's range now names was asked for
+		// nothing, so its own resolution is empty: the copy replacing it, from a lower boundary, is
+		// asked from where the reader placed the range instead. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 3, spec: spec(false, "hour", [0, 1], false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "ranges", reader: 3, range: [0, 6] },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "write", instance: 0, slot: 2, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// The same once a failover moves the boundary below a time start the replaced copy placed at a
+		// lower group. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [6, 7], false) },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "write", instance: 1, slot: 2, group: 7, frames: 1 },
+				{ kind: "down", instance: 1, slot: 2 },
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "write", instance: 1, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", instance: 1, slot: 2, group: 1, frames: 1 },
+			],
+			finish: false,
+		},
+		// A backfill passed a group outside the reader's range, which a widening then owes: the serving
+		// route is asked for it, since the backfill will not hand it out again. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [3, 4], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 4, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "ranges", reader: 0, range: undefined },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {

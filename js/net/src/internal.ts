@@ -976,6 +976,12 @@ export const hooks: {
 	reportedRuns: (subscriber: Subscriber) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
+	/**
+	 * Whether the subscriber may still hand out group `key`: its ranges and floor cover it, nothing
+	 * skipped or gave it up, and it has not handed it out or passed it already. Mirrors the Rust
+	 * crate-private `track::Subscriber::may_take`.
+	 */
+	mayTake: (subscriber: Subscriber, key: bigint) => boolean;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
@@ -1384,6 +1390,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {
+		throw new Error("track.ts not loaded");
+	},
+	mayTake: () => {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
