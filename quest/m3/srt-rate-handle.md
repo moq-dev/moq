@@ -68,4 +68,3 @@ which both `Play::accept` and a dial-out `Client::publish` take, never a
 ## Related
 
 - [moq-webrtc pacing](/quest/m3/rtc-pacing.md) - the same pacing and retransmit charging on WHEP
-- [moq-srt wire source](/quest/m3/wire-stats/srt.md) - per-connection byte counts from the same socket

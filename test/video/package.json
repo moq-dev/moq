@@ -3,7 +3,7 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"check": "tsc --noEmit"
+		"check": "bun check --no-script"
 	},
 	"dependencies": {
 		"@moq/clock": "workspace:*",

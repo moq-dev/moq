@@ -132,8 +132,8 @@ export function fit(
 		(gap) => avoid.some((run) => run.start < gap.end && gap.start < run.end),
 	);
 
-	// The other ranges have no start, so no gap between them is measured: when even one span per
-	// list leaves them no room, they collapse to the one range covering them.
+	// The other ranges have no time start, so no gap between them is measured: when even one span per
+	// list leaves them no room, they collapse to one range per kind covering them.
 	const costOf = (ranges: readonly WireRange[]) =>
 		ranges.reduce((sum, range) => sum + (cost(budget, range) ?? Number.POSITIVE_INFINITY), 0);
 	if (costOf(others) + spans.least() + runs.least() > budget.bytes) others = collapse(others);
@@ -265,15 +265,22 @@ function bySpan(a: Span, b: Span): number {
 }
 
 /**
- * One range covering every range with no start, from where they start to the latest end. A time
- * or absolute start is a span, so only ranges with no start are left, and they all start at the
- * same group.
+ * One range per kind of start covering every range of that kind, from the earliest start to the
+ * latest end. A time or absolute start is a span, so only ranges with no start and live joins are
+ * left: those with no start all start at the same group, and the join reaching furthest back
+ * delivers what each of the others does. Mirrors the Rust `collapse`.
  */
 function collapse(ranges: readonly WireRange[]): WireRange[] {
-	const [first, ...rest] = ranges;
-	if (!first) return [];
-	const cover: WireRange = { ...first };
-	for (const range of rest) {
+	const kinds: WireRange[] = [];
+	for (const range of ranges) {
+		const live = range.start?.live;
+		const cover = kinds.find((cover) => (cover.start?.live === undefined) === (live === undefined));
+		if (!cover) {
+			kinds.push({ ...range });
+			continue;
+		}
+		if (cover.start?.live !== undefined && live !== undefined)
+			cover.start = { live: Math.max(cover.start.live, live) };
 		const [a, b] = [cover.end, range.end];
 		if (a?.absolute !== undefined && b?.absolute !== undefined)
 			cover.end = { absolute: max(a.absolute, b.absolute) };
@@ -281,5 +288,5 @@ function collapse(ranges: readonly WireRange[]): WireRange[] {
 		// An exclusive and an inclusive end, or an open one: follow the edge.
 		else delete cover.end;
 	}
-	return [cover];
+	return kinds;
 }

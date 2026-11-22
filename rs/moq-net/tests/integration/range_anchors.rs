@@ -110,8 +110,16 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 		}
 	};
 
+	// A range with no start joins live, `how.min` behind the live edge, when one is given.
+	let range = match (range.start, how.min) {
+		(moq_net::track::Start::Oldest, Some(min)) => Range {
+			start: moq_net::track::Start::Live(min),
+			..range
+		},
+		_ => range,
+	};
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_min(how.min).with_max(FOREVER))
+		.with_delay(Delay::default().with_max(FOREVER))
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
 	let reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
@@ -163,6 +171,10 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 }
 
 fn range(start: Option<u64>, end: Option<u64>) -> Range {
+	let start = match start {
+		Some(start) => moq_net::track::Start::Time(start),
+		None => moq_net::track::Start::Oldest,
+	};
 	Range { start, end }
 }
 
@@ -188,7 +200,7 @@ async fn each_wire_carries_a_time_range() {
 		for (range, mut held) in timed() {
 			// An older wire's publisher starts a time start at the first group at or after it,
 			// not the group containing it.
-			if let (false, Some(start)) = (resolves, range.start) {
+			if let (false, moq_net::track::Start::Time(start)) = (resolves, range.start) {
 				held.retain(|&key| key >= start);
 			}
 			let mut result = read(version, range).await;
@@ -279,7 +291,9 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
 		.unwrap();
-	let subscription = Subscription::default().with_delay(Delay::default().with_min(Duration::ZERO).with_max(FOREVER));
+	let subscription = Subscription::default()
+		.with_delay(Delay::default().with_max(FOREVER))
+		.with_ranges([Range::from(moq_net::track::Start::Live(Duration::ZERO))]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -333,11 +347,15 @@ async fn a_sparse_request_places_its_live_join_as_the_publisher_did() {
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
 		.unwrap();
-	// The live edge is at 9 ms, so a 2 ms Min Age joins at group 7.
+	// The live edge is at 9 ms, so a 2 ms lag joins at group 7.
+	let join = Range {
+		start: moq_net::track::Start::Live(Duration::from_millis(2)),
+		end: Some(8),
+	};
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_min(Duration::from_millis(2)).with_max(FOREVER))
+		.with_delay(Delay::default().with_max(FOREVER))
 		.with_order(Order::Ascending)
-		.with_ranges([range(Some(1), Some(2)), range(None, Some(8))]);
+		.with_ranges([range(Some(1), Some(2)), join]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")

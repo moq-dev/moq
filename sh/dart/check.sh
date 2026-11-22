@@ -58,34 +58,11 @@ done
 generated=$(mktemp -d)
 trap 'rm -rf "$generated"' EXIT
 
-# generate.sh and the build hook both reach Cargo through PATH, which Dart's
-# filter keeps. A recorder in front of Cargo saves each build's environment and
-# stderr, so a rebuild below can name its cause. It leaves out the variables its
-# own shell sets, and leaves PATH before Cargo starts, or mbx's Cargo shim would
-# find the recorder again as the real Cargo. Only builds are recorded:
-# uniffi_bindgen_dart runs `cargo metadata` in the full environment.
-real_cargo=$(command -v cargo)
-mkdir "$generated/bin"
-record_cargo() {
-    local phase=$1 flags=$2
-    cat >"$generated/bin/cargo" <<EOF
-#!/usr/bin/env bash
-if [[ "\${1:-}" == build-ffi ]]; then
-    env -u PWD -u OLDPWD -u SHLVL -u _ -0 | sort -z >"$generated/$phase.env"
-    set -- "\$@" $flags
-fi
-export PATH=\${PATH#"$generated/bin:"}
-exec "$real_cargo" "\$@" 2> >(tee -a "$generated/$phase.log" >&2)
-EOF
-    chmod +x "$generated/bin/cargo"
-}
-export PATH="$generated/bin:$PATH"
-
-record_cargo generate ""
-MOQ_FFI_PROFILE=debug "$DART_DIR/../sh/dart/generate.sh"
-touch "$generated/built"
-# Verbose, so Cargo says why it rebuilt anything.
-record_cargo hook --verbose
+MOQ_FFI_PROFILE=debug MOQ_DART_LIBRARY_OUT="$generated/library" "$DART_DIR/../sh/dart/generate.sh"
+library_path=$(<"$generated/library")
+mkdir -p "$generated/lib"
+pinned_library="$generated/lib/$(basename "$library_path")"
+cp "$library_path" "$pinned_library"
 
 # Analyze samples alongside the wrapper tests so package imports resolve to
 # this checkout. These functions only type-check; tests never execute them.
@@ -100,46 +77,55 @@ dart format --output=none --set-exit-if-changed \
     "$DART_DIR/moq_ffi" "$DART_DIR/moq"
 
 publish_dir="$generated/publish"
-mkdir -p "$publish_dir"
+test_dir="$generated/test"
+mkdir -p "$publish_dir" "$test_dir" "$generated/bin"
 # Isolate Pub's file discovery from the checkout's ignores when TMPDIR is
 # inside .tmp. Untracked copies also avoid the dirty-tree publish check.
 git init --quiet "$publish_dir"
+
+# Refuse any Cargo invocation from the Dart build hook during `dart test`:
+# generate.sh already built the library with full cache env, and the staged
+# pubspec pins it through hooks.user_defines.moq_ffi.library.
+cat >"$generated/bin/cargo" <<'SHIM'
+#!/usr/bin/env bash
+echo "error: the moq_ffi build hook invoked cargo despite hooks.user_defines.moq_ffi.library" >&2
+exit 1
+SHIM
+chmod +x "$generated/bin/cargo"
+
+pinned_yaml="'${pinned_library//\'/\'\'}'"
 for package in moq_ffi moq; do
     cp -R "$DART_DIR/$package" "$publish_dir/$package"
     rm -rf "$publish_dir/$package/.dart_tool" "$publish_dir/$package/build"
 
+    cp -R "$DART_DIR/$package" "$test_dir/$package"
+    rm -rf "$test_dir/$package/.dart_tool" "$test_dir/$package/build"
+    cat >>"$test_dir/$package/pubspec.yaml" <<YAML
+
+hooks:
+  user_defines:
+    moq_ffi:
+      library: $pinned_yaml
+YAML
+done
+
+for package in moq_ffi moq; do
     (
         cd "$DART_DIR/$package"
         dart analyze
-        dart test
+    )
+    (
+        cd "$test_dir/$package"
+        dart pub get --offline --enforce-lockfile
+        PATH="$generated/bin:$PATH" dart test
     )
 done
-
-# The build hook reuses generate.sh's build only while both run Cargo with the
-# same environment and that build's inputs stay in place. A Dart SDK bump that
-# changes the hook's filter would otherwise silently double this check's Rust
-# build. Cargo rewrites the .d dep-info file even on a no-op, so only the
-# libraries count.
-if [[ -n "$(find "$DART_DIR/../target/dart" -mindepth 2 -maxdepth 3 -name '*moq_ffi.*' ! -name '*.d' -newer "$generated/built")" ]]; then
-    drift=$(
-        { diff <(tr '\0' '\n' <"$generated/generate.env") <(tr '\0' '\n' <"$generated/hook.env") || true; } |
-            sed -n 's/^[<>] \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort -u | paste -sd ' ' -
-    )
-    if [[ -n "$drift" ]]; then
-        echo "error: the moq_ffi build hook ran Cargo with $drift set differently than sh/dart/generate.sh; update hook_vars there to match the Dart SDK" >&2
-    else
-        echo "error: the moq_ffi build hook rebuilt moq-ffi in generate.sh's environment, so an input of that build changed or went missing, such as a generated source tree mbx gc evicted" >&2
-    fi
-    # Units rebuilt only because a dependency was are left out.
-    grep -hs 'Dirty' "$generated/hook.log" | grep -v 'info of dependency' >&2 || true
-    exit 1
-fi
 
 # Validate staged copies so this pre-commit check exercises package contents.
 for package in moq_ffi moq; do
     (
         cd "$publish_dir/$package"
-        dart pub get --enforce-lockfile
+        dart pub get --offline --enforce-lockfile
         dart pub publish --dry-run 2>&1 | tee "$generated/$package.publish"
     )
 done

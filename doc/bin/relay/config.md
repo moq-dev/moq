@@ -299,6 +299,12 @@ max_hops = 32                                         # Legacy: longest hop path
 url = "https://api.example.com/peers"                  # Live JSON peer list; a local file also works.
 # root = ["api-ca.pem"]                               # API server trust, independent from connect.tls.
 
+[cluster.listen]                                      # A QUIC port for peers alone, apart from [listen].
+bind = "[::]:4443"
+cert = ["cluster.pem"]                                # Served to peers, selected by SNI.
+key = ["cluster.key"]
+root = ["cluster-ca.pem"]                             # Required: a client without a certificate chaining here is refused.
+
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
 # secret = "/etc/moq/cluster.key"                     # Optional: a file holding 64 hex chars.

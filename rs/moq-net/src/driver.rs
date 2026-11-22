@@ -60,7 +60,8 @@ pub(crate) struct State {
 	pub(crate) protocol: Protocol,
 	// The session supervisor, polled alongside the protocol: it executes the
 	// handles' close requests, publishes the transport's terminal error, and
-	// samples stats. It finishes once the transport reports closed, and the
+	// samples stats. It finishes once the transport reports closed (or a close
+	// this side sent outlives its grace unconfirmed), and the
 	// machine is not done until it has: the protocol's terminal transport close
 	// is what `Session::closed` observes, so resolving before it is published
 	// would leave waiters parked on a machine nobody polls again. `None` once

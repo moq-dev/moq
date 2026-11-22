@@ -1008,12 +1008,41 @@ test("a routed reader serves its live join as the serving copy resolves it", asy
 	front.serve(a.consume());
 	const sub = front.consumer
 		.track("seq")
-		.subscribe({ delay: { min: Duration.ZERO, max: null }, ranges: [{ end: 5n }] });
+		.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO }, end: 5n }] });
 	try {
 		await settle();
 		// The copy holds the groups the join starts among, so it starts at the latest one.
 		expect(hooks.servingEnd(sub)).toBe(6n);
 		expect(hooks.servingRuns(sub, 0n, 10n)).toEqual([{ start: 4n, end: 6n }]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
+// A front's reader subscribes to a copy only once a route serves it, which may be after the copy's
+// upstream answered the reader's live join. The copy takes the tick the reader added its range at,
+// not its own later one, so it places the join from that answer rather than asking again. Mirrors
+// the Rust fix behind `Copy::stamp`.
+test("a front's reader places a live join from an answer its copy recorded before subscribing", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	hooks.answersJoins(ta.producer);
+	for (let key = 0n; key < 5n; key++) ta.write(key);
+	const front = new Front();
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] });
+	try {
+		// The copy's upstream answered the join after the reader added it, before any copy asked.
+		hooks.answerJoin(ta.producer, 0, undefined, 3n, NO_MAX_DELAY);
+		front.serve(a.consume());
+		await settle();
+		await settle();
+		expect(drain(sub)).toEqual([3n, 4n]);
+		expect(hooks.requested(ta.producer).joins()).toEqual([]);
 	} finally {
 		sub.close();
 		front.consumer.close();
@@ -1783,27 +1812,32 @@ for (const whole of [true, false]) {
 	});
 }
 
-test("a short group on a failed route waits for the next one", async () => {
-	const { a, b, swap, active, close } = await setup();
-	const ta = copy(a);
-	const tb = copy(b);
-	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
-	ta.write(0n, 1);
-	const group = sub.tryRecvGroup();
-	if (!group) throw new Error("expected group 0");
-	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
-	await settle();
-	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
-	const reading = group.readFrame();
-	expect(await isPending(reading)).toBe(true);
-	tb.write(0n, 2);
-	await swap();
-	expect(dec.decode((await reading)?.payload)).toBe("0.1");
-	expect(await group.readFrame()).toBeUndefined();
+// Taken after the failure too: a group the copy buffered for the reader is no less continuable
+// for not being taken yet, as a Rust reader takes it from the cache.
+for (const taken of ["before", "after"]) {
+	test(`a short group on a failed route waits for the next one, taken ${taken} the failure`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+		ta.write(0n, 1);
+		let group = taken === "before" ? sub.tryRecvGroup() : undefined;
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		group ??= sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		const reading = group.readFrame();
+		expect(await isPending(reading)).toBe(true);
+		tb.write(0n, 2);
+		await swap();
+		expect(dec.decode((await reading)?.payload)).toBe("0.1");
+		expect(await group.readFrame()).toBeUndefined();
 
-	sub.close();
-	close();
-});
+		sub.close();
+		close();
+	});
+}
 
 test("a short group ends once no route holds more of it", async () => {
 	const { a, b, swap, active, close } = await setup();

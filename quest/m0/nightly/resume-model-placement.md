@@ -45,5 +45,4 @@ models' `regressions` once it passes.
 
 ## Related
 
-- [Time start asks upstream](/quest/m1/time-start-asks-upstream.md) - the same proof rule for a live join
 - [Route close](/quest/m0/nightly/resume-model-route-close.md) - the sweep's other open Rust failures
