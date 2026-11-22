@@ -142,3 +142,15 @@ test("Nightly and alert chains retain packaged outputs with one shared producer"
 	}
 	expect((await read("alert")).on.workflow_run?.workflows).toContain("Release FFI");
 });
+
+test("C and C++ stop when the build they consume failed", async () => {
+	const nightly = await read("nightly");
+	// Without `always()`, a failed shared build skips them instead of failing every target again.
+	for (const job of ["release-cpp", "release-c"]) {
+		expect(nightly.jobs[job].needs).toEqual(["release-shared-ffi"]);
+		expect(nightly.jobs[job].if).toBeUndefined();
+	}
+	// `native` is skipped outside the prebuilt-test dispatch, which must still build.
+	const build = (await read("release-cpp")).jobs.build;
+	expect(build.if).toContain("needs.native.result != 'failure'");
+});

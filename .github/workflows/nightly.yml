@@ -750,7 +750,6 @@ jobs:
   release-cpp:
     name: Release Cpp
     needs: [release-shared-ffi]
-    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
     with:
       reuse-native: true
@@ -760,7 +759,6 @@ jobs:
   release-c:
     name: Release C
     needs: [release-shared-ffi]
-    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-c.yml
     with:
       reuse-native: true
