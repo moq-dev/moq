@@ -350,14 +350,34 @@ impl<E> Catalog<E> {
 		Ok(())
 	}
 
-	/// Copy the media sections into a catalog with no application extension.
+	/// Copy every section into a catalog with no application extension.
 	pub fn without_ext(&self) -> Catalog<()> {
+		// Destructured without `..`, so a new field fails to compile until it is carried over.
+		let Catalog {
+			video,
+			audio,
+			sync,
+			text,
+			json,
+			binary,
+			stats,
+			echo,
+			include,
+			ext: _,
+			skipped,
+		} = self;
 		Catalog {
-			video: self.video.clone(),
-			audio: self.audio.clone(),
-			sync: self.sync,
-			text: self.text.clone(),
-			..Default::default()
+			video: video.clone(),
+			audio: audio.clone(),
+			sync: *sync,
+			text: text.clone(),
+			json: json.clone(),
+			binary: binary.clone(),
+			stats: stats.clone(),
+			echo: echo.clone(),
+			include: include.clone(),
+			ext: (),
+			skipped: skipped.clone(),
 		}
 	}
 }
@@ -1688,5 +1708,56 @@ mod test {
 		catalog.json.insert("chat", chat).unwrap();
 		let err = catalog.to_json().unwrap_err();
 		assert!(err.to_string().contains("must not carry a member `version`"), "{err}");
+	}
+
+	/// `without_ext` clears only the extension: every other field, including those a decoder fills,
+	/// survives the copy.
+	#[test]
+	fn without_ext_keeps_every_other_field() {
+		let mut catalog = Catalog::<serde_json::Map<String, serde_json::Value>> {
+			echo: Some(crate::catalog::Echo::new(moq_net::path::Relative::new("echo").unwrap())),
+			stats: Some(crate::catalog::Stats::new("stats")),
+			..Default::default()
+		};
+		catalog.ext.insert("app".into(), 1.into());
+		catalog.video.renditions.insert(
+			"video".into(),
+			VideoConfig::new(H264 {
+				profile: 0x64,
+				constraints: 0,
+				level: 0x28,
+				inline: false,
+			}),
+		);
+		catalog
+			.audio
+			.renditions
+			.insert("audio".into(), AudioConfig::new(Opus, 48_000, 2));
+		catalog.sync.interval = Some(std::time::Duration::from_secs(2));
+		catalog.json.insert("chat", JsonConfig::new(Mode::Stream)).unwrap();
+		catalog.binary.insert("blob", BinaryConfig::new(Mode::Snapshot)).unwrap();
+		catalog.include.insert(
+			"other".into(),
+			crate::catalog::Include::new(moq_net::path::Relative::new("other").unwrap()),
+		);
+		catalog.skipped.video.insert("future".into(), 9);
+
+		let stripped = catalog.without_ext();
+		let expected = Catalog::<()> {
+			video: catalog.video.clone(),
+			audio: catalog.audio.clone(),
+			sync: catalog.sync,
+			text: catalog.text.clone(),
+			json: catalog.json.clone(),
+			binary: catalog.binary.clone(),
+			stats: catalog.stats.clone(),
+			echo: catalog.echo.clone(),
+			include: catalog.include.clone(),
+			ext: (),
+			skipped: catalog.skipped.clone(),
+		};
+		assert_eq!(stripped, expected);
+		assert!(!stripped.json.tracks.is_empty() && !stripped.skipped.video.is_empty());
+		assert!(stripped.stats.is_some() && stripped.echo.is_some() && !stripped.include.is_empty());
 	}
 }

@@ -35,8 +35,6 @@ native crates, and public APIs:
   [moq-nvenc](/quest/m2/nvenc-soundness.md) before `0.22.0` publishes them.
 - **Public API freezes.** Fence `moq-net` event/item types with
   `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)),
-  fix `hang::Catalog::without_ext` and drop dead `Error` variants and the unused
-  `url` dependency ([hang-without-ext-and-errors](/quest/m2/hang-without-ext-and-errors.md)),
   rename `moq-gst`'s retired `tls-disable-verify` property to
   `connect-tls-insecure` ([gst-tls-insecure-prop](/quest/m2/gst-tls-insecure-prop.md)),
   narrow `@moq/room`'s `Room.remotes` to `ReadonlyMap`
