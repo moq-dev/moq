@@ -23,7 +23,8 @@ extension TimestampDuration on MoqTimestamp {
     // Both are u64, which a Dart int past 2^63 holds as negative.
     final units = BigInt.from(scale).toUnsigned(64);
     // value * 10^6 can exceed 64 bits at the allowed bounds.
-    final micros = BigInt.from(value).toUnsigned(64) * _microsPerSecond ~/ units;
+    final micros =
+        BigInt.from(value).toUnsigned(64) * _microsPerSecond ~/ units;
     if (!micros.isValidInt) {
       throw RangeError('timestamp $value/$scale s does not fit in a Duration');
     }
