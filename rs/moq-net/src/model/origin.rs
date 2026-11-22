@@ -11348,6 +11348,7 @@ mod tests {
 	/// A follower of a path ranks a claim filed deeper against the claim of its prefix as a
 	/// request does, so a better claim of the tier filed shallower takes over.
 	#[kio::test]
+	#[cfg(feature = "async")]
 	async fn a_follower_takes_the_claim_a_request_resolves() {
 		let route = |instance: &crate::Instance, node, above, draining| {
 			RouteInfo::new()
