@@ -17,6 +17,10 @@ SOURCES = (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs")
 # Tooling every package runs from its scripts by path, which no manifest edge records, so a change
 # to it checks every package.
 SHARED = ("js/common",)
+# Packages whose dist/ sh/js/install.py already materializes via root postinstall under
+# .tmp/bun-install.lock (and invalidates via its fingerprint of js/libav and Nix inputs).
+# Rebuilding them outside that lock would delete dist/ while parallel lanes run install.py.
+INSTALL_BUILT = frozenset({"@moq/libav"})
 # A string literal climbing out of its directory, like a test reading a shared corpus.
 RELATIVE = re.compile(r"""["'`]((?:\.\./)+[^"'`$?\s]*)""")
 # A `tsc` invocation that emits from a project, however the build script spells it.
@@ -159,7 +163,9 @@ def run(action, plan):
 
     def scripts(verb):
         filters = [
-            f"--filter={name}" for name, package in packages.items() if verb in package["manifest"].get("scripts", {})
+            f"--filter={name}"
+            for name, package in packages.items()
+            if verb in package["manifest"].get("scripts", {}) and not (verb == "build" and name in INSTALL_BUILT)
         ]
         if filters:
             if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -276,7 +282,7 @@ def run(action, plan):
         loaded = [name for name, package in packages.items() if node_loaded(package["manifest"])]
         if loaded:
             # The check loads each workspace dependency from its dist, so build the unselected ones.
-            if missing := sorted(runtime_closure(plan["manifests"], loaded) - set(packages)):
+            if missing := sorted(runtime_closure(plan["manifests"], loaded) - set(packages) - INSTALL_BUILT):
                 command("bun", "run", *(f"--filter={name}" for name in missing), "--elide-lines=0", "build")
             command("node", "sh/js/dist-imports.test.mjs", *(packages[name]["directory"] for name in loaded))
         for name in ("@moq/watch", "@moq/publish"):

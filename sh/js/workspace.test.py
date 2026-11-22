@@ -285,6 +285,40 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "test")))
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "build")))
 
+    def test_install_built_packages_skip_unlocked_build(self):
+        self.packages["js/libav"] = {
+            "name": "@moq/libav",
+            "scripts": {"check": "bun check --no-script", "build": "bun build.ts"},
+        }
+        self.packages["js/core"]["dependencies"] = {"@moq/libav": "workspace:*"}
+        self.packages["js/core"]["scripts"]["build"] = "tsc -p tsconfig.json"
+        self.packages["js/core"]["scripts"]["release"] = "bun ../common/release.ts"
+        self.write()
+        check_calls = self.calls(["js/libav/build.ts"], "check")
+        self.assertIn(
+            [
+                "bun",
+                "run",
+                "--sequential",
+                "--filter=@example/core",
+                "--filter=@example/view",
+                "--filter=@moq/libav",
+                "--filter=docs",
+                "--elide-lines=0",
+                "check",
+            ],
+            check_calls,
+        )
+        build_calls = [c for c in check_calls if c[:2] == ["bun", "run"] and c[-1] == "build"]
+        self.assertTrue(build_calls)
+        self.assertFalse(any("--filter=@moq/libav" in c for c in build_calls), build_calls)
+        # Runtime closure for unselected deps must also reuse the install-built libav artifact.
+        dep_calls = self.calls(["js/core/src/index.ts"], "check")
+        self.assertIn(["node", "sh/js/dist-imports.test.mjs", "js/core"], dep_calls)
+        dep_builds = [c for c in dep_calls if c[:2] == ["bun", "run"] and c[-1] == "build"]
+        self.assertTrue(dep_builds)
+        self.assertFalse(any("--filter=@moq/libav" in c for c in dep_builds), dep_builds)
+
     def test_empty_selection_runs_nothing(self):
         self.assertEqual(self.calls([]), [])
 
