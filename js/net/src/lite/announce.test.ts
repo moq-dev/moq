@@ -386,6 +386,20 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
 });
 
+// Rust's compressed output for bases that keep parts holding `\/` and `\\`, pinned by
+// `lite::compress::tests::golden_escaped_stream_is_pinned`.
+const GOLDEN_ESCAPED =
+	"001b00000f726f6f6d2f615c2f622f63616d2d3101610000000000ff00001701010b635c5c2f642f63616d2d3101610000000000ff00001102020563616d2d3201610000000000ff00000d0202016501610000000000ff00";
+
+test("AnnounceHistory resolves the Rust encoder's keeps across escapes", async () => {
+	expect(await resolveStream(unhex(GOLDEN_ESCAPED))).toEqual([
+		{ start: Path.from("room/a\\/b/cam-1"), ...own },
+		{ start: Path.from("room/c\\\\/d/cam-1"), ...own },
+		{ start: Path.from("room/a\\/b/cam-2"), ...own },
+		{ start: Path.from("room/c\\\\/e"), ...own },
+	]);
+});
+
 // JS always encodes literally. Rust's `js_literal_stream_decodes` pins the same bytes.
 const JS_LITERAL =
 	"001600000a726f6f6d2f612f63616d01610000000000ff00001600000a726f6f6d2f612f6d696301610000000000ff00" +
@@ -526,23 +540,25 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 	);
 });
 
-// TEMPORARY MIGRATION, delete at the next version cut and expect whole segments: the previous
-// release counts a keep by every `/`, so until it is gone this resolves what it sends.
-test("AnnounceHistory keeps raw parts across an escaped slash", () => {
+// A keep counts decoded parts: an escaped `/` stays inside its part, and a run of `\\` before a
+// `/` leaves that `/` bare. rs/moq-net's compress.rs pins the same cases.
+test("AnnounceHistory keeps whole parts across an escape", () => {
 	const history = new AnnounceHistory();
 	history.start({ suffix: Path.from("room/a\\/b/cam-1") });
-	// The previous release sends keep 3 for `room/a\/b/cam-2`.
-	expect(history.start({ suffix: Path.from("cam-2"), pathBase: { distance: 1n, keep: 3 } })).toBe(
+	history.start({ suffix: Path.from("room/c\\\\/d/cam-1") });
+	// `room` and `a\/b` are two parts.
+	expect(history.start({ suffix: Path.from("cam-2"), pathBase: { distance: 2n, keep: 2 } })).toBe(
 		Path.from("room/a\\/b/cam-2"),
 	);
-	// The kept `room/a\` is half an escape, which the rest completes, or nothing does and the path
-	// is refused, its id assigned all the same.
-	expect(history.start({ suffix: Path.from("c"), pathBase: { distance: 1n, keep: 2 } })).toBe(
-		Path.from("room/a\\/c"),
+	// `c\\` ends in an escaped backslash, so its `/` separates.
+	expect(history.start({ suffix: Path.from("e"), pathBase: { distance: 2n, keep: 2 } })).toBe(
+		Path.from("room/c\\\\/e"),
 	);
-	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 3n, keep: 2 } })).toBeUndefined();
-	expect(history.next).toBe(4n);
-	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 4n, keep: 5 } })).toThrow(
+	// Three parts of `room/a\/b/cam-1` are all it has, and a fourth is refused.
+	expect(history.start({ suffix: Path.from("x"), pathBase: { distance: 4n, keep: 3 } })).toBe(
+		Path.from("room/a\\/b/cam-1/x"),
+	);
+	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 5n, keep: 4 } })).toThrow(
 		ProtocolViolation,
 	);
 });
