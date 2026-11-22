@@ -296,11 +296,6 @@ func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config Gr
 	if err := bridge.Rendition(config.Rendition); err != nil {
 		return nil, err
 	}
-	if config.Options != nil {
-		if err := bridge.NonNegative(config.Options.MaxDelay, "max delay"); err != nil {
-			return nil, err
-		}
-	}
 	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Rendition: config.Rendition, Start: config.Start, Options: config.Options})
 	if err != nil {
 		return nil, err

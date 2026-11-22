@@ -3,7 +3,6 @@ package moq
 import (
 	"context"
 	"iter"
-	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
@@ -372,12 +371,6 @@ func (f *Fill) End() uint64 {
 // Priority is the most urgent delivery priority among the readers waiting on it.
 func (f *Fill) Priority() int8 {
 	return f.inner.Priority()
-}
-
-// MaxDelay is the most tolerant age budget among its readers, or nil for the
-// publisher's max age alone.
-func (f *Fill) MaxDelay() *time.Duration {
-	return f.inner.MaxDelay()
 }
 
 // Order is which end to fill first.

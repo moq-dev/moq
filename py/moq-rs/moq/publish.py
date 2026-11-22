@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from moq_ffi import (
@@ -273,11 +272,6 @@ class Fill:
     def priority(self) -> int:
         """The most urgent delivery priority among the readers waiting on it."""
         return self._inner.priority()
-
-    @property
-    def max_delay(self) -> timedelta | None:
-        """The most tolerant age budget among its readers, ``None`` for the publisher's max age alone."""
-        return self._inner.max_delay()
 
     @property
     def order(self) -> MoqOrder:
