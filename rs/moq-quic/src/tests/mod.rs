@@ -7052,6 +7052,68 @@ fn pacing_blocked_backlog_is_not_app_limited() {
 	});
 }
 
+/// Drains a backlog that `factory`'s controllers hold back, and returns the client's
+/// `(cwnd_blocked, pacing_blocked)` with the span from its first send of the backlog to its last.
+///
+/// The backlog waits on the controller from its first send to its last, and the simulated
+/// clock sends in no time, so the limit that held it must account for that whole span.
+fn congestion_waits(factory: PacketRecorderFactory) -> (Duration, Duration, Duration) {
+	let _guard = subscribe();
+	let (mut pair, client_ch, log) = recorded_pair(factory);
+	pair.latency = Duration::from_millis(20);
+	// Refill a pacer the handshake drained, as `check_blocked_backlog_is_not_app_limited` does.
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
+	pair.drive();
+	let before = log.lock().unwrap().len();
+	// The handshake may have waited on the pacer already.
+	let start = pair.client_conn_mut(client_ch).stats().path;
+
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.client_send(client_ch, s).finish().unwrap();
+	pair.drive();
+
+	let sent: Vec<Instant> = log.lock().unwrap()[before..]
+		.iter()
+		.filter_map(|e| match e {
+			PacketEvent::Sent { at } => Some(*at),
+			_ => None,
+		})
+		.collect();
+	let span = *sent.last().unwrap() - sent[0];
+	let end = pair.client_conn_mut(client_ch).stats().path;
+	(
+		end.cwnd_blocked - start.cwnd_blocked,
+		end.pacing_blocked - start.pacing_blocked,
+		span,
+	)
+}
+
+#[test]
+fn congestion_waits_time_a_full_window() {
+	let (window, pacing, span) = congestion_waits(PacketRecorderFactory {
+		window: Some(12_000),
+		..Default::default()
+	});
+	// 64 KiB through a 12 kB window takes several 40 ms round trips.
+	assert!(span >= Duration::from_millis(160), "{span:?}");
+	assert_eq!((window, pacing), (span, Duration::ZERO));
+}
+
+#[test]
+fn congestion_waits_time_the_pacer() {
+	let (window, pacing, span) = congestion_waits(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	// 64 KiB at 125 kB/s takes about half a second.
+	assert!(span >= Duration::from_millis(400), "{span:?}");
+	assert_eq!((window, pacing), (Duration::ZERO, span));
+}
+
 /// The last packet in a poll can drain the application while bytes remain in flight.
 #[test]
 fn partial_poll_reports_starvation() {

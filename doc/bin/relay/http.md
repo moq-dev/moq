@@ -68,6 +68,14 @@ internal sessions and the stats feed. Compare them with payload to spot
 transport overhead and idle traffic. Transports that do not report them
 contribute zero.
 
+`moq_relay_wire_lost_bytes_total`, `moq_relay_cwnd_blocked_microseconds_total`,
+and `moq_relay_pacing_blocked_microseconds_total` sum the per-session
+[congestion counters](/concept/stats#presence) by `tier`: the sent bytes
+declared lost, a share of `moq_relay_wire_tx_bytes_total`, and how long data
+ready to send waited on a full congestion window or on the pacer. Wait time
+growing while credit stays flat means the network, not a peer, held delivery
+back.
+
 `moq_relay_credit_stalls_total` and `moq_relay_credit_stalled_microseconds_total`
 sum the per-session [credit stalls](/concept/stats#presence) by `tier`: how often
 and how long a connection's writes waited on the peer's connection-level
