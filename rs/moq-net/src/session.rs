@@ -389,6 +389,10 @@ impl Session {
 
 	/// Block until the transport session is closed, returning the reason.
 	///
+	/// A close this side sent counts as closed once the transport confirms it, or after
+	/// three round trips (at least 100ms) without that, since a peer that is gone may never
+	/// let it; the transport keeps delivering the close in the background.
+	///
 	/// The driver keeps draining group streams already delivered to the transport
 	/// after this resolves, so keep driving it until it completes.
 	///
@@ -653,7 +657,8 @@ impl Session {
 /// samples the connection stats (including the send-bandwidth estimate) while
 /// anyone is consuming them, and enforces GOAWAY deadlines independently of writes.
 ///
-/// Finishes once the transport reports closed; everything else is moot then.
+/// Finishes once the transport reports closed, or once a close this side sent goes
+/// unconfirmed past its grace; everything else is moot then.
 pub(crate) struct Supervisor {
 	goaway: Option<goaway::Deadline>,
 	version: Version,
