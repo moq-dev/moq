@@ -31,6 +31,8 @@ unstable keys.
 - Read the bypass reasons of the jobs that bypass 73 to 126 compilations, and
   cache what mbx can.
 
+Decided 2026-11-22 (maintainer, pick of #9413): ✅ kept as a follow-up.
+
 Public API: none. Wire: none.
 
 ## Related
