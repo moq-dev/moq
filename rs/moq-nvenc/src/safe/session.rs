@@ -256,11 +256,7 @@ impl Session {
 		output_bitstream: Bitstream,
 		params: EncodePictureParams,
 	) -> Result<Submission<I>, Rejected<I>> {
-		let reject = |error, input, output| Rejected {
-			error,
-			input,
-			output,
-		};
+		let reject = |error, input, output| Rejected { error, input, output };
 		if self.ended {
 			let error = EncodeError::new(ErrorKind::InvalidCall, Some("the stream already ended".into()));
 			return Err(reject(error, input_buffer, output_bitstream));
@@ -878,7 +874,9 @@ mod tests {
 		let output = session.create_output_bitstream().unwrap();
 
 		session.end_of_stream().expect("end of stream was refused");
-		let error = session.end_of_stream().expect_err("a second end of stream was accepted");
+		let error = session
+			.end_of_stream()
+			.expect_err("a second end of stream was accepted");
 		assert_eq!(error.kind(), ErrorKind::InvalidCall);
 
 		let rejected = session
