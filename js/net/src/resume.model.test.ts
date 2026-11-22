@@ -25,7 +25,6 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
-import { routeFailed } from "./resume.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -1619,8 +1618,8 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
-		// Once the track ended, a group still read continues off a route that dies, from the copy
-		// the front serves next, as the Rust front's reader does.
+		// Once the track ended, a group still read that its route closes short and then fails
+		// continues from the copy the front serves next, as the Rust front's reader does.
 		{
 			ops: [
 				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 1 },
@@ -1632,6 +1631,7 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// The same once a route that closed the group short ends the track and then fails.
 		{
 			ops: [
 				{ kind: "up", instance: 1, slot: 2 },
