@@ -1009,7 +1009,9 @@ impl Copy {
 					Bound::Included(self.start(groups.0)),
 					groups.1.map_or(Bound::Unbounded, Bound::Excluded),
 				))
-				.parked();
+				.parked()
+				// What it reports goes to the reader, which may still take it back.
+				.withdrawing();
 			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
@@ -1426,6 +1428,32 @@ impl Subscriber {
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
 		self.reader().poll_drop(delivered, probe, waiter)
+	}
+
+	/// The drops the copies took back after a widening since the last call, none of which is
+	/// reported any more; see [`track::Subscriber::take_withdrawn`].
+	pub(super) fn take_withdrawn(&mut self) -> RangeSet<u64> {
+		let mut reader = self.reader();
+		let mut withdrawn = RangeSet::new();
+		for copy in &mut reader.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				withdrawn.extend(sub.take_withdrawn());
+			}
+		}
+		for run in withdrawn.iter() {
+			reader.remove_drop(run.clone());
+		}
+		withdrawn
+	}
+
+	/// Settle `keys` on every copy, which the reader reported for good, so a widening never
+	/// takes them back; see [`track::Subscriber::settle_gap`].
+	pub(super) fn settle(&mut self, keys: std::ops::Range<u64>) {
+		for copy in &mut self.reader().copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.settle_gap(keys.clone());
+			}
+		}
 	}
 
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
@@ -7580,6 +7608,197 @@ mod test {
 		assert_eq!(read(&mut sub), ["gap 3..4 (old, landed true)"]);
 		write(&a, 6);
 		assert_eq!(read(&mut sub), ["group 6"]);
+	}
+
+	/// A run the serving copy's fill refused as stale under the reader's budget is no verdict
+	/// for it once it widens past that budget, unless it already returned the gap, on a front
+	/// as on a plain reader: it asks the run again, and the gap waits for that answer.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_widened_read_asks_its_own_stale_refusal_again() {
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			a.received();
+			a.anchored();
+			let dynamic = a.requests();
+			write(&a, 900);
+			write(&a, 2000);
+			a.give_up(1000..1500, track::Hole::stale(Duration::from_secs(10)));
+			routes.serve(a.consume());
+			let track = if routed { &logical } else { &a };
+			let mut ordered = track
+				.consume()
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))))
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.with_range(900..1600)
+				.ordered();
+			let read = |ordered: &mut track::Ordered| {
+				let mut items = Vec::new();
+				loop {
+					match ordered.poll_next_item(&kio::Waiter::noop()) {
+						Poll::Pending => return items,
+						Poll::Ready(Ok(Some(track::Item::Group(group)))) => items.push(Ok(group.start)),
+						Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => items.push(Err(range)),
+						Poll::Ready(res) => panic!("routed={routed}: ended: {:?}", res.map(|_| ())),
+					}
+				}
+			};
+			assert_eq!(
+				read(&mut ordered),
+				[Ok(900)],
+				"routed={routed}: 901..1000 is still owed"
+			);
+			let fill = dynamic.requested_fill().now_or_never().expect("asked").unwrap();
+			assert_eq!(fill.start().group..fill.end(), 1000..1500, "routed={routed}");
+			fill.refuse_groups(1000..1500, Error::Old);
+			assert_eq!(
+				read(&mut ordered),
+				[],
+				"routed={routed}: the gap waits behind 901..1000"
+			);
+
+			// Widened past the budget the fill refused under: the refusal is no verdict for it now.
+			ordered
+				.update(ordered.subscription().with_delay(Delay::default().with_max(None)))
+				.unwrap();
+			a.skip_groups(901..1000);
+			assert_eq!(read(&mut ordered), [], "routed={routed}: the run is asked again");
+			let fill = dynamic.requested_fill().now_or_never().expect("asked again").unwrap();
+			assert_eq!(fill.start().group..fill.end(), 1000..1500, "routed={routed}");
+			fill.accept(1200, None)
+				.unwrap()
+				.expect("a group the wider budget reaches")
+				.finish()
+				.unwrap();
+			fill.drop_groups(1000..1200);
+			fill.drop_groups(1201..1500);
+			assert_eq!(
+				read(&mut ordered),
+				[Err(1000..1200), Ok(1200), Err(1201..1500)],
+				"routed={routed}"
+			);
+		}
+	}
+
+	/// A gap a front's ordered read returned stands once it widens, as does a drop a front's
+	/// reader reported for good, as on a plain reader: neither asks its copy again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_widened_read_keeps_a_stale_gap_it_reported() {
+		for (routed, ordered) in [(false, false), (false, true), (true, false), (true, true)] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			a.received();
+			a.anchored();
+			let dynamic = a.requests();
+			write(&a, 900);
+			write(&a, 2000);
+			a.skip_groups(901..1000);
+			a.give_up(1000..1500, track::Hole::stale(Duration::from_secs(10)));
+			routes.serve(a.consume());
+			let track = if routed { &logical } else { &a };
+			let mut sub = track
+				.consume()
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))))
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.with_range(900..1600);
+			let case = format!("routed={routed} ordered={ordered}");
+			let fill = if ordered {
+				let mut reader = sub.ordered();
+				let read = |reader: &mut track::Ordered| {
+					let mut items = Vec::new();
+					while let Poll::Ready(Ok(Some(item))) = reader.poll_next_item(&kio::Waiter::noop()) {
+						items.push(match item {
+							track::Item::Group(group) => Ok(group.start),
+							track::Item::Gap { range, .. } => Err(range),
+						});
+					}
+					items
+				};
+				assert_eq!(read(&mut reader), [Ok(900)], "{case}");
+				let fill = dynamic.requested_fill().now_or_never().expect("asked").unwrap();
+				fill.refuse_groups(1000..1500, Error::Old);
+				assert_eq!(read(&mut reader), [Err(1000..1500)], "{case}");
+				reader
+					.update(reader.subscription().with_delay(Delay::default().with_max(None)))
+					.unwrap();
+				assert_eq!(read(&mut reader), [], "{case}");
+				fill
+			} else {
+				assert_eq!(drain(&mut sub, false), [900], "{case}");
+				let fill = dynamic.requested_fill().now_or_never().expect("asked").unwrap();
+				fill.refuse_groups(1000..1500, Error::Old);
+				let drops = dropped(&mut sub);
+				assert!(drops.contains(&(1000..1500, StreamError::Old)), "{case}: {drops:?}");
+				sub.update(sub.subscription().with_delay(Delay::default().with_max(None)))
+					.unwrap();
+				assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "{case}");
+				assert_eq!(dropped(&mut sub), [], "{case}");
+				fill
+			};
+			drop(fill);
+			assert!(
+				dynamic.requested_fill().now_or_never().is_none(),
+				"{case}: nothing is asked again"
+			);
+		}
+	}
+
+	/// A front's ordered read returns a gap its copy gave up below a group it hands out in the
+	/// same read, before that group, as a plain reader does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_returns_a_gap_given_up_below_the_group_it_reads() {
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			a.received();
+			a.anchored();
+			let dynamic = a.requests();
+			write(&a, 900);
+			write(&a, 2000);
+			a.give_up(1000..1500, track::Hole::stale(Duration::from_secs(10)));
+			routes.serve(a.consume());
+			let track = if routed { &logical } else { &a };
+			let mut ordered = track
+				.consume()
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(HOUR)))
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.with_range(900..1600)
+				.ordered();
+			let read = |ordered: &mut track::Ordered| {
+				let mut items = Vec::new();
+				loop {
+					match ordered.poll_next_item(&kio::Waiter::noop()) {
+						Poll::Pending => return items,
+						Poll::Ready(Ok(Some(track::Item::Group(group)))) => items.push(Ok(group.start)),
+						Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => items.push(Err(range)),
+						Poll::Ready(res) => panic!("routed={routed}: ended: {:?}", res.map(|_| ())),
+					}
+				}
+			};
+			assert_eq!(read(&mut ordered), [Ok(900)], "routed={routed}");
+			let fill = dynamic.requested_fill().now_or_never().expect("asked").unwrap();
+			a.skip_groups(901..1000);
+			fill.accept(1200, None).unwrap().unwrap().finish().unwrap();
+			fill.drop_groups(1000..1200);
+			fill.drop_groups(1201..1500);
+			assert_eq!(
+				read(&mut ordered),
+				[Err(1000..1200), Ok(1200), Err(1201..1500)],
+				"routed={routed}"
+			);
+		}
 	}
 
 	/// A front's ordered read that ends past a group its copy gave up, as one missing its head

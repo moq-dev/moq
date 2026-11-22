@@ -7695,6 +7695,7 @@ impl Subscribing {
 				Logical {
 					state: self.state.clone(),
 					record: Record::default(),
+					withdrawn: None,
 				},
 			),
 			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
@@ -8135,6 +8136,43 @@ enum Inner {
 struct Logical {
 	state: kio::Consumer<TrackState>,
 	record: Record,
+	/// As [`Cursor::withdrawn`]: behind an owner that may take a dropped report back, the runs
+	/// a copy's widening took back from it, for that owner to forget.
+	withdrawn: Option<RangeSet<u64>>,
+}
+
+impl Logical {
+	/// Take back what the copies took back after a widening (see [`Cursor::rejudge`]): a run
+	/// still to report is dropped from the queue, and one reported to an owner that may take
+	/// it back is untold, for that owner to forget. What the owner settled stays settled, since
+	/// the copies were told of it.
+	fn take_back(&mut self, resume: &mut super::resume::Subscriber) {
+		for run in resume.take_withdrawn().iter() {
+			let record = &mut self.record;
+			let stale: Vec<_> = record
+				.pending
+				.overlapping(run)
+				.filter(|(_, pending)| !pending.received && pending.hole.stale_budget().is_some())
+				.map(|(range, _)| range.start.max(run.start)..range.end.min(run.end))
+				.collect();
+			for range in stale {
+				record.pending.remove(range);
+			}
+			let Some(withdrawn) = &mut self.withdrawn else {
+				continue;
+			};
+			let dropped: Vec<_> = record
+				.reported
+				.overlapping(run)
+				.filter(|(_, report)| **report == Report::Dropped)
+				.map(|(range, _)| range.start.max(run.start)..range.end.min(run.end))
+				.collect();
+			for range in dropped {
+				record.untell(range.clone());
+				withdrawn.insert(range);
+			}
+		}
+	}
 }
 
 /// A group a [`Subscriber`] reserved without handing it out; see
@@ -9021,9 +9059,10 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
-	/// Behind an [`Ordered`], whose dropped reports are gaps it has yet to return: the runs a
-	/// widening took back from them, for it to forget. `None` for a wire publisher, which
-	/// told its peer of every drop it reported, for good.
+	/// Behind an [`Ordered`], whose dropped reports are gaps it has yet to return, or a front's
+	/// reader, whose owner settles them: the runs a widening took back from them, for it to
+	/// forget. `None` for a wire publisher, which told its peer of every drop it reported, for
+	/// good.
 	withdrawn: Option<RangeSet<u64>>,
 	/// The heads a bounded window asked for, once it first finds a group missing one.
 	heads: Option<Box<Heads>>,
@@ -11559,6 +11598,14 @@ impl Subscriber {
 			Inner::Resume(resume, logical) => {
 				let delivered = &mut logical.record.delivered;
 				if ordered {
+					// A run a copy gave up under the key still goes out below it, as on a plain
+					// cursor: once passed, the copies' reports of it no longer reach this reader.
+					if !delivered.covers(0..key) {
+						while let Poll::Ready((range, hole)) = resume.poll_drop(delivered, false, &kio::Waiter::noop())
+						{
+							logical.record.pending.insert(range, Pending::own(hole));
+						}
+					}
 					delivered.forget_below(key);
 				}
 				delivered.insert(key);
@@ -11718,10 +11765,32 @@ impl Subscriber {
 
 	/// The drops reported to an [`Ordered`] and taken back since the last call, which a
 	/// widened budget asks again (see [`Cursor::rejudge`]).
-	fn take_withdrawn(&mut self) -> RangeSet<u64> {
+	pub(super) fn take_withdrawn(&mut self) -> RangeSet<u64> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.withdrawn.as_mut().map(std::mem::take).unwrap_or_default(),
-			Inner::Resume(..) => RangeSet::new(),
+			Inner::Resume(resume, logical) => {
+				logical.take_back(resume);
+				logical.withdrawn.as_mut().map(std::mem::take).unwrap_or_default()
+			}
+		}
+	}
+
+	/// Let the drops this reports be taken back until its owner settles them with
+	/// [`Self::settle_gap`], as an [`Ordered`] does for the gaps it returns.
+	pub(super) fn withdrawing(mut self) -> Self {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.withdrawn = Some(RangeSet::new()),
+			Inner::Resume(_, logical) => logical.withdrawn = Some(RangeSet::new()),
+		}
+		self
+	}
+
+	/// Settle `keys` as reported for good: a gap an [`Ordered`] returned. A front's copies are
+	/// told too, so a widening never asks them again.
+	pub(super) fn settle_gap(&mut self, keys: ops::Range<u64>) {
+		self.settle_range(keys.clone());
+		if let Inner::Resume(resume, _) = &mut self.inner {
+			resume.settle(keys);
 		}
 	}
 
@@ -11756,12 +11825,9 @@ impl Subscriber {
 	/// arrival-order [`Subscriber`] or a key-order [`Ordered`], never both at once.
 	/// The two advance independently, and interleaving them produces a group stream that
 	/// is neither, which is why the choice is a handle rather than a method.
-	pub fn ordered(mut self) -> Ordered {
-		if let Inner::Plain(cursor) = &mut self.inner {
-			cursor.withdrawn = Some(RangeSet::new());
-		}
+	pub fn ordered(self) -> Ordered {
 		Ordered {
-			inner: self,
+			inner: self.withdrawing(),
 			held: None,
 			gaps: BTreeMap::new(),
 			at: 0,
@@ -12032,8 +12098,13 @@ impl Subscriber {
 			// Each copy reports to its own route; the logical record keeps one route's run from
 			// going out over what another's already settled.
 			Inner::Resume(resume, logical) => loop {
-				if let Some(next) = logical.record.next_pending() {
-					return Poll::Ready(next);
+				logical.take_back(resume);
+				if let Some((range, hole)) = logical.record.next_pending() {
+					// An owner that cannot take it back reported it for good, which the copies learn.
+					if logical.withdrawn.is_none() {
+						resume.settle(range.clone());
+					}
+					return Poll::Ready((range, hole));
 				}
 				let (range, hole) = std::task::ready!(resume.poll_drop(&logical.record.delivered, probe, waiter));
 				logical.record.pending.insert(range, Pending::own(hole));
@@ -12905,7 +12976,7 @@ impl Ordered {
 	fn give(&mut self, range: ops::Range<u64>, error: Error) -> Item {
 		self.at = self.at.max(range.end);
 		// Told once: no later drop of these keys is a gap again.
-		self.inner.settle_range(range.clone());
+		self.inner.settle_gap(range.clone());
 		let landed = self.inner.landed(range.clone());
 		Item::Gap { range, error, landed }
 	}
