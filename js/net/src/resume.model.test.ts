@@ -259,6 +259,11 @@ class Publisher {
 		return this.routes.filter((copy) => copy !== undefined);
 	}
 
+	/** The route the front serves: the cheapest live one. */
+	serving(): Copy | undefined {
+		return this.live().at(-1);
+	}
+
 	newest(): number | undefined {
 		return this.written.size === 0 ? undefined : Math.max(...this.written.keys());
 	}
@@ -817,7 +822,8 @@ class Model {
 			if (!frame) {
 				// Short of whole only where a route closed it, and, unless the budget gave up or the
 				// group may have expired, only while a route that closed it lives: one whose route
-				// failed reads on from the route replacing it.
+				// failed reads on from the route replacing it, unless that route gave the group up, so
+				// nothing continues it.
 				const instance = this.instances[reader.instance];
 				const whole = reading.frames === frames(key) && instance.complete.has(key);
 				if (!whole && !instance.short.has(`${key}:${reading.frames}`)) {
@@ -827,7 +833,8 @@ class Model {
 					reader.spec.budget === "hour" &&
 					!reader.doomed &&
 					(instance.expired === undefined || key > instance.expired) &&
-					!instance.live().some((copy) => closed(copy, key, reading.frames))
+					!instance.live().some((copy) => closed(copy, key, reading.frames)) &&
+					!instance.serving()?.givenUp.has(key)
 				) {
 					this.failure ??= fail(
 						index,
@@ -1551,6 +1558,32 @@ test("regressions", async () => {
 				{ kind: "down", instance: 0, slot: 2 },
 				{ kind: "ranges", reader: 3, range: undefined },
 				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+			],
+			finish: false,
+		},
+		// A group read past where the serving copy then closes it short cannot end cleanly there: no
+		// route said it ends at the frames read. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: 5, frames: 2 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 5, frames: 1 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "close", instance: 0, slot: 1, group: undefined, down: false },
+			],
+			finish: false,
+		},
+		// A short close from a route that failed stands once the route replacing it gave the group up,
+		// so nothing continues it. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "giveUp", instance: 0, slot: 1, group: 5 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 2, group: 5, frames: 1 },
+				{ kind: "close", instance: 0, slot: 2, group: undefined, down: true },
 			],
 			finish: false,
 		},
