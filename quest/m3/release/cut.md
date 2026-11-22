@@ -258,9 +258,7 @@ Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
 full-codebase audit): ✅ the cut waits on the release-pipeline and packaging
 bugs found in m0: simultaneous apt/rpm/brew tag cancellation and npm publish
 propagation retries ([release-queue-and-npm-retry](/quest/m0/release-queue-and-npm-retry.md)),
-the frozen `moq-cli` `.deb` smoke target ([smoke-moq-deb-name](/quest/m0/smoke-moq-deb-name.md)),
-and the missing comma delimiter on `tls::Listen` env vars
-([tls-cert-env-delimiter](/quest/m0/tls-cert-env-delimiter.md)), while
+and the frozen `moq-cli` `.deb` smoke target ([smoke-moq-deb-name](/quest/m0/smoke-moq-deb-name.md)), while
 [crates-trusted-publisher](/quest/m3/crates-trusted-publisher.md) adds
 `moq-vaapi` after the cut first-publishes it by token (rejected: putting all
 pipeline fixes in m1 without gating the cut; fixing only 3 publish-breaking
@@ -307,4 +305,3 @@ candidate:
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
 - [Queue simultaneous apt/rpm/brew releases and retry npm CDN propagation](/quest/m0/release-queue-and-npm-retry.md) - simultaneous release tags and multi-package npm publishes do not silently drop artifacts
 - [Update smoke workflow to install moq instead of retired moq-cli](/quest/m0/smoke-moq-deb-name.md) - post-cut deb smoke tests install the newly published `moq` package
-- [Restore comma delimiter on TLS cert/key environment variables](/quest/m0/tls-cert-env-delimiter.md) - NixOS multi-cert relay configs do not fail to parse at startup
