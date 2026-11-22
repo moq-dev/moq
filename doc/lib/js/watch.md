@@ -191,6 +191,12 @@ Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `audio.muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
 
+`video.target`'s `width` and `height` cap the picture and, unless the box is
+square, prefer the renditions shown in its orientation, falling back to the
+other only when none can be decoded. `<moq-watch>` sets them from its rendered
+size, so rotating a phone switches between a broadcast's portrait and landscape
+renditions.
+
 `viewer.viewers` claims the broadcast's share of the connection's receive
 estimate (see [`connection.viewers`](/lib/js/net)). Its ceiling follows the
 catalog: the rate at which selection would pick the best enabled video

@@ -16,7 +16,8 @@ export type Target = {
 	// Maximum desired coded width in pixels.
 	width?: number;
 
-	// Maximum desired coded height in pixels.
+	// Maximum desired coded height in pixels. With `width`, the box's shape also prefers the
+	// renditions shown in its orientation, landscape or portrait.
 	height?: number;
 
 	// Maximum desired bitrate in bits per second, a cap rather than a hint: selection picks the
@@ -199,6 +200,25 @@ function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): R
 	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
 }
 
+/**
+ * Keep the renditions shown in the target box's orientation: a square or unsized one matches
+ * either, and when none match, or the box is square or unsized, every rendition stays.
+ */
+function orientedRenditions(
+	section: Catalog.Video | undefined,
+	renditions: Record<string, Catalog.VideoConfig>,
+	target: Target | undefined,
+): Record<string, Catalog.VideoConfig> {
+	if (target?.width == null || target.height == null) return renditions;
+	const viewport = Catalog.Orientation.of(target.width, target.height);
+	if (!viewport) return renditions;
+	const shape = section ?? { renditions };
+	const kept = Object.entries(renditions).filter(
+		([, config]) => (Catalog.Video.orientation(shape, config) ?? viewport) === viewport,
+	);
+	return kept.length > 0 ? Object.fromEntries(kept) : renditions;
+}
+
 /** Whether the receive rate steers selection: not with nothing to select, or a pinned rendition or bitrate. */
 function steers(available: Record<string, Catalog.VideoConfig>, target: Target | undefined): boolean {
 	if (Object.keys(available).length === 0) return false;
@@ -269,7 +289,7 @@ export class Source {
 		const target = effect.get(this.in.target);
 		// Read the rate only when it steers selection, so a pinned choice doesn't rerun with it.
 		if (steers(available, target)) this.#rate = effect.get(this.in.rate) ?? this.#rate;
-		const selected = this.#choose(available, target, this.#rate);
+		const selected = this.#choose(effect.get(this.#out.catalog), available, target, this.#rate);
 		if (!selected) return;
 
 		effect.set(this.#out.track, selected);
@@ -280,7 +300,7 @@ export class Source {
 		const available = enabledRenditions(effect.get(this.#out.available));
 		const target = effect.get(this.in.target);
 		// An unlimited rate picks the best rendition bandwidth could ever buy.
-		const best = this.#choose(available, target, Number.POSITIVE_INFINITY);
+		const best = this.#choose(effect.get(this.#out.catalog), available, target, Number.POSITIVE_INFINITY);
 		const bitrate = best === undefined ? undefined : available[best].bitrate;
 		if (bitrate === undefined) return;
 		// Only the rate's discounted share counts, so it must reach the bitrate over the margin.
@@ -290,6 +310,7 @@ export class Source {
 
 	// Pick among the enabled renditions, given the receive rate if known.
 	#choose(
+		section: Catalog.Video | undefined,
 		available: Record<string, Catalog.VideoConfig>,
 		target: Target | undefined,
 		rate: number | undefined,
@@ -301,7 +322,9 @@ export class Source {
 			target = { ...target, bitrate: Math.round(rate * MARGIN) };
 		}
 
-		return this.#select(preferredRenditions(available), target);
+		// Orientation first, so a lower preference ranks a broadcast's secondary orientation
+		// rather than dropping it as a decode fallback.
+		return this.#select(preferredRenditions(orientedRenditions(section, available, target)), target);
 	}
 
 	/**

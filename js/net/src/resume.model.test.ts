@@ -308,6 +308,11 @@ interface Reader {
 	/** What every live route carried in full when the track ended cleanly. */
 	carried: Set<number>;
 	/**
+	 * Where an ordered read that ran out of its bounded range passed every key below for good: a
+	 * range edit reads on only above it, so below it the read owes what it owed then.
+	 */
+	passed?: number;
+	/**
 	 * The group holding the range's start time when an arrival read first placed the range, as the
 	 * routes wrote groups then: what it owes starts there. See {@link Model.place}.
 	 */
@@ -320,6 +325,11 @@ interface Reader {
  */
 function capped(reader: Reader): boolean {
 	return (reader.cursor?.[1] ?? GROUPS) < GROUPS;
+}
+
+/** Whether `group` lies below the end the reader's ordered read passed for good. */
+function passedBelow(reader: Reader, group: number): boolean {
+	return reader.passed !== undefined && group < reader.passed;
 }
 
 function intersect(a: Range, b: Range): Range {
@@ -492,7 +502,7 @@ class Model {
 				// A read that ended at its range's end reads on once the range widens.
 				if (reader.end === null && !this.instances[reader.instance].ended) {
 					reader.end = undefined;
-					reader.carried = new Set();
+					reader.carried = new Set([...reader.carried].filter((group) => passedBelow(reader, group)));
 				}
 				this.poll(op.reader);
 				break;
@@ -523,6 +533,7 @@ class Model {
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
+		// A local publisher, where the Rust model's route is a received copy.
 		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		void (async () => {
 			for await (const request of serving.requested()) {
@@ -685,7 +696,6 @@ class Model {
 		reader.request.close();
 	}
 
-	/** Read everything `index` has ready, checking each step against the model. */
 	/**
 	 * The read ended cleanly, with the track or, for a bounded range, once that range is read and a
 	 * local cap holds nothing back: a group landing below the end afterwards is not owed, since a
@@ -698,13 +708,21 @@ class Model {
 		}
 		// Where the range placed decides what it owes, so record it before the snapshot.
 		this.#place(reader);
-		const covered = (group: number) => (instance.ended ? covers(reader, group) : within(owedRange(reader), group));
-		reader.carried = new Set();
+		// An ordered read passes what its floor keeps out, as `owed` judges a read that ended.
+		const covered = (group: number) =>
+			instance.ended
+				? covers(reader, group)
+				: within(owedRange(reader), group) &&
+					(!reader.spec.ordered || reader.local === undefined || group >= reader.local[0]);
+		// Below an end an ordered read passed, it still owes what it owed when it passed it.
+		reader.carried = new Set([...reader.carried].filter((group) => passedBelow(reader, group)));
 		for (let group = 0; group < GROUPS; group++) {
+			if (passedBelow(reader, group)) continue;
 			if (covered(group) && instance.live().every((copy) => complete(copy, group))) reader.carried.add(group);
 		}
 	}
 
+	/** Read everything `index` has ready, checking each step against the model. */
 	poll(index: number): void {
 		const reader = this.readers[index];
 		if (!reader) return;
@@ -750,6 +768,9 @@ class Model {
 			} else if (recv.kind === "done") {
 				if (!reader.parked) this.#endClean(index, reader);
 				reader.end = null;
+				// An ordered read passes every key below its bounded range's end, or its cap when lower.
+				const end = reader.ranges && Math.min(reader.ranges[1], reader.local?.[1] ?? GROUPS);
+				if (reader.spec.ordered && end !== undefined) reader.passed = Math.max(reader.passed ?? end, end);
 			} else if (recv.kind === "error") {
 				if (!reader.doomed) throw fail(index, `the track failed while its instance had a route: ${recv.error}`);
 				reader.end = recv.error;
@@ -937,6 +958,7 @@ class Model {
 		}
 		if (reader.spec.ordered && before !== undefined) owed = owed.filter((group) => group > before);
 		if (ended) owed = owed.filter((group) => reader.carried.has(group));
+		else owed = owed.filter((group) => !passedBelow(reader, group) || reader.carried.has(group));
 		if (reader.spec.budget === "short") owed = owed.filter((group) => group === GROUPS - 1);
 		const missing = owed.filter((group) => !reader.reading.has(group));
 		let problems = "";
@@ -1479,6 +1501,43 @@ test("regressions", async () => {
 				{ kind: "down", instance: 1, slot: 1 },
 				{ kind: "ranges", reader: 1, range: [1, 7] },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+			],
+			finish: false,
+		},
+		// An ordered read of a local route that ran out of its range when a group past it was created
+		// passed the key below for good, so the range set again reads on only past it. The Rust model
+		// runs the same ops on a received route, which waits for that key instead.
+		{
+			ops: [
+				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "ranges", reader: 3, range: [0, 1] },
+				{ kind: "advance", ms: 1 },
+			],
+			finish: false,
+		},
+		// The same across a route switch, with the range widened past the end the read passed.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(true, "hour", [0, 1], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "close", instance: 0, slot: 0, group: undefined, down: true },
+				{ kind: "ranges", reader: 2, range: undefined },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+			],
+			finish: false,
+		},
+		// The same once the route it passed on fails, with the group below landing on the next route.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
+				{ kind: "write", instance: 0, slot: 2, group: 1, frames: 1 },
+				{ kind: "down", instance: 0, slot: 2 },
+				{ kind: "ranges", reader: 3, range: undefined },
+				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
 			],
 			finish: false,
 		},
