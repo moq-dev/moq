@@ -11804,9 +11804,14 @@ impl Subscriber {
 	}
 
 	/// Whether this subscriber may still hand out group `key`: its ranges and floor cover it,
-	/// nothing skipped or gave it up, and it has not handed it out or passed it already.
+	/// nothing skipped or gave it up, and it has not handed it out or passed it already, as an
+	/// ordered read passes what lies below where it reads next.
 	pub(super) fn may_take(&self, key: u64) -> bool {
-		self.next_in_range(key) == Some(key) && !self.record().delivered.contains(key)
+		let ahead = match &self.inner {
+			Inner::Plain(cursor) => cursor.next_key <= key,
+			Inner::Resume(..) => true,
+		};
+		ahead && self.next_in_range(key) == Some(key) && !self.record().delivered.contains(key)
 	}
 
 	/// Whether the publisher declared every start in `groups` skipped, never to be produced

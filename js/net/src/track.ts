@@ -4652,7 +4652,10 @@ export class Subscriber {
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
-		hooks.mayTake = (subscriber, key) => subscriber.#nextInRange(key) === key && !subscriber.#delivered.has(key);
+		hooks.mayTake = (subscriber, key) =>
+			(subscriber.#resume !== undefined || subscriber.#nextKey <= key) &&
+			subscriber.#nextInRange(key) === key &&
+			!subscriber.#delivered.has(key);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
 			subscriber.#state.groups
 				.peek()
