@@ -1375,7 +1375,7 @@ class Reader implements ResumeSource {
 		const skipped = (open: Run) => {
 			const held = new Delivered();
 			for (const copy of this.#copies) {
-				for (const run of hooks.skippedIn(copy.sub, open.start, open.end)) held.addRun(run.start, run.end);
+				for (const run of copySkips(copy, open.start, open.end)) held.addRun(run.start, run.end);
 			}
 			return held.covers(open.start, open.end);
 		};
@@ -1710,15 +1710,13 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Keep what `copy` skipped of each gap in `lacking` under its bound, merged with what earlier
+	 * Keep what `copy` skipped of each gap in `lacking`, merged with what earlier
 	 * copies skipped: a skip is final, and only that copy may know it. Mirrors the Rust
 	 * `Reader::let_go`.
 	 */
 	#keepSkips(copy: Copy, lacking: readonly Run[]): void {
-		const bound = copyEnd(copy);
 		for (const gap of lacking) {
-			const end = bound === undefined ? gap.end : min(gap.end, bound);
-			for (const skip of hooks.skippedIn(copy.sub, gap.start, end)) this.#skipped.addRun(skip.start, skip.end);
+			for (const skip of copySkips(copy, gap.start, gap.end)) this.#skipped.addRun(skip.start, skip.end);
 		}
 	}
 
@@ -1992,7 +1990,7 @@ class Reader implements ResumeSource {
 		const skipped = new Delivered();
 		for (const run of runsIn(this.#skipped, start, end)) skipped.addRun(run.start, run.end);
 		for (const copy of this.#copies) {
-			for (const run of hooks.skippedIn(copy.sub, start, end)) skipped.addRun(run.start, run.end);
+			for (const run of copySkips(copy, start, end)) skipped.addRun(run.start, run.end);
 		}
 		return runsIn(skipped, start, end);
 	}
@@ -3200,4 +3198,11 @@ function runsIn(held: Delivered, start: bigint, end: bigint): Run[] {
 	}
 	if (at < end) runs.push({ start: at, end });
 	return runs;
+}
+
+/** The parts of `[start, end)` under `copy`'s bound that its publisher skipped: one bound whether it is held or let go. */
+function copySkips(copy: Copy, start: bigint, end: bigint): Run[] {
+	const bound = copyEnd(copy);
+	const to = bound === undefined ? end : min(end, bound);
+	return start < to ? hooks.skippedIn(copy.sub, start, to) : [];
 }

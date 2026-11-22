@@ -769,9 +769,14 @@ struct Span {
 }
 
 impl Copy {
-	/// The parts of `groups` this copy's publisher declared skipped: through its subscriber
-	/// once ready, which for another front's track counts the routes that front replaced.
+	/// The parts of `groups` under this copy's bound that its publisher declared skipped:
+	/// through its subscriber once ready, which for another front's track counts the routes
+	/// that front replaced. One bound whether the copy is held or let go.
 	fn skipped_in(&self, groups: std::ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let groups = groups.start..groups.end.min(self.end().unwrap_or(u64::MAX));
+		if groups.is_empty() {
+			return RangeSet::new();
+		}
 		match &self.sub {
 			Sub::Ready(sub) => sub.skipped_in(groups, waiter),
 			Sub::Pending(_) => self.track.skipped_in(groups, waiter),
@@ -2317,7 +2322,7 @@ impl Reader {
 			return waits;
 		}
 		// A skip is final, and only that copy may know it: keep what the copies skipped of the
-		// start and end of each gap the reader lacks, each under its bound, merged with what was
+		// start and end of each gap the reader lacks, merged with what was
 		// kept before, since a start or end may be skipped in parts no one copy knows whole. Only
 		// the start and end, at most two runs a gap, so what is kept never outgrows the gaps
 		// however many routes come and go; a skip inside a gap is left to the copies that hold it.
@@ -2331,8 +2336,7 @@ impl Reader {
 				.collect();
 			if !gone.is_empty() {
 				for copy in gone.iter().chain(&self.copies) {
-					let end = copy.end().unwrap_or(u64::MAX).min(gap.end);
-					found.extend(copy.skipped_in(gap.start..end, &kio::Waiter::noop()).iter().cloned());
+					found.extend(copy.skipped_in(gap.clone(), &kio::Waiter::noop()).iter().cloned());
 				}
 			}
 			if let Some(first) = found.iter().next().filter(|run| run.start == gap.start) {
