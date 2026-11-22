@@ -129,6 +129,7 @@ async fn next_active(announced: &mut moq_net::origin::Routes) -> String {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 }

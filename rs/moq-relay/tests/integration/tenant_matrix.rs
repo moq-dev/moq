@@ -369,6 +369,7 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 					..
 				}) => listed.insert(route.prefix.to_string()),
 				None => return,
+				other => panic!("unexpected route event {other:?}"),
 			};
 		}
 	})
