@@ -113,8 +113,9 @@ pub struct Producer<C: Container, R = ()> {
 	/// an exclusive presentation point from a max timestamp that still needs an estimate.
 	last_duration: Option<moq_net::Timestamp>,
 
-	/// Previous timestamp within the group and cadence observed within this epoch.
-	previous_timestamp: Option<moq_net::Timestamp>,
+	/// Previous source and published timestamps within the group, and the cadence observed within
+	/// this epoch.
+	previous_timestamp: Option<(moq_net::Timestamp, moq_net::Timestamp)>,
 	cadence: Option<moq_net::Timestamp>,
 	/// A presentation endpoint cannot bound the decode-order tail after reordering.
 	reordered: bool,
@@ -790,7 +791,19 @@ where
 		let mut timestamp = timestamp;
 		// A seek has no group open, so cutting it changes nothing this depends on.
 		let sought = match (keyframe, self.pending_start) {
-			(true, Some(start)) => Some(self.sought(start)?),
+			(true, Some(start)) => {
+				let sought = self.sought(start)?;
+				// A start moved past a span takes a keyframe below it along, as a keyframe the
+				// track's spans hold is moved, so it never presents below its own group's start.
+				if sought != start
+					&& let Some(scale) = self.inner.info().timescale
+					&& crate::start::key(&self.inner, timestamp)? < sought
+				{
+					timestamp =
+						moq_net::Timestamp::new(sought, scale).map_err(|_| moq_net::Error::TimestampMismatch)?;
+				}
+				Some(sought)
+			}
 			_ => None,
 		};
 		let start = match (keyframe && self.pending_start.is_none(), &self.group) {
@@ -1017,14 +1030,18 @@ where
 		at: moq_net::Timestamp,
 		duration: Option<moq_net::Timestamp>,
 	) {
-		self.reordered |= self.previous_timestamp.is_some_and(|previous| timestamp < previous);
-		if let Some(previous) = self.previous_timestamp
+		// Either order stepping back is a reorder: a frame after a keyframe a group start moved can
+		// publish below it, so the source's order alone misses it.
+		self.reordered |= self
+			.previous_timestamp
+			.is_some_and(|(previous, published)| timestamp < previous || timestamp_lt(at, published));
+		if let Some((previous, _)) = self.previous_timestamp
 			&& let Ok(delta) = timestamp.checked_sub(previous)
 			&& !delta.is_zero()
 		{
 			self.cadence = Some(delta);
 		}
-		self.previous_timestamp = Some(timestamp);
+		self.previous_timestamp = Some((timestamp, at));
 		// At full precision, so the group's floor is its highest frame as `finish_at` sees it.
 		self.newest = Some(self.newest.map_or(at, |newest| super::later(newest, at)));
 
@@ -1069,8 +1086,9 @@ where
 	/// The closing group ends whole where its last frame does, as [`cut(None)`](Self::cut)
 	/// estimates it, but not past `start`, which no group's span may hold. A `start` at or below a
 	/// frame the track holds, or inside the span of a group that ended whole, keys the group at the
-	/// first start past both instead, as [`write`](Self::write) moves a keyframe. One that doesn't
-	/// pass the latest group's start refuses the next keyframe with
+	/// first start past both instead, as [`write`](Self::write) moves a keyframe, and a keyframe
+	/// below that start is stamped at it, with a frame at its timestamp. One that doesn't pass the
+	/// latest group's start refuses the next keyframe with
 	/// [`TimestampRewind`](super::TimestampRewind). A decoder change takes `start` to a fresh
 	/// track, which holds nothing.
 	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
@@ -2952,6 +2970,56 @@ mod tests {
 		let spans: Vec<_> = groups.iter().map(|(start, _, end)| (*start, *end)).collect();
 		assert_eq!(spans, [(0, Some(132_000)), (132_000, Some(266_000))]);
 		copy(&groups, [1, 0]).unwrap();
+	}
+
+	/// A seek's start moved past the span of the group it closed takes a keyframe below that span's
+	/// End along, as `write` moves one, so the keyframe never presents below its own group's start.
+	#[tokio::test]
+	async fn a_seek_moved_past_a_span_takes_its_keyframe_along() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(66_000, false)).unwrap();
+		// The group ends whole at 132ms, past the seek and the keyframe after it.
+		producer.seek(50_000).unwrap();
+		producer.write(frame(100_000, true)).unwrap();
+		// The picture its parameter sets precede goes with it.
+		producer.write(frame(100_000, false)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_published(consumer).await;
+		let spans: Vec<_> = groups.iter().map(|(start, _, end)| (*start, *end)).collect();
+		assert_eq!(spans[0], (0, Some(132_000)));
+		assert_eq!(spans[1].0, 132_000);
+		let timestamps: Vec<_> = groups[1]
+			.1
+			.iter()
+			.map(|frame| frame.timestamp.as_micros().unwrap())
+			.collect();
+		assert_eq!(timestamps[..3], [132_000, 132_000, 166_000]);
+		copy(&groups, [1, 0]).unwrap();
+	}
+
+	/// A frame after a moved keyframe that publishes below it reorders the group as published, so
+	/// the group's presentation end no longer bounds its decode-order tail and no marker says so.
+	#[tokio::test]
+	async fn a_frame_published_below_a_moved_keyframe_reorders_its_group() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(100_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(232_000).unwrap())).unwrap();
+		// Below the End the cut set, so moved to it, while the frame after it stays.
+		producer.write(frame(200_000, true)).unwrap();
+		producer.write(frame(220_000, false)).unwrap();
+		producer.cut(None).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let groups = collect_payloads(consumer).await;
+		assert_eq!(groups[1], vec![(232_000, 2), (220_000, 2)]);
 	}
 
 	/// A seek keys the next group itself, so the group it closes ends whole at the estimate from its

@@ -136,6 +136,21 @@ test("Legacy Producer moves a picture with the parameter sets a marker moved", a
 	});
 });
 
+test("Legacy Producer reorders a group whose frame is written below its moved keyframe", async () => {
+	const media = track(Time.Timescale.MILLI);
+	const subscriber = media.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const producer = new Producer(media, new Format("video"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.discontinuity(Duration.micros(33_000));
+	// Moved to the next millisecond past the marker, while the frame after it stays below.
+	producer.encode(new Uint8Array([1]), Duration.micros(33_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(33_500), false);
+	producer.finish();
+
+	// Its presentation end no longer bounds its decode-order tail, so no end marker says so.
+	expect((await groups(subscriber))[2]).toEqual({ start: 34n, end: undefined, frames: [34_000, 33_500] });
+});
+
 test("Legacy Producer refuses an end below a frame of the open group, for every kind", () => {
 	for (const kind of ["audio", "video", "data"] as const) {
 		const media = track(Time.Timescale.MICRO);

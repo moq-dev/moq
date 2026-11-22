@@ -147,8 +147,9 @@ export interface Finished {
 export class Producer {
 	#track: Moq.Track.Producer;
 	#format: Format;
-	// Timestamps in whole microseconds.
+	// Timestamps in whole microseconds: the previous frame's source and written ones.
 	#previous?: number;
+	#previousWritten?: number;
 	#reordered = false;
 	#group?: Moq.Group.Producer;
 	// The newest timestamp written in the current group, which estimates its end.
@@ -261,12 +262,17 @@ export class Producer {
 		});
 
 		// The cadence follows the source, so a moved start never stretches the estimate after it.
-		this.#reordered ||= this.#previous !== undefined && source < this.#previous;
+		// Either order stepping back is a reorder: a frame after a keyframe a group start moved can
+		// be written below it, so the source's order alone misses it.
+		this.#reordered ||=
+			(this.#previous !== undefined && source < this.#previous) ||
+			(this.#previousWritten !== undefined && timestamp < this.#previousWritten);
 		if (this.#previous !== undefined && source > this.#previous) {
 			const delta = source - this.#previous;
 			this.#interval = delta;
 		}
 		this.#previous = source;
+		this.#previousWritten = timestamp;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
 		if (this.#newest === undefined || timestamp > this.#newest) this.#newest = timestamp;
 	}
@@ -355,6 +361,7 @@ export class Producer {
 		}
 		this.#end = undefined;
 		this.#previous = undefined;
+		this.#previousWritten = undefined;
 		this.#reordered = false;
 	}
 
