@@ -5868,24 +5868,6 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// A start past everything the live feed has (a subscriber resuming just after what it
-		// holds) is answered at once with the largest position, on versions that carry it:
-		// a quiet track may not reach that start for a while, and the subscriber judges
-		// what it holds against the answer.
-		if self.start.is_unresolved()
-			&& self.ctx.version.has_largest()
-			&& let Some(start) = self.requested.start()
-			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
-			&& (track::Position {
-				group: start,
-				frame: self.frames.start(start),
-			}) > largest
-		{
-			self.resolve(start, Some(largest), writer)?;
-			self.raise_floor(start);
-			return Poll::Ready(Ok(ControlFlow::Continue(())));
-		}
-
 		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
 		let order = self.ctx.steer_current().order;
 		let stuck = self.stuck();
@@ -6235,7 +6217,7 @@ impl TrackRun {
 				start = given_up.end.min(group.start);
 			}
 		}
-		self.resolve(start, None, writer)?;
+		self.resolve(start, writer)?;
 		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an
 		// explicit floor, still inside the subscriber's max age, is delivered, so the cursor
@@ -6261,16 +6243,15 @@ impl TrackRun {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
 		let start = self.starts(self.floor).into_iter().flatten().min().unwrap_or(none);
-		self.resolve(start, None, writer)
+		self.resolve(start, writer)
 	}
 
 	/// Send SUBSCRIBE_START resolving delivery at `start`, then name the groups given up
 	/// above it while it was held back. The only way out of [`Start::Unresolved`], so no
-	/// start leaves its held drops unsent. `live` is the source's largest, if already polled.
+	/// start leaves its held drops unsent.
 	fn resolve(
 		&mut self,
 		start: u64,
-		live: Option<track::Position>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
 		let Start::Unresolved { first, skipped } = std::mem::replace(&mut self.start, Start::Resolved(start)) else {
@@ -6281,12 +6262,9 @@ impl TrackRun {
 		// (see `lite::SubscribeStart`). A relay can hold just the first group of a backlog
 		// its source already answered past, so the source's largest says where the live
 		// feed is.
-		let live = match live {
-			Some(live) => Some(live),
-			None => match self.track.poll_live(&kio::Waiter::noop()) {
-				Poll::Ready(largest) => largest,
-				Poll::Pending => None,
-			},
+		let live = match self.track.poll_live(&kio::Waiter::noop()) {
+			Poll::Ready(largest) => largest,
+			Poll::Pending => None,
 		};
 		let largest = live.max(self.track.peek_largest()).map(|position| lite::Largest {
 			position,
@@ -10566,11 +10544,11 @@ mod serve_group_test {
 		}
 	}
 
-	/// A start past the live edge is answered at once, and a group given up while it was held
-	/// is still named: the subscriber owes itself every group from the start.
+	/// A time start past the newest group's start lands in that group, the group containing
+	/// it until a newer one exists, and a group given up while the start was held is still
+	/// named: the subscriber owes itself every group from the start.
 	#[kio::test]
-	async fn a_start_past_the_live_edge_names_what_it_held() {
-		// Only lite-07 answers a start past the live edge at once.
+	async fn a_time_start_past_the_newest_group_starts_there() {
 		{
 			let version = Version::Lite07;
 			let mut track = track::Producer::new(
@@ -10582,13 +10560,16 @@ mod serve_group_test {
 			write_group(&mut track, 5, 0);
 			track.drop_groups(11..12, crate::StreamError::NotFound);
 			let subscriber = track.subscribe(track::Subscription::default().with_start(10));
-			let (mut run, mut writer, log) = lite_run_from(version, subscriber, 10);
+			let (run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			// Lite-07 resolves the start on its own, so the cursor's floor stays at 0.
+			let bounds = Bounds::new(&[lite::Range::span(Some(10), 0, None, None)], false);
+			let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
 			assert!(
 				kio::wait(|waiter| run.poll(&mut writer, waiter))
 					.now_or_never()
 					.is_none()
 			);
-			assert_eq!(run.start.resolved(), Some(10), "{version}");
+			assert_eq!(run.start.resolved(), Some(5), "{version}");
 			assert_eq!(drops(&mut writer, &log, version).await, [(11, 11)], "{version}");
 		}
 	}
@@ -11026,32 +11007,6 @@ mod serve_group_test {
 				Ok((lite::SubscribeResponse::Start(start), _)) if start.starts == [Some(group)]
 			)
 		}
-	}
-
-	/// A resume past the only finished group leaves that group below the cursor.
-	/// Widening to no floor serves it: it is the live edge until a newer group
-	/// exists, and a catalog never publishes the next one.
-	#[kio::test]
-	async fn a_widening_update_serves_the_finished_group_it_had_skipped() {
-		let mut track = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		write_group(&mut track, 0, 0);
-		let mut relay = RelayRun::new(&mut track, 1);
-		relay.settle();
-		assert_eq!(relay.opened(), 0, "the resume is past the only group");
-
-		relay.run.replace(lite::SubscribeUpdate {
-			wanted_group: None,
-			order: crate::track::Order::Descending,
-			priority: 0,
-			max_delay: Some(Duration::from_secs(30)),
-			ranges: vec![lite::Range::span(None, 0, None, None)],
-		});
-		relay.settle();
-		assert_eq!(relay.opened(), 1, "the finished group is the live edge");
 	}
 
 	/// Widening the floor serves a cached group below the old one, even though it arrived
