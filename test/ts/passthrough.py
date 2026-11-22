@@ -47,6 +47,8 @@ PACKET = 188
 # Matching packets a position needs before it is claimed.
 RUN = 16
 PCR_HZ = 27_000_000
+# A PCR's range in 27 MHz ticks: a 33-bit 90 kHz base times 300.
+PCR_WRAP = 2**33 * 300
 # The stream types the importer groups on: video, as `passthrough.rs` lists them.
 VIDEO_STREAM_TYPES = {0x01, 0x02, 0x10, 0x1B, 0x1F, 0x20, 0x24, 0x33, 0x42, 0xD1, 0xEA}
 
@@ -181,14 +183,20 @@ def layout(source: list[bytes]) -> Layout:
 
 
 class Clock:
-    """Each source position's time in seconds, interpolated between its PCRs."""
+    """Each source position's time in seconds, interpolated between its PCRs, unwrapped."""
 
     def __init__(self, source: list[bytes], pcr_pid: int):
         pcrs = [(i, value) for i, pkt in enumerate(source) if pid(pkt) == pcr_pid and (value := pcr(pkt)) is not None]
         if len(pcrs) < 2:
             raise Mismatch("the source carries fewer than two PCRs")
         self.positions = [i for i, _ in pcrs]
-        self.values = [value for _, value in pcrs]
+        self.values = []
+        wraps = 0
+        for _, value in pcrs:
+            # A step back by more than half the range is the counter wrapping, not a jump.
+            if self.values and value + wraps < self.values[-1] - PCR_WRAP // 2:
+                wraps += PCR_WRAP
+            self.values.append(value + wraps)
 
     def at(self, position: int) -> float:
         k = max(0, min(bisect.bisect_right(self.positions, position) - 1, len(self.positions) - 2))
@@ -254,6 +262,8 @@ def restart_shortfall(placement: Placement, clock: Clock, bound: Restart) -> str
     if not start <= bound.resumed <= start + length:
         return f"the capture misses source packets {start} to {start + length}, not the restart at {bound.resumed}"
     lost = clock.at(start + length) - clock.at(start)
+    if lost < 0:
+        return f"the source's clock steps back {-lost:.3f} s across the capture's gap, so its loss is unknown"
     if lost > bound.bound:
         return f"the capture misses {lost:.3f} s at the restart, past the {bound.bound:.3f} s bound"
     return None

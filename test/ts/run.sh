@@ -394,8 +394,11 @@ fi
 # a replacement. A UDP input ends only on a receive timeout, which TSDuck counts in whole
 # seconds, and the importer holds its last object until its input ends: a 2 s delay keeps
 # that object on time. The delay is buffer, not loss, so the bound does not move with it.
+# Should the old route go before the replacement is announced, the follow window, not the
+# delay's buffer, keeps the export waiting for it.
 if [[ -n "$RESTART" ]]; then
     [[ " ${EXPORT[*]} " == *" --delay "* ]] || EXPORT+=(--delay 2s)
+    [[ " ${EXPORT[*]} " == *" --follow "* ]] || EXPORT+=(--follow 10s)
     EXPORT+=(--stitch)
 fi
 

@@ -249,15 +249,13 @@ impl Release {
 				let source =
 					ExportSource::for_stream(&self.source, &passthrough.track, export::subscribed(self.delay))?;
 				let source = export::skipping(source, self.delay);
-				let source = match self.replay {
-					true => source,
-					false => source.live(),
-				};
 				// The instance returning carries on after the group it was reading, which it
-				// would otherwise replay.
-				let source = match self.resume.take() {
-					Some(resume) => source.resuming(&resume),
-					None => source,
+				// would otherwise replay, rather than at its live edge, which would skip the
+				// groups after it that the delay may still reach.
+				let source = match (self.resume.take(), self.replay) {
+					(Some(resume), _) => source.resuming(&resume),
+					(None, true) => source,
+					(None, false) => source.live(),
 				};
 				self.track = Some((passthrough.track.clone(), source));
 				self.subscribed = kio::clock::now();

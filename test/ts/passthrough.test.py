@@ -88,7 +88,7 @@ def clock_packet(pid, ticks, rap, n):
     pcr = bytes([base >> 25 & 0xFF, base >> 17 & 0xFF, base >> 9 & 0xFF, base >> 1 & 0xFF])
     pcr += bytes([(base & 1) << 7 | 0x7E | ext >> 8, ext & 0xFF])
     field = bytes([7, 0x10 | (0x40 if rap else 0)]) + pcr
-    return bytes([0x47, pid >> 8, pid & 0xFF, 0x30]) + field + n.to_bytes(4, "big") + bytes(176)
+    return bytes([0x47, pid >> 8, pid & 0xFF, 0x30]) + field + n.to_bytes(4, "big") + bytes(172)
 
 
 PAT = (1).to_bytes(2, "big") + bytes([0xC1, 0, 0]) + (1).to_bytes(2, "big") + (0xE000 | 0x20).to_bytes(2, "big")
@@ -111,6 +111,7 @@ for i in range(250):
         PROGRAM += [section_packet(0, 0x00, PAT, i), section_packet(0x20, 0x02, PMT, i)]
     PROGRAM.append(clock_packet(0x100, 27_000_000 + i * INTERVAL, i % GOP == 0, i))
     PROGRAM += [packet(0x101 if k == 2 else 0x100, i * 4 + k) for k in range(4)]
+assert all(len(pkt) == passthrough.PACKET for pkt in PROGRAM)
 
 
 def interval(i):
@@ -159,6 +160,12 @@ class Restart(unittest.TestCase):
         # One run missing, but not where the import was down.
         early = passthrough.place(PROGRAM, PROGRAM[: interval(50)] + PROGRAM[interval(51) :])
         self.assertIn("not the restart", passthrough.restart_shortfall(early, self.clock, self.bound))
+
+    def test_the_clock_runs_on_across_a_pcr_wrap(self):
+        start = passthrough.PCR_WRAP - 2 * INTERVAL
+        source = [clock_packet(0x100, (start + i * INTERVAL) % passthrough.PCR_WRAP, False, i) for i in range(5)]
+        clock = passthrough.Clock(source, 0x100)
+        self.assertAlmostEqual(clock.at(4) - clock.at(1), 0.12)
 
     def test_a_restart_needs_one_program_and_a_downtime(self):
         with self.assertRaises(passthrough.Mismatch):
