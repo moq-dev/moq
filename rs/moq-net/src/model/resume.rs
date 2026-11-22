@@ -2112,29 +2112,11 @@ impl Reader {
 		if self.copies.last().is_some_and(|copy| copy.generation == generation) {
 			return;
 		}
-		// Where the serving copy resolved the reader's ranges: the floor raises each start
-		// there, never lowering a later range to the floor. A failed copy's resolution is no
-		// placement, as in `window`: the reader's own carries over, pending until a copy
-		// continuing the track places it.
-		let failed = self.route.end().is_none()
-			&& self
-				.copies
-				.last()
-				.is_some_and(|copy| matches!(copy.sub, Sub::Ready(_)) && copy_failed(&copy.track));
-		let keys = self.mirrored.ranges.keys().copied();
-		let resolved = match self.copies.last_mut() {
-			Some(_) if failed => self.window().resolved_by_key(),
-			Some(Copy {
-				sub: Sub::Ready(sub), ..
-			}) => keyed_resolution(keys.clone(), sub.resolved_ranges(keys)),
-			// One still unanswered passes on what it was handed.
-			Some(Copy {
-				sub: Sub::Pending(_),
-				resolved,
-				..
-			}) => resolved.clone(),
-			None => BTreeMap::new(),
-		};
+		// Where the reader placed its ranges, which the new copy's floor raises. Never the serving
+		// copy's own resolution: its floor or cap clamped what it was asked, so a range wholly
+		// below its floor resolves empty there, which would empty the new copy's range too, and a
+		// failed copy's is no placement. Pending until a copy continuing the track places it.
+		let resolved = self.window().resolved_by_key();
 		// The new copy starts at the boundary, so a lower group no replaced copy holds is asked
 		// of its route once the reader says which; see `backfill_gaps`.
 		self.resumed = Some(Resumed::Route(
@@ -3179,10 +3161,11 @@ impl Reader {
 			}
 		};
 		let from = from.unwrap_or(floor).max(self.groups.0);
-		// A group a replaced copy holds under its cap is that copy's to drain: the serving route
-		// is asked from the lowest one none holds. A copy that failed or spent its drain budget
-		// delivers nothing more, even while a read still leases it, and one holding a group
-		// without its head may give that group up, so neither counts.
+		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
+		// drain: the serving route is asked from the lowest one none holds. A copy that failed or
+		// spent its drain budget delivers nothing more, even while a read still leases it, and
+		// one holding a group without its head may give that group up, so neither counts. Nor
+		// does one still unanswered, whose ranges are not placed yet.
 		let start = self.groups.0;
 		let budget = self.mirrored.budget();
 		let drains = |key: u64| {
@@ -3192,6 +3175,7 @@ impl Reader {
 					&& !copy.expired(budget, waiter)
 					&& copy.start(start) <= key
 					&& copy.end().is_some_and(|end| key < end)
+					&& matches!(&copy.sub, Sub::Ready(sub) if sub.may_take(key))
 					&& !copy_failed(&copy.track)
 					&& copy.track.peek_group(key).is_some_and(|group| group.first_frame() == 0)
 			})
