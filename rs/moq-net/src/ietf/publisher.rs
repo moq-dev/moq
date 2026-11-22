@@ -22040,6 +22040,55 @@ mod range_tests {
 		);
 	}
 
+	/// A group a relay holds with its END_OF_GROUP object still has its Largest Object at the
+	/// last frame, as the origin publisher states it: a fill cut at the terminal object would
+	/// ask for an object no frame holds, and fail.
+	#[test]
+	fn a_terminal_object_is_not_the_largest_object() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"catalog",
+			crate::track::Info::timed(),
+		);
+		let group = track.create_group(group::Info { start: 7 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: false,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_object(crate::frame::Header {
+				info: crate::frame::Info {
+					size: 1,
+					timestamp: crate::Timestamp::from_millis(0).unwrap(),
+				},
+				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+					id: 0,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		frame.write(&b"x"[..]).unwrap();
+		let group = frame.finish().unwrap();
+		group
+			.set_end_object(crate::model::object::Fields {
+				id: 1,
+				properties: Default::default(),
+			})
+			.unwrap();
+
+		let edge = live_edge(&track.consume());
+		assert_eq!(edge.largest, Some(Location { group: 7, object: 0 }));
+		assert_eq!(edge.next, Some(Location { group: 7, object: 1 }));
+	}
+
 	/// Anything received past the upstream's last reported Largest Object outdates it, a
 	/// later object of its group or a newer group, even once the cache evicted what arrived,
 	/// so the edge never moves back to the report. A report that lands after a frame past it

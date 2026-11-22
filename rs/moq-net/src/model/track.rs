@@ -3956,7 +3956,7 @@ impl TrackState {
 			.find_map(|(&group, slot)| {
 				Some(Position {
 					group,
-					frame: slot.group.last_data_object()?,
+					frame: slot.group.last_object()?,
 				})
 			});
 		self.feed = Feed::Idle { newest, held };

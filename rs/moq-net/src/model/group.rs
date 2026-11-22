@@ -1414,6 +1414,20 @@ impl GroupState {
 		self.relay.as_ref()?.wire.as_ref()
 	}
 
+	/// The newest object's ID, by its moq-transport object ID when the group carries one,
+	/// else its frame index; `None` before the first frame. A terminal object does not
+	/// count: a publisher's Largest never names the END_OF_GROUP it sends past the last, so
+	/// a Largest or a fill range cut at it asks for an object no frame holds.
+	fn last_object(&self) -> Option<u64> {
+		match self.wire() {
+			Some(wire) => match self.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
+				Some(relay) => relay.last_before_end,
+				None => wire.last,
+			},
+			None => (self.next_index as u64).checked_sub(1),
+		}
+	}
+
 	fn wire_mut(&mut self) -> Option<&mut Wire> {
 		self.relay.as_mut()?.wire.as_mut()
 	}
@@ -2947,18 +2961,8 @@ impl Handle {
 		self.track.compressed()
 	}
 
-	/// The newest object's ID, by its moq-transport object ID when the group carries one,
-	/// else its frame index; `None` before the first frame. A terminal object does not
-	/// count: a publisher's Largest never names the END_OF_GROUP it sends past the last.
-	pub(crate) fn last_data_object(&self) -> Option<u64> {
-		let state = self.state.read();
-		match state.wire() {
-			Some(wire) => match state.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
-				Some(relay) => relay.last_before_end,
-				None => wire.last,
-			},
-			None => (state.next_index as u64).checked_sub(1),
-		}
+	pub(crate) fn last_object(&self) -> Option<u64> {
+		self.state.read().last_object()
 	}
 
 	/// Cap the group at `frames`, for a track end inside it, or lift the cap with `None`:
@@ -4013,11 +4017,7 @@ impl std::ops::Deref for Consumer {
 impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn last_object(&self) -> Option<u64> {
-		let state = self.cursor.state.read();
-		match state.wire() {
-			Some(wire) => wire.last,
-			None => (state.next_index as u64).checked_sub(1),
-		}
+		self.cursor.state.read().last_object()
 	}
 
 	#[cfg(feature = "async")]
