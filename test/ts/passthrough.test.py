@@ -157,8 +157,8 @@ class Restart(unittest.TestCase):
         whole = passthrough.place(PROGRAM, PROGRAM)
         self.assertIn("0 runs", passthrough.restart_shortfall(whole, self.clock, self.bound))
         # One run missing, but not where the import was down.
-        early = PROGRAM[: interval(50)] + PROGRAM[interval(51) :]
-        self.assertIn("not the restart", passthrough.restart_shortfall(passthrough.place(PROGRAM, early), self.clock, self.bound))
+        early = passthrough.place(PROGRAM, PROGRAM[: interval(50)] + PROGRAM[interval(51) :])
+        self.assertIn("not the restart", passthrough.restart_shortfall(early, self.clock, self.bound))
 
     def test_a_restart_needs_one_program_and_a_downtime(self):
         with self.assertRaises(passthrough.Mismatch):

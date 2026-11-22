@@ -699,7 +699,10 @@ async fn follow(
 	assert!(groups.len() >= 5, "{} groups", groups.len());
 	// The first instance stops partway into its second group.
 	let before = objects.iter().position(|object| object.group == groups[1]).unwrap() + 2;
-	let from = objects.iter().position(|object| object.group == groups[second.from]).unwrap();
+	let from = objects
+		.iter()
+		.position(|object| object.group == groups[second.from])
+		.unwrap();
 	let (head, mut tail) = (objects[..before].to_vec(), objects[from..].to_vec());
 	if let Some(back) = second.back {
 		let rewind = tail[0].micros - head.last().unwrap().micros + back.as_micros() as u64;
