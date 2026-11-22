@@ -11468,7 +11468,7 @@ impl Subscriber {
 	}
 
 	/// The parts of `groups` the publisher declared skipped, as this subscriber knows them: a
-	/// front's logical track counts every route it held or let go.
+	/// front's logical track counts every route it holds.
 	/// Parks `waiter` until a change while some of `groups` is not.
 	pub(super) fn skipped_in(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
 		match &self.inner {
