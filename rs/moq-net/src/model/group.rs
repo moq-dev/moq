@@ -4438,6 +4438,7 @@ impl Consumer {
 
 	/// How many frames the group holds for good once its producer closed it, `None` while it
 	/// may still grow or after it failed.
+	#[cfg(feature = "async")]
 	pub(crate) fn settled_frames(&self) -> Option<usize> {
 		self.cursor.state.read().outcome.frames()
 	}
