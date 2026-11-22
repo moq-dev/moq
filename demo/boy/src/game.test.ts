@@ -59,7 +59,7 @@ test("status skips values that fail the schema and ends when the track errors", 
 	Object.defineProperty(globalThis, "document", { configurable: true, value: new EventTarget() });
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const error = spyOn(console, "error").mockImplementation(() => {});
-	const refused = () => warn.mock.calls.filter(([msg]) => msg === "Invalid status:").length;
+	const refused = () => warn.mock.calls.filter(([msg]) => String(msg).startsWith("refused invalid snapshot")).length;
 
 	const connection = new Moq.Connection({ enabled: false });
 	const origin = new Moq.Origin.Producer();
