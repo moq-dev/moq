@@ -2531,7 +2531,7 @@ mod tests {
 	}
 
 	/// A source that closes while its catalog track stays open still ends a serving transcoder.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_closed_source_ends_the_serve_loop() {
 		let source = source_broadcast(1, 3);
 		let config = Config {
