@@ -80,7 +80,7 @@ In a receive trace, follow `pc`, `q[s]`'s `arr`, `taken`, `rel`, and `msd`, `cha
 
 ## Coverage
 
-Sync commit: `ef832d9bcc96e06e95a7e005f03f36c88ac6dc4c`; with `Shaped`, moq-dev/moq#9210 at `c0a70c8ab`. Run `git log ef832d9bcc.. -- rs/moq-quic/src/connection/streams rs/moq-net/src/coding/reader.rs rs/moq-net/src/transport/boxed.rs rs/moq-net/src/transport/open.rs rs/moq-net/src/model/pace.rs rs/moq-net/src/model/frame.rs rs/moq-net/src/lite/publisher.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `1cb22d4725171be5e547cfa5c23672c28c4e79a5`, with `Shaped` from [moq-dev/moq#9210](https://github.com/moq-dev/moq/pull/9210). Run `git log 1cb22d4725.. -- rs/moq-quic/src/connection/streams rs/moq-net/src/coding/reader.rs rs/moq-net/src/transport/boxed.rs rs/moq-net/src/transport/open.rs rs/moq-net/src/model/pace.rs rs/moq-net/src/model/frame.rs rs/moq-net/src/lite/publisher.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
