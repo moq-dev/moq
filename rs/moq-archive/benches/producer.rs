@@ -44,8 +44,7 @@ fn setup(tracks: usize, groups: u64) -> (broadcast::Producer, Vec<track::Produce
 
 /// Record the broadcast until every track ends, from the producer's start.
 async fn record(source: broadcast::Producer, tracks: Vec<track::Producer>) -> Duration {
-	let config = producer::Config::default()
-		.with_duration(Duration::from_secs(2));
+	let config = producer::Config::default().with_duration(Duration::from_secs(2));
 	let store = Store::new(InMemory::new(), "bench");
 	let start = Instant::now();
 	let run = tokio::spawn(Producer::new(store, source.consume(), config).run());

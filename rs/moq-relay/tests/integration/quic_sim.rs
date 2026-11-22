@@ -220,7 +220,12 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			.unwrap()
 			// A budget spanning the run, so recovery has to deliver every group, however late.
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(TIMEOUT)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: TIMEOUT,
+						max: Some(TIMEOUT),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -383,8 +388,12 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 				.track(&name)
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(600))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Duration::from_secs(600),
+							max: Some(Duration::from_secs(600)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();

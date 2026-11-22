@@ -21,9 +21,7 @@ fn store() -> Store<Mock> {
 
 /// No flush or gap verdict lands unless a test waits for it.
 fn config() -> Config {
-	Config::default()
-		.with_duration(2 * SECOND)
-		.with_flush(100 * SECOND)
+	Config::default().with_duration(2 * SECOND).with_flush(100 * SECOND)
 }
 
 fn spawn(store: &Store<Mock>, broadcast: &broadcast::Producer, config: Config) -> JoinHandle<Result<()>> {

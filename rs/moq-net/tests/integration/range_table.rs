@@ -63,7 +63,10 @@ impl Ask {
 		let start = |range: &Value| match range.get("start") {
 			None => Start::Oldest,
 			Some(start) => match start.get("live") {
-				Some(live) => Start::Live { min: Duration::from_millis(live.as_u64().expect("a lag")), max: Some(std::time::Duration::ZERO) },
+				Some(live) => Start::Live {
+					min: Duration::from_millis(live.as_u64().expect("a lag")),
+					max: Some(std::time::Duration::ZERO),
+				},
 				None => Start::Time(start.as_u64().expect("a time")),
 			},
 		};

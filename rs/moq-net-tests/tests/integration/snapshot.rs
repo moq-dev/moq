@@ -16,7 +16,12 @@ fn reads_skip_an_owed_hole() {
 			.unwrap();
 		fuzz::received(&track);
 		// The caller's own reader of the track, at the budget it might have wanted.
-		let _other = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(max)));
+		let _other = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+			track::Start::Live {
+				min: max,
+				max: Some(max),
+			},
+		)]));
 		let mut latest = snapshot::Consumer::<Value>::new(track.consume(), Default::default());
 		let mut next = snapshot::Consumer::<Value>::new(track.consume(), Default::default());
 		let waiter = kio::Waiter::noop();

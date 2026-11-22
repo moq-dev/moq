@@ -442,7 +442,11 @@ impl Window {
 		holdings: &impl Holdings,
 	) {
 		let retuned: BTreeSet<u64> = (added.iter())
-			.filter(|(key, range)| range.join().is_some_and(|join| self.ranges.get(key).and_then(Range::join) == Some(join)))
+			.filter(|(key, range)| {
+				range
+					.join()
+					.is_some_and(|join| self.ranges.get(key).and_then(Range::join) == Some(join))
+			})
 			.map(|(key, _)| *key)
 			.collect();
 		for key in retired {
@@ -492,7 +496,10 @@ impl Window {
 	/// How long each group stays worth delivering once superseded, as these ranges set it.
 	pub fn budget(&self) -> Budget {
 		Budget {
-			live: self.budgets.last_key_value().map_or(Duration::ZERO, |(budget, _)| *budget),
+			live: self
+				.budgets
+				.last_key_value()
+				.map_or(Duration::ZERO, |(budget, _)| *budget),
 			history: Duration::MAX,
 			covered: self.history.clone(),
 		}
@@ -1884,11 +1891,7 @@ mod tests {
 	#[test]
 	fn a_time_start_is_not_looked_up_without_a_history() {
 		let keys = Keys::new([4000, 9000]);
-		let window = Window::new(
-			&[range(time(8500), None), range(time(500), None)],
-			Some(9000),
-			&keys,
-		);
+		let window = Window::new(&[range(time(8500), None), range(time(500), None)], Some(9000), &keys);
 		assert_eq!(window.lookups().count(), 0);
 		assert_eq!(
 			window.resolved(),

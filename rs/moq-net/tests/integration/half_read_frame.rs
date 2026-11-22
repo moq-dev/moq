@@ -58,8 +58,7 @@ async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 		.await
 		.unwrap()
 		.unwrap();
-	let prefs =
-		track::Subscription::default().with_max(std::time::Duration::from_secs(60));
+	let prefs = track::Subscription::default().with_max(std::time::Duration::from_secs(60));
 	let mut sub = remote.track("file").unwrap().subscribe(prefs).await.unwrap();
 
 	let payload = pattern(SIZE);

@@ -370,7 +370,10 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 	// A range with no time start can't be placed against the time spans.
 	union.extend(ranges.iter().filter(|range| range.start == Start::Oldest));
 	union.extend(joins.into_iter().map(|((min, end), budget)| Range {
-		start: Start::Live { min, max: max_of(budget) },
+		start: Start::Live {
+			min,
+			max: max_of(budget),
+		},
 		end,
 	}));
 	union.sort_unstable();
@@ -693,7 +696,10 @@ mod tests {
 	}
 
 	fn joining(min: Duration) -> Subscription {
-		Subscription::default().with_ranges([Range::from(Start::Live { min, max: Some(std::time::Duration::ZERO) })])
+		Subscription::default().with_ranges([Range::from(Start::Live {
+			min,
+			max: Some(std::time::Duration::ZERO),
+		})])
 	}
 
 	/// A legacy span becomes inclusive times: an exclusive end of 0 holds nothing, whatever
@@ -786,8 +792,14 @@ mod tests {
 			ranges(&[sub(&[groups(2, 5)]), joining(two), joining(five), joining(two)]),
 			vec![
 				groups(2, 5),
-				Range::from(Start::Live { min: two, max: Some(std::time::Duration::ZERO) }),
-				Range::from(Start::Live { min: five, max: Some(std::time::Duration::ZERO) })
+				Range::from(Start::Live {
+					min: two,
+					max: Some(std::time::Duration::ZERO)
+				}),
+				Range::from(Start::Live {
+					min: five,
+					max: Some(std::time::Duration::ZERO)
+				})
 			]
 		);
 		// Unless another reader starts at the oldest group.

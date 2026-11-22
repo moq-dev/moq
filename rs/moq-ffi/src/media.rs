@@ -2208,8 +2208,12 @@ mod timebase_tests {
 					.track(&name)
 					.unwrap()
 					.subscribe(
-						moq_net::track::Subscription::default()
-							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Duration::from_secs(30),
+								max: Some(Duration::from_secs(30)),
+							},
+						)]),
 					)
 					.await
 					.unwrap();

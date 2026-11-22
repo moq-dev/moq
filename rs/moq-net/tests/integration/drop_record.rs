@@ -158,9 +158,7 @@ fn asked(pair: &MockPair) -> (usize, usize) {
 
 /// A reader of `ranges` with max delay `budget`.
 fn reading(budget: impl Into<Option<Duration>>, ranges: impl IntoIterator<Item = Range>) -> Subscription {
-	Subscription::default()
-		.with_ranges(ranges)
-		.with_max(budget)
+	Subscription::default().with_ranges(ranges).with_max(budget)
 }
 
 /// Every group `subscriber` receives until it goes quiet for a second, or ends.

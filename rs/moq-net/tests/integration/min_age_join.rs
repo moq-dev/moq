@@ -132,7 +132,10 @@ impl Chain {
 
 	/// Wait until the publisher is asked for a live join `min` behind the live edge.
 	async fn asked(&self, min: Duration) {
-		let join = track::Range::from(track::Start::Live { min, max: Some(std::time::Duration::ZERO) });
+		let join = track::Range::from(track::Start::Live {
+			min,
+			max: Some(std::time::Duration::ZERO),
+		});
 		let mut source = self.source.clone();
 		while source
 			.subscription()
@@ -146,7 +149,10 @@ impl Chain {
 /// A live join `min` behind the live edge, or a range from the oldest group for `None`.
 fn joining(min: Option<Duration>) -> track::Subscription {
 	let start = match min {
-		Some(min) => track::Start::Live { min, max: Some(std::time::Duration::ZERO) },
+		Some(min) => track::Start::Live {
+			min,
+			max: Some(std::time::Duration::ZERO),
+		},
 		None => track::Start::Oldest,
 	};
 	track::Subscription::default()
@@ -231,7 +237,10 @@ async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
 	let chain = Chain::new().await;
 	let bounded = || {
 		joining(None).with_ranges([track::Range {
-			start: track::Start::Live { min: Duration::from_secs(1), max: Some(std::time::Duration::ZERO) },
+			start: track::Start::Live {
+				min: Duration::from_secs(1),
+				max: Some(std::time::Duration::ZERO),
+			},
 			end: Some(1000),
 		}])
 	};
@@ -419,7 +428,13 @@ async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
 		let mut subscriber = remote.track("video").unwrap().subscribe(joining).await.unwrap();
 		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 3000);
 		let asked = source.subscription().expect("the relay subscribes again");
-		assert_eq!(asked.ranges, [track::Range::from(track::Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })]);
+		assert_eq!(
+			asked.ranges,
+			[track::Range::from(track::Start::Live {
+				min: Duration::ZERO,
+				max: Some(std::time::Duration::ZERO)
+			})]
+		);
 	})
 	.await
 	.expect("the viewer joined live again");
@@ -449,7 +464,10 @@ async fn a_join_asked_but_unanswered_is_placed_when_an_oldest_reader_hides_it() 
 		let track = remote.track("video").unwrap();
 		let lag = Duration::from_secs(1);
 		let mut live = track.subscribe(joining(Some(lag))).await.unwrap().ordered();
-		let join = track::Range::from(track::Start::Live { min: lag, max: Some(std::time::Duration::ZERO) });
+		let join = track::Range::from(track::Start::Live {
+			min: lag,
+			max: Some(std::time::Duration::ZERO),
+		});
 		let mut asked = source.clone();
 		while asked
 			.subscription()

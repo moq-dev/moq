@@ -343,8 +343,10 @@ fn consume(generation: &Producer) -> Consumer {
 }
 
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)))
+	moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		min: Duration::from_secs(60),
+		max: Some(Duration::from_secs(60)),
+	})])
 }
 
 /// A track whose superseded groups stay fresh, so [`subscribe_all`] reads every group.

@@ -128,8 +128,7 @@ impl Recording {
 			sources.insert(name.to_string(), Source { media });
 		}
 
-		let config = moq_archive::producer::Config::default()
-			.with_flush(Duration::from_millis(100));
+		let config = moq_archive::producer::Config::default().with_flush(Duration::from_millis(100));
 		let recorder = tokio::spawn(moq_archive::Producer::new(store.clone(), broadcast.consume(), config).run());
 		// Subscribed before anything is published, so every group is recorded live.
 		for source in sources.values() {

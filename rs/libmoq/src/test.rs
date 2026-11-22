@@ -5484,7 +5484,6 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 
 	let ascending = |start, end: Option<u64>| {
 		moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(None))
 			.with_ranges([moq_net::track::Range {
 				start: moq_net::track::Start::Time(start),
 				end,
@@ -5571,7 +5570,6 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 			}
 			producer.subscribe(
 				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(None))
 					.with_order(moq_net::track::Order::Ascending)
 					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(time))]),
 			)
@@ -5597,7 +5595,6 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 				let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 				producer.subscribe(
 					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(None))
 						.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(time))]),
 				)
 			};
@@ -5679,12 +5676,10 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(None))
-			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Start::Time(6),
-				end: Some(6),
-			}]);
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+			start: moq_net::track::Start::Time(6),
+			end: Some(6),
+		}]);
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 		producer.subscribe(subscription)

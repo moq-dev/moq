@@ -52,7 +52,12 @@ async fn import(data: &[u8]) -> Imported {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING,
+					max: Some(RECORDING),
+				},
+			)]),
 		)
 		.await
 		.unwrap()

@@ -182,18 +182,11 @@ pub struct MoqFetchGroupOptions {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age behind the live edge; null uses the publisher's max age alone.
-	#[uniffi(default = None)]
-	pub max_delay: Option<Duration>,
 }
 
 impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 	fn from(options: MoqFetchGroupOptions) -> Self {
-		let fetch = moq_net::group::Fetch::default().with_priority(options.priority);
-		match options.max_delay {
-			Some(max_delay) => fetch.with_max_delay(max_delay),
-			None => fetch,
-		}
+		moq_net::group::Fetch::default().with_priority(options.priority)
 	}
 }
 

@@ -582,9 +582,12 @@ impl Aged {
 				let track = broadcast
 					.create_track(format!("bench{i}"), moq_net::track::Info::default().with_max_age(None))
 					.unwrap();
-				let mut sub = track.subscribe(
-					track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)),
-				);
+				let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+					track::Start::Live {
+						min: AGED_BUDGET,
+						max: Some(AGED_BUDGET),
+					},
+				)]));
 				let mut held = track.append_group(Timestamp::unscaled(0)).unwrap();
 				held.write_frame(moq_net::Timestamp::unscaled(held.start), Bytes::from_static(b"x"))
 					.unwrap();
@@ -1121,13 +1124,15 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 		let i = i as u64;
 		track::Subscription::default()
 			.with_priority(((i % 255) as i16 - 128) as i8)
-			.with_delay(track::Delay::default().with_max(Duration::from_micros(i)))
 			.with_ranges([span(100 + i, 199 + i)])
 			.with_order(track::Order::Ascending)
 	};
 	let extreme = track::Subscription::default()
 		.with_priority(i8::MAX)
-		.with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
+		.with_ranges([track::Range::from(track::Start::Live {
+			min: Duration::from_secs(10),
+			max: Some(Duration::from_secs(10)),
+		})]);
 	let mut group = c.benchmark_group("track_subscriber_preferences");
 	for steady in STEADY {
 		for touched in CHURN {
@@ -1250,12 +1255,10 @@ fn bench_range_serving(c: &mut Criterion) {
 					.unwrap();
 				group.finish().unwrap();
 			}
-			let subscription = track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-				.with_ranges((0..ranges).map(|i| {
-					let start = i * (width + 1);
-					span(start, start + width - 1)
-				}));
+			let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
+				let start = i * (width + 1);
+				span(start, start + width - 1)
+			}));
 
 			group.throughput(Throughput::Elements(ranges * width));
 			group.bench_function(BenchmarkId::new(format!("span_{width}"), ranges), |b| {
@@ -1319,8 +1322,12 @@ fn bench_parked_read(c: &mut Criterion) {
 						.checked_mul(MICROS_PER_GROUP)
 						.unwrap(),
 				);
-				let mut sub = track
-					.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(max_delay)));
+				let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+					track::Start::Live {
+						min: max_delay,
+						max: Some(max_delay),
+					},
+				)]));
 				let mut micros = 0;
 				let mut open = Vec::with_capacity(parked);
 				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1397,9 +1404,12 @@ impl Sparse {
 	fn new(info: track::Info, gaps: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", info.clone()).unwrap();
-		let sub = track.subscribe(
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-		);
+		let sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+			track::Start::Live {
+				min: Duration::from_secs(3600),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]));
 		let mut sparse = Self {
 			_broadcast: broadcast,
 			track,
@@ -1512,8 +1522,12 @@ impl Idle {
 		let waiter = kio::Waiter::noop();
 		let (mut recv, mut next) = (Vec::new(), Vec::new());
 		for _ in 0..readers {
-			let reader = track
-				.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)));
+			let reader = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+				track::Start::Live {
+					min: AGED_BUDGET,
+					max: Some(AGED_BUDGET),
+				},
+			)]));
 			if ordered {
 				let mut reader = reader.ordered();
 				assert!(matches!(reader.poll_next_group(&waiter), Poll::Ready(Ok(Some(_)))));
@@ -1574,8 +1588,10 @@ impl Expiring {
 		sparse
 			.sub
 			.update(
-				track::Subscription::default()
-					.with_delay(track::Delay::default().with_max(Duration::from_millis(gaps))),
+				track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+					min: Duration::from_millis(gaps),
+					max: Some(Duration::from_millis(gaps)),
+				})]),
 			)
 			.unwrap();
 		let pool = sparse._broadcast.info().pool.clone();
@@ -1641,9 +1657,12 @@ impl GapFlush {
 	fn new(gaps: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let mut sub = track.subscribe(
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-		);
+		let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+			track::Start::Live {
+				min: Duration::from_secs(3600),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]));
 		let mut hand_out = |key: u64| {
 			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"x")).unwrap();
@@ -1751,7 +1770,10 @@ impl EmptyRun {
 			Run::Fresh => (Duration::from_millis(HOUR), run as usize + 2),
 			Run::Retired => (Duration::ZERO, 1),
 		};
-		let budget = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
+		let budget = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: budget,
+			max: Some(budget),
+		})]);
 		Self {
 			readers: (0..readers).map(|_| track.subscribe(budget.clone())).collect(),
 			_broadcast: broadcast,
@@ -1820,9 +1842,7 @@ fn bench_range_widening(c: &mut Criterion) {
 							.unwrap();
 						group.finish().unwrap();
 					}
-					let narrow = track::Subscription::default()
-						.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-						.with_ranges([span(0, 0)]);
+					let narrow = track::Subscription::default().with_ranges([span(0, 0)]);
 					let mid = cached / 2;
 					let wide = narrow.clone().with_ranges([span(0, 0), span(mid, mid + WIDENED - 1)]);
 					let waiter = kio::Waiter::noop();
@@ -1869,7 +1889,10 @@ impl BudgetWidening {
 	fn new(readers: usize, cached: u64, runs: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let narrow = track::Subscription::default().with_delay(track::Delay::default().with_max(Self::NARROW));
+		let narrow = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: Self::NARROW,
+			max: Some(Self::NARROW),
+		})]);
 		let mut reader = track.subscribe(narrow.clone());
 		let beside = (0..readers).map(|_| track.subscribe(narrow.clone())).collect();
 		let waiter = kio::Waiter::noop();
@@ -1902,7 +1925,10 @@ impl BudgetWidening {
 	}
 
 	fn widen(&mut self) {
-		let wide = track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET));
+		let wide = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: AGED_BUDGET,
+			max: Some(AGED_BUDGET),
+		})]);
 		self.reader.update(wide).unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut offered = 0;
@@ -1955,9 +1981,7 @@ impl TimeEnd {
 			.unwrap();
 		zero.finish().unwrap();
 		// Group 1 never arrives, and the budget outlasts the run, so the end never settles.
-		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-			.with_ranges([span(0, u64::from(u32::MAX) * 1000)]);
+		let subscription = track::Subscription::default().with_ranges([span(0, u64::from(u32::MAX) * 1000)]);
 		let waiter = kio::Waiter::noop();
 		let readers = (0..readers)
 			.map(|_| {
@@ -2036,9 +2060,7 @@ impl Fills {
 		group.finish().unwrap();
 		// One range per run, with a key between each that no reader asks for.
 		let ranges = (0..runs).map(|run| span(run * 2, run * 2)).chain([from(start)]);
-		let subscription = track::Subscription::default()
-			.with_ranges(ranges)
-			.with_delay(track::Delay::default().with_max(budget));
+		let subscription = track::Subscription::default().with_ranges(ranges);
 		let readers = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
 		Self {
 			_broadcast: broadcast,
@@ -2142,12 +2164,10 @@ impl RangeFills {
 			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
 		group.finish().unwrap();
-		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-			.with_ranges((0..ranges).map(|i| {
-				let first = i * (width + 1) + 1;
-				span(first, first + width - 1)
-			}));
+		let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
+			let first = i * (width + 1) + 1;
+			span(first, first + width - 1)
+		}));
 		let readers = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
 		Self {
 			_broadcast: broadcast,
@@ -2252,11 +2272,7 @@ impl RefusedFill {
 		let waiter = kio::Waiter::noop();
 		let readers = (0..readers)
 			.map(|_| {
-				let mut reader = track.subscribe(
-					track::Subscription::default()
-						.with_ranges([from(0)])
-						.with_delay(track::Delay::default().with_max(AGED_BUDGET)),
-				);
+				let mut reader = track.subscribe(track::Subscription::default().with_ranges([from(0)]));
 				let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) else {
 					panic!("the live group is cached");
 				};

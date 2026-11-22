@@ -110,11 +110,7 @@ impl Fixture {
 		self.remote
 			.track("video")
 			.unwrap()
-			.subscribe(
-				Subscription::default()
-					.with_ranges(ranges)
-					.with_max(None),
-			)
+			.subscribe(Subscription::default().with_ranges(ranges).with_max(None))
 			.await
 			.unwrap()
 	}

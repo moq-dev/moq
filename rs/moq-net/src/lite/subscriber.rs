@@ -3951,11 +3951,7 @@ mod tests {
 		assert_eq!(probes, [], "the kept demand range answers the join");
 
 		// Hidden by an oldest range, it is retired, so the join is asked by a probe.
-		let (probes, _) = join_probes(
-			Some(&sub),
-			&[join],
-			&[lite::Range { start: None, end: None }],
-		);
+		let (probes, _) = join_probes(Some(&sub), &[join], &[lite::Range { start: None, end: None }]);
 		assert_eq!(probes, [probe], "the retired demand range answers nothing");
 	}
 
@@ -4118,21 +4114,18 @@ mod tests {
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
 		// The same bounds again, as a fill.
-		sub.edit(&[demand, demand], (0, 1), &Default::default())
-			.unwrap();
+		sub.edit(&[demand, demand], (0, 1), &Default::default()).unwrap();
 		assert_eq!(sub.fill_range(0), None, "the demand keeps its range");
 		assert_eq!(sub.fill_range(1), Some(4..8), "the copy the edit added is the fill");
 
 		// Another fill joins, and the first keeps its Range ID.
 		let other = groups(10..12);
-		sub.edit(&[demand, demand, other], (0, 2), &Default::default())
-			.unwrap();
+		sub.edit(&[demand, demand, other], (0, 2), &Default::default()).unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 
 		// The demand moves away while the fill stays: the fill keeps Range ID 1.
 		let moved = lite::Range::span(Some(20), 0, None, None);
-		sub.edit(&[moved, demand, other], (0, 2), &Default::default())
-			.unwrap();
+		sub.edit(&[moved, demand, other], (0, 2), &Default::default()).unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 		assert_eq!(sub.fill_range(1), Some(4..8));
 		assert_eq!(sub.fill_range(3), None, "the demand's new range is no fill");
@@ -4140,13 +4133,11 @@ mod tests {
 		// Before SUBSCRIBE_START, a fill an update retires keeps its Range ID, since the start
 		// still names it, and it must not count as the demand's.
 		sub.started = None;
-		sub.edit(&[moved, demand], (0, 1), &Default::default())
-			.unwrap();
+		sub.edit(&[moved, demand], (0, 1), &Default::default()).unwrap();
 		assert_eq!(sub.fill_range(2), None, "retired");
 		assert!(sub.fill_ids.contains(&2), "still a fill's");
 		sub.started = Some(Some(4));
-		sub.edit(&[moved, demand], (0, 1), &Default::default())
-			.unwrap();
+		sub.edit(&[moved, demand], (0, 1), &Default::default()).unwrap();
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
 
@@ -4193,12 +4184,13 @@ mod tests {
 
 		// A live join, which only the publisher can place.
 		let back = lite::Range {
-			start: Some(lite::Anchor::Live { min: Duration::ZERO, max: None }),
+			start: Some(lite::Anchor::Live {
+				min: Duration::ZERO,
+				max: None,
+			}),
 			end: None,
 		};
-		let (edit, changed) = sub
-			.edit(&[first, back], (0, 0), &Default::default())
-			.unwrap();
+		let (edit, changed) = sub.edit(&[first, back], (0, 0), &Default::default()).unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
@@ -5840,11 +5832,7 @@ mod tests {
 			copy.evict(key);
 		}
 		let mut reader = copy
-			.subscribe(
-				crate::track::Subscription::default()
-					.with_max(None)
-					.with_range(0..4),
-			)
+			.subscribe(crate::track::Subscription::default().with_max(None).with_range(0..4))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..4 are owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
@@ -6980,10 +6968,7 @@ mod tests {
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![info, Vec::new()]);
 			let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
 			let wait = Duration::from_secs(10);
-			let (waiting, mut run) = subscribing(
-				&subscriber,
-				Subscription::default().with_max(wait),
-			);
+			let (waiting, mut run) = subscribing(&subscriber, Subscription::default().with_max(wait));
 			for _ in 0..4 {
 				let _ = kio::Task::poll(&mut run, &kio::Waiter::noop());
 			}
@@ -11430,11 +11415,7 @@ impl TrackServe {
 		// every group from the oldest.
 		let newest = idle.filter(|_| {
 			subscription.start().is_none()
-				&& (!ranged
-					|| subscription
-						.ranges
-						.iter()
-						.all(|range| *range == track::Range::ALL))
+				&& (!ranged || subscription.ranges.iter().all(|range| *range == track::Range::ALL))
 		});
 		if let Some(newest) = newest {
 			subscription = subscription.with_start(newest);

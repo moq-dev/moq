@@ -77,9 +77,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 			.unwrap()
 			.unwrap();
 		let cache = remote.track("catalog").unwrap();
-		let prefs = |millis| {
-			track::Subscription::default().with_max(Duration::from_millis(millis))
-		};
+		let prefs = |millis| track::Subscription::default().with_max(Duration::from_millis(millis));
 		let mut short = cache.subscribe(prefs(250)).await.unwrap();
 		budget(&mut source, 250, version).await;
 		let tolerant = cache.subscribe(prefs(2000)).await.unwrap();

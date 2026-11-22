@@ -1783,8 +1783,10 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 		.expect("front refused");
 	let track = resolved.track("0").unwrap();
 	// A budget covering every group, so none is written off as late.
-	let subscription =
-		track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600)));
+	let subscription = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+		min: Duration::from_secs(3600),
+		max: Some(Duration::from_secs(3600)),
+	})]);
 	let mut subscribers = Vec::with_capacity(readers);
 	for _ in 0..readers {
 		let subscriber = kio::clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))

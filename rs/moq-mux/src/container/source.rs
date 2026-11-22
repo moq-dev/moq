@@ -1507,10 +1507,15 @@ mod tests {
 			.produce()
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		let subscribed = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
-		);
+		let subscribed =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(10),
+						max: Some(Duration::from_secs(10)),
+					},
+				)]),
+			);
 		export.state = SourceState::Active(Box::new(Active {
 			_priority: export.source.control(subscribed.control()).unwrap(),
 			consumer: Consumer::new(subscribed, HangContainer::Legacy(crate::container::Kind::Audio)),

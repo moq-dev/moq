@@ -55,8 +55,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 			.await
 			.unwrap()
 			.unwrap();
-		let prefs =
-			track::Subscription::default().with_max(Duration::from_secs(30));
+		let prefs = track::Subscription::default().with_max(Duration::from_secs(30));
 		let mut subscribers = Vec::new();
 		for i in 0..tracks.len() {
 			let track = remote.track(&format!("{i}")).unwrap();
@@ -283,8 +282,7 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 			.await
 			.unwrap()
 			.unwrap();
-		let prefs =
-			track::Subscription::default().with_max(Duration::from_secs(30));
+		let prefs = track::Subscription::default().with_max(Duration::from_secs(30));
 		let held = remote.track("first").unwrap().subscribe(prefs.clone()).await.unwrap();
 		let mut waiting = std::pin::pin!(remote.track("second").unwrap().subscribe(prefs));
 		assert!(
@@ -345,8 +343,7 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 			.await
 			.unwrap()
 			.unwrap();
-		let prefs =
-			track::Subscription::default().with_max(Duration::from_secs(30));
+		let prefs = track::Subscription::default().with_max(Duration::from_secs(30));
 		let held = remote.track("first").unwrap().subscribe(prefs.clone()).await.unwrap();
 		let mut waiting = Box::pin(remote.track("second").unwrap().subscribe(prefs.clone()));
 		assert!(

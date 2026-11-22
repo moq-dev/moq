@@ -1524,8 +1524,12 @@ mod read_tests {
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let consumer = moq_mux::container::Consumer::new(
 			track.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::ZERO)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: std::time::Duration::ZERO,
+						max: Some(std::time::Duration::ZERO),
+					},
+				)]),
 			),
 			format(),
 		);

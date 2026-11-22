@@ -81,8 +81,7 @@ impl Chain {
 			.await
 			.unwrap()
 			.unwrap();
-		let prefs =
-			track::Subscription::default().with_max(Duration::from_secs(60));
+		let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
 		let mut group0 = track.append_next().unwrap();

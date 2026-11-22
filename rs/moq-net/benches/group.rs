@@ -274,12 +274,10 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 
 /// Request the full cache window instead of the default live edge.
 fn replay() -> track::Subscription {
-	track::Subscription::default()
-		.with_delay(track::Delay::default().with_max(Duration::MAX))
-		.with_ranges([track::Range {
-			start: track::Start::Time(0),
-			end: None,
-		}])
+	track::Subscription::default().with_ranges([track::Range {
+		start: track::Start::Time(0),
+		end: None,
+	}])
 }
 
 /// Drain N cached groups from a track, in arrival order and in key order.

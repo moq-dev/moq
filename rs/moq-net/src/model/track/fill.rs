@@ -236,10 +236,7 @@ impl Outcome {
 		}
 		let id = self.refusals;
 		self.refusals += 1;
-		self.refused.insert(
-			groups.clone(),
-			Refusal { id, err, dropped },
-		);
+		self.refused.insert(groups.clone(), Refusal { id, err, dropped });
 		self.resolved.insert(groups);
 	}
 }

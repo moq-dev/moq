@@ -997,12 +997,10 @@ mod tests {
 		})
 		.await;
 
-		let past = moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Start::Time(3),
-				end: Some(4),
-			}])
-			.with_delay(moq_net::track::Delay::default().with_max(None));
+		let past = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+			start: moq_net::track::Start::Time(3),
+			end: Some(4),
+		}]);
 		let rung = consumer.track("video/120p").unwrap();
 		let _subscriber = rung.subscribe(past).await.unwrap();
 

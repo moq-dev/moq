@@ -2197,7 +2197,12 @@ mod tests {
 		let subscriber = video
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: delay,
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2332,7 +2337,12 @@ mod tests {
 		let subscriber = video
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: delay,
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2658,8 +2668,12 @@ mod tests {
 		let subscriber = video
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(10),
+						max: Some(Duration::from_secs(10)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -3613,7 +3627,12 @@ mod tests {
 			.track("video")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: delay,
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();

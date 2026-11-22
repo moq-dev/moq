@@ -3358,8 +3358,7 @@ mod test {
 		}
 
 		// What run_subscribe hands the model for a Lite01/02 peer, which sends no budget at all.
-		let served =
-			|| producer.subscribe(track::Subscription::default().with_max(None));
+		let served = || producer.subscribe(track::Subscription::default().with_max(None));
 		let drain = |subscriber: &mut track::Subscriber| {
 			let mut keys = Vec::new();
 			while let Some(Ok(Some(group))) = subscriber.recv_group().now_or_never() {
@@ -3381,18 +3380,12 @@ mod test {
 
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
-		let tolerant = producer.subscribe(
-			track::Subscription::default()
-				.with_max(std::time::Duration::from_secs(5)),
-		);
+		let tolerant = producer.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(5)));
 		let mut tolerant = tolerant.with_range(cursor_floor(Version::Lite05, None, producer.latest_key())..);
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
-		let declared = producer.subscribe(
-			track::Subscription::default()
-				.with_max(std::time::Duration::from_secs(5)),
-		);
+		let declared = producer.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(5)));
 		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_key())..);
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
@@ -3543,9 +3536,7 @@ mod test {
 		use futures::FutureExt;
 
 		let mut producer = track_producer("test");
-		let mut subscriber = producer.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(5)),
-		);
+		let mut subscriber = producer.subscribe(track::Subscription::default().with_max(Duration::from_secs(5)));
 
 		producer
 			.create_group(group::Info { start: 2 })
@@ -4911,7 +4902,9 @@ impl Bounds {
 				Some(lite::Anchor::Time(time)) => Start::Time(time),
 				Some(lite::Anchor::Live { min, max }) => Start::Live { min, max },
 			};
-			if legacy.is_some() && let Some(lite::Anchor::Absolute(start)) = range.start {
+			if legacy.is_some()
+				&& let Some(lite::Anchor::Absolute(start)) = range.start
+			{
 				bounds.frames.floor = bounds.frames.floor.max(start.group);
 			}
 			let position = match range.start {
@@ -6689,7 +6682,14 @@ impl UpdateBench {
 		self.oldest += edited;
 		let next = self.live.next();
 		let add = (next..next + edited).map(Self::range).collect();
-		self.apply(lite::RangeEdit::Edit { remove, add, retune: Vec::new() }, 0);
+		self.apply(
+			lite::RangeEdit::Edit {
+				remove,
+				add,
+				retune: Vec::new(),
+			},
+			0,
+		);
 	}
 
 	/// Move only the priority, leaving every range live.
@@ -8170,10 +8170,8 @@ mod serve_group_test {
 						crate::track::Info::timed(),
 					);
 					// Nothing goes stale, so only the credit bounds what is held.
-					let subscriber = track.subscribe(
-						track::Subscription::default()
-							.with_max(Duration::from_secs(3600)),
-					);
+					let subscriber =
+						track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 					let (run, writer, _) = lite_run(Version::Lite07, session.clone(), subscriber);
 					(track, run, writer)
 				})
@@ -8209,9 +8207,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
@@ -8248,9 +8244,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(1)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(1)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 		for key in 0..10 {
 			write_group(&mut track, key, key * 1000);
@@ -8736,9 +8730,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		// Old groups stay worth sending, so both are in flight at once.
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 		let session = SinkSession::new(Log::default()).with_groups().with_unacked_fin();
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
@@ -8796,9 +8788,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 		let log = Log::default();
 		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
 
@@ -8860,7 +8850,10 @@ mod serve_group_test {
 			track::Subscription::default()
 				.with_ranges([
 					// A live join a second behind the newest frame, at 4 s.
-					Range::from(crate::track::Start::Live { min: Duration::from_secs(1), max: Some(std::time::Duration::ZERO) }),
+					Range::from(crate::track::Start::Live {
+						min: Duration::from_secs(1),
+						max: Some(std::time::Duration::ZERO),
+					}),
 					Range {
 						start: crate::track::Start::Time(1500),
 						end: Some(1999),
@@ -8869,7 +8862,10 @@ mod serve_group_test {
 					Range::EMPTY,
 					// Empty only once its join resolves to group 3000.
 					Range {
-						start: crate::track::Start::Live { min: Duration::from_secs(1), max: Some(std::time::Duration::ZERO) },
+						start: crate::track::Start::Live {
+							min: Duration::from_secs(1),
+							max: Some(std::time::Duration::ZERO),
+						},
 						end: Some(1999),
 					},
 				])
@@ -8997,7 +8993,10 @@ mod serve_group_test {
 
 		// A live join two seconds behind the newest frame, at 4 s: group 2000, before delivery.
 		let back = lite::Range {
-			start: Some(lite::Anchor::Live { min: Duration::from_secs(2), max: None }),
+			start: Some(lite::Anchor::Live {
+				min: Duration::from_secs(2),
+				max: None,
+			}),
 			end: None,
 		};
 		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
@@ -9051,7 +9050,10 @@ mod serve_group_test {
 
 		// A live join two seconds behind the newest frame, at 4 s: group 2000.
 		let back = lite::Range {
-			start: Some(lite::Anchor::Live { min: Duration::from_secs(2), max: None }),
+			start: Some(lite::Anchor::Live {
+				min: Duration::from_secs(2),
+				max: None,
+			}),
 			end: None,
 		};
 		let join = |update: LiveUpdate| update;
@@ -9823,8 +9825,7 @@ mod serve_group_test {
 					crate::track::Info::timed(),
 				);
 				let budget = Duration::from_millis(1500);
-				let subscriber = track
-					.subscribe(track::Subscription::default().with_max(budget));
+				let subscriber = track.subscribe(track::Subscription::default().with_max(budget));
 				let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 				write_group(&mut track, 0, 0);
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -9871,8 +9872,7 @@ mod serve_group_test {
 				"test",
 				crate::track::Info::timed(),
 			);
-			let subscriber =
-				track.subscribe(track::Subscription::default().with_max(budget));
+			let subscriber = track.subscribe(track::Subscription::default().with_max(budget));
 			let session = Log::default();
 			let (mut run, mut writer, log) = lite_run(
 				version,
@@ -10135,9 +10135,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(60)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -10173,9 +10171,7 @@ mod serve_group_test {
 		);
 		// A received copy, whose groups may land out of order.
 		track.received();
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(1)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(1)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		write_group(&mut track, 2, 2);
@@ -10205,9 +10201,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(60)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -10246,9 +10240,7 @@ mod serve_group_test {
 				crate::track::Info::timed(),
 			);
 			let dynamic = track.requests();
-			let subscriber = track.subscribe(
-				track::Subscription::default().with_max(Duration::from_secs(60)),
-			);
+			let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)));
 			let session = SinkSession::new(Log::default());
 			let streams = session.log.clone();
 			let (mut run, mut writer, log) = lite_run(version, session, subscriber);
@@ -10321,10 +10313,7 @@ mod serve_group_test {
 		let track = resolved.track("test").unwrap();
 		let subscribing = kio::clock::sim::spawn(async move {
 			track
-				.subscribe(
-					track::Subscription::default()
-						.with_max(Duration::from_secs(60)),
-				)
+				.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)))
 				.await
 		});
 		let copy = dynamic
@@ -10973,9 +10962,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(1)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(1)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));

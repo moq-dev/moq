@@ -42,7 +42,10 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 
 /// A live join at the latest group.
 fn live() -> Subscription {
-	Subscription::default().with_ranges([Range::from(Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })])
+	Subscription::default().with_ranges([Range::from(Start::Live {
+		min: Duration::ZERO,
+		max: Some(std::time::Duration::ZERO),
+	})])
 }
 
 /// The next group's key, or `None` once the track ends or nothing arrives in time.
@@ -230,7 +233,10 @@ async fn a_live_viewer_asks_lite07_upstream_for_the_live_edge() {
 		let asked = track.subscription().expect("the publisher holds the demand").ranges;
 		assert_eq!(
 			asked,
-			[Range::from(Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })],
+			[Range::from(Start::Live {
+				min: Duration::ZERO,
+				max: Some(std::time::Duration::ZERO)
+			})],
 			"relay={relay}: a live join"
 		);
 		drop((track, sessions, relay_origin, subscriber, broadcast, publisher));
@@ -347,7 +353,13 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 					assert_eq!(next(&mut warm).await, None);
 				}
 				let subscription = Subscription::default()
-					.with_ranges([support::keys(1..2), Range::from(Start::Live { min: Duration::ZERO, max: None })])
+					.with_ranges([
+						support::keys(1..2),
+						Range::from(Start::Live {
+							min: Duration::ZERO,
+							max: None,
+						}),
+					])
 					.with_max(None);
 				let mut reader = subscribe(&fixture.remote, subscription).await;
 				let mut got = Vec::new();
@@ -539,9 +551,7 @@ async fn draft18_updates_narrow_then_widen() {
 	let version = "moq-transport-18";
 	for relay in [false, true] {
 		let mut fixture = range_fixture_version(version, relay).await;
-		let initial = Subscription::default()
-			.with_ranges([support::keys(5..)])
-			.with_max(None);
+		let initial = Subscription::default().with_ranges([support::keys(5..)]).with_max(None);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = Vec::new();
 		for _ in 0..1 {
@@ -676,9 +686,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 async fn draft22_cold_widening_finishes_the_largest_group() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture_history("moq-transport-22", relay, 0).await;
-		let initial = Subscription::default()
-			.with_ranges([support::keys(2..)])
-			.with_max(None);
+		let initial = Subscription::default().with_ranges([support::keys(2..)]).with_max(None);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		for start in [0, 1, 2] {
 			let future = start + 1;
@@ -689,7 +697,10 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			// the publisher serves that as a live join.
 			let narrowed = match start {
 				0 => support::keys(future..),
-				_ => Range::from(Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) }),
+				_ => Range::from(Start::Live {
+					min: Duration::ZERO,
+					max: Some(std::time::Duration::ZERO),
+				}),
 			};
 			kio::clock::timeout(
 				TIMEOUT,
@@ -879,10 +890,13 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 
 		let mut reader = subscribe(
 			&fixture.remote,
-			Subscription::default()
-				.with_max(budget)
-				.with_order(order)
-				.with_ranges([keys(0..8), Range::from(Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })]),
+			Subscription::default().with_max(budget).with_order(order).with_ranges([
+				keys(0..8),
+				Range::from(Start::Live {
+					min: Duration::ZERO,
+					max: Some(std::time::Duration::ZERO),
+				}),
+			]),
 		)
 		.await;
 		// Everything in range that exists now, before the live edge moves.
