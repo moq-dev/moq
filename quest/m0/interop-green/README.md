@@ -52,6 +52,27 @@ The intermittent `go -> js` silent audio went to
 test flakes (fixed by the Go tone's start-anchored pacing), and the datagram
 cells are [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)'s.
 
+Scheduled runs 2026-11-15 to 2026-11-21 (every one red) failed three causes, none a flake:
+
+- Harness regressions: `open-gop.browser.ts` since
+  [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) made the player join
+  live. [moq-dev/moq#9306](https://github.com/moq-dev/moq/pull/9306) fixes the fixture
+  and is open and approved.
+- Interop (moq-transport): `datagram rust -> js-native-node` and `-bun` on moq-transport-18
+  fail every run, since [moq-dev/moq#8918](https://github.com/moq-dev/moq/pull/8918) gave
+  every JS datagram a timestamp. [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)
+  fixes the assertion and is open, approved, and conflicting with `main`.
+- Interop (full matrix and moq-transport): `js -> js`, `js -> js-native-*`, and `go -> js`
+  timed out waiting for the catalog on moq-transport 18, 20, and 22, one to three cells per
+  pass, so a fresh retry always hid it. Root cause: a relay holding a group with its
+  END_OF_GROUP answered Largest at that status, which is no frame. The next subscriber's
+  head fill, which asks the group's objects through Largest, ran off the end, failed
+  NotFound, and the subscriber dropped the catalog group as headless. It began with the
+  catalog groups the relay cached (first red run 2026-11-16, after
+  [moq-dev/moq#8698](https://github.com/moq-dev/moq/pull/8698) landed the JS head fills
+  on 2026-11-14), and a relay copy resubscribing hit the same bug as MalformedTrack in
+  `judge`. Fixed in this quest's PR: the group's last object excludes its terminal object.
+
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
 - ✅ the release-remeasure pipeline is a child quest of quest/m0/interop-green/ (rejected: quest/m3/release/; drop the follow-up).
