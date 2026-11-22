@@ -26,9 +26,9 @@ wait "$!"
 case "${1:-}" in
     check)
         shfmt --diff "${scripts[@]}"
-        # `-x` lets chunked invocations follow `source` directives across scripts
-        # that land in different batches without walking untracked directories.
-        cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)
+        # Without `-x`, shellcheck follows a `source` only to a file in the same invocation,
+        # so a script sourcing one from another batch would fail with SC1091.
+        cpus=$(getconf _NPROCESSORS_ONLN)
         ((cpus <= 8)) || cpus=8
         printf '%s\0' "${scripts[@]}" | xargs -0 -n 16 -P "$cpus" shellcheck -x --
         ;;

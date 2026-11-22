@@ -11,7 +11,9 @@ import {
 	inclusiveGroupEnd,
 	LiveRanges,
 	positionFrames,
+	positionStops,
 	rangeSize,
+	requestedRange,
 	requestedRanges,
 	Subscribe,
 	SubscribeDrop,
@@ -253,9 +255,12 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 	// Type 3 is a live join's lag, which only a start may carry.
 	expect((await update([1, 3, 7, 0])).ranges).toEqual([{ start: { live: 7 } }]);
 	await expect(update([1, 0, 3, 7])).rejects.toThrow(ProtocolViolation);
-	// Any other type is a violation, and so is a Position at frame 0 or as an end.
+	// Any other type is a violation, and so is a Position at frame 0, as a start or an end.
 	await expect(update([1, 2, 0, 0, 0])).rejects.toThrow(ProtocolViolation);
-	await expect(update([1, 1, 0, 2, 7, 4])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, 1, 0, 2, 7, 0])).rejects.toThrow(ProtocolViolation);
+	expect((await update([1, 1, 0, 2, 7, 4])).ranges).toEqual([
+		{ start: { time: 0n }, end: { absolute: 7n, frame: 4 } },
+	]);
 	await expect(update([1, 4, 0, 0])).rejects.toThrow(ProtocolViolation);
 });
 
@@ -328,14 +333,38 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 		}
 		expect(positionFrames(ranges)).toEqual(scanned);
 	}
+});
 
-	// An end there can't go out.
-	await expect(
-		encodeMessage(
-			Version.DRAFT_07,
-			new SubscribeUpdate({ priority: 0, ranges: [{ end: { absolute: 9n, frame: 2 } }] }),
-		),
-	).rejects.toThrow("a range ends only at a group");
+test("a lite-07 range may end partway through a group, stopping it there", async () => {
+	const position = { start: { time: 3n }, end: { absolute: 9n, frame: 2 } };
+	const update = new SubscribeUpdate({ priority: 0, ranges: [position] });
+	const bytes = await encodeMessage(Version.DRAFT_07, update);
+	// Type 1, time 3, then type 2, start 9, frame 2, which it stops before.
+	expect(Array.from(bytes.slice(-6))).toEqual([1, 3, 2, 9, 2, 0]);
+	const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.ranges).toEqual([position]);
+	// The model range includes group 9, and only the frames before frame 2 of it go out.
+	expect(requestedRange(position)).toEqual({ start: 3n, end: 9n });
+	expect(positionStops([position])).toEqual(new Map([[9n, 2]]));
+	// Another range covering group 9 asks for it whole, and one starting past it stops nothing.
+	expect(positionStops([position, { start: { time: 9n } }])).toEqual(new Map());
+	expect(positionStops([{ start: { time: 10n }, end: { absolute: 9n, frame: 2 } }])).toEqual(new Map());
+	// One stopping where it starts holds nothing.
+	expect(requestedRange({ start: { absolute: 9n, frame: 2 }, end: { absolute: 9n, frame: 2 } })).toEqual({
+		start: 1n,
+		end: 0n,
+	});
+	expect(requestedRange({ start: { absolute: 9n, frame: 1 }, end: { absolute: 9n, frame: 2 } })).toEqual({
+		start: 9n,
+		end: 9n,
+	});
+	// It covers no group either, so it neither stops nor starts one, nor keeps another range's
+	// stop or start from applying.
+	const empty = { start: { absolute: 9n, frame: 2 }, end: { absolute: 9n, frame: 2 } };
+	expect(positionStops([empty])).toEqual(new Map());
+	expect(positionFrames([empty])).toEqual(new Map());
+	expect(positionStops([empty, position])).toEqual(new Map([[9n, 2]]));
+	expect(positionFrames([empty, { start: { absolute: 9n, frame: 3 } }])).toEqual(new Map([[9n, 3]]));
 });
 
 test("lite-07 sends an absolute anchor as a time, an end as the time before it", async () => {

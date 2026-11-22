@@ -383,15 +383,16 @@ impl ExportSource {
 	/// Pick up where an earlier source of this rendition stopped.
 	///
 	/// On the same track, start after the last group it delivered, so the publisher's cached
-	/// group is not replayed. Another track is new content, read from its live edge, and the
-	/// rendition never goes back in time: frames are dropped until a sync frame past the latest
-	/// one delivered. On a shared clock the first group read may overlap that, but a later group
-	/// that still does fails with [`Error::RenditionRewound`](crate::Error::RenditionRewound).
+	/// group is not replayed, and hand that cursor on until this source delivers a frame of its
+	/// own. Another track is new content, read from its live edge, and the rendition never goes
+	/// back in time: frames are dropped until a sync frame past the latest one delivered. On a
+	/// shared clock the first group read may overlap that, but a later group that still does fails with [`Error::RenditionRewound`](crate::Error::RenditionRewound).
 	pub(crate) fn resuming(mut self, resume: &Resume) -> Self {
 		if resume.target == self.target {
 			self.start().after = resume.group;
 			self.start().reached = resume.reached;
 			self.reached = resume.reached;
+			self.delivered = resume.group;
 		} else {
 			self.start().live = true;
 			self.splice = resume.latest.map(|read| Splice { read, group: None });
@@ -1490,6 +1491,27 @@ mod tests {
 			}
 			assert_eq!(next.skips(), 3, "the move counts as a skip");
 		}
+	}
+
+	/// A source resuming one on the same track hands its cursor on until it delivers a frame, so
+	/// a resumption that fails before reading anything does not lose where the first stopped.
+	#[tokio::test(start_paused = true)]
+	async fn a_resumed_source_keeps_the_cursor_until_it_reads() {
+		use crate::container::test_util::{Moving, SPS};
+
+		let moving = Moving::new();
+		let source = moving.source().await;
+		let delay = crate::container::Delay::default().with_max(Duration::from_secs(10));
+		let config = Moving::config("a", None, SPS);
+		let mut first = ExportSource::for_video(&source, Moving::RENDITION, &config, delay)
+			.unwrap()
+			.unwrap();
+		first.delivered = Some(7);
+		let second = ExportSource::for_video(&source, Moving::RENDITION, &config, delay)
+			.unwrap()
+			.unwrap()
+			.resuming(&first.resume());
+		assert_eq!(second.resume().group, Some(7));
 	}
 
 	async fn audio_export() -> (moq_net::track::Producer, ExportSource) {
