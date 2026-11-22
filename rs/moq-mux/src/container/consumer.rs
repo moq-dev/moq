@@ -343,27 +343,23 @@ impl Delay {
 	/// `subscription` at this delay: [`Self::max`] as its budget, and each range starting at the
 	/// oldest group joining live [`Self::min`] behind the live edge when it is stated.
 	pub fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
-		let ranges = joining(&subscription.ranges, self.min);
+		use moq_net::track::{Range, Start};
+		// A time start, or a live join of the caller's own, is kept.
+		let ranges: Vec<Range> = subscription
+			.ranges
+			.iter()
+			.map(|range| match (range.start, self.min) {
+				(Start::Oldest, Some(min)) => Range {
+					start: Start::Live(min),
+					..*range
+				},
+				_ => *range,
+			})
+			.collect();
 		subscription
 			.with_delay(moq_net::track::Delay::default().with_max(self.max))
 			.with_ranges(ranges)
 	}
-}
-
-/// `ranges` with each one starting at the oldest group joining live `min` behind the live edge
-/// instead, when it is stated. A time start or a live join of the caller's own is kept.
-fn joining(ranges: &[moq_net::track::Range], min: Option<std::time::Duration>) -> Vec<moq_net::track::Range> {
-	use moq_net::track::{Range, Start};
-	ranges
-		.iter()
-		.map(|range| match (range.start, min) {
-			(Start::Oldest, Some(min)) => Range {
-				start: Start::Live(min),
-				..*range
-			},
-			_ => *range,
-		})
-		.collect()
 }
 
 /// The playout delay `subscription` states: the furthest back any of its ranges joins live, or
@@ -431,8 +427,8 @@ impl Playout {
 	/// Decode `track` as `format` at this playout.
 	///
 	/// Subscribe `track` with [`subscription`](Self::subscription): the publisher may already
-	/// have skipped what a narrower one left out. A track subscribed otherwise has its subscription
-	/// set to that delay here, widened or narrowed.
+	/// have skipped what a narrower one left out, and the live join starts where it was
+	/// subscribed. A track subscribed otherwise has its max delay set here, widened or narrowed.
 	pub fn consumer<F: Container>(&self, track: moq_net::track::Subscriber, format: F) -> Consumer<F> {
 		let mut consumer = Consumer::new(track, format);
 		consumer.warmup = self.reach();
@@ -1261,12 +1257,11 @@ impl<F: Container> Consumer<F> {
 	/// Set the [`Delay`], mid-stream or before the first read.
 	///
 	/// [`Delay::max`] is clamped to the track's max age like [`new`](Self::new). The
-	/// subscription keeps the requested max verbatim, plus any [`Playout::warmup`], and while the
-	/// start is still to come its ranges from the oldest group join live at the min plus the
-	/// warmup, as [`Delay::subscription`] places them. A [`Delay::min`] moves a start still to come, reading
-	/// an unstated one as zero. A min past the
-	/// max starts at the max, since the publisher serves nothing older. A missing group is given
-	/// up by the subscription's max alone.
+	/// subscription keeps the requested max verbatim, plus any [`Playout::warmup`]; its ranges
+	/// keep the live join they were subscribed with (see [`Delay::subscription`]). A
+	/// [`Delay::min`] moves where this reader keeps a start still to come, reading an unstated one
+	/// as zero. A min past the max starts at the max, since the publisher serves nothing older. A
+	/// missing group is given up by the subscription's max alone.
 	pub fn set_delay(&mut self, delay: Delay) {
 		self.set_skip(delay);
 		// An ended reader has no subscription left to tune.
@@ -1277,16 +1272,13 @@ impl<F: Container> Consumer<F> {
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here. It keeps the
 		// warmup too, as [`Playout::subscription`] does.
-		// A range turned into a live join resolves again, so only a start still to come takes
-		// the min.
-		let delay = warmed(delay, self.warmup);
+		// Only the budget: a replaced range resolves again, so the ranges keep the join they
+		// were subscribed with.
+		let max = warmed(delay, self.warmup).max;
 		let current = track.subscription();
-		let subscription = match self.startup {
-			Startup::Started => current
-				.clone()
-				.with_delay(moq_net::track::Delay::default().with_max(delay.max)),
-			Startup::Earliest | Startup::Newest => delay.subscription(current.clone()),
-		};
+		let subscription = current
+			.clone()
+			.with_delay(moq_net::track::Delay::default().with_max(max));
 		if subscription != current {
 			let _ = track.update(subscription);
 		}
@@ -4673,8 +4665,8 @@ mod tests {
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 	}
 
-	/// A track subscribed without the warmup is widened by the playout, and its consumer still
-	/// starts the warmup further back.
+	/// A track subscribed without the warmup has its max widened by the playout, keeping the live
+	/// join it resolved, and its consumer still starts the warmup further back.
 	#[tokio::test]
 	async fn the_playout_widens_a_narrow_subscription() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -4689,7 +4681,7 @@ mod tests {
 		assert_eq!(
 			subscription.ranges,
 			[moq_net::track::Range::from(moq_net::track::Start::Live(
-				Duration::from_millis(400)
+				Duration::from_millis(100)
 			))]
 		);
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
