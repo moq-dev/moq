@@ -1,7 +1,6 @@
 import { Duration } from "@moq/clock";
 import type { Timed } from "@moq/net";
 import * as Moq from "@moq/net";
-import type * as z from "zod/mini";
 
 import { Decoder } from "./decoder.ts";
 import type { Config as CodecConfig } from "./encoder.ts";
@@ -22,11 +21,8 @@ const GAPS: Moq.StreamCode[] = [
  * and {@link latest} skips to the newest state, for a caller that only wants the current value.
  * What {@link latest} skips is gone, so a later {@link next} resumes after it. Overlapping reads
  * take turns in call order.
- *
- * A value that fails the `schema` is refused with a warning and skipped like a lost group: the
- * previous value stays the current one and the read waits for the next frame, so a publisher's
- * malformed frame never ends the consumer. A read rejects only on a real failure, such as the
- * track erroring or a frame that is not valid JSON.
+ * A value that fails the `schema` rejects the read like any other failure: the publisher broke the
+ * contract, so the caller ends the subscription instead of reading on.
  * When something else already owns the track, use the {@link Decoder} directly.
  *
  * A snapshot is superseded the moment a newer one exists, so by default the consumer subscribes
@@ -38,10 +34,7 @@ const GAPS: Moq.StreamCode[] = [
  */
 export class Consumer<T> {
 	#track: Moq.Track.Ordered;
-	#name: string;
-	// Decodes raw JSON only: the schema is applied here, so a refusal is a result, not an error.
-	#decoder: Decoder<unknown>;
-	#schema?: z.ZodMiniType<T>;
+	#decoder: Decoder<T>;
 
 	#group?: Moq.Group.Consumer;
 	#framesRead = 0;
@@ -50,7 +43,6 @@ export class Consumer<T> {
 	#reading: Promise<unknown> = Promise.resolve();
 
 	constructor(config: Consumer.Config<T>) {
-		this.#name = config.track.name;
 		this.#track = config.track
 			.subscribe({
 				...Moq.Track.Subscription.default(),
@@ -58,8 +50,7 @@ export class Consumer<T> {
 				delay: { min: config.delay ?? Duration.ZERO, max: config.delay ?? Duration.ZERO },
 			})
 			.ordered();
-		this.#decoder = new Decoder();
-		this.#schema = config.schema;
+		this.#decoder = new Decoder(config);
 	}
 
 	/** End the consumer's subscription; a pending or later read returns `undefined`. Idempotent. */
@@ -160,13 +151,7 @@ export class Consumer<T> {
 			}
 
 			// Every group starts with a snapshot, so a frame has been applied to one by now.
-			const value = this.#decoder.decode();
-			if (!this.#schema) return { value: value as T, at: frame.timestamp };
-
-			const parsed = this.#schema.safeParse(value);
-			if (parsed.success) return { value: parsed.data, at: frame.timestamp };
-			// The state is intact and a later frame may repair it, so wait for the next one.
-			console.warn(`refused invalid snapshot on ${this.#name}:`, parsed.error);
+			return { value: this.#decoder.decode() as T, at: frame.timestamp };
 		}
 	}
 
@@ -199,7 +184,7 @@ export namespace Consumer {
 		 * in-process. The consumer subscribes to it at `delay`, with default options
 		 * otherwise.
 		 */
-		track: Pick<Moq.Track.Consumer, "subscribe" | "name">;
+		track: Pick<Moq.Track.Consumer, "subscribe">;
 		/** Delivery priority of the consumer's subscription, higher first; defaults to 0. */
 		priority?: number;
 		/**

@@ -277,8 +277,8 @@ export function consume(broadcast: Watch.Broadcast): Consumed {
 /**
  * Feed each value on `name` that matches `schema` to `update`.
  *
- * The consumer refuses a value that does not match with a warning and the last valid one stays,
- * so a malformed publish neither reaches the UI nor ends the subscription.
+ * A value that does not match ends the subscription, as any failed read does: it never reaches the
+ * UI and the last valid one stays.
  */
 function subscribeJson<T>(
 	broadcast: Moq.Broadcast.Consumer,

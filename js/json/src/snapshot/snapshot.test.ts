@@ -1,4 +1,4 @@
-import { beforeEach, expect, spyOn, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
@@ -792,60 +792,13 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
 });
 
-// A value that fails the schema is the publisher's mistake, not a failed read: skip it and keep the consumer.
-test("a schema refusal is skipped with a warning and the next value is read", async () => {
-	const schema = z.object({ n: z.number() });
-	const payload = (json: string) => new TextEncoder().encode(json);
-	// Resolves with each refusal, so a read can be held until the consumer has refused.
-	let refused = Promise.withResolvers<void>();
-	const warn = spyOn(console, "warn").mockImplementation(() => refused.resolve());
-	try {
-		// next() refuses the bad snapshot, then yields the state a later frame of its group repairs.
-		const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
-		const consumer = new Consumer({ track, schema });
-		const group = track.appendGroup(Time.Timestamp.fromMillis(1));
-		group.writeFrame({ payload: payload('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
-		group.writeFrame({ payload: payload('{"n":1}'), timestamp: Time.Timestamp.fromMillis(2) });
-		expect((await consumer.next())?.value).toEqual({ n: 1 });
-		expect(warn).toHaveBeenCalledTimes(1);
-		consumer.close();
-		refused = Promise.withResolvers<void>();
-
-		// latest() waits through a refused group for the next one.
-		const live = new Track.Producer("live").accept({ timescale: Time.Timescale.MILLI });
-		const reader = new Consumer({ track: live, schema });
-		live.appendGroup(Time.Timestamp.fromMillis(1)).writeFrame({
-			payload: payload('{"n":"x"}'),
-			timestamp: Time.Timestamp.fromMillis(1),
-		});
-		const pending = reader.latest();
-		await refused.promise;
-		expect(warn).toHaveBeenCalledTimes(2);
-		live.appendGroup(Time.Timestamp.fromMillis(2)).writeFrame({
-			payload: payload('{"n":2}'),
-			timestamp: Time.Timestamp.fromMillis(2),
-		});
-		expect((await pending)?.value).toEqual({ n: 2 });
-		reader.close();
-	} finally {
-		warn.mockRestore();
-	}
-});
-
-// Only a value that fails validation is refused; whatever the schema itself throws is a real failure.
-test("an error a schema throws rejects the read", async () => {
+test("a value that fails the schema rejects the read", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
-	const schema = z.pipe(
-		z.unknown(),
-		z.transform(() => {
-			throw new Error("schema failure");
-		}),
-	) as unknown as z.ZodMiniType<unknown>;
-	const consumer = new Consumer({ track, schema });
+	const consumer = new Consumer({ track, schema: z.object({ n: z.number() }) });
 	track
 		.appendGroup(Time.Timestamp.fromMillis(1))
-		.writeFrame({ payload: new TextEncoder().encode("{}"), timestamp: Time.Timestamp.fromMillis(1) });
-	await expect(consumer.next()).rejects.toThrow("schema failure");
+		.writeFrame({ payload: new TextEncoder().encode('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
+	await expect(consumer.latest()).rejects.toBeInstanceOf(z.core.$ZodError);
 });
 
 test("a scale-less snapshot opens its group at its key, and a delta carries that key", async () => {
