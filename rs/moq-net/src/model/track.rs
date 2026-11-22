@@ -3313,15 +3313,15 @@ impl TrackState {
 				if self.oldest_is_stale(&pool) {
 					accrued = accrued.saturating_mul(2);
 				}
-				// `used` bounds what eviction could ever free, keeping a track that
+				// The excess bounds what eviction could ever free, keeping a track that
 				// can't pay (everything protected) from hoarding a stale schedule.
-				self.debt = self.debt.saturating_add(accrued).min(pool.used());
+				self.debt = self.debt.saturating_add(accrued).min(pool.excess().unwrap_or(0));
 				// Cap each payment at twice what was written so one write never dumps
 				// a deep backlog at once; the remainder carries to the next write.
 				let cap = written.saturating_mul(2);
 				self.pay_debt(&pool, cap);
 			}
-			// Under capacity there is nothing to work off, and stale debt would
+			// Within its target there is nothing to work off, and stale debt would
 			// cause a spurious eviction burst at the next pressure spike.
 			None => self.debt = 0,
 		}
@@ -3422,9 +3422,9 @@ impl TrackState {
 		if self.debt > 0 && paid < cap {
 			paid = paid.saturating_add(self.shed_drops(cap - paid));
 		}
-		// No cold group left to pay with: shed the front of the groups that could not go
-		// whole, the ones being read and then the live edge, so neither grows without bound.
-		fresh.extend(self.latest_group.filter(|latest| self.protects(*latest)));
+		// No cold group left to pay with: shed the front of the groups being read, which could
+		// not go whole. Never the live edge's: the pool pins it, so shedding it frees nothing
+		// toward its target, and its session's budget and the group tail bound it instead.
 		for key in fresh {
 			if self.debt == 0 || paid >= cap {
 				break;
@@ -26360,6 +26360,45 @@ mod test {
 		assert!(consumer.peek_group(1).is_none());
 		assert!(consumer.peek_group(2).is_some(), "the backlog drains gradually");
 		assert!(pool.used() > before - 4_000, "one write must not dump the backlog");
+	}
+
+	/// A pool whose target sits below what its live edges hold still serves every live edge: a
+	/// new reader of a sparse-key track, a catalog's, receives its latest group whole, while
+	/// its older groups go.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_pool_below_its_live_edges_still_serves_them() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(1 << 40));
+		let catalog = track_producer_pooled("catalog.json", pool.clone());
+		for start in [0, 1_000, 2_000] {
+			let mut group = catalog.create_group(group::Info { start }).unwrap();
+			group
+				.write_frame(group.key_time(), bytes::Bytes::from(vec![start as u8; 2_000]))
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let mut video = track_producer_pooled("video", pool.clone());
+		for _ in 0..8 {
+			finished_group(&mut video, 10_000);
+		}
+
+		// What a headroom governor targets on a host with less memory available than its headroom.
+		pool.resize(0);
+		for _ in 0..64 {
+			finished_group(&mut video, 10_000);
+		}
+
+		for _ in 0..2 {
+			let mut subscriber = catalog.subscribe(None);
+			let mut group = subscriber.assert_group();
+			assert_eq!(group.start, 2_000, "the live edge");
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.payload, bytes::Bytes::from(vec![2_000u16 as u8; 2_000]));
+			subscriber.assert_no_group();
+		}
+		let consumer = catalog.consume();
+		assert!(consumer.peek_group(0).is_none(), "older history goes to the pool");
+		assert!(consumer.peek_group(1_000).is_none());
 	}
 
 	/// Accepting a track after pre-accept backfill must keep the same write

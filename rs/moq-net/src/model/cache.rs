@@ -151,6 +151,10 @@ struct Inner {
 	used: AtomicU64,
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
+	// The part of `used` no eviction can reclaim while its track lives: each track's live
+	// edge and spare encoder. Signed: a footprint that flips while one of its bytes is
+	// mid-update pins it an instant early or late, which may dip this below zero.
+	pinned: AtomicI64,
 	// Wall-clock LRU window in milliseconds; u64::MAX means never expire by idleness.
 	expiry: u64,
 	// Reference point for the coarse tick clock.
@@ -222,6 +226,7 @@ impl Pool {
 			inner: Arc::new(SendCell::new(Inner {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
+				pinned: AtomicI64::new(0),
 				expiry,
 				clock: Mutex::new(None),
 				tick: AtomicU64::new(0),
@@ -252,6 +257,32 @@ impl Pool {
 	/// Bytes currently cached across every registered group.
 	pub fn used(&self) -> u64 {
 		self.inner.used.load(Ordering::Relaxed)
+	}
+
+	/// Bytes no eviction can reclaim while their tracks live: every live track's newest group
+	/// and spare encoder.
+	pub(super) fn pinned(&self) -> u64 {
+		self.inner.pinned.load(Ordering::Relaxed).max(0).unsigned_abs()
+	}
+
+	fn pin(&self, n: u64) {
+		self.inner.pinned.fetch_add(n.cast_signed(), Ordering::Relaxed);
+	}
+
+	fn unpin(&self, n: u64) {
+		self.inner.pinned.fetch_sub(n.cast_signed(), Ordering::Relaxed);
+	}
+
+	/// What usage converges toward: the capacity, or the pinned bytes when they are more,
+	/// since nothing can reclaim those.
+	fn target(&self) -> u64 {
+		self.inner.capacity.load(Ordering::Relaxed).max(self.pinned())
+	}
+
+	/// How far usage is past [`Self::target`], if it is: all that eviction, shedding, and
+	/// readers folding could still free toward it.
+	pub(super) fn excess(&self) -> Option<u64> {
+		self.used().checked_sub(self.target()).filter(|excess| *excess > 0)
 	}
 
 	/// Change the capacity. `None` makes the pool unbounded.
@@ -301,23 +332,22 @@ impl Pool {
 		held.push(Arc::downgrade(handoff));
 	}
 
-	/// Drop held heads, oldest first, while the pool is over capacity.
+	/// Drop held heads, oldest first, while the pool is past its target.
 	pub(super) fn reclaim_held(&self) {
-		if self.used() > self.inner.capacity.load(Ordering::Relaxed) {
+		if self.excess().is_some() {
 			let mut held = self.inner.held.lock().unwrap_or_else(PoisonError::into_inner);
 			self.prune_held(&mut held);
 		}
 	}
 
-	/// Drop the held heads past the idle window, then the oldest while the pool is over
-	/// capacity, and forget the hand-offs holding none.
+	/// Drop the held heads past the idle window, then the oldest while the pool is past its
+	/// target, and forget the hand-offs holding none.
 	fn prune_held(&self, held: &mut Vec<Weak<group::Handoff>>) {
 		held.retain(|handoff| {
 			let Some(handoff) = handoff.upgrade() else {
 				return false;
 			};
-			let over = self.used() > self.inner.capacity.load(Ordering::Relaxed);
-			!handoff.expire(over)
+			!handoff.expire(self.excess().is_some())
 		});
 	}
 
@@ -611,19 +641,20 @@ impl Pool {
 	}
 
 	/// The eviction debt a track takes on by writing `written` bytes, or `None` while
-	/// the pool is under capacity (the caller should forget any outstanding debt).
+	/// the pool is within its [`Self::target`] (the caller should forget any outstanding
+	/// debt).
 	///
-	/// The debt is `written * used / capacity`, so paying it evicts slightly more
-	/// than was written and the overshoot decays toward the capacity. Tracks double
+	/// The debt is `written * used / target`, so paying it evicts slightly more
+	/// than was written and the overshoot decays toward the target. Tracks double
 	/// it when their oldest content is staler than [`Self::average`]. Saturates: a
 	/// tiny capacity must not wrap a huge debt into a small one.
 	pub(super) fn accrue(&self, written: u64) -> Option<u64> {
-		let used = self.inner.used.load(Ordering::Relaxed);
-		let capacity = self.inner.capacity.load(Ordering::Relaxed);
-		if used <= capacity {
+		let used = self.used();
+		let target = self.target();
+		if used <= target {
 			return None;
 		}
-		let debt = written as u128 * used as u128 / capacity.max(1) as u128;
+		let debt = written as u128 * used as u128 / target.max(1) as u128;
 		Some(u64::try_from(debt).unwrap_or(u64::MAX))
 	}
 }
@@ -1132,7 +1163,10 @@ impl Track {
 			bytes: ENTRY_OVERHEAD,
 			access,
 			counted: false,
-			footprint: Arc::default(),
+			footprint: Arc::new(Footprint {
+				content: AtomicU64::new(0),
+				fixed: AtomicU64::new(ENTRY_OVERHEAD),
+			}),
 			content: 0,
 			edge: false,
 		}
@@ -1186,13 +1220,9 @@ impl Track {
 	///
 	/// Readers that stop polling can hold a hand-off indefinitely, so the head is billed
 	/// like cached content and bounded the same way: `None` when it would take the pool past
-	/// its capacity, and [`Pool::hold_head`] has the pool reclaim it like idle content.
+	/// its target, and [`Pool::hold_head`] has the pool reclaim it like idle content.
 	pub(super) fn hold(self: &Arc<Self>, bytes: u64) -> Option<Bill> {
-		if self
-			.pool
-			.capacity()
-			.is_some_and(|capacity| self.pool.used().saturating_add(bytes) > capacity)
-		{
+		if self.pool.used().saturating_add(bytes) > self.pool.target() {
 			return None;
 		}
 		self.pool.add(bytes);
@@ -1223,11 +1253,11 @@ impl Track {
 		self.settle_inner(now, false);
 	}
 
-	/// Settle eviction debt now if the pool is over its capacity, without waiting for the
+	/// Settle eviction debt now if the pool is past its target, without waiting for the
 	/// write threshold: a reader's record grows by runs, never by enough bytes to cross it.
 	/// Takes the track lock: call with none held.
 	pub(super) fn charge_over(&self) {
-		if self.pool.capacity().is_none_or(|capacity| self.pool.used() <= capacity) {
+		if self.pool.excess().is_none() {
 			return;
 		}
 		if let Some(state) = self.state.upgrade()
@@ -1330,6 +1360,7 @@ impl Drop for Track {
 			.is_some()
 		{
 			self.pool.sub(flate::ENCODER_HEAP);
+			self.pool.unpin(flate::ENCODER_HEAP);
 		}
 		if let Some(key) = self.sweep.get() {
 			self.pool.unregister(*key);
@@ -1365,58 +1396,101 @@ impl Drop for Bill {
 	}
 }
 
-/// The flag bit in a [`Footprint`]: set while its bytes bill the session's [`Edges`].
+/// The flag bit in a [`Footprint`]'s counts: set while its bytes are its track's live edge.
 const EDGE: u64 = 1 << 63;
 
-/// The content bytes one cached group bills, across its [`Charge`] and the [`Extra`]s it
-/// hands out (shared content, inflated copies, codec state), and whether they bill its
-/// session's [`Edges`] as its track's live edge.
+/// The bytes one cached group bills, across its [`Charge`] and the [`Extra`]s it hands out
+/// (shared content, inflated copies, codec state), and whether they are its track's live
+/// edge, which the [`Pool`] pins and its session's [`Edges`] bill.
 ///
-/// Its fixed [`ENTRY_OVERHEAD`] is left out: that scales with the tracks a session holds,
-/// which its stream credit bounds, and shedding can never free it.
+/// Its content bills the session; its fixed costs, the [`ENTRY_OVERHEAD`] and codec state,
+/// only the pool's pins: those scale with the tracks a session holds, which its stream
+/// credit bounds, and shedding can never free them.
 ///
-/// One atomic holding both, the flag in its top bit (no group bills 2^63 bytes), so a byte
-/// added while the flag flips is billed to the session exactly once, by whichever came last.
+/// Each count is one atomic holding the flag in its top bit (no group bills 2^63 bytes), so
+/// a byte added while the flag flips is counted exactly once, by whichever came last.
 #[derive(Default)]
-pub(super) struct Footprint(AtomicU64);
+pub(super) struct Footprint {
+	content: AtomicU64,
+	fixed: AtomicU64,
+}
 
 impl Footprint {
-	/// Count `n` more bytes, returning whether they bill the session.
-	fn add(&self, edges: &Edges, n: u64) -> bool {
-		let edge = self.0.fetch_add(n, Ordering::Relaxed) & EDGE != 0;
+	/// Count `n` more content bytes, returning whether they bill the session.
+	fn add(&self, track: &Track, n: u64) -> bool {
+		let edge = Self::count(&self.content, track, n);
 		if edge {
-			edges.add(n);
+			track.edges.add(n);
 		}
 		edge
 	}
 
-	/// Count `n` fewer bytes, no more than it holds: a charge's overhead never entered it.
-	fn sub(&self, edges: &Edges, n: u64) {
+	/// Count `n` fewer content bytes, no more than it holds.
+	fn sub(&self, track: &Track, n: u64) {
+		let taken = Self::uncount(&self.content, track, n);
+		if let Some(taken) = taken {
+			track.edges.sub(taken);
+		}
+	}
+
+	/// Count `n` more fixed bytes.
+	fn add_fixed(&self, track: &Track, n: u64) {
+		Self::count(&self.fixed, track, n);
+	}
+
+	/// Count `n` fewer fixed bytes, no more than it holds.
+	fn sub_fixed(&self, track: &Track, n: u64) {
+		Self::uncount(&self.fixed, track, n);
+	}
+
+	fn promote(&self, track: &Track) {
+		let prior = self.content.fetch_or(EDGE, Ordering::Relaxed);
+		if prior & EDGE == 0 {
+			track.edges.add(prior);
+			track.pool.pin(prior);
+		}
+		let prior = self.fixed.fetch_or(EDGE, Ordering::Relaxed);
+		if prior & EDGE == 0 {
+			track.pool.pin(prior);
+		}
+	}
+
+	fn demote(&self, track: &Track) {
+		let prior = self.content.fetch_and(!EDGE, Ordering::Relaxed);
+		if prior & EDGE != 0 {
+			track.edges.sub(prior & !EDGE);
+			track.pool.unpin(prior & !EDGE);
+		}
+		let prior = self.fixed.fetch_and(!EDGE, Ordering::Relaxed);
+		if prior & EDGE != 0 {
+			track.pool.unpin(prior & !EDGE);
+		}
+	}
+
+	/// Add `n` to `count`, pinning them while it is the live edge, and return whether it is.
+	fn count(count: &AtomicU64, track: &Track, n: u64) -> bool {
+		let edge = count.fetch_add(n, Ordering::Relaxed) & EDGE != 0;
+		if edge {
+			track.pool.pin(n);
+		}
+		edge
+	}
+
+	/// Take up to `n` from `count`, unpinning them while it is the live edge: what it took
+	/// then, `None` otherwise.
+	fn uncount(count: &AtomicU64, track: &Track, n: u64) -> Option<u64> {
 		let mut taken = 0;
-		let prior = self
-			.0
+		let prior = count
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prior| {
 				taken = n.min(prior & !EDGE);
 				Some(prior - taken)
 			})
 			.expect("always updates");
-		if prior & EDGE != 0 {
-			edges.sub(taken);
-		}
-	}
-
-	fn promote(&self, edges: &Edges) {
-		let prior = self.0.fetch_or(EDGE, Ordering::Relaxed);
 		if prior & EDGE == 0 {
-			edges.add(prior);
+			return None;
 		}
-	}
-
-	fn demote(&self, edges: &Edges) {
-		let prior = self.0.fetch_and(!EDGE, Ordering::Relaxed);
-		if prior & EDGE != 0 {
-			edges.sub(prior & !EDGE);
-		}
+		track.pool.unpin(taken);
+		Some(taken)
 	}
 }
 
@@ -1474,8 +1548,8 @@ impl Siblings {
 		let edge = siblings.iter().any(|sibling| sibling.edge);
 		for sibling in siblings.iter() {
 			match edge {
-				true => sibling.footprint.promote(&sibling.track.edges),
-				false => sibling.footprint.demote(&sibling.track.edges),
+				true => sibling.footprint.promote(&sibling.track),
+				false => sibling.footprint.demote(&sibling.track),
 			}
 		}
 	}
@@ -1586,7 +1660,7 @@ impl Charge {
 		if let Some(track) = &self.track {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
-			if self.footprint.add(&track.edges, n) {
+			if self.footprint.add(track, n) {
 				track.edge_grew();
 			}
 			self.bytes += n;
@@ -1601,7 +1675,8 @@ impl Charge {
 			let n = n.min(self.bytes);
 			track.pool.sub(n);
 			let content = n.min(self.content);
-			self.footprint.sub(&track.edges, content);
+			self.footprint.sub(track, content);
+			self.footprint.sub_fixed(track, n - content);
 			self.content -= content;
 			self.bytes -= n;
 		}
@@ -1669,7 +1744,7 @@ impl Charge {
 	/// evictable population it is no longer part of.
 	pub(super) fn leave_edge(&mut self) {
 		if let Some(track) = &self.track {
-			self.footprint.demote(&track.edges);
+			self.footprint.demote(track);
 		}
 		self.edge = false;
 	}
@@ -1681,7 +1756,7 @@ impl Charge {
 		if let Some(track) = &self.track
 			&& !self.counted
 		{
-			self.footprint.promote(&track.edges);
+			self.footprint.promote(track);
 			self.edge = true;
 		}
 	}
@@ -1732,7 +1807,8 @@ impl Charge {
 	pub(super) fn clear(&mut self) {
 		self.leave_edge();
 		if let Some(track) = &self.track {
-			self.footprint.sub(&track.edges, self.content);
+			self.footprint.sub(track, self.content);
+			self.footprint.sub_fixed(track, self.bytes - self.content);
 			self.content = 0;
 			track.pool.sub(self.bytes);
 			self.bytes = 0;
@@ -1796,12 +1872,12 @@ impl Reader {
 		}
 	}
 
-	/// The debt the track's readers owe, forgiven once the pool is back within its capacity:
-	/// nothing needs the room any more, as the track forgives its own debt.
+	/// The debt the track's readers owe, forgiven once the pool is back within its target:
+	/// nothing needs the room any more, as the track forgives its own debt. A pool held past
+	/// its capacity by pinned bytes alone owes nothing, since no reader ending would free them.
 	pub(crate) fn debt(&self) -> u64 {
 		let readers = &self.track.readers;
-		let pool = &self.track.pool;
-		if pool.capacity().is_none_or(|capacity| pool.used() <= capacity) {
+		if self.track.pool.excess().is_none() {
 			readers.debt.store(0, Ordering::Relaxed);
 			return 0;
 		}
@@ -1854,16 +1930,26 @@ pub(super) struct Extra {
 }
 
 impl Extra {
-	/// Count `n` bytes in, or out of, the owning group's footprint.
+	/// Count `n` content bytes in, or out of, the owning group's footprint.
 	fn footprint(&self, track: &Arc<Track>, n: u64, add: bool) {
 		if let Some(footprint) = &self.footprint {
 			match add {
 				true => {
-					if footprint.add(&track.edges, n) {
+					if footprint.add(track, n) {
 						track.edge_grew();
 					}
 				}
-				false => footprint.sub(&track.edges, n),
+				false => footprint.sub(track, n),
+			}
+		}
+	}
+
+	/// Count `n` bytes of codec state in, or out of, the owning group's footprint.
+	fn footprint_fixed(&self, track: &Track, n: u64, add: bool) {
+		if let Some(footprint) = &self.footprint {
+			match add {
+				true => footprint.add_fixed(track, n),
+				false => footprint.sub_fixed(track, n),
 			}
 		}
 	}
@@ -1876,6 +1962,8 @@ impl Extra {
 				// Moving existing heap is not a write and must not accrue eviction debt.
 				self.bytes.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
 				self.state.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
+				track.pool.unpin(flate::ENCODER_HEAP);
+				self.footprint_fixed(track, flate::ENCODER_HEAP, true);
 				encoder.reset();
 				return encoder;
 			}
@@ -1891,6 +1979,9 @@ impl Extra {
 			if spare.is_none() {
 				self.bytes.fetch_sub(flate::ENCODER_HEAP, Ordering::Relaxed);
 				self.state.fetch_sub(flate::ENCODER_HEAP, Ordering::Relaxed);
+				self.footprint_fixed(track, flate::ENCODER_HEAP, false);
+				// Only the track's end frees a spare.
+				track.pool.pin(flate::ENCODER_HEAP);
 				*spare = Some(encoder);
 				return;
 			}
@@ -1905,6 +1996,7 @@ impl Extra {
 			track.written.fetch_add(n, Ordering::Relaxed);
 			self.bytes.fetch_add(n, Ordering::Relaxed);
 			self.state.fetch_add(n, Ordering::Relaxed);
+			self.footprint_fixed(track, n, true);
 		}
 	}
 
@@ -1919,6 +2011,7 @@ impl Extra {
 				.expect("always updates");
 			self.bytes.fetch_sub(prior.min(n), Ordering::Relaxed);
 			track.pool.sub(prior.min(n));
+			self.footprint_fixed(track, prior.min(n), false);
 		}
 	}
 
@@ -1965,6 +2058,7 @@ impl Extra {
 			let state = self.state.swap(0, Ordering::Relaxed);
 			track.pool.sub(bytes);
 			self.footprint(track, bytes.saturating_sub(state), false);
+			self.footprint_fixed(track, state, false);
 		}
 	}
 }
