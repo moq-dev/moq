@@ -500,7 +500,7 @@ class QueryTests(unittest.TestCase):
     def test_failure_continues_independent_modules_in_the_same_lane(self):
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
-                self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
+                self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "js dead-code") exit 4 ;; esac\n')
                 self.change("js/net/src/index.ts")
                 self.change("dart/example.dart")
                 result = subprocess.run(
@@ -512,12 +512,11 @@ class QueryTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 3, result.stderr)
                 self.assertIn("ci: check js failed", result.stderr)
-                self.assertIn("ci: check gh failed", result.stderr)
+                self.assertIn("ci: check dead_code failed", result.stderr)
                 calls = (self.root / "calls").read_text().splitlines()
-                self.assertIn("gh check", calls)
+                self.assertIn("js dead-code", calls)
                 self.assertIn("dart check", calls)
                 self.assertFalse(any(call.startswith("js test-changed ") for call in calls))
-                self.assertNotIn("gh test", calls)
 
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
     def test_local_flake_namespace_refusal_is_reported_as_skipped(self):
