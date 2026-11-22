@@ -564,8 +564,9 @@ GST_PLUGIN_DIR="" # dir holding the built moq-gst plugin (set in prepare)
 BROKEN_LANGS=""   # clients whose source build failed
 
 mark_broken() {
-    # A client whose source build fails fails only its own matrix cells instead
-    # of aborting the whole run, so one broken binding still lets the rest report.
+    # A client whose own toolchain or build fails fails only its own matrix cells
+    # instead of aborting the whole run, so one broken binding still lets the rest
+    # report. The Cargo clients build with the relay in build_cargo instead.
     BROKEN_LANGS="$BROKEN_LANGS $1"
     echo "  WARN  $1 client unavailable: $2"
 }
@@ -603,10 +604,14 @@ require_tools() {
     }
 }
 
-# Build moq-relay + moq-cli from the workspace. The relay is the spine of the
-# test, so a failure here aborts rather than marking a single client broken.
-build_relay_cli() {
-    local flag=() packages=(-p moq-relay -p moq-cli) clients=() label=""
+# Build every Cargo package the run needs in one call: moq-relay + moq-cli, the Rust
+# interop clients, libmoq for the C client, and moq-gst for GStreamer. One call
+# unifies their features, so each dependency compiles once instead of once per
+# package. A failure here aborts: the relay is the spine of the test, and a Cargo
+# client that fails to compile fails with the checkout, not its toolchain.
+CARGO_JSON="" # the build's JSON messages, which alone name libmoq's moq.h
+build_cargo() {
+    local flag=() packages=() clients=() package args=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
     if [[ -n "$RELAY" && -n "$MOQ" ]]; then
         [[ -x "$RELAY" && -x "$MOQ" ]] || {
@@ -614,23 +619,27 @@ build_relay_cli() {
             exit 1
         }
     else
-        # The Rust interop clients build in the same cargo call, so they share every
-        # dependency compilation with the relay and CLI instead of a second feature set.
+        packages+=(moq-relay moq-cli)
         if [[ "$MEDIA" -eq 0 ]]; then
             clients=(interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
-            packages+=(-p moq-interop)
-            label=" + interop clients"
+            packages+=(moq-interop)
         fi
-        echo "building moq-relay + moq-cli$label ($PROFILE)..."
-        # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
-        # an empty (debug) array under `set -u`.
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} "${packages[@]}") || {
-            echo "error: failed to build moq-relay / moq-cli" >&2
-            exit 1
-        }
         [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
         # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
         [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
+    fi
+    if needs c && have_c; then packages+=(libmoq); fi
+    if needs gst && have_gst; then packages+=(moq-gst); fi
+    if [[ ${#packages[@]} -gt 0 ]]; then
+        echo "building ${packages[*]} ($PROFILE)..."
+        for package in "${packages[@]}"; do args+=(-p "$package"); done
+        CARGO_JSON="$HARNESS_RUN/cargo-build.json"
+        # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
+        # an empty (debug) array under `set -u`.
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} "${args[@]}" --message-format=json-render-diagnostics) >"$CARGO_JSON" || {
+            echo "error: cargo build failed" >&2
+            exit 1
+        }
     fi
     harness_stage bin/moq-relay "$RELAY"
     harness_stage bin/moq "$MOQ"
@@ -785,24 +794,19 @@ prepare_cpp() {
     CPP_INTEROP="$build/client/cpp-interop"
 }
 
-# Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
-# against it. cargo writes libmoq.a to the profile dir, and build.rs writes
+# Compile the C subscriber against libmoq (the C staticlib + cbindgen header), which
+# build_cargo built. cargo writes libmoq.a to the profile dir, and build.rs writes
 # moq.h into its OUT_DIR, which only cargo's JSON messages name.
+have_c() { have "${CC:-cc}"; }
+
 prepare_c() {
     local cc="${CC:-cc}" out_dir header lib os_libs
-    have "$cc" || {
+    have_c || {
         mark_broken c "no C compiler ($cc) on PATH"
         return
     }
-    echo "building c client (workspace libmoq + cc)..."
-    local flag=()
-    [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
-        mark_broken c "cargo build -p libmoq failed"
-        sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
-        return
-    fi
-    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/libmoq#' |
+    echo "building c client (libmoq from the cargo build + cc)..."
+    out_dir=$(grep '"reason":"build-script-executed"' "$CARGO_JSON" | grep -F '/libmoq#' |
         sed -n 's/.*"out_dir":"\([^"]*\)".*/\1/p' | tail -1) || true
     header="$out_dir/include/moq.h"
     lib="$TARGET_BASE/$PROFILE/libmoq.a"
@@ -834,12 +838,14 @@ prepare_c() {
     fi
 }
 
-# Build the moq-gst plugin and confirm it loads against the GStreamer in the
+# Stage the moq-gst plugin build_cargo built and confirm it loads against the GStreamer in the
 # environment. moqsrc links the host's libgstreamer, so this wants a real
 # GStreamer with the core plugins (the nix devShell ships gstreamer + base/good;
 # a bare shell without it marks gst unavailable). Sets GST_PLUGIN_DIR to the dir
 # holding libgstmoq.{so,dylib}. Subscribe only: moqsink publishing needs an
 # encoder + request-pad muxing this client doesn't drive.
+have_gst() { have gst-launch-1.0 && have gst-inspect-1.0; }
+
 prepare_gst() {
     have gst-launch-1.0 || {
         mark_broken gst "gst-launch-1.0 not on PATH (needs a system GStreamer)"
@@ -849,14 +855,7 @@ prepare_gst() {
         mark_broken gst "gst-inspect-1.0 not on PATH"
         return
     }
-    echo "building gstreamer client (workspace moq-gst plugin)..."
-    local flag=()
-    [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-gst) >"$HARNESS_RUN/gst-build.log" 2>&1; then
-        mark_broken gst "cargo build -p moq-gst failed"
-        sed 's/^/        /' "$HARNESS_RUN/gst-build.log" >&2 || true
-        return
-    fi
+    echo "checking gstreamer client (moq-gst plugin from the cargo build)..."
     local extension=so
     [[ "$(uname -s)" != Darwin ]] || extension=dylib
     harness_stage "gst/libgstmoq.$extension" "$TARGET_BASE/$PROFILE/libgstmoq.$extension"
@@ -886,7 +885,7 @@ prepare_gst() {
 
 # ── setup ───────────────────────────────────────────────────────────────────
 require_tools
-build_relay_cli
+build_cargo
 
 echo "relay:   $RELAY"
 echo "moq-cli: $MOQ"

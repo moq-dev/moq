@@ -148,19 +148,22 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 
 | Client | Source under test | Built with | Roles |
 |---|---|---|---|
-| Rust | `rs/moq-relay` + `rs/moq-cli` (+ `rs/moq-interop`'s clients) | one `cargo build` | publish (video + audio) + subscribe |
+| Rust | `rs/moq-relay` + `rs/moq-cli` (+ `rs/moq-interop`'s clients) | `cargo build` | publish (video + audio) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `uv build` wheels (maturin + hatchling), installed into a venv in the run directory | publish (video + audio) + subscribe |
 | Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `sh/go/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
 | C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
-| GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
+| C | `rs/libmoq` | `cargo build` + `cc` | subscribe |
+| GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
 (publishing media needs an encoder the native JS runtimes lack, the C client is
 intentionally minimal, and `moqsink` publishing needs request-pad muxing this
 client doesn't drive). Rust, Python, Go, C++, and the browser publish.
+
+The Rust, C, and GStreamer rows build in one `cargo build`, so their shared
+dependencies compile once; a compile error there fails the whole run.
 
 The Go client builds against the modules `sh/go/stage.sh` assembles from
 this checkout: `moq-ffi` compiled for the host, bindings regenerated with
