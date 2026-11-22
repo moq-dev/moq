@@ -31,15 +31,10 @@ no longer needs. This follows the repository's cache rule: a copy answers
 from memory only what it can prove upstream would answer. Add the case above
 as a unit test in both languages.
 
-## Waiting
-
-- Maintainer: whether a key the local floor or cap keeps out should be owed
-  by a bounded read at all. Options: owe it, as one cursor does today, and
-  ask upstream as above (recommended: a single cursor and a resumed reader
-  then end the same read at the same time); or stop owing kept-out keys,
-  which deletes `Reader::skipped` and this quest's backfill, but lets a read
-  end before a group its window covers is known. An agent cannot pick this:
-  it changes what a subscription's bounded read promises.
+Decided by the maintainer: owe it, ask upstream. A key the local floor or
+cap keeps out stays owed by a bounded read, as on one cursor, and the reader
+asks the serving route for it, so a single cursor and a resumed reader end
+the same read at the same time.
 
 ## Related
 
