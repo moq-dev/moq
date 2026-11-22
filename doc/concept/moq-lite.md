@@ -314,8 +314,9 @@ through a relay as from the publisher. Readers joining alike share one answer.
 Over older moq-lite and moq-transport, a relay places the join from the groups
 it holds instead.
 
-A join's max never moves where it starts: a max below its lag skips the join's
-oldest groups. A group several ranges cover takes the largest max, and none if
+A join never starts at a group its max expired, so a max below its lag starts
+past the oldest groups the lag reaches, and a relay copy reuses an answer only
+for readers no wider than the max it was asked under. A group several ranges cover takes the largest max, and none if
 a history range covers it. Over moq-lite 07 an update changes a join's max in
 place, keeping where it started. Older moq-lite and moq-transport carry one
 subscriber max age instead, so a subscription sends its widest, or none while it

@@ -159,7 +159,7 @@ pub enum Start {
 		/// The hop serving it measures the live edge in media time, from the newest frame it
 		/// holds, rounded up to whole ticks, and on a scale-less track by arrival on its own
 		/// clock. It resolves that time as a [`Self::Time`] start would, so a publisher looks it
-		/// up in its history; `max` does not move it. A relay's copy forwards each join to its
+		/// up in its history, then starts past any group there that `max` already expired. A relay's copy forwards each join to its
 		/// upstream as its own range and starts it where that range's answer does. A range
 		/// resolves once, so a live edge that moves later moves nothing already started.
 		min: Duration,
