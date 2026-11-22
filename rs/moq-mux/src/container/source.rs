@@ -1501,7 +1501,7 @@ mod tests {
 
 		let moving = Moving::new();
 		let source = moving.source().await;
-		let delay = moq_net::track::Delay::default().with_max(Duration::from_secs(10));
+		let delay = crate::container::Delay::default().with_max(Duration::from_secs(10));
 		let config = Moving::config("a", None, SPS);
 		let mut first = ExportSource::for_video(&source, Moving::RENDITION, &config, delay)
 			.unwrap()
