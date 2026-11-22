@@ -4252,7 +4252,6 @@ name = "moq-audio"
 version = "0.1.10"
 dependencies = [
  "bench-harness",
- "bitstream-io 4.10.0",
  "block2 0.6.2",
  "bytes",
  "cpal",

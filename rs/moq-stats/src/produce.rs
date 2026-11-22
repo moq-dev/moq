@@ -597,10 +597,6 @@ impl<T: Serialize> Snapshot<T> {
 		self
 	}
 
-	fn demand(&self) -> moq_net::track::Demand {
-		self.track.demand()
-	}
-
 	/// Write one frame, stamped by its drain. `Some(len)` is the payload written; `None`
 	/// means the value was unchanged, the interval already has a group for a snapshot, or
 	/// the track already ended, and nothing was written.
@@ -690,6 +686,20 @@ impl<T: Serialize> Snapshot<T> {
 		// The output keeps its own clone, whose appends the end refuses.
 		Ok(self.track.clone().finish().map(drop)?)
 	}
+
+	/// End the track, unlisting it, only while nobody wants it, returning whether it ended. The
+	/// check and the end are one step on the track, so a reader joining in between keeps it
+	/// instead of finding it ended. Nobody reads the abort that ends it.
+	fn reclaim(&mut self) -> bool {
+		if self.track.clone().abort_unwanted(moq_net::Error::Cancel).is_err() {
+			return false;
+		}
+		// The track's abort already failed the open group.
+		if let Some(group) = self.group.take() {
+			let _ = group.abort(moq_net::Error::Cancel);
+		}
+		true
+	}
 }
 
 /// A stats track and the frame it publishes each drain.
@@ -751,9 +761,9 @@ impl<V: Serialize> Output<V> {
 		}
 	}
 
-	/// Whether anyone wants the output.
-	fn is_wanted(&self) -> bool {
-		self.snapshot.demand().wanted()
+	/// End the track if nobody wants it, returning whether it ended; see [`Snapshot::reclaim`].
+	fn reclaim(&mut self) -> bool {
+		self.snapshot.reclaim()
 	}
 
 	/// Publish this drain's entries (`{}` when there are none) and clear them
@@ -1438,20 +1448,8 @@ impl NodePublisher {
 	fn serve_requests(&mut self, report: &Report, tick: u64, stamp: Stamp) {
 		// Reclaim before adopting, so a request for a track just reclaimed is
 		// served again by this very drain.
-		self.presence.retain(|_, track| {
-			if track.output.is_wanted() {
-				return true;
-			}
-			track.output.finish();
-			false
-		});
-		self.prefixes.retain(|_, track| {
-			if track.output.is_wanted() {
-				return true;
-			}
-			track.output.finish();
-			false
-		});
+		self.presence.retain(|_, track| !track.output.reclaim());
+		self.prefixes.retain(|_, track| !track.output.reclaim());
 
 		// Pop everything queued, keeping one request per name so each track is
 		// built from an actual request.
@@ -1650,6 +1648,30 @@ mod tests {
 			timestamp: Timestamp::from_secs(group).unwrap(),
 			group,
 		}
+	}
+
+	/// Reclaiming ends a track only while nobody wants it, in one step with a reader's
+	/// arrival: a reader that joined since the last drain keeps the track open and live.
+	#[test]
+	fn reclaim_spares_a_track_a_reader_joined() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("t.json", info()).unwrap();
+		let mut snapshot = Snapshot::<Frame<u64>>::new(track.clone(), config());
+		let frame = |n| Frame {
+			entries: vec![(Path::from_static("a"), n)],
+		};
+		snapshot.update(&frame(1), stamp(1)).unwrap();
+		assert!(!track.demand().wanted(), "nobody reads it yet");
+
+		// Joins after the unwanted reading a two-step check acted on.
+		let reader = track.subscribe(None);
+		assert!(!snapshot.reclaim(), "the reader keeps it");
+		assert!(!track.is_closed());
+		assert!(snapshot.update(&frame(2), stamp(2)).unwrap().is_some(), "still live");
+
+		drop(reader);
+		assert!(snapshot.reclaim(), "unwanted again");
+		assert!(track.is_closed());
 	}
 
 	/// A joiner once the deltas outweigh the track's ratio gets a fresh snapshot group in

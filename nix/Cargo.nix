@@ -17972,10 +17972,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "bitstream-io";
-            packageId = "bitstream-io 4.10.0";
-          }
-          {
             name = "block2";
             packageId = "block2 0.6.2";
             optional = true;

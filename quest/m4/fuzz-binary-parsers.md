@@ -27,8 +27,9 @@ the audit:
 Register each target in `.github/workflows/nightly.yml:894` (where the fuzz
 matrix runs) and ensure workspace package selection (`sh/rs/select.sh`,
 `sh/rs/coverage.sh`) excludes the new `*-fuzz` crates cleanly. Seed each target
-with a minimal regression corpus covering edge cases fixed by
-[mux-archive-json-stats-fixes](/quest/m1/precut-audit/mux-archive-json-stats-fixes.md).
+with a minimal regression corpus covering the edge cases the pre-cut audit fixed:
+`mp4::repair`'s metadata bounds and zero timescales, AV1 LEB128 sizes past
+`u32::MAX`, and archive IDs past `ID_MAX` in `Object` and `End`.
 
 Public API: none. Wire: none. Run each new target briefly under `cargo fuzz`
 (or replay its corpus) and verify `just check` / `sh/rs/select.test.py`.
