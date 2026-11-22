@@ -4714,8 +4714,11 @@ export class Subscriber {
 			return (key) => {
 				if (drift) {
 					if (key < subscriber.#nextKey) return false;
-					// Stale under the current budget, it is skipped when reached or already was: only a
-					// wider budget offers it again, and at the track's max age bound none does.
+					// Stale under the current budget, it is skipped when reached or already was, which
+					// stays so after the groups that convicted it leave: only a wider budget offers it
+					// again, and at the track's max age bound none does.
+					const judged = subscriber.#skipped.get(key);
+					if (judged !== undefined && judged >= drift.budget) return false;
 					if (subscriber.#staleAt(key, drift)) return false;
 				}
 				return subscriber.#nextInRange(key) === key && !subscriber.#delivered.has(key);
@@ -5261,9 +5264,12 @@ export class Subscriber {
 			}
 			if (this.#staleAt(group.start, drift)) {
 				group.close();
-				// A re-offered group stale at the bound is final.
-				if (drift.bounded) this.#skipped.delete(group.start);
-				else this.#skip(group.start, drift.budget);
+				// Stale at the bound is final: settled as handed out, as the Rust `retire_written_off`
+				// does, so nothing counts on this reader to hand it out once what convicted it leaves.
+				if (drift.bounded) {
+					this.#skipped.delete(group.start);
+					this.#delivered.add(group.start);
+				} else this.#skip(group.start, drift.budget);
 				if (dispositions) {
 					const dropped = this.#report(group.start, group.start + 1n, staleHole(drift.budget));
 					if (dropped) return dropped;

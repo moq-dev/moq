@@ -5215,28 +5215,87 @@ test("a stale skip may be taken only once the budget widens", () => {
 	producer.close();
 });
 
-// Re-offered under a budget the track's max age bounds, a group still stale there is final: the
-// reader may not hand it out, though its skip is no longer recorded. Mirrors the Rust test.
-test("a stale skip at the max age bound may not be taken", () => {
-	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(1500) });
-	const subscriber = producer.subscribe({ delay: { max: Duration.millis(1000) } });
-	stampGroup(producer, 0n, 0);
-	expect(drainGroups(subscriber)).toEqual([0n]);
-	for (const [key, ms] of [
-		[1n, 1000],
-		[2n, 2000],
-		[3n, 3000],
-		[4n, 6000],
-	] as const) {
-		stampGroup(producer, key, ms);
-	}
-	expect(drainGroups(subscriber)).toEqual([3n, 4n]);
+// A stale skip stays one the reader may not hand out once the groups that convicted it leave the
+// cache: the walk passed it, and only a widening offers it again. Mirrors the Rust test.
+test("a stale skip may not be taken once its successors leave", async () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	try {
+		const window = CACHE_WINDOW_MS;
+		const subscriber = producer.subscribe({ delay: { max: Duration.millis(4 * window) } });
+		for (const [key, ms] of [
+			[1n, window],
+			[2n, 2 * window],
+			[3n, 3 * window],
+			[4n, 10 * window],
+		] as const) {
+			stampGroup(producer, key, ms);
+		}
+		// Groups 1 and 2 reach 2 and 3 windows, at least 4 behind the edge.
+		expect(drainGroups(subscriber)).toEqual([3n, 4n]);
 
-	subscriber.update({ delay: { max: Duration.millis(10_000) } });
-	expect(drainGroups(subscriber)).toEqual([]);
-	expect(hooks.taking(subscriber)(1n)).toBe(false);
-	expect(hooks.taking(subscriber)(2n)).toBe(false);
-	producer.close();
+		// Another reader keeps group 1 cached while 2 and 3 idle out, leaving the edge to bound
+		// its reach.
+		await clock.advance(10_000 + window - 1);
+		const keeper = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1n, end: 2n }] });
+		expect(keeper.tryRecvGroup()?.start).toBe(1n);
+		await clock.advance(10_000 + window + SWEEP_LAG_MS + 1);
+		await settle();
+		expect(hooks.holdsGroup(subscriber, 1n, true)).toBe(true);
+		expect(hooks.holdsGroup(subscriber, 2n, false)).toBe(false);
+		expect(hooks.holdsGroup(subscriber, 3n, false)).toBe(false);
+		expect(hooks.taking(subscriber)(1n)).toBe(false);
+
+		subscriber.update({ delay: { max: Duration.millis(100 * window) } });
+		expect(hooks.taking(subscriber)(1n)).toBe(true);
+		keeper.close();
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// Re-offered under a budget the track's max age bounds, a group still stale there is final: the
+// reader may not hand it out, though its skip is no longer recorded, nor once the groups that
+// convicted it leave the cache. Mirrors the Rust test.
+test("a stale skip at the max age bound may not be taken", async () => {
+	const clock = manualTime(10_000);
+	const window = CACHE_WINDOW_MS;
+	const producer = new TrackProducer("test").accept({
+		timescale: Timescale.MILLI,
+		maxAge: Duration.millis(5 * window),
+	});
+	try {
+		const subscriber = producer.subscribe({ delay: { max: Duration.millis(4 * window) } });
+		for (const [key, ms] of [
+			[1n, window],
+			[2n, 2 * window],
+			[3n, 3 * window],
+			[4n, 10 * window],
+		] as const) {
+			stampGroup(producer, key, ms);
+		}
+		expect(drainGroups(subscriber)).toEqual([3n, 4n]);
+
+		subscriber.update({ delay: { max: Duration.millis(100 * window) } });
+		expect(drainGroups(subscriber)).toEqual([]);
+		expect(hooks.taking(subscriber)(1n)).toBe(false);
+		expect(hooks.taking(subscriber)(2n)).toBe(false);
+
+		// Another reader keeps group 1 cached while 2 and 3 idle out.
+		await clock.advance(10_000 + window - 1);
+		const keeper = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1n, end: 2n }] });
+		expect(keeper.tryRecvGroup()?.start).toBe(1n);
+		await clock.advance(10_000 + window + SWEEP_LAG_MS + 1);
+		await settle();
+		expect(hooks.holdsGroup(subscriber, 1n, true)).toBe(true);
+		expect(hooks.holdsGroup(subscriber, 3n, false)).toBe(false);
+		expect(hooks.taking(subscriber)(1n)).toBe(false);
+		keeper.close();
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
 });
 
 // A read already parked when the budget widens wakes for the re-offer.
