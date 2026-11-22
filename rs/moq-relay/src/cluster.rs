@@ -1319,9 +1319,15 @@ impl Credential {
 	/// The tokens to present now, marking every source seen.
 	fn current(&mut self) -> Vec<moq_net::auth::Token> {
 		let own = self.peer.borrow_and_update().clone();
-		let shared = self.cluster.as_mut().and_then(|cluster| cluster.borrow_and_update().clone());
+		let shared = self
+			.cluster
+			.as_mut()
+			.and_then(|cluster| cluster.borrow_and_update().clone());
 		// Both sources hold only non-empty tokens, which always parse.
-		own.or(shared).and_then(|token| token.parse().ok()).into_iter().collect()
+		own.or(shared)
+			.and_then(|token| token.parse().ok())
+			.into_iter()
+			.collect()
 	}
 
 	/// Resolve once a source changes. A source whose sender is gone never changes again.
@@ -2394,7 +2400,8 @@ impl Cluster {
 				return Ok(());
 			}
 			let mut connected = false;
-			let result = match moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address") {
+			let result = match moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")
+			{
 				Ok(addrs) => {
 					self.run_remote_once(&addrs, target, &mut credential, dial, &mut connected)
 						.await
@@ -3503,7 +3510,10 @@ mod tests {
 		// Anything else about the dial still replaces it, with the latest token.
 		let moved = DialTarget::parse("https://peer.example/?jwt=newer&cost=2").unwrap();
 		let mut spawned = Vec::new();
-		dialed.reconcile_api(&[(moved.key.clone(), moved)].into_iter().collect(), &mut recording(&mut spawned));
+		dialed.reconcile_api(
+			&[(moved.key.clone(), moved)].into_iter().collect(),
+			&mut recording(&mut spawned),
+		);
 		assert_eq!(spawned.len(), 1, "a cost change redials");
 		assert_eq!(token.borrow_and_update().as_deref(), Some("newer"));
 	}
@@ -3589,7 +3599,11 @@ mod tests {
 		assert_eq!(inline, from_object);
 		assert_eq!(inline.key, key("https://peer.example/"));
 		assert_eq!(inline.token.as_deref(), Some("secret"));
-		assert_eq!(inline.url.query(), None, "the dial presents it through its tokens, not its URL");
+		assert_eq!(
+			inline.url.query(),
+			None,
+			"the dial presents it through its tokens, not its URL"
+		);
 	}
 
 	/// `upstream` is object-only policy: it round-trips, reaches the dial target,
@@ -4535,7 +4549,12 @@ mod tests {
 	/// either as it changes; a LAN dial never presents the shared one.
 	#[tokio::test]
 	async fn a_credential_follows_its_sources() {
-		let names = |tokens: Vec<moq_net::auth::Token>| tokens.iter().map(|token| token.as_str().to_string()).collect::<Vec<_>>();
+		let names = |tokens: Vec<moq_net::auth::Token>| {
+			tokens
+				.iter()
+				.map(|token| token.as_str().to_string())
+				.collect::<Vec<_>>()
+		};
 		let shared = tokio::sync::watch::Sender::new(Some("first".to_string()));
 		let own = tokio::sync::watch::Sender::new(None);
 		let target = DialTarget::parse("https://peer.example/").unwrap();
@@ -4574,11 +4593,17 @@ mod tests {
 		));
 
 		std::fs::write(&path, "second").unwrap();
-		current.wait_for(|token| token.as_deref() == Some("second")).await.unwrap();
+		current
+			.wait_for(|token| token.as_deref() == Some("second"))
+			.await
+			.unwrap();
 
 		std::fs::remove_file(&path).unwrap();
 		std::fs::write(&path, "third").unwrap();
-		current.wait_for(|token| token.as_deref() == Some("third")).await.unwrap();
+		current
+			.wait_for(|token| token.as_deref() == Some("third"))
+			.await
+			.unwrap();
 		watch.abort();
 	}
 
@@ -4600,7 +4625,9 @@ mod tests {
 
 		let spawn = |options: Options| {
 			let (cluster, driver) = Cluster::new(options).expect("cluster");
-			drop(kio::clock::sim::spawn(async move { driver.run().await.expect("driver") }));
+			drop(kio::clock::sim::spawn(
+				async move { driver.run().await.expect("driver") },
+			));
 			cluster
 		};
 		let net = crate::sim::Net::new();
@@ -4642,7 +4669,9 @@ mod tests {
 		let own = tokio::sync::watch::Sender::new(Some("old".to_string()));
 		let credential = Credential::new(&target, own.subscribe(), &no_token());
 		let dial = a.nodes.dial(&target.key);
-		drop(kio::clock::sim::spawn(a.clone().supervise_remote(credential, target, dial)));
+		drop(kio::clock::sim::spawn(
+			a.clone().supervise_remote(credential, target, dial),
+		));
 
 		kio::clock::sleep(Duration::from_secs(5)).await;
 		own.send_replace(Some("new".to_string()));
