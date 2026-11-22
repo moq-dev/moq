@@ -883,3 +883,34 @@ fn a_request_waiting_for_a_way_fails_once_its_claim_is_outranked() {
 	assert_eq!(told(&viewer), [("room".to_string(), true)], "shown by the newer claim");
 	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
 }
+
+/// A copy its publisher withdraws as another session's copy shows the claim again at
+/// once still ends, though it waits for that session to serve the claim: the wait keeps
+/// why it is leaving.
+#[test]
+fn a_withdrawn_copy_waiting_on_another_session_still_ends() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let first = publisher(&node, 1);
+	announce(&first, &room, live(0));
+	assert_eq!(confirm(&first), 1);
+	let second = publisher(&node, 2);
+
+	// Taken in together: the reader ends the claim and shows it again in one flush.
+	first
+		.recv(Msg::Announce {
+			changes: vec![(room.clone(), Change::Ended)],
+		})
+		.unwrap();
+	announce(&second, &room, live(0));
+	let handed = serves(&second);
+	assert!(matches!(handed.as_slice(), [Output::Serve { .. }]), "{handed:?}");
+	assert_eq!(serves(&first), [], "kept until the other session serves it");
+
+	second.serving(node.me(), &room, true);
+	let unserved = serves(&first);
+	assert!(
+		matches!(unserved.as_slice(), [Output::Unserve { gone: Gone::Withdrawn, .. }]),
+		"{unserved:?}"
+	);
+}
