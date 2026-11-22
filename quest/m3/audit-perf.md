@@ -94,6 +94,26 @@ such as `relay_auth_refresh`, is not attributable this way.
   and WebRTC egress twice per frame per viewer (`rs/moq-webrtc/src/egress.rs`).
 - Single-axis fan-out benches to widen: `session_delivery_paced`,
   `track_fanout_*`, `memory`, and `bench/workloads/fanout*.toml`.
+- From the 2026-11-21 pre-cut full-codebase audit (maintainer, /quest-plan;
+  rejected: standalone m4 quests for these, since each needs measurement
+  alongside the release perf run):
+  - `rs/moq-mux/src/codec/{h264,h265,av1}/import.rs` (`h264/import.rs:307,396-398`,
+    `h265/import.rs:310,357-359`, `av1/import.rs:292,628-642`): copies the full
+    keyframe `Bytes` on every Annex-B/AV1 keyframe instead of zero-copy
+    `Bytes::slice_ref` (cf. `find_hdr` at `av1/import.rs:603`).
+  - `rs/hang/src/catalog/root.rs:394-427`: `Catalog::from_slice` parses and
+    traverses catalog JSON four times.
+  - `rs/moq-archive/src/layout.rs:194-219`: `Object::encode` copies every media
+    payload twice.
+  - `rs/moq-loc/src/lib.rs:170-181`: `encode` performs two heap allocations per
+    frame.
+  - `js/qmux/src/web-socket-stream.ts:357-366` and
+    `js/qmux/src/scheduler.ts:201,411`: redundant `TransformStream` pipe on
+    Chromium's native `WebSocketStream` (`session.ts:936` already normalizes
+    `ArrayBuffer`) and `Array.shift()` in `Scheduler.#datagrams` instead of
+    `Queue`.
+  - `js/signals/src/react.ts:15-34`: `useValue` triggers a redundant synchronous
+    re-render on mount for `Derived` signals returning fresh objects.
 
 ## Required
 
