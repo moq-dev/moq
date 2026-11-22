@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
+import { within } from "../subscription.test-util.ts";
 
 // Standalone from consumer.test.ts so it only pulls the Legacy format, not the CMAF decoder.
 
@@ -80,7 +81,7 @@ test("the head of the window arriving after the live edge is delivered first", a
 	});
 	// An unserved fill owes the window's head, as a session's feed would.
 	track.requests();
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(5000) } });
+	const subscriber = track.subscribe(within(Duration.millis(5000)));
 	subscriber.withRange({ start: { included: 10n } });
 	const consumer = new Consumer(subscriber, {
 		format: new LegacyFormat("data"),
@@ -115,7 +116,7 @@ test("a head group still downloading is not truncated", async () => {
 		timescale: Time.Timescale.MILLI,
 		maxAge: Duration.millis(30_000),
 	});
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: 1n }] }), {
+	const consumer = new Consumer(track.subscribe({ ranges: [{ start: 1n }] }), {
 		format: new LegacyFormat("data"),
 		delay: { max: Duration.millis(5000) },
 	});
@@ -155,7 +156,6 @@ test("an excluded gap between ranges does not stall", async () => {
 	});
 	const consumer = new Consumer(
 		track.subscribe({
-			delay: { max: Duration.millis(10_000) },
 			ranges: [{ start: 0n, end: 0n }, { start: 10n }],
 		}),
 		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(10_000) } },

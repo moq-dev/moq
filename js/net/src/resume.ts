@@ -2050,6 +2050,14 @@ class Reader implements ResumeSource {
 		return this.#window().starts(from);
 	}
 
+	// Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the
+	// serving copy. Mirrors the Rust `Subscriber::join_start` on a reader following route copies.
+	joinStart(placed: bigint, budget: number): bigint {
+		this.sync();
+		const serving = this.#serving();
+		return serving ? hooks.joinStart(serving.sub, placed, budget) : placed;
+	}
+
 	// The reader's ranges as its window resolved them, whichever copy serves.
 	resolved(): (Resolved | undefined)[] {
 		this.sync();

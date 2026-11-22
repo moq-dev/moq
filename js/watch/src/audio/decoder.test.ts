@@ -774,6 +774,12 @@ describe("Decoder across a broadcast disable", () => {
 	});
 });
 
+// The max the subscription's live join asks, as the decoder sets it.
+function liveMax(subscription: Moq.Track.Subscription | undefined): Duration | null | undefined {
+	const start = subscription?.ranges?.[0]?.start;
+	return typeof start === "object" ? (start.live.max ?? Duration.ZERO) : undefined;
+}
+
 describe("Decoder across a delay change", () => {
 	it("reaches back and trims the join for a catalog warmup no further than the delay cap", async () => {
 		const trims = spyOn(Terminal.prototype, "clear");
@@ -785,14 +791,14 @@ describe("Decoder across a delay change", () => {
 			this: Moq.Track.Consumer,
 			...args: Parameters<typeof subscribe>
 		) {
-			asked.push(args[0]?.delay?.max);
+			asked.push(liveMax(args[0]));
 			return subscribe.apply(this, args);
 		});
 		const updates = spyOn(Moq.Track.Subscriber.prototype, "update").mockImplementation(function (
 			this: Moq.Track.Subscriber,
 			...args: Parameters<typeof update>
 		) {
-			asked.push(args[0]?.delay?.max);
+			asked.push(liveMax(args[0]));
 			return update.apply(this, args);
 		});
 		const playback = await play(Duration.millis(100));
@@ -2110,14 +2116,14 @@ for (const buffered of [false, true]) {
 			...args: Parameters<typeof subscribe>
 		) {
 			const subscriber = subscribe.apply(this, args);
-			asked.set(subscriber, args[0]?.delay?.max);
+			asked.set(subscriber, liveMax(args[0]));
 			return subscriber;
 		});
 		const updates = spyOn(Moq.Track.Subscriber.prototype, "update").mockImplementation(function (
 			this: Moq.Track.Subscriber,
 			...args: Parameters<typeof update>
 		) {
-			asked.set(this, args[0]?.delay?.max);
+			asked.set(this, liveMax(args[0]));
 			return update.apply(this, args);
 		});
 		const playback = await play(Duration.millis(100), buffered);

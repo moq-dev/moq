@@ -221,6 +221,10 @@ interface SubscribeEntry {
 	// The tick the copy recorded each live join range's answer at, by Range ID (see
 	// `hooks.answerJoin`): one with none is still unanswered.
 	joinTicks: Map<bigint, number>;
+	// The narrowest max in milliseconds each live join range was asked under before its answer, by
+	// Range ID, beside the one it asks now: its publisher starts it past the groups that max
+	// expired, so the answer places only readers within it.
+	joinBudgets: Map<bigint, number>;
 	// The first group the ranges last sent ask for, which a lite-07 declaration answers.
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
@@ -1721,6 +1725,7 @@ export class Subscriber {
 			live,
 			starts: new Map(),
 			joinTicks: new Map(),
+			joinBudgets: new Map(),
 			sent: 0,
 			stream: { kind: "setup" },
 			fillIds: new Set(),
@@ -2177,6 +2182,7 @@ export class Subscriber {
 			live,
 			starts: new Map(),
 			joinTicks: new Map(),
+			joinBudgets: new Map(),
 			sent: 0,
 			// Its responses are read here, which owns this stream's end.
 			stream: { kind: "setup" },
@@ -2815,6 +2821,12 @@ export class Subscriber {
 				// The demand's ranges, then the probes, then the fills'.
 				const kindOf = (id: bigint): RangeKind =>
 					entry.fillIds.has(id) ? "fill" : entry.probeIds.has(id) ? "probe" : "demand";
+				// Before a retune moves it: the publisher may answer under the max asked until then.
+				for (const [id, range] of entry.live.entries()) {
+					const live = range.start?.live;
+					if (live === undefined || entry.joinTicks.has(id)) continue;
+					entry.joinBudgets.set(id, Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(live.max)));
+				}
 				const edited = entry.live.edit(
 					[...fitted.ranges, ...probed, ...fillRanges],
 					{ probes: probed.length, fills: fillRanges.length, kindOf },
@@ -2823,6 +2835,7 @@ export class Subscriber {
 				edit = edited;
 				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
 				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
+				for (const id of entry.joinBudgets.keys()) if (!entry.live.get(id)) entry.joinBudgets.delete(id);
 				entry.staleBudget = Math.min(entry.staleBudget, narrowest(entry.live));
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
@@ -2879,7 +2892,7 @@ export class Subscriber {
 		// Where the publisher started each live range asked from a group's start, or from the oldest
 		// group as time 0, which a reader's time start there resolves to when the copy can't place it
 		// among its groups; and one asked as a live join, whose answer alone places that join for the
-		// copy's readers, whatever max each asks. Mirrors the Rust `SubStream::report_starts`.
+		// copy's readers within the max it was asked under. Mirrors the Rust `SubStream::report_starts`.
 		const times: [bigint, bigint | undefined][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
@@ -2888,8 +2901,11 @@ export class Subscriber {
 			const at = entry.starts.get(id);
 			if (range.start?.live !== undefined) {
 				// Recorded once, as it arrives: a reader that began waiting since takes only a newer answer.
-				if (!entry.joinTicks.has(id))
-					entry.joinTicks.set(id, hooks.answerJoin(entry.track, range.start.live.min, through(range.end), at));
+				if (!entry.joinTicks.has(id)) {
+					const { min, max } = range.start.live;
+					const budget = Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max));
+					entry.joinTicks.set(id, hooks.answerJoin(entry.track, min, through(range.end), at, budget));
+				}
 				continue;
 			}
 			const asked = range.start?.time ?? range.start?.absolute ?? 0n;
@@ -3442,8 +3458,9 @@ function probes(asks: readonly bigint[], ranges: readonly WireRange[]): WireRang
 // The probes to ask for `joins`, each a live join the copy's readers wait on, beside the demand's
 // `ranges`, and the live probes to ask afresh: one answered before a reader began waiting.
 //
-// A live range asking the join answers it when it is still unanswered, or was answered after every
-// waiting reader began, whatever max it asks. So does a demand range asking it that this edit adds,
+// A live range asking the join answers it when it is still unanswered under a max as wide as the
+// waiting readers', or was answered after every waiting reader began under one: its publisher starts
+// the join past the groups that max expired. So does a demand range asking it that this edit adds,
 // which its answer comes after. A probe answering it stays until its readers stop waiting, so its
 // answer outlives their placing, and asks the widest max they wait with, retuned in place as that
 // moves. Mirrors the Rust `join_probes`.
@@ -3457,8 +3474,12 @@ function joinProbes(
 	for (const join of joins) {
 		const key = joinKey(join.min, join.end);
 		const answers = (id: bigint) => {
+			const asked = entry.joinBudgets.get(id) ?? NO_MAX_DELAY;
+			const live = entry.live.get(id)?.start?.live;
+			const now = live === undefined ? 0 : wireBudget(live.max);
 			const tick = entry.joinTicks.get(id);
-			return tick === undefined ? !entry.starts.has(id) : tick > join.since;
+			if (tick === undefined) return !entry.starts.has(id) && now >= join.budget;
+			return tick > join.since && Math.min(asked, now) >= join.budget;
 		};
 		// Each live range asking the join, with whether it is a probe.
 		const live: [bigint, boolean][] = [];
@@ -3485,6 +3506,11 @@ function joinProbe(join: JoinAsk): WireRange {
 	return join.end === undefined ? { start: { live } } : { start: { live }, end: { time: join.end } };
 }
 
+// A wire live start's max in milliseconds as a budget: {@link NO_MAX_DELAY} for none.
+function wireBudget(max: number | null): number {
+	return max ?? NO_MAX_DELAY;
+}
+
 // The live join `min` milliseconds behind the live edge through the time `end`, as one key.
 function joinKey(min: number, end: bigint | undefined): string {
 	return `${min}:${end ?? ""}`;
@@ -3503,7 +3529,7 @@ function narrowest(live: LiveRanges): number {
 	let narrowest = NO_MAX_DELAY;
 	for (const range of live.ranges()) {
 		const max = range.start?.live?.max;
-		if (max !== undefined) narrowest = Math.min(narrowest, max ?? NO_MAX_DELAY);
+		if (max !== undefined) narrowest = Math.min(narrowest, wireBudget(max));
 	}
 	return narrowest;
 }

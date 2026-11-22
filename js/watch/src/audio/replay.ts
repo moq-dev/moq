@@ -32,13 +32,6 @@ import { AudioRingBuffer } from "./ring-buffer";
 /** An AudioWorklet render quantum, in frames. */
 export const QUANTUM = 128;
 
-/**
- * The replay's own subscription passes every recorded group through: the recorder's relay already
- * applied a wire max delay, so only the consumer's decisions are made again. No subscriber limit
- * leaves only the publisher's max age, which a replay never reaches.
- */
-const WIRE_MAX_DELAY = null;
-
 /** How far, in ms, a group may start past the end of the one below and still read as back to back, as the consumer allows. */
 const CONTIGUOUS = 1;
 
@@ -244,10 +237,15 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	// Fills nobody serves stand in for the recorder's feed: the ordered reader waits for a missing
 	// group as it would for a session's, until the group lands or its budget gives up on it.
 	const requests = track.requests();
-	const subscriber = track.subscribe({ delay: { max: WIRE_MAX_DELAY } });
-	// It reads from the oldest group: a trace keys its groups by sequence rather than by time, where a
-	// live join could not measure back from the live edge.
-	const ordered = track.subscribe({ delay: {} }).ordered();
+	// It passes every recorded group through as history: the recorder's relay already applied the
+	// wire's max delay, so only the consumer's decisions are made again.
+	const subscriber = track.subscribe({ ranges: [{}] });
+	// The ordered reader's live join places at the first group recorded, as the track has no info to
+	// measure a lag by; its max is how long it waits for a hole, retuned below.
+	const reading = (max: Duration | null): Track.Subscription => ({
+		ranges: [{ start: { live: { min: Duration.ZERO, max } } }],
+	});
+	const ordered = track.subscribe(reading(null)).ordered();
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
 		delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
@@ -285,7 +283,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	signals.run((effect) => {
 		const delay = effect.get(sync.out.delay);
 		const max = holeWait(delay, bound({ delay, maxDelay: effect.get(sync.out.maxDelay), stretch }));
-		ordered.update({ delay: { max: max.add(warmup) } });
+		ordered.update(reading(max.add(warmup)));
 	});
 	signals.cleanup(() => requests.close());
 	await settle();

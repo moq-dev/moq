@@ -11,6 +11,11 @@ import { Estimator, Order } from "../order";
 import { Slot } from "../publication";
 import { type Config, Encoder } from "./encoder";
 
+// A live join reaching `ms` back, whose groups stay wanted that long.
+const within = (ms: number): Moq.Track.Subscription => ({
+	ranges: [{ start: { live: { min: Duration.millis(ms), max: Duration.millis(ms) } } }],
+});
+
 // A probe chunk's bytes: an Annex B start code, which the probe requires of H.264 and HEVC.
 const ANNEX_B = { byteLength: 4, copyTo: (dest: Uint8Array) => dest.set([0, 0, 0, 1]) };
 
@@ -1574,7 +1579,7 @@ test.each(["off", "all"] as const)(
 			await recording.send(150);
 			expect(recording.keys).toEqual(onDemand ? [] : [0, 100]);
 
-			late = net.track("video").subscribe({ delay: { max: Duration.millis(10_000) } });
+			late = net.track("video").subscribe(within(10_000));
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
 			await recording.send(200);

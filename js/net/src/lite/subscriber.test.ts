@@ -1479,7 +1479,10 @@ test.each(
 		expect(await subscribe.u53()).toBe(StreamId.Subscribe);
 		// Reading the request waits for its body without needing TRACK_INFO first.
 		const msg = await Subscribe.decode(subscribe, version);
-		expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, 10_000]);
+		// Lite-07 carries the max on the live join, and earlier lite as the one Subscriber Max Age.
+		const maxAge = version === Version.DRAFT_07 ? null : 10_000;
+		expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, maxAge]);
+		if (version === Version.DRAFT_07) expect(msg.ranges?.map((range) => range.start?.live?.max)).toEqual([10_000]);
 
 		const chunks: Uint8Array[] = [];
 		const writer = new Writer(
@@ -1493,7 +1496,7 @@ test.each(
 		// An explicit change orders after any update caused by TRACK_INFO, even if its encoding yields.
 		track.update(withMax({ priority: 4, delay: { max: Duration.millis(10_000) } }));
 		const update = await SubscribeUpdate.decode(subscribe, version);
-		expect([update.priority, update.maxDelay]).toEqual([4, 10_000]);
+		expect([update.priority, update.maxDelay]).toEqual([4, maxAge]);
 		track.close();
 		expect(await subscribe.done()).toBe(true);
 	} finally {
@@ -1508,7 +1511,8 @@ test("a group that beats its track info waits for it", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	// History, which places without waiting on the publisher to answer a live join.
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await (await opened(1)).writing;
@@ -1827,10 +1831,10 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
-		// SUBSCRIBE_FINISH starts the end's grace, and the update then widens the budget.
+		// SUBSCRIBE_FINISH starts the end's grace, and the update then widens the live join's max.
 		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 		await drainReactions();
-		track.update(withMax({ priority: 0, delay: { max: Duration.millis(60_000) } }));
+		track.update({ priority: 0, ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(60_000) } } }] });
 		await drainReactions();
 
 		await clock.advance(GRACE.mul(3));
@@ -1853,7 +1857,7 @@ test("a malformed lite-07 group stream ends only its group", async () => {
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
+		.subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -1903,7 +1907,7 @@ test("a lite-07 GROUP_END accounts for the starts inside its group's span", asyn
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
+		.subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2737,7 +2741,7 @@ test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 		return task;
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe();
+	const track = broadcast.track("video").subscribe({ ranges: [{}] });
 	const ordered = track.ordered();
 	try {
 		await opened(0);
@@ -2855,13 +2859,14 @@ test.each([0, 5, 9000])("a received group numbers its frames from transport offs
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const consumer = broadcast.track("video");
-	const early = consumer.subscribe();
+	// History, which places without waiting on the publisher to answer a live join.
+	const early = consumer.subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
 		await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n, frameStart }), await groupStream(1000, version));
-		const late = consumer.subscribe();
+		const late = consumer.subscribe({ ranges: [{}] });
 		try {
 			for (const reader of [early, late]) {
 				const group = await reader.recvGroup();
@@ -3229,11 +3234,12 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 
 		// Each update is sent only once the previous write is credited, which may take tasks, so wait
 		// for it on the wire: the budget narrows before its update is written.
+		// Each retunes the live join's max in place.
 		track.update(withMax({ delay: { max: Duration.millis(5000) } }));
-		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(5000);
+		expect((await SubscribeUpdate.decode(sent, version)).retune).toEqual([[0n, 5000]]);
 		expect(entry.staleBudget).toBe(500);
 		track.update(withMax({ delay: { max: Duration.millis(200) } }));
-		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(200);
+		expect((await SubscribeUpdate.decode(sent, version)).retune).toEqual([[0n, 200]]);
 		expect(entry.staleBudget).toBe(200);
 	} finally {
 		responses.mockRestore();

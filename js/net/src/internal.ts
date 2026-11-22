@@ -40,6 +40,12 @@ import type { Advertised, Advertisements } from "./wire.ts";
 /** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
 export const NO_MAX_DELAY = Varint.MAX_U53;
 
+/**
+ * A lag long past any group, so a join this far behind takes every group still within its max: the
+ * largest every implementation carries losslessly. Mirrors the Rust `PAST_EVERY_GROUP`.
+ */
+export const PAST_EVERY_GROUP = Duration.millis(NO_MAX_DELAY);
+
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
 export function datagramTrackInfo(info: datagram.Info): Info {
 	return {
@@ -573,6 +579,8 @@ export interface ResumeSource {
 	starts(from: bigint): (bigint | undefined)[] | undefined;
 	/** Each range as the reader's window resolved it, whichever copy serves. */
 	resolved(): (Resolved | undefined)[];
+	/** Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the serving copy. */
+	joinStart(placed: bigint, budget: number): bigint;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
@@ -828,11 +836,18 @@ export const hooks: {
 	/**
 	 * Record how the upstream publisher answered a range of a lite-07 copy asking the live join `min`
 	 * milliseconds behind the live edge through the time `end`: at group `start`, or undefined for
-	 * nothing to deliver. It replaces the join's earlier answer, and places every reader of that join
-	 * that began waiting before now, whatever max each asks. Returns the tick it was recorded at.
-	 * Mirrors the Rust `track::Producer::answer_join`; assigned by `track.ts`.
+	 * nothing to deliver, asked under at most `budget` milliseconds ({@link NO_MAX_DELAY} for no
+	 * limit). It replaces the join's earlier answer, and places every reader of that join that began
+	 * waiting before now, within the budget. Returns the tick it was recorded at. Mirrors the Rust
+	 * `track::Producer::answer_join`; assigned by `track.ts`.
 	 */
-	answerJoin: (producer: Producer, min: number, end: bigint | undefined, start: bigint | undefined) => number;
+	answerJoin: (
+		producer: Producer,
+		min: number,
+		end: bigint | undefined,
+		start: bigint | undefined,
+		budget: number,
+	) => number;
 	/**
 	 * Forget the answers of the live joins `keep` rejects: no live range asks them, so no reader waits
 	 * on them. Mirrors the Rust `track::Producer::retain_joins`; assigned by `track.ts`.
@@ -925,6 +940,12 @@ export const hooks: {
 	 * `track.ts`.
 	 */
 	servingResolvedKeys: (subscriber: Subscriber, keys: readonly bigint[]) => (Resolved | undefined)[];
+	/**
+	 * Where a live join a subscriber placed at `placed` starts under `budget` milliseconds, as a
+	 * publisher reports it: past the groups the budget expired, unless an upstream's answer placed
+	 * it. Mirrors the Rust `Subscriber::join_start`; assigned by `track.ts`.
+	 */
+	joinStart: (subscriber: Subscriber, placed: bigint, budget: number) => bigint;
 	/**
 	 * Edit a subscriber's preferences by key, costing the ranges the edit names rather than every
 	 * range: lite-07's SUBSCRIBE_UPDATE, by Range ID. Mirrors the Rust `Subscriber::edit`. Assigned
@@ -1324,6 +1345,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingResolvedKeys: () => {
+		throw new Error("track.ts not loaded");
+	},
+	joinStart: () => {
 		throw new Error("track.ts not loaded");
 	},
 	editSubscriber: () => {

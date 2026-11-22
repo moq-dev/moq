@@ -376,8 +376,9 @@ export interface Holdings {
 	/**
 	 * Where a live join holding a nonzero `min` behind the live edge, ending at `end`, starts for a
 	 * range whose groups go stale past `budget` (see {@link containing}). On a hop that
-	 * {@link answersJoins}, only an answer recorded after tick `since` counts, whatever budget it was
-	 * asked under: the budget never moves where a join lands. Undefined while it can't tell yet: nothing held
+	 * {@link answersJoins}, only an answer recorded after tick `since`, under a budget at least as
+	 * wide, counts: its publisher starts a join past the groups its max expired, which a wider reader
+	 * still wants. Undefined while it can't tell yet: nothing held
 	 * measures the live edge, or a relay copy waits on upstream to answer for it. Absent where the
 	 * hop leaves its ranges to the copies it follows. Mirrors the Rust `Holdings::join`.
 	 */
@@ -407,7 +408,7 @@ export interface Holdings {
  * or its upstream answered (`group`); or nowhere (`"empty"`), as the upstream answered a bounded
  * join. Mirrors the Rust `Join`.
  */
-export type Join = { group: bigint; time?: never } | { time: bigint; group?: never } | "empty";
+export type Join = { group: bigint; time?: never } | { time: bigint; group?: never } | "oldest" | "empty";
 
 /**
  * The times a {@link Holdings} can't place: sorted, disjoint runs, apart from the times a placement
@@ -1039,12 +1040,13 @@ export class Window {
 					return;
 				}
 			}
-			// A group a join measured starts there; a time is placed among the groups held.
-			if (join.group !== undefined) {
+			// A group a join measured starts there; a time is placed among the groups held; one past
+			// every group starts as a range from the oldest group does.
+			if (join === "oldest") at = undefined;
+			else if (join.group !== undefined) {
 				this.#count(key, { at: undefined, start: join.group, end, floored: true, waiting: false, history });
 				return;
-			}
-			at = join.time;
+			} else at = join.time;
 		}
 		const start = startOf(at, latest, budget, holdings);
 		if (start === "pending") {

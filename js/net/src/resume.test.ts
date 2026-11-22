@@ -11,7 +11,7 @@ import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
-import { hooks, staleHole } from "./internal.ts";
+import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -92,6 +92,14 @@ async function expectOld(read: Promise<unknown>) {
 	expect(toStreamCode(err)).toBe(StreamCode.Old);
 }
 
+/**
+ * A live join at the newest group, or the first to arrive, whose groups go stale `max` behind the
+ * live edge: what a reader subscribing before any group asks to follow the track from there.
+ */
+function joining(max: Duration | null): track.Subscription {
+	return { ranges: [{ start: { live: { min: Duration.ZERO, max } } }] };
+}
+
 /** Every group sequence readable without waiting. */
 function drain(sub: track.Subscriber): bigint[] {
 	const keys: bigint[] = [];
@@ -145,7 +153,7 @@ test("returning to a route reuses its subscription and held group", async () => 
 	const open = tracks[0].write(0n, 1, false);
 	const mirrored = spyOn(open, "mirror");
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		await clock.advance(Duration.ZERO);
 		const held = sub.tryRecvGroup();
@@ -243,7 +251,7 @@ test("a returning route backfills below the reader's newest", async () => {
 	const open = ta.write(0n, 1, false);
 	const mirrored = spyOn(open, "mirror");
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		await clock.advance(Duration.ZERO);
 		const held = sub.tryRecvGroup();
@@ -666,7 +674,7 @@ test("route flaps keep one backfill per distinct route", async () => {
 	const handles = sources.map((source) => source.consume());
 	const tracks = sources.map(copy);
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	const subscribed = tracks.map((track) => spyOn(track.producer, "subscribe"));
 	try {
 		await clock.advance(Duration.ZERO);
@@ -708,7 +716,7 @@ test("a group below the replacement's resume point is backfilled", async () => {
 	const handles = sources.map((source) => source.consume());
 	const [ta, tb] = sources.map(copy);
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		await clock.advance(Duration.ZERO);
 		ta.write(5n);
@@ -742,7 +750,7 @@ test("a late group on a drained serving copy is read", async () => {
 	hooks.receiveTrack(ta.producer);
 	hooks.receiveTrack(tb.producer);
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		await clock.advance(Duration.ZERO);
 		ta.write(0n);
@@ -782,7 +790,7 @@ test("a replacement ending before any group waits for the replaced copy's late g
 	// The old route's groups may land late; the new route's local track is complete once it ends.
 	hooks.receiveTrack(ta.producer);
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		await clock.advance(Duration.ZERO);
 		ta.write(0n);
@@ -817,7 +825,7 @@ test("a late group under the resume point is backfilled again", async () => {
 	hooks.receiveTrack(ta.producer);
 	hooks.receiveTrack(tb.producer);
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		await clock.advance(Duration.ZERO);
 		ta.write(2n);
@@ -868,7 +876,7 @@ test("a backfill waits on a fill the finished route still owes", async () => {
 	tb.write(6n);
 	tb.producer.finish();
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		await clock.advance(Duration.ZERO);
 		ta.write(5n);
@@ -971,7 +979,7 @@ test("a front's reader places a live join from an answer its copy recorded befor
 		.subscribe(withMax({ delay: { max: null }, ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] }));
 	try {
 		// The copy's upstream answered the join after the reader added it, before any copy asked.
-		hooks.answerJoin(ta.producer, 0, undefined, 3n);
+		hooks.answerJoin(ta.producer, 0, undefined, 3n, NO_MAX_DELAY);
 		front.serve(a.consume());
 		await settle();
 		await settle();
@@ -1715,7 +1723,7 @@ for (const taken of ["before", "after"]) {
 		const { a, b, swap, active, close } = await setup();
 		const ta = copy(a);
 		const tb = copy(b);
-		const sub = active.track("seq").subscribe(withMax({ delay: { max: Duration.millis(300_000) } }));
+		const sub = active.track("seq").subscribe({ ranges: [{}] });
 		ta.write(0n, 1);
 		let group = taken === "before" ? sub.tryRecvGroup() : undefined;
 		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
@@ -3006,7 +3014,7 @@ test.each([
 			const first = bounded
 				? front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 0n }] })
 				: undefined;
-			const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+			const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 			await settle();
 			expect(group.expired.peek()).toBeUndefined();
 
@@ -3391,7 +3399,7 @@ test("a routed ordered read returns the gap its copy passed to take a group", as
 	front.serve(a.consume());
 	const ordered = front.consumer
 		.track("seq")
-		.subscribe(withMax({ delay: { max: Duration.millis(1000) } }))
+		.subscribe(joining(Duration.millis(1000)))
 		.ordered();
 	try {
 		ta.write(4n);
@@ -3424,7 +3432,7 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 		front.serve(a.consume());
 		const ordered = front.consumer
 			.track("seq")
-			.subscribe(withMax({ delay: { max: Duration.millis(1000) } }))
+			.subscribe(joining(Duration.millis(1000)))
 			.ordered();
 		try {
 			ta.write(4n);
@@ -3806,7 +3814,7 @@ test("a drop a replaced route held back is no verdict on the route serving next"
 	const tb = copy(b);
 	const tc = copy(c);
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	ta.write(0n);
 	expect(recvDisposition(sub)).toBe(0n);
 	// The switch splits at 2, below which the old route may still deliver 1.
@@ -3932,7 +3940,7 @@ test("a failed group whose replacement cannot fetch ends with the failure, or co
 		const tb = copy(b);
 		front.serve(a.consume());
 		// A budget wide enough that the newer group never gives group 0 up first.
-		const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 		const stalled = ta.write(0n, 1, false);
 		const group = sub.tryRecvGroup();
 		if (!group) throw new Error("expected group 0");
@@ -4181,7 +4189,7 @@ test("a switch before any group leaves the replaced copy uncapped as the incumbe
 		expect(drain(sub)).toEqual([]);
 		await settle();
 		// Nothing held nor handed out: nothing to split, so the new route is asked as the reader was.
-		expect(tb.producer.subscription.peek()?.ranges?.[0]?.start).toBeUndefined();
+		expect(tb.producer.subscription.peek()?.ranges).toEqual([{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }]);
 		expect(ta.producer.subscription.peek()?.ranges?.[0]?.end).toBeUndefined();
 		ta.write(0n);
 		tb.write(1n);
@@ -4690,7 +4698,7 @@ test.each(["lands", "dropped", "expired"])(
 		const tb = copy(b);
 		hooks.receiveTrack(ta.producer);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: SECOND } }));
+		const sub = front.consumer.track("seq").subscribe(joining(SECOND));
 		try {
 			ta.write(0n);
 			expect(drain(sub)).toEqual([0n]);
@@ -4817,7 +4825,7 @@ test.each([true, false])(
 		const ta = copy(a);
 		const tb = copy(b);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 		const view = ordered ? sub.ordered() : undefined;
 		const next = () => (view ? view.nextGroup() : sub.recvGroup());
 		ta.write(0n);
@@ -4859,7 +4867,7 @@ test.each([true, false])("a replaced copy backs a group before its first arrival
 	const tb = copy(b);
 	const tc = copy(c);
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	const view = ordered ? sub.ordered() : undefined;
 	const next = () => (view ? view.nextGroup() : sub.recvGroup());
 	ta.write(0n);
@@ -5179,7 +5187,7 @@ test.each([
 		const ta = copy(a);
 		const tb = copy(b);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 		const inOrder = ordered ? sub.ordered() : undefined;
 		const read = () => {
 			const keys: bigint[] = [];
@@ -5233,7 +5241,7 @@ test("a clean end keeps the serving copy while a group read from a replaced one 
 	const ta = copy(a);
 	const tb = copy(b);
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		ta.write(0n);
 		expect(drain(sub)).toEqual([0n]);
@@ -5314,7 +5322,7 @@ test("a clean end keeps the serving copy while a group handed out before the swa
 	const ta = copy(a);
 	const tb = copy(b);
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		// Group 0 is handed out while the old route is the only one.
 		const stalled = ta.write(0n, 1, false);
@@ -6015,7 +6023,7 @@ test("a routed reader reports its serving copy's whole group spans", async () =>
 	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(3) });
 	group.finishAt(10n);
 	front.serve(handle);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 	try {
 		await clock.advance(Duration.ZERO);
 		expect(sub.tryRecvGroup()?.start).toBe(3n);

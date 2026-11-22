@@ -54,7 +54,7 @@ const path = Path.from("room");
 // The origin's instance, which both routes of a switch carry, so the front resumes across them.
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 
-// As the Rust harness asks: each live join under a max of zero, and history otherwise.
+// Each live join under no max, so only its lag decides what it gets, and history otherwise.
 function subscription(ask: Ask): Subscription {
 	const ranges: Range[] = (ask.ranges ?? [{}]).map((range) => ({
 		start:
@@ -62,7 +62,7 @@ function subscription(ask: Ask): Subscription {
 				? undefined
 				: typeof range.start === "number"
 					? BigInt(range.start)
-					: { live: { min: Duration.millis(range.start.live), max: Duration.ZERO } },
+					: { live: { min: Duration.millis(range.start.live), max: null } },
 		end: range.end === undefined ? undefined : BigInt(range.end),
 	}));
 	return { order: "ascending", ranges };

@@ -72,9 +72,9 @@ async function drain(reader: { recvGroup(): Promise<GroupConsumer | undefined> }
 }
 
 // A track whose first write is group `first`, so every group below it was never cached here.
-function resumed(first: bigint): { broadcast: BroadcastProducer; track: Producer } {
+function resumed(first: bigint, maxAge: Duration | null = null): { broadcast: BroadcastProducer; track: Producer } {
 	const broadcast = new BroadcastProducer();
-	const track = defined(broadcast.createTrack("video", { maxAge: null }));
+	const track = defined(broadcast.createTrack("video", { maxAge }));
 	const group = track.createGroup(first);
 	group.writeFrame({ payload: enc.encode(`live ${first}`), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
@@ -409,9 +409,10 @@ test("fill: an answer withheld after a probe judged it is asked again", async ()
 // failed group below it, which was no successor.
 test("fill: a gap below a group that fails after a probe is asked", async () => {
 	const broadcast = new BroadcastProducer();
-	const track = defined(broadcast.createTrack("video", { maxAge: null }));
+	// The publisher's max age bounds history, so a superseded gap goes stale at once.
+	const track = defined(broadcast.createTrack("video", { maxAge: Duration.ZERO }));
 	const requests = track.requests();
-	const reader = track.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: Duration.millis(0) } }));
+	const reader = track.subscribe({ ranges: [{ start: 0n }] });
 	const ordered = reader.ordered();
 	const failed = track.createGroup(2n);
 	const group = track.createGroup(4n);
@@ -698,23 +699,20 @@ test("fill: a group arriving live answers the fill", async () => {
 	broadcast.close();
 });
 
-test("fill: an ordered reader stops waiting on an unanswered fill once its budget convicts the hole", async () => {
+test("fill: an ordered reader stops waiting on an unanswered fill once the max age convicts the hole", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		const { broadcast, track } = resumed(5n);
+		// The publisher's max age bounds history, so it convicts the holes below group 5.
+		const { broadcast, track } = resumed(5n, Duration.millis(1000));
 		const requests = track.requests();
-		const reader = track.subscribe(withMax({
-			ranges: [{ start: 0n }],
-			delay: { max: Duration.millis(1000) },
-			order: "ascending",
-		}));
+		const reader = track.subscribe({ ranges: [{ start: 0n }], order: "ascending" });
 		const next = reader.ordered().nextGroup();
 		// The handler takes the fill for the missing groups and never answers.
 		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 
-		// Group 5 arrived when the reader asked, so its budget gives up the holes below a second on.
+		// Group 5 arrived when the reader asked, so the max age gives up the holes below a second on.
 		await clock.advance(Duration.millis(1001));
 		expect((await next)?.start).toBe(5n);
 
@@ -727,23 +725,20 @@ test("fill: an ordered reader stops waiting on an unanswered fill once its budge
 	}
 });
 
-test("fill: an arrival-order reader stops waiting on an unanswered fill once its budget convicts the hole", async () => {
+test("fill: an arrival-order reader stops waiting on an unanswered fill once the max age convicts the hole", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		const { broadcast, track } = resumed(5n);
+		const { broadcast, track } = resumed(5n, Duration.millis(1000));
 		track.finish();
 		const requests = track.requests();
-		const reader = track.subscribe(withMax({
-			ranges: [{ start: 0n }],
-			delay: { max: Duration.millis(1000) },
-		}));
+		const reader = track.subscribe({ ranges: [{ start: 0n }] });
 		expect((await reader.recvGroup())?.start).toBe(5n);
 		const next = reader.recvGroup();
 		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 
-		// The fill never answers; the holes go past the budget, and the finished track ends the read.
+		// The fill never answers; the holes go past the max age, and the finished track ends the read.
 		await clock.advance(Duration.millis(1001));
 		expect(await next).toBeUndefined();
 		// The reader gave the stale holes up, so the handler hears it no longer waits on them.
@@ -762,13 +757,9 @@ test("fill: a handler hears that a reader stopped wanting what it handed out pas
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
-		const { broadcast, track } = resumed(5n);
+		const { broadcast, track } = resumed(5n, Duration.millis(1000));
 		const requests = track.requests();
-		const reader = track.subscribe(withMax({
-			ranges: [{ start: 0n }],
-			delay: { max: Duration.millis(1000) },
-			order: "ascending",
-		}));
+		const reader = track.subscribe({ ranges: [{ start: 0n }], order: "ascending" });
 		const next = reader.ordered().nextGroup();
 		const fill = await requests.requestedFill();
 		if (!fill) throw new Error("no fill of groups");
@@ -776,7 +767,7 @@ test("fill: a handler hears that a reader stopped wanting what it handed out pas
 		const changed = fill.wantedChanged();
 		const unwanted = fill.unwanted(0n);
 
-		// Past the budget the reader takes group 5, leaving the holes below it for good.
+		// Past the max age the reader takes group 5, leaving the holes below it for good.
 		await clock.advance(Duration.millis(1001));
 		expect((await next)?.start).toBe(5n);
 		expect(await changed).toBeUndefined();

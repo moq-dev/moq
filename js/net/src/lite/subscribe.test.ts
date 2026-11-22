@@ -264,8 +264,9 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 	const position = { start: { absolute: 7n, frame: 4 } };
 	const update = new SubscribeUpdate({ priority: 0, ranges: [position] });
 	const bytes = await encodeMessage(Version.DRAFT_07, update);
-	// One range: type 2, start 7, frame 4, then no end, and an absent wanted group.
-	expect(Array.from(bytes.slice(-6))).toEqual([1, 2, 7, 4, 0, 0]);
+	// One range: type 2, start 7, frame 4, then no end, no live join to retune, and an absent
+	// wanted group.
+	expect(Array.from(bytes.slice(-7))).toEqual([1, 2, 7, 4, 0, 0, 0]);
 	expect(rangeSize(position)).toBe(4);
 	const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.ranges).toEqual([position]);

@@ -38,6 +38,7 @@ import {
 	insertRun,
 	type Land,
 	NO_MAX_DELAY,
+	PAST_EVERY_GROUP,
 	type Recv,
 	type ResumeSource,
 	type Run,
@@ -1020,11 +1021,14 @@ let timeAnchors: (producer: Producer) => {
  * the Rust `JoinAnswer`.
  */
 type JoinAnswer = {
-	/**
-	 * The group the join starts at, undefined for nothing to deliver, whatever max it was asked
-	 * under: a join lands where its lag does.
-	 */
+	/** The group the join starts at, undefined for nothing to deliver. */
 	start?: bigint;
+	/**
+	 * The narrowest max the range was asked under before its answer, as a budget in milliseconds:
+	 * the publisher starts a join past the groups its max expired, so the start holds only for a
+	 * reader within it.
+	 */
+	budget: number;
 	/** When it was recorded: a reader that began waiting later takes only a newer answer, since the live edge moved on. */
 	tick: number;
 };
@@ -1649,10 +1653,10 @@ export class Producer {
 			producer.#answersJoins = true;
 			producer.#placing++;
 		};
-		hooks.answerJoin = (producer, min, end, start) => {
-			// Every range added before now takes this answer, whatever max each asks.
+		hooks.answerJoin = (producer, min, end, start, budget) => {
+			// Every range added before now within `budget` takes this answer.
 			const tick = answered();
-			producer.#joinAnswers.set(joinKey(min, end), { start, tick });
+			producer.#joinAnswers.set(joinKey(min, end), { start, budget, tick });
 			producer.#placing++;
 			// A reader's join waiting on the upstream's answer places now.
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
@@ -3481,6 +3485,37 @@ export class Subscriber {
 		return reach !== undefined && drift.presentation.at - reach >= budget;
 	}
 
+	// Where a live join this reader placed at `placed` starts for a reader within `budget`
+	// milliseconds, as its publisher reports it: past the groups held there and after that the budget
+	// expired, as delivery starts at the first group it serves.
+	//
+	// A copy whose upstream answers joins reports the answer that placed it, given under a max at
+	// least as wide: its upstream judged the groups, and those owed from there may not have arrived
+	// yet. Any other copy starts no lower than where its upstream said its feed starts, that wire's
+	// answer for the whole subscription, and skips a stale group only once every key below it is
+	// given up for the reader, since a group still on its way there may be fresh. Mirrors the Rust
+	// `TrackState::join_start`.
+	#joinStart(placed: bigint, budget: number): bigint {
+		if (this.#resume) return this.#resume.joinStart(placed, budget);
+		const producer = this.#state.producer;
+		if (producer === undefined || timeAnchors(producer).answersJoins) return placed;
+		const whole = this.#drift(WHOLE);
+		const drift = { ...whole, budget: Budget.uniform(budget).clamped(whole.bound) };
+		const received = receivedCopy(producer);
+		const feed = received ? sourceStart(producer) : undefined;
+		let from = typeof feed === "bigint" ? max(placed, feed) : placed;
+		const timeline = this.#state.timeline;
+		for (let i = timelineIndex(timeline, from); i < timeline.length; i++) {
+			const group = timeline[i];
+			// An aborted group cannot start a join.
+			if (hooks.groupFailed(group)) continue;
+			if (received && !this.#state.drops.givenUp(from, group.start, budget)) break;
+			if (!this.#staleAt(group.start, drift)) return group.start;
+			from = group.start + 1n;
+		}
+		return from;
+	}
+
 	// The cached group starting at `key`, failed or not.
 	#held(key: bigint): GroupConsumer | undefined {
 		const timeline = this.#state.timeline;
@@ -3924,9 +3959,9 @@ export class Subscriber {
 						wire && !anchors.atKeys,
 						anchors.ended,
 					);
-				// Whatever budget it was asked under: the budget never moves where a join lands.
+				// A start past groups a narrower max expired would skip groups this reader still wants.
 				const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
-				if (answer === undefined || answer.tick <= since) return undefined;
+				if (answer === undefined || answer.tick <= since || budget > answer.budget) return undefined;
 				return answer.start === undefined ? "empty" : { group: answer.start };
 			},
 			answersJoins: () => answers,
@@ -3976,10 +4011,13 @@ export class Subscriber {
 		const scale = info.timescale;
 		if (scale == null) {
 			const at = now();
+			const group = newest((group) => at.since(hooks.groupArrived(group)).ge(min));
+			if (group) return { group: group.start };
 			// This copy's arrivals don't reach back that far, but its upstream's may.
-			const group =
-				newest((group) => at.since(hooks.groupArrived(group)).ge(min)) ?? (wire ? undefined : oldest());
-			return group && { group: group.start };
+			if (wire) return undefined;
+			// It reaches back past every arrival, so it starts where a time start from 0 does, taking a
+			// lower group that arrives late as the oldest group would.
+			return { time: 0n };
 		}
 		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);
 		// In the track's own scale, which holds every timestamp it accepted. Floored exactly, as
@@ -4003,7 +4041,7 @@ export class Subscriber {
 			}
 			if (top === undefined) return undefined;
 			const target = top > back ? top - back : 0n;
-			if (!wire || containing(target) !== "unknown") return { time: target };
+			if (target === 0n || !wire || containing(target) !== "unknown") return { time: target };
 			// Groups never overlap in time, so one held starting by the target with a frame at or past
 			// it contains it: every later group starts after that frame.
 			const holder = newest((group) => group.start <= target);
@@ -4011,8 +4049,16 @@ export class Subscriber {
 			if (holder && through !== undefined && through >= target) return { group: holder.start };
 			return ended() ? { time: target } : undefined;
 		}
-		if (edge === undefined) return undefined;
-		const target = edge > back ? edge - back : 0n;
+		// Keys that aren't times: by when each group's first frame presented. No group presents
+		// before time 0, so a join reaching back that far starts as the oldest group does, taking a
+		// lower group that arrives late rather than starting at the oldest group this hop happens to
+		// hold. One past every group needs no frame to measure it by, so groups whose frames are
+		// still on their way place it all the same.
+		let target: bigint;
+		if (min.ge(PAST_EVERY_GROUP)) target = 0n;
+		else if (edge === undefined) return undefined;
+		else target = edge > back ? edge - back : 0n;
+		if (target === 0n) return "oldest";
 		const group =
 			newest((group) => {
 				const start = hooks.groupTimestamp(group);
@@ -4633,6 +4679,7 @@ export class Subscriber {
 			const end = subscriber.#resume.servingEnd();
 			return end === undefined ? undefined : min(end, cursor.end ?? end);
 		};
+		hooks.joinStart = (subscriber, placed, budget) => subscriber.#joinStart(placed, budget);
 		hooks.servingStarts = (subscriber, from) => {
 			const resumed = subscriber.#resume?.starts(from);
 			if (resumed) return resumed;

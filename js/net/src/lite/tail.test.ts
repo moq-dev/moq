@@ -71,7 +71,7 @@ function groupStream(subscriber: Subscriber, key: bigint) {
  * it answers TRACK_INFO, then writes whatever responses the test asks for on the subscribe
  * stream and FINs it when told.
  */
-async function subscribed(version: Version, maxDelay = GRACE, range?: Range) {
+async function subscribed(version: Version, maxDelay: Duration | null = GRACE, range?: Range) {
 	const pair = createMockTransportPair(ALPN_05);
 	const subscriber = new Subscriber(pair.client, version, randomHop());
 	const reader = subscriber
@@ -200,7 +200,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const sub = await subscribed(version);
 			subscriber = sub.subscriber;
 			const { reader, respond, fin } = sub;
-			const ordered = reader.fork(withMax({ delay: { max: GRACE } })).ordered();
+			// History from the oldest group, which owes group 0 until the subscription settles.
+			const ordered = reader.fork({ ranges: [{}] }).ordered();
 			await respond({ start: new SubscribeStart([0n]) });
 			const group = groupStream(subscriber, 1n);
 			group.write("1.0");
@@ -211,7 +212,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 			// Group 0 has no header, so accounting still waits, and its stream may yet
 			// land behind group 1's. Both readers wait, with the ordered reader holding
-			// group 1 until its budget gives up on the owed hole.
+			// group 1 until the grace gives up on the owed hole.
 			expect((await reader.recvGroup())?.start).toBe(1n);
 			let ended = false;
 			const held = reader.recvGroup().finally(() => (ended = true));
@@ -240,7 +241,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	// QUIC does not order streams, so a lower group's stream can land after a higher one and
 	// after SUBSCRIBE_FINISH. The reader receives it before its end, which then comes at once.
 	test("a lower group that lands after SUBSCRIBE_FINISH reaches the reader", async () => {
-		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000));
+		// History from the oldest group, which reaches group 0 whenever it lands.
+		const { subscriber, reader, respond, fin } = await subscribed(version, null);
 		await respond({ start: new SubscribeStart([0n]) });
 		const high = groupStream(subscriber, 1n);
 		high.finish();

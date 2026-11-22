@@ -5,7 +5,7 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order, Position, Range, Start } from "../track.ts";
 import { UNBOUNDED } from "../util/key.ts";
-import { NO_MAX_DELAY } from "../internal.ts";
+import { NO_MAX_DELAY, PAST_EVERY_GROUP } from "../internal.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import { EMPTY, liveMillis, rangeBudget, rangeTime } from "../window.ts";
 import * as Duration from "./duration.ts";
@@ -267,20 +267,16 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }, legacy?: S
  * (`maxDelay` milliseconds, `null` for none) bounds the whole subscription; undefined on lite-07,
  * which carries one on each live start instead, and for the oldest group.
  *
- * Lite-06 resolves an absent start from that max age, so it takes every group still within it;
- * with no max age, it reaches back to the oldest group. Before lite-06 an absent start is the
- * latest group, still expiring past the max age, and lite-01/02 carry none, so nothing expires
- * (see `cursorFloor`). A named start is a history floor on every wire, bounded by the publisher's
- * max age. Mirrors the Rust `Bounds::legacy`.
+ * An absent start takes every group still within that max age, or every group with none, as
+ * lite-01/02 never carry one. Lite-06 resolves it there. Before lite-06 an absent start is the
+ * latest group, which the publisher places as the floor once the source's feed says where it
+ * starts (see `cursorFloor`). A named start is a history floor on every wire, bounded by the
+ * publisher's max age. Mirrors the Rust `Bounds::legacy`.
  */
 export function legacyStart(version: Version, maxDelay: number | null): Start | undefined {
-	if (hasRanges(version)) return undefined;
-	const max = maxDelay === null ? null : ClockDuration.millis(maxDelay);
-	if (!resolvesStart(version)) return { live: { min: ClockDuration.ZERO, max } };
-	// A lag past every group, the largest every implementation carries losslessly, so the join
-	// takes every group still within its max. Mirrors the Rust `Start::within`.
-	if (max !== null) return { live: { min: ClockDuration.millis(NO_MAX_DELAY), max } };
-	return undefined;
+	if (hasRanges(version) || maxDelay === null) return undefined;
+	// A join past every group takes every group still within its max. Mirrors the Rust `Start::within`.
+	return { live: { min: PAST_EVERY_GROUP, max: ClockDuration.millis(maxDelay) } };
 }
 
 /** The model range one lite-07 range asks for; see {@link requestedRanges}. */

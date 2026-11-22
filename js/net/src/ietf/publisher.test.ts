@@ -5167,8 +5167,9 @@ test("a SUBSCRIBE carries no budget, so the publisher's own policy bounds it", a
 		}),
 	);
 	try {
-		// A live join whose groups only the publisher's max age expires.
-		const unbounded = [{ start: { live: { min: Duration.ZERO, max: null } } }];
+		// With no group yet it asks history from time zero, whose groups only the publisher's max
+		// age expires.
+		const unbounded = [{ start: 0n }];
 		expect(track.subscription.peek()?.ranges).toEqual(unbounded);
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n }).encode(client.writer, fx.version);

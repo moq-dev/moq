@@ -226,7 +226,7 @@ test("a held failed fill answer stays readable", async () => {
 	const pool = new cache.Pool({});
 	const producer = pooled(pool);
 	hooks.receiveTrack(producer);
-	const reader = producer.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
+	const reader = producer.subscribe({ ranges: [{}] });
 	const answer = hooks.receiveGroup(producer, { start: 1n, offset: 0, fill: true });
 	answer.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(answer.start) });
 	const group = await reader.recvGroup();

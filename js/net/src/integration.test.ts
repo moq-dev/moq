@@ -19,7 +19,7 @@ import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
 import { refuse as refuseRequest } from "./ietf/request_stream.ts";
 import * as Instance from "./instance.ts";
-import { hooks } from "./internal.ts";
+import { hooks, PAST_EVERY_GROUP } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { Routed } from "./lite/routed.ts";
@@ -304,11 +304,11 @@ test("integration: lite carries a fractional live max as a whole millisecond", a
 	const remote = wireOf(client).consume(Path.from("test"));
 	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
 	// nothing resubscribes. The publisher must see the budget rounded up instead: lite-05 carries
-	// the live join as no start under its one max age.
-	const live = (max: number) => ({
-		ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(max) } } }],
+	// the live join as no start under its one max age, which takes every group within it.
+	const live = (min: Duration, max: number) => ({
+		ranges: [{ start: { live: { min, max: Duration.millis(max) } } }],
 	});
-	const subscriber = remote.track("video").subscribe(live(38.75));
+	const subscriber = remote.track("video").subscribe(live(Duration.ZERO, 38.75));
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -317,11 +317,11 @@ test("integration: lite carries a fractional live max as a whole millisecond", a
 	});
 
 	const producer = await Promise.race([accepted, failed]);
-	expect(producer.subscription.peek()?.ranges).toEqual(live(39).ranges);
+	expect(producer.subscription.peek()?.ranges).toEqual(live(PAST_EVERY_GROUP, 39).ranges);
 
 	const updated = producer.subscription.changed();
-	subscriber.update(live(500.25));
-	expect((await Promise.race([updated, failed]))?.ranges).toEqual(live(501).ranges);
+	subscriber.update(live(Duration.ZERO, 500.25));
+	expect((await Promise.race([updated, failed]))?.ranges).toEqual(live(PAST_EVERY_GROUP, 501).ranges);
 
 	subscriber.close();
 	remote.close();

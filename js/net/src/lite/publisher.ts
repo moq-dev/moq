@@ -32,6 +32,7 @@ import {
 	hiddenBelow,
 	hooks,
 	insertRun,
+	NO_MAX_DELAY,
 	presented,
 	type Run,
 	runGaps,
@@ -421,9 +422,10 @@ class SubscriptionControls {
 		return this.#live.get(id) !== undefined;
 	}
 
-	/** Whether Range ID `id` is live and starts with a live join. */
-	joins(id: bigint): boolean {
-		return this.#live.get(id)?.start?.live !== undefined;
+	/** The staleness budget in milliseconds of Range ID `id` when it is live and a live join. */
+	joinBudget(id: bigint): number | undefined {
+		const range = this.#live.get(id);
+		return range && joinBudget(range);
 	}
 
 	/** Whether {@link take} has a control to answer with now. */
@@ -627,6 +629,13 @@ function due(range: WireRange, started: boolean): bigint | undefined {
 	if (!started && range.start !== undefined && range.start.absolute === undefined) return 0n;
 	if (range.end?.time !== undefined) return range.end.time + 1n;
 	return undefined;
+}
+
+// A live join's staleness budget in milliseconds, undefined for any other range. Mirrors the Rust
+// `join_budget`.
+function joinBudget(range: WireRange): number | undefined {
+	const live = range.start?.live;
+	return live && (live.max ?? NO_MAX_DELAY);
 }
 
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
@@ -1557,20 +1566,34 @@ export class Publisher {
 		const answered = (position: track.Position | undefined) =>
 			position && { position, ended: hooks.largestFinished(track, position) };
 		let endSent = false;
-		// Lite-07: the Range IDs an update added whose start no SUBSCRIBE_STARTED reported yet.
-		const unstarted = new Set<bigint>();
+		// Lite-07: the Range IDs an update added whose start no SUBSCRIBE_STARTED reported yet, each
+		// with its budget in milliseconds when it was added as a live join.
+		const unstarted = new Map<bigint, number | undefined>();
 
 		// Where each of the SUBSCRIBE's ranges starts once delivery starts at `from`, by Range ID,
-		// undefined for one with no group there or an update retired: SUBSCRIBE_STARTED answers
-		// each one an update added. Before lite-07 there is one range, which starts there.
+		// undefined for one with no group there or an update retired: SUBSCRIBE_START answers them.
+		// Before lite-07 there is one range, which starts there.
+		//
+		// A live join starts where it was placed, past the groups its max expired, which may be below
+		// where delivery starts: a relay serves first the groups it holds, before those the join is
+		// owed arrive. It moves delivery down to it, as one an update adds does. Any other range starts
+		// no earlier than delivery. Mirrors the Rust `TrackRun::starts`.
 		const rangeStarts = (from: bigint): (bigint | undefined)[] => {
 			if (!hasRanges(this.version)) return [from];
 			const starts = hooks.servingStarts(track, from);
+			const resolved = hooks.servingResolved(track);
 			const positions = controls.positions();
-			return Array.from({ length: Number(initial) }, (_, id) => {
+			const out = Array.from({ length: Number(initial) }, (_, id) => {
 				const index = positions.get(BigInt(id));
-				return index === undefined ? undefined : starts[index];
+				if (index === undefined) return undefined;
+				const budget = controls.joinBudget(BigInt(id));
+				const range = resolved[index];
+				if (budget === undefined || range === undefined) return starts[index];
+				const start = hooks.joinStart(track, range.start, budget);
+				return range.end === undefined || range.end > start ? start : undefined;
 			});
+			for (const start of out) if (start !== undefined && startKey !== undefined) startKey = min(startKey, start);
+			return out;
 		};
 
 		// Report where each range an update added starts, once it resolves, or with no start once
@@ -1579,7 +1602,9 @@ export class Publisher {
 			if (startKey === undefined || unstarted.size === 0) return true;
 			// An update not taken yet retired one, and taking that update forgets it. In Range ID
 			// order, as the Rust `TrackRun::report_started` reports them.
-			const held = [...unstarted].filter((id) => controls.holds(id)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+			const held = [...unstarted.keys()]
+				.filter((id) => controls.holds(id))
+				.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 			// Every range clamps against where delivery started before this batch, so one reported
 			// later isn't clamped against a start an earlier join in the batch lowered.
 			const from = startKey;
@@ -1592,11 +1617,11 @@ export class Publisher {
 				let start: bigint | undefined;
 				if (range) {
 					// A live join placed behind where delivery started, further from the live edge than
-					// the first ranges, starts where it was placed: the subscriber reads its answer as
-					// the join's start, so its groups from there are owed, and delivery now starts there
-					// too. Any other range starts no earlier than delivery.
-					const joins = controls.joins(id);
-					start = joins ? range.start : max(range.start, from);
+					// the first ranges, starts where it was placed, past the groups its max expired: the
+					// subscriber reads its answer as the join's start, so its groups from there are owed,
+					// and delivery now starts there too. Any other range starts no earlier than delivery.
+					const budget = unstarted.get(id);
+					start = budget !== undefined ? hooks.joinStart(track, range.start, budget) : max(range.start, from);
 					if (range.end !== undefined && range.end <= start) start = undefined;
 					else startKey = min(startKey, start);
 				}
@@ -1769,7 +1794,8 @@ export class Publisher {
 							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
 								for (const id of control.applied.retired) unstarted.delete(id);
-								for (const [id] of control.applied.added) if (id >= initial) unstarted.add(id);
+								for (const [id, range] of control.applied.added)
+									if (id >= initial) unstarted.set(id, joinBudget(range));
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest

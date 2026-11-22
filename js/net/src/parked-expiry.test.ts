@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { defined } from "./defined.test-util.ts";
 import { StreamCode } from "./error.ts";
 import { randomHop } from "./hop.ts";
+import { NO_MAX_DELAY } from "./internal.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { NativeSession } from "./ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
@@ -87,7 +88,11 @@ for (const protocol of protocols) {
 						broadcast: Path.from("parked"),
 						track: "video",
 						priority: 0,
-						maxDelay: budget,
+						// Lite-07 carries the budget on a live join reaching back to the oldest group, and
+						// earlier lite one subscription-wide max age.
+						...(protocol.version === Lite.DRAFT_07
+							? { ranges: [{ start: { live: { min: NO_MAX_DELAY, max: budget } } }] }
+							: { maxDelay: budget }),
 					}),
 					server,
 				);
