@@ -12796,7 +12796,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Some(0),
+				start: track::Start::Time(0),
 				end: Some(3),
 			}]);
 		let sub = logical
@@ -12833,7 +12833,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Some(0),
+				start: track::Start::Time(0),
 				end: Some(4),
 			}]);
 		let mut sub = logical
@@ -12873,7 +12873,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Some(0),
+				start: track::Start::Time(0),
 				end: Some(5),
 			}]);
 		let mut sub = logical
@@ -12913,7 +12913,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Some(0),
+				start: track::Start::Time(0),
 				end: Some(6),
 			}]);
 		let mut sub = logical
@@ -12962,7 +12962,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Some(0),
+				start: track::Start::Time(0),
 				end: Some(4),
 			}]);
 		let mut sub = front.consume().subscribe(subscription).now_or_never().unwrap().unwrap();
@@ -12997,7 +12997,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Some(0),
+				start: track::Start::Time(0),
 				end: Some(3),
 			}]);
 		let mut sub = front.consume().subscribe(subscription).now_or_never().unwrap().unwrap();
@@ -13027,7 +13027,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Some(0),
+				start: track::Start::Time(0),
 				end: Some(2),
 			}]);
 		let mut sub = logical
@@ -13058,11 +13058,11 @@ mod test {
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([
 				track::Range {
-					start: Some(8),
+					start: track::Start::Time(8),
 					end: Some(8),
 				},
 				track::Range {
-					start: Some(0),
+					start: track::Start::Time(0),
 					end: Some(8),
 				},
 			]);
