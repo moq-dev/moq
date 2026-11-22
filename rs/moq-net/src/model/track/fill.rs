@@ -201,6 +201,9 @@ pub(crate) struct Outcome {
 	// Each accepted copy short of the whole group, which a later copy may displace from the
 	// cache before a reader takes it. A whole copy covers every other, so none displaces it.
 	partial: BTreeMap<u64, group::Handle>,
+	// The group a time start's fill accepted below the time, held so where it ends is known
+	// even once the cache lets it go.
+	answer: Option<group::Handle>,
 }
 
 impl Outcome {
@@ -211,6 +214,11 @@ impl Outcome {
 
 	pub(super) fn is_accepted(&self, key: u64) -> bool {
 		self.accepted.contains(&key)
+	}
+
+	/// The group a time start's fill accepted below the time, if it created it.
+	pub(super) fn answer(&self) -> Option<&group::Handle> {
+		self.answer.as_ref()
 	}
 
 	/// What a time start's fill answered, once `time`'s key is: `None` while it is out.
@@ -1427,6 +1435,11 @@ impl Inner {
 				&& (self.flight || frames.start > 0 || frames.end.is_some())
 			{
 				outcome.partial.insert(key, group.handle());
+			}
+			if let Ok(Some(group)) = &res
+				&& key < self.start.group
+			{
+				outcome.answer = Some(group.handle());
 			}
 		}
 		uncover(&self.fills, self.id, key..end);

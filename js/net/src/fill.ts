@@ -423,7 +423,7 @@ export class FillState {
 				const group = state.#track.holds(key) === true ? undefined : state.#track.accept(key, info);
 				// A time start's fill is no live part, and a group below its key lands nowhere it owes.
 				if (pending.exclusive && !pending.done) {
-					pending.answer = { kind: "group", group: key };
+					pending.answer = { kind: "group", group: key, answer: key < pending.start ? group : undefined };
 					state.#resolve(pending, pending.start, pending.end);
 				}
 				return group;
@@ -486,7 +486,12 @@ export interface Judged {
  *
  * @internal
  */
-export type TimeStart = { kind: "group"; group: bigint } | { kind: "dropped" } | { kind: "refused"; error: Error };
+export type TimeStart =
+	/**
+	 * The group containing the time, and the group created to answer it below the time, held so where
+	 * it ends is known once the cache lets it go.
+	 */
+	{ kind: "group"; group: bigint; answer?: GroupProducer } | { kind: "dropped" } | { kind: "refused"; error: Error };
 
 /**
  * A reader's time start, from {@link FillState.timeStart}.
@@ -635,15 +640,15 @@ export class FillGroups {
 	/**
 	 * The oldest group the first group may start at: {@link start}, unless that is a reader's time
 	 * start no cached group places. Then the first group is the one containing that time: the group
-	 * starting at it, or else the newest one starting before it, at or after the floor, unless that
-	 * one ended whole at or before the time, which no group then contains. A handler
+	 * starting at it, or else the newest one starting before it, at or after the floor; once that
+	 * group ends whole at or before the time, the reader starts past it, at its End. A handler
 	 * knowing its groups only by key serves that key as any other; one that can tell which group
 	 * holds the time, as from an index, may {@link accept} that group instead, or
 	 * {@link dropGroups} the key when none does. The reader starts where the answer says, never
 	 * where the cached groups happen to say: a drop, or the fill closed unanswered, says no group
 	 * starts from the floor through the time, so it starts at the group just below the floor (at its
-	 * End once the time is past that group's span), or past the time when the floor is 0. A {@link refuseGroups refusal} fails the reader with its
-	 * error until its ranges change.
+	 * End once the time is past that group's span), or past the time when the floor is 0. A
+	 * {@link refuseGroups refusal} fails the reader with its error until its ranges change.
 	 */
 	readonly floor: bigint;
 

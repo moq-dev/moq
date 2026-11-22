@@ -997,8 +997,16 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
 // Where the held group at `key` ends, once finished whole; assigned in its static block.
 let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
-// The held group at `key`'s close, while it is still open; assigned in its static block.
-let openAt: (producer: Producer, key: bigint) => GetPromise<Error | null> | undefined;
+// The held group at `key`; assigned in its static block.
+let cachedGroup: (producer: Producer, key: bigint) => GroupProducer | undefined;
+
+// Where a range from `time` starts, the group at `key` being the newest starting at or before it and
+// `end` where it ended whole, if it did: there, unless it ended at or before the time, then at its
+// End, so at the next group, since no group contains a time past a whole group's span. A time at the
+// group's start names it whatever its End. Mirrors the Rust `reached`.
+function reached(key: bigint, time: bigint, end: bigint | undefined): bigint {
+	return end !== undefined && time > key && end <= time ? max(end, key + 1n) : key;
+}
 // How a received copy resolves its readers' time anchors, as its wire tells it; assigned in the
 // producer's static block. See `hooks.startsAtKeys` and `hooks.timeStarts`.
 let timeAnchors: (producer: Producer) => {
@@ -1606,10 +1614,7 @@ export class Producer {
 			const entry = producer.#cached.get(key);
 			return entry && hooks.groupWholeEnd(entry.group);
 		};
-		openAt = (producer, key) => {
-			const closed = producer.#cached.get(key)?.group.closed;
-			return closed?.peek() === undefined ? closed : undefined;
-		};
+		cachedGroup = (producer, key) => producer.#cached.get(key)?.group;
 		wholeAround = (producer, key) => {
 			const keys = producer.#keys;
 			const index = keyIndex(keys, key);
@@ -3372,8 +3377,8 @@ export class Subscriber {
 	#fillMoves = new Signal(0);
 	// The time starts this reader asked its fills to look up, each with the floor it asked from and
 	// its fill, absent when no handler could take it.
-	// Each with the close of the group its answer named while that group is still open.
-	#lookups: { time: bigint; floor: bigint; lookup?: Lookup; ending?: GetPromise<Error | null> }[] = [];
+	// Each with the group it answered with below the time, held while it ends.
+	#lookups: { time: bigint; floor: bigint; lookup?: Lookup; answer?: GroupProducer }[] = [];
 	// A time start's refusal, which every read fails with until the ranges change. Mirrors the Rust
 	// `Filter::refused`.
 	#refusal?: Error;
@@ -3908,7 +3913,7 @@ export class Subscriber {
 				const index = keyIndex(keys, time + 1n);
 				const below = index > 0 ? keys[index - 1] : undefined;
 				// No group contains a time past a whole group's span, so one there starts at its End.
-				const reached = (below: bigint): { at: bigint } => ({ at: holdings.reached?.(below, time) ?? below });
+				const at = (below: bigint): { at: bigint } => ({ at: reached(below, time, wholeAt(producer, below)) });
 				// A lite-07 copy holds only part of the track, so it places a time only where it can prove
 				// what its upstream would answer: at a group held before it once every key between is
 				// given up for this reader (a whole group's GROUP_END gives up the starts inside its span,
@@ -3919,13 +3924,13 @@ export class Subscriber {
 				// between, nor does a stale drop of a reader wider than the budget it was judged under.
 				// Mirrors the Rust `TrackState::containing_received`.
 				if (wire) {
-					if (below !== undefined && drops.givenUp(below + 1n, time + 1n, budget)) return reached(below);
+					if (below !== undefined && drops.givenUp(below + 1n, time + 1n, budget)) return at(below);
 					const reported = timeStartContaining(anchors.starts.get(time), time, budget);
 					if (reported !== undefined) return reported;
 					if (below === undefined && drops.givenUp(0n, time + 1n, budget)) return "before";
 					return "unknown";
 				}
-				if (below !== undefined) return reached(below);
+				if (below !== undefined) return at(below);
 				// Every key at or before it is gone, so whichever group held it will never arrive.
 				if (drops.covers(0n, time + 1n)) return "before";
 				return keys.length === 0 ? "unknown" : "before";
@@ -3952,13 +3957,6 @@ export class Subscriber {
 				return { runs, mark };
 			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
-			// There, unless the group held at `key` ended whole at or before the time, then at its End,
-			// so at the next group. A time at the group's start names it whatever its End. Mirrors the
-			// Rust `Slot::reached`.
-			reached: (key, time) => {
-				const end = wholeAt(producer, key);
-				return end !== undefined && time > key && end <= time ? max(end, key + 1n) : key;
-			},
 			// Only once the producer is gone: a group held below a reached end may still start.
 			complete: () => state.closed.peek() !== undefined,
 			// A received copy's handler is its session, which fetches by group alone.
@@ -4119,13 +4117,12 @@ export class Subscriber {
 			const answer = lookup.lookup?.answer();
 			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
 			// A group answered below the time may end whole before it, which then lies in the pause past
-			// it: wait for it to end, so the start is the same whether the cache held it or not. Mirrors
-			// the Rust `Cursor::look_up_pass`.
-			lookup.ending =
-				answer?.kind === "group" && answer.group < lookup.time && producer
-					? openAt(producer, answer.group)
-					: undefined;
-			if (lookup.ending !== undefined) continue;
+			// it: wait for it to end, then place the time by its End, held here so the start is the same
+			// whether the cache still holds it or not. Mirrors the Rust `Cursor::look_up_pass`.
+			if (answer?.kind === "group" && answer.group < lookup.time) {
+				lookup.answer ??= answer.answer ?? (producer && cachedGroup(producer, answer.group));
+				if (lookup.answer?.closed.peek() === undefined && lookup.answer !== undefined) continue;
+			}
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			lookup.lookup?.leave();
 			// Where the time falls is unknown, so the reads fail rather than guess from the cache. The
@@ -4134,11 +4131,12 @@ export class Subscriber {
 				this.#refusal = answer.error;
 				return { moved: true, again: false };
 			}
+			const ended = lookup.answer && hooks.groupWholeEnd(lookup.answer);
 			const found: Found =
 				answer === undefined
 					? { kind: "unanswered" }
 					: answer.kind === "group"
-						? answer
+						? { kind: "group", group: reached(answer.group, lookup.time, ended) }
 						: { kind: "dropped", floor: lookup.floor };
 			if (this.#window.found(lookup.time, found, this.#holdings())) moved = true;
 			if (this.#window.lookups().some((want) => want.time === lookup.time)) again = true;
@@ -5536,7 +5534,7 @@ export class Subscriber {
 			this.#state.refused.changed(fn),
 			this.#fillMoves.changed(fn),
 			...this.#lookups.flatMap((lookup) => (lookup.lookup ? [lookup.lookup.changed.changed(fn)] : [])),
-			...this.#lookups.flatMap((lookup) => (lookup.ending ? [lookup.ending.changed(fn)] : [])),
+			...this.#lookups.flatMap((lookup) => (lookup.answer ? [lookup.answer.closed.changed(fn)] : [])),
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
 			this.#state.startChanged.changed(fn),

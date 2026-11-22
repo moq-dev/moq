@@ -1045,14 +1045,9 @@ impl Slot {
 	}
 
 	/// Where a range from `time` starts, this group, at `key`, being the newest starting at or
-	/// before it: here, unless the group ended whole at or before the time, then at its End, so
-	/// at the next group, since no group contains a time past a whole group's span. A time at
-	/// the group's start names it whatever its End.
+	/// before it; see [`reached`].
 	fn reached(&self, key: u64, time: u64) -> u64 {
-		match self.end() {
-			Some(end) if time > key && end <= time => end.max(key.saturating_add(1)),
-			_ => key,
-		}
+		reached(key, time, self.end())
 	}
 
 	/// Every copy this slot holds, the live group first.
@@ -1162,6 +1157,17 @@ pub(super) const RUN_OVERHEAD: u64 = 2
 		+ size_of::<(u64, (u64, u64))>()
 		+ size_of::<(u64, u64)>()) as u64;
 
+/// Where a range from `time` starts, the group at `key` being the newest starting at or before
+/// it and `end` where it ended whole, if it did: there, unless it ended at or before the time,
+/// then at its End, so at the next group, since no group contains a time past a whole group's
+/// span. A time at the group's start names it whatever its End.
+fn reached(key: u64, time: u64, end: Option<u64>) -> u64 {
+	match end {
+		Some(end) if time > key && end <= time => end.max(key.saturating_add(1)),
+		_ => key,
+	}
+}
+
 /// Heap the track keeps per entry of its drop set's expiry index, `drops_born`, doubled as
 /// [`RUN_OVERHEAD`] is.
 pub(super) const BORN_OVERHEAD: u64 = 2 * size_of::<(ops::Range<u64>, u64)>() as u64;
@@ -1234,10 +1240,6 @@ impl Holdings for TrackState {
 
 	fn next_start(&self, from: u64) -> Option<u64> {
 		self.lookup.range(from..).next().map(|(&key, _)| key)
-	}
-
-	fn reached(&self, key: u64, time: u64) -> u64 {
-		self.lookup.get(&key).map_or(key, |slot| slot.reached(key, time))
 	}
 
 	fn complete(&self) -> bool {
@@ -9127,6 +9129,9 @@ struct Lookup {
 	floor: u64,
 	/// The fill looking it up, `None` once its answer was taken in.
 	join: Option<fill::Join>,
+	/// The group it answered with below the time, held while it ends: its End may place the
+	/// time past it, whether or not the cache still holds it by then.
+	answer: Option<group::Handle>,
 }
 
 /// A group a cursor found but has not moved past; see [`Cursor::take`].
@@ -10358,7 +10363,12 @@ impl Cursor {
 				continue;
 			}
 			let join = fills.lock().time_start(&fills, time, floor, *asking);
-			self.filter.lookups.push(Lookup { time, floor, join });
+			self.filter.lookups.push(Lookup {
+				time,
+				floor,
+				join,
+				answer: None,
+			});
 		}
 		let mut again = false;
 		for lookup in &mut self.filter.lookups {
@@ -10374,29 +10384,47 @@ impl Cursor {
 				join.update(asking);
 			}
 			let time = lookup.time;
-			let answer = match &lookup.join {
-				None => fill::TimeStart::Unanswered,
+			let (answer, created) = match &lookup.join {
+				None => (fill::TimeStart::Unanswered, None),
 				Some(join) => match join.outcome().poll(waiter, |outcome| {
-					outcome.time_start(time).map_or(Poll::Pending, Poll::Ready)
+					(outcome.time_start(time))
+						.map_or(Poll::Pending, |answer| Poll::Ready((answer, outcome.answer().cloned())))
 				}) {
 					Poll::Ready(Ok(answer)) => answer,
 					// Ended unanswered: no handler is left to answer it.
-					Poll::Ready(Err(closed)) => closed.time_start(time).unwrap_or(fill::TimeStart::Unanswered),
+					Poll::Ready(Err(closed)) => (
+						closed.time_start(time).unwrap_or(fill::TimeStart::Unanswered),
+						closed.answer().cloned(),
+					),
 					Poll::Pending => continue,
 				},
 			};
 			// A group answered below the time may end whole before it, which then lies in the pause
-			// past it: wait for it to end, so the start is the same whether the cache held it or not.
+			// past it: wait for it to end, then place the time by its End, held here so the start is
+			// the same whether the cache still holds it or not.
 			if let fill::TimeStart::Group(group) = answer
 				&& group < time
-				&& (self.state.read().lookup.get(&group))
-					.is_some_and(|slot| slot.end().is_none() && slot.serving().poll_closed(waiter).is_pending())
 			{
-				continue;
+				if lookup.answer.is_none() {
+					lookup.answer = created.or_else(|| {
+						let state = self.state.read();
+						state.lookup.get(&group).map(|slot| slot.serving().clone())
+					});
+				}
+				if lookup
+					.answer
+					.as_ref()
+					.is_some_and(|answer| answer.poll_closed(waiter).is_pending())
+				{
+					continue;
+				}
 			}
 			lookup.join = None;
 			let found = match answer {
-				fill::TimeStart::Group(group) => Found::Group(group),
+				fill::TimeStart::Group(group) => {
+					let end = lookup.answer.take().and_then(|answer| answer.end());
+					Found::Group(reached(group, time, end))
+				}
 				fill::TimeStart::Dropped => Found::Dropped { floor: lookup.floor },
 				fill::TimeStart::Unanswered => Found::Unanswered,
 				// Where the time falls is unknown, so the reads fail rather than guess from the
@@ -28605,11 +28633,12 @@ mod test {
 
 	/// A time in the pause past an evicted whole group starts where it would with that group
 	/// cached: the handler answers with the group, the reader waits for it to end, and its End
-	/// places the time past it, so the group is never read.
+	/// places the time past it, so the group is never read, even once the cache let the answer
+	/// go before the reader took it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_looked_up_group_ending_before_the_time_starts_past_it() {
-		for cached in [true, false] {
+		for (cached, evicted) in [(true, false), (false, false), (false, true)] {
 			let producer = track_producer("test", Info::timed());
 			let dynamic = producer.requests();
 			let append = |start: u64, end: u64| {
@@ -28643,12 +28672,19 @@ mod test {
 				assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new(), "waits for its End");
 				drop(group.finish_at(1400).unwrap());
 				drop(start);
+				if evicted {
+					evict(&producer, 1000);
+				}
 			}
-			assert_eq!(drain_groups(&mut subscriber), [3000], "cached: {cached}");
+			assert_eq!(
+				drain_groups(&mut subscriber),
+				[3000],
+				"cached: {cached}, evicted: {evicted}"
+			);
 			assert_eq!(
 				subscriber.resolved_range(0).map(|resolved| resolved.start),
 				Some(1400),
-				"cached: {cached}"
+				"cached: {cached}, evicted: {evicted}"
 			);
 		}
 	}
