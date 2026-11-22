@@ -1186,14 +1186,16 @@ export class Consumer {
 	}
 
 	// Judge a short close final. One below the frames an earlier copy delivered is no end of
-	// this read, since no route said the group ends there, so it fails the reader instead, with
-	// Old once its budget gave up.
-	#end(expired = false): void {
+	// this read, since no route said the group ends there, so it fails the reader instead: with
+	// the error a recovery that found nothing `failed` with, Old once its budget gave up, or
+	// NotFound.
+	#end(expired = false, failed?: unknown): void {
 		if (this.#skip > this.#state.total.peek()) {
 			this.#fail(
-				new StreamError(expired ? StreamCode.Old : StreamCode.NotFound, {
-					message: `group ${this.start} closed below frame ${this.#skip}`,
-				}),
+				failed ??
+					new StreamError(expired ? StreamCode.Old : StreamCode.NotFound, {
+						message: `group ${this.start} closed below frame ${this.#skip}`,
+					}),
 			);
 		} else {
 			this.#ended = true;
@@ -1359,7 +1361,7 @@ export class Consumer {
 				(err: unknown) => {
 					started.settled = true;
 					if (abort.signal.aborted) return;
-					if (cause.kind === "closed") this.#end();
+					if (cause.kind === "closed") this.#end(false, err);
 					else this.#fail(err);
 				},
 			);

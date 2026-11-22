@@ -1756,6 +1756,51 @@ test("a short close below the frames read fails the group", async () => {
 	close();
 });
 
+// Fails with the verdict of the route that took over, as Rust does. Mirrors the Rust test.
+test("a short close below the frames read fails with the next route's verdict", async () => {
+	const { origin, a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	const first = ta.write(0n, 2, false);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+	// The read moves onto b at frame 2 once a fails, and waits there.
+	const second = tb.write(0n, 1, false);
+	const disposeB = await swap();
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	const reading = group.readFrame().then(
+		(frame) => frame,
+		(e: unknown) => e,
+	);
+	expect(await isPending(reading)).toBe(true);
+	// c takes over before it holds the group, then b closes the group below that frame, and c
+	// gives it up.
+	const c = new BroadcastProducer();
+	const tc = copy(c);
+	const disposeC = serve(origin, c, 0n);
+	await settle();
+	await settle();
+	expect(await isPending(reading)).toBe(true);
+	second.finish();
+	await settle();
+	expect(await isPending(reading)).toBe(true);
+	hooks.dropTrackGroups(tc.producer, 0n, 1n, { error: new StreamError(StreamCode.DeliveryTimeout) });
+	await settle();
+	const err = await reading;
+	expect(toStreamCode(err)).toBe(StreamCode.DeliveryTimeout);
+	expect(toStreamCode(await group.closed)).toBe(StreamCode.DeliveryTimeout);
+	expect(first).toBeDefined();
+
+	sub.close();
+	disposeC();
+	disposeB();
+	close();
+});
+
 test("a short group ends as it closed while its copy still serves", async () => {
 	const { a, active, close } = await setup();
 	const ta = copy(a);
