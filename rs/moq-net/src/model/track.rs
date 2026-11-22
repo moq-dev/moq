@@ -7436,6 +7436,22 @@ impl Consumer {
 		self.with_state(|state| state.and_then(|state| state.read().landed(keys)))
 	}
 
+	/// The lowest group the cache holds at or above `from`.
+	#[cfg(feature = "async")]
+	pub(crate) fn next_cached_group(&self, from: u64) -> Option<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.next_cached_group(from);
+		}
+		self.with_state(|state| {
+			let state = state?.read();
+			state
+				.lookup
+				.range(from..)
+				.find(|(_, slot)| slot.serves_end())
+				.map(|(key, _)| *key)
+		})
+	}
+
 	/// The keys of `span` the cache holds, lowest first.
 	#[cfg(feature = "async")]
 	pub(crate) fn cached_groups(&self, span: ops::Range<u64>) -> Vec<u64> {

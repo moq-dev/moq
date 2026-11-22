@@ -1,4 +1,5 @@
-//! Fills a lite-07 copy asks of its upstream through a subscription rather than FETCH.
+//! Fills a copy asks of its upstream through a subscription rather than FETCH: lite-07's
+//! own, or before it, one of its own per run.
 
 use std::{
 	collections::BTreeMap,
@@ -100,8 +101,17 @@ impl FillAsk {
 ///
 /// A group stays asked until its stream finishes, since narrowing the subscription under a
 /// stream still arriving would reset it.
+///
+/// Before lite-07 a subscription carries one range, so each run goes out on a [`Recovery`]
+/// of its own instead. Its publisher names no keys between two group starts (no GROUP_END
+/// or SUBSCRIBE_SKIP), and the keys of a timed track are its media time, so FETCHing a run
+/// key by key would cost a round trip per microsecond. A SUBSCRIBE from the run's first key
+/// answers in one round trip instead: its start is the first group at or past that key, and
+/// nothing below it is delivered.
 #[derive(Default)]
 pub(super) struct RangeFills {
+	/// Whether each run goes out on its own subscription, before lite-07.
+	per_run: bool,
 	held: Vec<track::FillGroups>,
 	/// What the upstream subscription asks for the fills now.
 	pub ask: FillAsk,
@@ -125,6 +135,14 @@ pub(super) struct RangeFills {
 }
 
 impl RangeFills {
+	/// The fills of a copy whose upstream speaks `version`.
+	pub fn new(version: lite::Version) -> Self {
+		Self {
+			per_run: !version.has_ranges(),
+			..Default::default()
+		}
+	}
+
 	/// Whether no fill is held, asked for, or recovering.
 	pub fn is_empty(&self) -> bool {
 		self.held.is_empty() && self.ask.is_empty() && self.recoveries.is_empty()
@@ -343,6 +361,11 @@ impl RangeFills {
 		// Rebuilt from those still out, so one ending leaves a later one's coverage of the same
 		// groups intact.
 		self.cover();
+		// A run's own subscription answers only below its start, so what lies past it is asked
+		// again rather than counted recovered.
+		if self.per_run {
+			self.recovered = self.recovering.clone();
+		}
 
 		let mut ask = FillAsk::default();
 		// Every run a held fill still owes, recovered or not.
@@ -387,6 +410,12 @@ impl RangeFills {
 		self.held = held;
 
 		self.forget_answered();
+
+		// Each run goes out on its own subscription, asked again by the next pass, which polls it.
+		if self.per_run && !ask.groups.is_empty() {
+			self.recover = std::mem::take(&mut ask.groups);
+			return self.poll(serve, serving, accounted, read, waiter);
+		}
 
 		// A recovery no held fill owes any group of is cancelled, once none of its streams is
 		// still being read or nobody reads the track, and a group is recovered once for the
@@ -520,6 +549,9 @@ struct Recovery {
 	serving: track::Producer,
 	id: u64,
 	groups: Range<u64>,
+	/// Before lite-07: the subscription proves only the keys below its start, so it asks no
+	/// further than the group it starts at.
+	one_start: bool,
 	state: RecoveryState,
 	/// The groups this subscription said it will not deliver, and why.
 	refused: RangeMap<u64, Refusal>,
@@ -544,14 +576,25 @@ enum RecoveryState {
 
 impl Recovery {
 	fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
+		// Before lite-07 the start is the answer, which the publisher gives only once a group in
+		// range can start it: the range reaches the first group held at or past the run, or the
+		// live edge when none is.
+		let one_start = !serve.subscriber.version.has_group_end();
+		let end = match one_start {
+			true => serving
+				.consume()
+				.next_cached_group(groups.end)
+				.map(|key| key.saturating_add(1)),
+			false => Some(groups.end),
+		};
 		let subscription = Subscription::default()
-			.with_ranges(track::Range::span(Some(groups.start), Some(groups.end)))
+			.with_ranges(track::Range::span(Some(groups.start), end))
 			.with_priority(priority)
 			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending);
 		let ranges = vec![lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
-			end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
 		}];
 		let copy = super::Accepted {
 			producer: serving.clone(),
@@ -564,6 +607,7 @@ impl Recovery {
 			serving: serving.clone(),
 			id: establish.id,
 			groups,
+			one_start,
 			state: RecoveryState::Establish(Box::new(establish)),
 			refused: Default::default(),
 			fresh: Default::default(),
@@ -670,6 +714,11 @@ impl Recovery {
 								Refusal::passing(StreamError::NotFound),
 							);
 							active.started = Some(start.starts[0]);
+							// Nothing names the keys past a group before lite-07, so this one waits
+							// only for the group it starts at, and the rest is asked again.
+							if self.one_start && from < groups.end {
+								self.groups = groups.start..from.saturating_add(1);
+							}
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
 							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));

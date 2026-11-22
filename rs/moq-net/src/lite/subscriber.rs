@@ -12849,7 +12849,7 @@ impl ServeLoop {
 			sub: Sub::None,
 			fetches,
 			feed_fetches: FeedFetches::new(&serve.subscriber.runtime),
-			range_fills: RangeFills::default(),
+			range_fills: RangeFills::new(serve.subscriber.version),
 			closed: serve.subscriber.session.clone(),
 			supports_update: !matches!(serve.subscriber.version, Version::Lite01 | Version::Lite02),
 			supports_fetch: serve.subscriber.version.has_track_stream(),
@@ -13389,13 +13389,14 @@ impl ServeLoop {
 					// subscription churn.
 					match self.dynamic.poll_requested_fill(waiter) {
 						Poll::Ready(Ok(fill)) => {
-							// Lite-07 asks for more than one group through the subscription. One
-							// group, or a slice of one, is what FETCH carries.
+							// More than one group is asked through a subscription: lite-07's own, or
+							// earlier, one of its own per run (see `RangeFills`). One group, or a
+							// slice of one, is what FETCH carries.
 							let last = fill.end().saturating_sub(1);
 							let groups = fill.start().frame == 0
 								&& fill.start().group < last
 								&& fill.group(last).frame_end().is_none();
-							if serve.subscriber.version.has_ranges() && groups {
+							if serve.subscriber.version.has_track_stream() && groups {
 								self.range_fills.push(fill);
 							} else if self.supports_fetch {
 								self.fetches.push(FillServeRun::new(
