@@ -43,8 +43,11 @@ An in-process reproduction with the mock transport (late reader, idle-cancel
 and resubscribe, bursts; drafted against `rs/moq-net/src/lite/`) never made
 the publisher reset an opened stream and passed on both an older pin and
 current `main`. The first step is a test that fails on `main`. It forces
-`Old` resets early in a lite-06 subscription to a timestamp-keyed track (stream
-credit held so `give_way` fires, or an injected reset after the header), then
+`Old` resets of opened, serving group streams early in a lite-06 subscription
+to a timestamp-keyed track, after their headers went out: a group expiring
+under the subscription's budget while the transport parks its stream
+(`poll_given_up`), or an injected reset. `give_way` will not do, since it
+gives up the group waiting for stream credit before it has a stream. Then it
 attaches an ordered reader from the start. It asserts the reader reaches later
 groups and the copy sends a bounded number of FETCHes. That test also pins
 down which reader wants the interior keys, and why a reset makes it want them.
