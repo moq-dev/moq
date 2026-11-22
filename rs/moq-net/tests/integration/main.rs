@@ -50,6 +50,7 @@ mod implementation;
 mod instance;
 mod late_lower_group;
 mod late_tail_reader;
+mod lite06_fill_walk;
 mod lazy_discovery;
 mod mesh_sweep;
 mod mesh_withdraw;
