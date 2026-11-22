@@ -7,7 +7,8 @@
 //! sized proportionally to what it wrote, and pays that debt by aborting its own oldest
 //! groups with [`Error::Evicted`](crate::Error::Evicted). Reclamation is therefore
 //! distributed across every writing track and converges on the capacity without any
-//! global eviction task.
+//! global eviction task. A capacity below what the pool pins (each live track's newest
+//! group) converges on the pins instead: nothing owes debt for bytes no eviction can free.
 //!
 //! Cross-track ordering comes from one statistic: the mean last-access time of the
 //! evictable population (every cached group except each live track's protected latest).
@@ -152,7 +153,7 @@ struct Inner {
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
 	// The part of `used` no eviction can reclaim while its track lives: each track's live
-	// edge and spare encoder. Signed: a footprint that flips while one of its bytes is
+	// edge (see [`Footprint`]) and spare encoder. Signed: a footprint that flips while one of its bytes is
 	// mid-update pins it an instant early or late, which may dip this below zero.
 	pinned: AtomicI64,
 	// Wall-clock LRU window in milliseconds; u64::MAX means never expire by idleness.
