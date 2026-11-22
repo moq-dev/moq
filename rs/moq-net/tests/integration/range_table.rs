@@ -411,6 +411,10 @@ async fn run(case: &Case, mode: Mode) -> Result<bool, String> {
 			let mut reader = subscribe(&remote, &case.read).await.map_err(|err| err.to_string())?;
 			settle().await;
 			let held = a.held_unis();
+			// Every group stalled, so the switch leaves the new route what the old never released.
+			if held != want {
+				return Err(format!("the first route opened {held} Group Streams for {want} groups"));
+			}
 			let oldest = (want / 2).min(held.saturating_sub(1));
 			for _ in 0..oldest {
 				a.release_oldest_uni();

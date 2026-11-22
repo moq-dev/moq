@@ -7457,7 +7457,6 @@ impl Consumer {
 	}
 
 	/// The keys of `span` the cache holds, lowest first.
-	#[cfg(feature = "async")]
 	pub(crate) fn cached_groups(&self, span: ops::Range<u64>) -> Vec<u64> {
 		if let Some(serving) = self.serving() {
 			return serving.cached_groups(span);

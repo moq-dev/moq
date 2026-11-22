@@ -725,8 +725,8 @@ struct Copy {
 	backfill: bool,
 	/// Asked only for groups under the serving copy's resume point. They come as fills under
 	/// where the track's live feed starts, which [`track::Consumer::may_land`] never waits
-	/// for, so they are waited for until its own subscription accounts for them, it fails, or
-	/// the reader's budget passes.
+	/// for, so a bounded reader waits for what only they may deliver until its own
+	/// subscription accounts for it, it fails, or the reader's budget passes.
 	fills: bool,
 	/// The frames of the group at `floor` the reader already held when this copy was asked,
 	/// so it asks for that group from the next frame; see [`Reader::resume_at`].
@@ -1101,9 +1101,9 @@ struct Retain<'a> {
 	mirrored: &'a Mirrored,
 	delivered: &'a Delivered,
 	out: &'a [(u64, Weak<()>)],
-	/// What the reader lacks under the serving copy's resume point that only a fill may
-	/// still deliver: no copy holds it, another replaced copy still feeds it, or a copy
-	/// declared it skipped, as a group's Previous Start does for the keys under it.
+	/// What a bounded reader lacks under the serving copy's resume point that only a fill may
+	/// still deliver: no copy holds it, no other replaced copy still feeds it, and no copy
+	/// declared it skipped. Empty for an unbounded reader, which no gap ends early.
 	owed: &'a RangeSet<u64>,
 	waiter: &'a kio::Waiter,
 }
