@@ -1059,8 +1059,7 @@ impl Copy {
 			// arrival; without a floor, only what follows its first arrival can.
 			let asked = self.floor.is_some_and(|floor| self.backfill || floor <= key);
 			self.track.peek_group(key).is_some()
-				|| (lands
-					&& self.may_land(key..key.saturating_add(1), asked, grace, None, reader.waiter))
+				|| (lands && self.may_land(key..key.saturating_add(1), asked, grace, None, reader.waiter))
 		};
 		match Arc::strong_count(&self.lease) > 1 || reader.out.iter().any(|(key, _)| backs(*key)) {
 			true => Retains::Keep,
