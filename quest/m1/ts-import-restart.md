@@ -40,5 +40,4 @@ being restarted, then asserts the bound.
 
 ## Related
 
-- [TS harness splice arm](/quest/m3/ts-harness-splice.md) - another arm from #9315
 - [TS harness late join to one program](/quest/m3/ts-harness-program-join.md) - another arm from #9315

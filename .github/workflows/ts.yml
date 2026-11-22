@@ -138,6 +138,23 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # The same over an unflagged encoder switch: halfway through, every PID moves onto a clock
+      # 16,844.5 s back (then ahead), breaking its continuity counter once, with nothing in the
+      # stream marking it. The capture must be the source in place, its breaks the source's own.
+      - name: TS passthrough of an encoder switch
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --splice
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS passthrough of an encoder switch forward
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --splice forward
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
       # so the export has to spread it over the slots before its DTS and still keep
       # the constant-rate schedule.

@@ -33,6 +33,7 @@
 #   ./run.sh --loss 10             # drop 10% of the relay's datagrams to the subscriber (moq-shaper)
 #   ./run.sh --passthrough         # carry the multiplex whole (`import/export ts --passthrough`)
 #   ./run.sh --passthrough --mpts  # the same with two programs whose recovery points rarely line up
+#   ./run.sh --passthrough --splice [forward] # an unflagged encoder switch, its clock 16,844.5 s back (or on)
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it
@@ -100,6 +101,7 @@ RATE=""         # bits/s moq-shaper carries from the relay to the subscriber, be
 QUEUE=""        # how long a datagram may wait for RATE before the path tail-drops it
 PASSTHROUGH=""  # carry the multiplex whole and grade the capture packet by packet against the source
 MPTS=""         # publish two programs, which only --passthrough carries whole
+SPLICE=""       # back or forward: splice two encodes on unrelated clocks, as an encoder switch does
 EXPORT=()       # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
@@ -222,6 +224,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mpts)
             MPTS=1
+            shift
+            ;;
+        --splice)
+            SPLICE=back
+            if [[ "${2:-}" == back || "${2:-}" == forward ]]; then
+                SPLICE="$2"
+                shift
+            fi
             shift
             ;;
         *)
@@ -366,6 +376,10 @@ if [[ -n "$MPTS" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPE
     echo "error: --mpts generates its own clip and needs --passthrough, the mode that carries a multiplex whole" >&2
     exit 1
 fi
+if [[ -n "$SPLICE" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$MPTS$WITH_EIT") ]]; then
+    echo "error: --splice generates its own clip and needs --passthrough, the mode that carries a clock step" >&2
+    exit 1
+fi
 IMPORT=(import ts)
 if [[ -n "$PASSTHROUGH" ]]; then
     IMPORT+=(--passthrough)
@@ -487,6 +501,12 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$SPLICE" ]]; then
+    echo "### generating ~${DURATION}s clip whose clock steps 16,844.5 s $SPLICE halfway, unflagged"
+    # Nothing in the stream marks the switch: every PID's continuity counter breaks once, the
+    # second encode joins mid-GOP, and no packet sets discontinuity_indicator. Passthrough must
+    # carry it as it is, so the source's own continuity breaks are its only verdict.
+    python3 "$DIR/splice.py" "$SRC_TS" "$SPLICE" --duration "$DURATION" --bitrate "$BITRATE"
 elif [[ -n "$MPTS" ]]; then
     echo "### generating ~${DURATION}s two-program clip with ffmpeg"
     # Two services in one multiplex, each with its own PCR PID, their keyframes every 25 and
@@ -924,7 +944,7 @@ if [[ -n "$PASSTHROUGH" ]]; then
         exit 1
     fi
     echo
-    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS$RATE" ]]; then
+    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS$RATE$SPLICE" ]]; then
         python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode" || exit 1
     else
         echo "decoded-content comparison: not covered for this profile"

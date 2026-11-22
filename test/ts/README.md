@@ -26,6 +26,8 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
   nothing lost.
 - `passthrough.py` places every packet of an `export ts --passthrough` capture
   at its source position and compares the compliance verdicts.
+- `splice.py` generates an unflagged encoder switch, the whole multiplex moving
+  onto another clock at one packet, for `--passthrough --splice`.
 
 ## Running
 
@@ -53,6 +55,7 @@ just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
 just test ts --passthrough      # carry the multiplex whole, grade it packet by packet
 just test ts --passthrough --mpts # the same with two programs on their own clocks
+just test ts --passthrough --splice [forward] # the same across an unflagged encoder switch
 just test ts-passthrough-capture # the same over an in-repo capture the T-STD model passes
 ```
 
@@ -802,6 +805,19 @@ access points, mostly open mid-GOP for program 2. The capture is still the
 source in place: a group boundary promises no immediate decode for every
 program, and passthrough neither inserts tables nor extracts a program.
 
+`--splice` generates the switch a contribution feed makes between two encoders
+whose clocks are not locked (`splice.py`, its controls in `splice.test.py`).
+Halfway through, the whole multiplex moves onto a clock 16,844.5 s back
+(`--splice forward`: ahead) at one packet: every PID breaks its continuity
+counter once, the video and audio are cut mid-PES, the second encode joins
+mid-GOP 0.08 s before its keyframe, the tables are byte-identical either side,
+and no packet sets `discontinuity_indicator`. Either side passes the
+compliance checks alone, so what the whole fails is the switch's: its
+continuity breaks, the clock step, and the cut PES. The import splices the step
+rather than ending (moq-dev/moq#9069), so the capture is still the source in place, and
+the source's continuity breaks are the only ones its verdict carries. Its decoded
+content is not compared: the PES cut at the switch is corrupt by design.
+
 A gap fails the run, `--loss` included, since QUIC retransmits what the path
 drops. A path that loses content, as `--rate` does, runs the grader with
 `--loss-ok`: gaps are reported and the checks run on the capture alone, since a
@@ -966,7 +982,7 @@ browser interop. It runs nightly on `main`, and release PRs touching a workspace
 crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
 toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion, MPTS, and an encoder switch back and forward), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,
