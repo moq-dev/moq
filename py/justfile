@@ -22,11 +22,12 @@ default:
 # keeps uv from fetching moq-ffi off PyPI; maturin just installed it locally.
 # The build shares target/ffi-testing with dart because both enable the same
 # `testing,openh264` features, while keeping that cdylib separate from the
-# default build the other bindings read from target/debug. Prebuilding
-# uniffi-bindgen via `cargo build` lets mbx cache its crates before maturin runs
-# `cargo run --bin uniffi-bindgen`.
+# default build the other bindings read from target/debug. Maturin's own
+# `cargo run --bin uniffi-bindgen --features cli`, from the workspace root,
+# misses mbx, so the same selection builds first, where mbx caches it, and
+# maturin's run finds it fresh. Adding `--package` would resolve other features.
 _develop *args:
-    cd .. && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/ffi-testing" bash sh/local.sh bash -euo pipefail -c 'cargo build --locked --package uniffi-bindgen --features cli --bin uniffi-bindgen && exec uv run --no-sync maturin develop --locked --uv "$@"' _ {{ args }}
+    cd .. && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/ffi-testing" bash sh/local.sh bash -euo pipefail -c 'cargo build --locked --bin uniffi-bindgen --features cli && exec uv run --no-sync maturin develop --locked --uv "$@"' _ {{ args }}
     uv pip install --no-deps -e moq-rs
 
 # Editable build + pyright + doc samples + docs; the root `python` module in
