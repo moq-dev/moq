@@ -6,7 +6,7 @@
 	"scripts": {
 		"dev": "vitepress dev --open",
 		"build": "vitepress build",
-		"check": "tsc --noEmit && bun test ./.vitepress ./concept/audio-jitter && vitepress build",
+		"check": "bun check --no-script",
 		"test": "bun test ./.vitepress ./concept/audio-jitter",
 		"preview": "vitepress preview",
 		"deploy": "vitepress build && wrangler deploy"

@@ -18,7 +18,7 @@
 	},
 	"scripts": {
 		"build": "bun build.ts",
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
