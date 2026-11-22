@@ -1024,6 +1024,7 @@ async fn serve_announced(
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: update,
+			..
 		} = event
 		{
 			broadcasts.push(update.prefix);

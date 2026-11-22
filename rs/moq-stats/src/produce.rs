@@ -1802,10 +1802,12 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
 		}
 	}
@@ -3177,14 +3179,17 @@ mod tests {
 				broadcast::TracksEvent::Added {
 					name,
 					info: broadcast::Listed::Track(_),
+					..
 				} => (name, true),
 				broadcast::TracksEvent::Removed {
 					kind: broadcast::Kind::Track,
 					name,
+					..
 				}
 				| broadcast::TracksEvent::Finished {
 					kind: broadcast::Kind::Track,
 					name,
+					..
 				} => (name, false),
 				_ => continue,
 			};

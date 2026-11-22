@@ -577,11 +577,17 @@ pub fn route_info(
 pub fn route_update(prefix: &str, cost: u64) -> crate::origin::RouteEvent {
 	crate::origin::RouteEvent {
 		kind: crate::origin::RouteKind::Update,
-		announce: crate::announce::Announce {
-			prefix: crate::Path::new(prefix).unwrap(),
-			captures: None,
-			route: route_info([], cost, None),
-		},
+		announce: announce(prefix, cost),
+	}
+}
+
+/// A route over `prefix` with `cost`, as an announcement listing reports it, for tests that
+/// hand one to code that consumes announcements.
+pub fn announce(prefix: &str, cost: u64) -> crate::announce::Announce {
+	crate::announce::Announce {
+		prefix: crate::Path::new(prefix).unwrap(),
+		captures: None,
+		route: route_info([], cost, None),
 	}
 }
 

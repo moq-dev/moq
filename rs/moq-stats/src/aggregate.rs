@@ -1248,10 +1248,12 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
 		}
 	}
@@ -2281,15 +2283,7 @@ mod tests {
 		let path = Path::from_static(".stats/node/a");
 		let instance: Instance = "a".parse().unwrap();
 		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into());
-		merged.apply_announce(
-			&moq_net::announce::Announce {
-				prefix: path.clone(),
-				captures: None,
-				route: moq_net::fuzz::route_info([], 0, None),
-			},
-			instance.clone(),
-			true,
-		);
+		merged.apply_announce(&moq_net::fuzz::announce(path.as_str(), 0), instance.clone(), true);
 		(merged, (path, instance))
 	}
 
@@ -2303,15 +2297,7 @@ mod tests {
 			value
 		};
 		let path = Path::from_static(".stats/node/b");
-		merged.apply_announce(
-			&moq_net::announce::Announce {
-				prefix: path.clone(),
-				captures: None,
-				route: moq_net::fuzz::route_info([], 0, None),
-			},
-			"b".parse().unwrap(),
-			true,
-		);
+		merged.apply_announce(&moq_net::fuzz::announce(path.as_str(), 0), "b".parse().unwrap(), true);
 		let second = (path, "b".parse().unwrap());
 		merged
 			.nodes
