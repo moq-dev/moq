@@ -131,8 +131,8 @@ interface Span {
 /**
  * One end of a lite-07 range: a model time (`time`), or a group by its start (`absolute`), as the
  * Rust `lite::Anchor` holds. A group's start is its time, so `absolute` goes out as a time, an end
- * (exclusive) as the time just before it, and decodes as one. A start partway through the group,
- * at a nonzero `frame`, goes out as a Position; an end there can't.
+ * (exclusive) as the time just before it, and decodes as one. One partway through the group, at a
+ * nonzero `frame`, goes out as a Position: a start from that frame, an end before it.
  */
 export type WireAnchor = { absolute: bigint; frame?: number; time?: never } | { time: bigint; absolute?: never };
 
@@ -155,15 +155,12 @@ export function toWireRanges(ranges: readonly Range[]): WireRange[] {
 /**
  * The lite-07 Anchor Type and values of a range's start or `end`: None (0), Time (1), or Position
  * (2). Both time ends are inclusive, so an absolute end, exclusive, goes out as the time just
- * before it; one at group 0 holds nothing a time can say. A start partway through a group is a
- * Position: its start, then the frame.
+ * before it; one at group 0 holds nothing a time can say. An end or start partway through a group
+ * is a Position: its start, then the frame.
  */
 function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, ...bigint[]] {
 	if (anchor?.absolute !== undefined) {
-		if (anchor.frame) {
-			if (end) throw new Error("a range ends only at a group");
-			return [2, anchor.absolute, BigInt(anchor.frame)];
-		}
+		if (anchor.frame) return [2, anchor.absolute, BigInt(anchor.frame)];
 		if (!end) return [1, anchor.absolute];
 		if (anchor.absolute === 0n) throw new Error(EMPTY_RANGE);
 		return [1, anchor.absolute - 1n];
@@ -237,8 +234,9 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }): Range[] {
 export function requestedRange(range: WireRange): Range {
 	// Empty, as group bounds say it: keep its place, covering no group.
 	const start = range.start?.absolute;
-	const end = range.end?.absolute;
-	if (start !== undefined && end !== undefined && end <= start) return { ...EMPTY };
+	const end = range.end && endGroup(range.end);
+	if (start !== undefined && range.end?.absolute !== undefined && endsBefore(range.end, range.start))
+		return { ...EMPTY };
 	if (end === 0n) return { ...EMPTY };
 	const out: Range = {};
 	if (range.start) out.start = start ?? range.start.time;
@@ -248,11 +246,11 @@ export function requestedRange(range: WireRange): Range {
 }
 
 /**
- * Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, or a start
+ * Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, or a position
  * partway through a group, never at frame 0, which a time says. Any other Anchor Type is a
  * protocol violation.
  */
-async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undefined> {
+async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
 	const kind = await r.u53();
 	switch (kind) {
 		case 0:
@@ -260,7 +258,6 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undef
 		case 1:
 			return { time: await r.u62() };
 		case 2: {
-			if (end) throw new ProtocolViolation("a range ends partway through a group");
 			const absolute = await r.u62();
 			const frame = await r.u53();
 			if (frame === 0) throw new ProtocolViolation("a position at frame 0");
@@ -273,8 +270,8 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undef
 
 /** Decode one lite-07 range: its start, then its end. */
 async function decodeRange(r: Reader): Promise<WireRange> {
-	const start = await decodeAnchor(r, false);
-	const end = await decodeAnchor(r, true);
+	const start = await decodeAnchor(r);
+	const end = await decodeAnchor(r);
 	const range: WireRange = {};
 	if (start) range.start = start;
 	if (end) range.end = end;
@@ -318,8 +315,25 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
  */
 export function rangeBounds(range: WireRange): [bigint | undefined, bigint | undefined] {
 	const from = range.start?.absolute ?? range.start?.time;
-	const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+	const end = range.end;
+	const to = end && (endGroup(end) ?? (end.time === undefined ? undefined : end.time + 1n));
 	return [from, to];
+}
+
+/**
+ * The exclusive group an absolute end stops before, `undefined` for a time: past its group when
+ * it stops partway through it.
+ */
+function endGroup(end: WireAnchor): bigint | undefined {
+	if (end.absolute === undefined) return undefined;
+	return end.frame ? end.absolute + 1n : end.absolute;
+}
+
+/** Whether absolute `end`, exclusive, stops at or before `start`, frames included. */
+function endsBefore(end: WireAnchor, start: WireAnchor | undefined): boolean {
+	if (end.absolute === undefined || start?.absolute === undefined) return false;
+	if (end.absolute !== start.absolute) return end.absolute < start.absolute;
+	return (end.frame ?? 0) <= (start.frame ?? 0);
 }
 
 /**
@@ -348,7 +362,6 @@ export function spanBetween(
  * them per Position.
  */
 export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number> {
-	const frames = new Map<bigint, number>();
 	const positions: [bigint, number][] = [];
 	for (const range of ranges) {
 		const start = range.start;
@@ -357,6 +370,28 @@ export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number
 		if (start?.absolute !== undefined && start.frame && (to === undefined || to > start.absolute))
 			positions.push([start.absolute, start.frame]);
 	}
+	return onlyCovered(positions, ranges);
+}
+
+/**
+ * The frame each lite-07 Position end stops its group before, by group, for each group no other
+ * range may cover, as {@link positionFrames} keeps starts. Mirrors the Rust `stops`.
+ */
+export function positionStops(ranges: readonly WireRange[]): Map<bigint, number> {
+	const positions: [bigint, number][] = [];
+	for (const range of ranges) {
+		const end = range.end;
+		// One starting past the group it stops partway through covers nothing.
+		const [from, to] = rangeBounds(range);
+		if (end?.absolute !== undefined && end.frame && (from === undefined || to === undefined || from < to))
+			positions.push([end.absolute, end.frame]);
+	}
+	return onlyCovered(positions, ranges);
+}
+
+/** The `positions` whose group no range in `ranges` but their own may cover, by group. */
+function onlyCovered(positions: readonly [bigint, number][], ranges: readonly WireRange[]): Map<bigint, number> {
+	const frames = new Map<bigint, number>();
 	if (positions.length === 0) return frames;
 	// A range may cover a group unless it starts past it or ends at or before it. One that
 	// starts at or past its end covers none, so with it left out, no range does both and the
@@ -365,9 +400,8 @@ export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number
 	const ends: bigint[] = [];
 	let count = 0;
 	for (const range of ranges) {
-		const from = range.start?.absolute ?? range.start?.time;
 		// No start, or no end, may cover it.
-		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+		const [from, to] = rangeBounds(range);
 		if (from !== undefined && to !== undefined && from >= to) continue;
 		count++;
 		if (from !== undefined) starts.push(from);

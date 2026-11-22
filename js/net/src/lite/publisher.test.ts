@@ -2284,6 +2284,49 @@ test("lite-07 an update moves frame starts with the live ranges", async () => {
 	}
 });
 
+test("lite-07 a Position end parks the group, the stream open, until an update moves it", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		sub.serve(0n);
+		let served: Served | undefined;
+		const serving = sub.servedGroup().then((group) => {
+			served = group;
+		});
+		await flush();
+		expect(served).toBeUndefined();
+
+		// Moved past the group, the rest goes out on the same stream, which then ends.
+		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
+			sub.client.writer,
+			version,
+		);
+		await serving;
+		expect(served).toMatchObject({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+	} finally {
+		await sub.close();
+	}
+
+	// A group ending at the end ends its stream as usual.
+	const ending = await servedSubscription({
+		version,
+		frames: ["a", "b"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		ending.serve(0n);
+		expect(await ending.servedGroup()).toMatchObject({ key: 0n, payloads: ["a", "b"] });
+	} finally {
+		await ending.close();
+	}
+});
+
 // The update and group are both ready when the write unblocks. Control is drained first, then
 // the group is popped and positioned synchronously under the new frame cap.
 test("lite draft-06: a queued frame update applies before the next group pop", async () => {
