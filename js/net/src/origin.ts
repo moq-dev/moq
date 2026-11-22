@@ -1801,6 +1801,7 @@ export class Producer implements Table {
 			open();
 			const previous = current.instance;
 			const restart = inserted && previous !== next.instance;
+			const renewed = previous !== next.instance || (current.epoch ?? 0n) !== (next.epoch ?? 0n);
 			current = next;
 			for (const { below, entry } of filed) {
 				if (restart) this.#state.restart(entry);
@@ -1812,8 +1813,19 @@ export class Producer implements Table {
 				else server.reset();
 			}
 			if (!inserted) return;
+			// A claim is new when it restarts, so it moves to the newest place and yields a tie
+			// it held to one that kept its instance (see bestCandidate).
+			this.#state.routes.mutate((routes) => {
+				if (!renewed) return;
+				for (const { at, entry } of filed) {
+					const entries = routes.get(at);
+					const index = entries?.indexOf(entry) ?? -1;
+					if (!entries || index <= 0) continue;
+					entries.splice(index, 1);
+					entries.unshift(entry);
+				}
+			});
 			refresh();
-			this.#state.routes.mutate(() => {});
 		};
 
 		if (publishes && minted) {

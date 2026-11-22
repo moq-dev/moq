@@ -641,17 +641,30 @@ fn close(pair: MockPair) {
 fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, seen: &Seen) -> Result<(), String> {
 	use origin::RouteKind::*;
 
+	// An UPDATE names the instance shown and a RESTART another. A session keeps the instance
+	// it minted for a path while it holds the path, so this holds on a moq-lite-06 wire too.
+	// A retraction names the last route advertised, which may be a minted RESTART the update
+	// hold kept back and the retraction overtook (see `RouteEvent::announce`).
+	let current = reader.shown.get(&seen.path);
+	match (seen.kind, current) {
+		(Start, Some(_)) => return Err("START for a shown broadcast".into()),
+		(Update | Restart | End | Offline, None) => return Err("an event for a broadcast not shown".into()),
+		(End | Offline, Some(_)) if seen.instance.is_minted() => {}
+		(Update | End | Offline, Some(shown)) if shown.instance != seen.instance => {
+			return Err(format!("the event names another instance than {:?}", shown.instance));
+		}
+		(Restart, Some(shown)) if shown.instance == seen.instance => {
+			return Err("RESTART to the same instance".into());
+		}
+		_ => {}
+	}
+
 	// A moq-lite-06 wire carries no instance, so each session mints one per path, and a
 	// reader can hold only the path to what was published: the settled check below still
 	// requires exactly the paths it reaches.
 	if seen.instance.is_minted() {
 		if !publications.values().any(|publication| publication.path == seen.path) {
 			return Err("a path nobody published".into());
-		}
-		match (seen.kind, reader.shown.contains_key(&seen.path)) {
-			(Start, true) => return Err("START for a shown broadcast".into()),
-			(Update | Restart | End | Offline, false) => return Err("an event for a broadcast not shown".into()),
-			_ => {}
 		}
 		match seen.kind {
 			Start | Update | Restart => {
@@ -672,18 +685,6 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 	let publication = publications.get(&seen.instance).ok_or("an instance nobody published")?;
 	if publication.path != seen.path {
 		return Err(format!("the instance of {}", publication.path));
-	}
-	let current = reader.shown.get(&seen.path);
-	match (seen.kind, current) {
-		(Start, Some(_)) => return Err("START for a shown broadcast".into()),
-		(Update | Restart | End | Offline, None) => return Err("an event for a broadcast not shown".into()),
-		(Update | End | Offline, Some(shown)) if shown.instance != seen.instance => {
-			return Err(format!("the event names another instance than {:?}", shown.instance));
-		}
-		(Restart, Some(shown)) if shown.instance == seen.instance => {
-			return Err("RESTART to the same instance".into());
-		}
-		_ => {}
 	}
 	match seen.kind {
 		Start | Update | Restart => {
