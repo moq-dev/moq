@@ -369,6 +369,14 @@ fn depths(tree: &[Option<Node>]) -> Vec<usize> {
 
 /// Run every failure on `mesh` under `arm`, each from a settled mesh.
 pub(super) fn fail(arm: Arm, mesh: &Mesh, coarse: bool) -> Vec<(Failure, Row)> {
+	fail_only(arm, mesh, coarse, None)
+}
+
+/// Run only the requested subset of failures (or all when `only` is `None`), skipping
+/// unrelated scenario groups while keeping prerequisite steps (such as Goaway before Drained).
+fn fail_only(arm: Arm, mesh: &Mesh, coarse: bool, only: Option<&[Failure]>) -> Vec<(Failure, Row)> {
+	let want = |f: Failure| only.is_none_or(|set| set.contains(&f));
+	let want_any = |fs: &[Failure]| fs.iter().copied().any(want);
 	let tree = mesh.tree();
 	let depth = depths(&tree);
 	let fresh = || {
@@ -381,109 +389,143 @@ pub(super) fn fail(arm: Arm, mesh: &Mesh, coarse: bool) -> Vec<(Failure, Row)> {
 	let home = mesh.homes[0];
 	let degree = |relay: Node| mesh.links.iter().filter(|&&(a, b, _)| a == relay || b == relay).count();
 
-	let mut lab = fresh();
-	if let Some((a, b)) = lab.tree_link(0, true, &tree) {
-		out.push((Failure::Close, observe(&mut lab, &|lab| lab.cut(a, b))));
-		out.push((Failure::Reopen, observe(&mut lab, &|lab| lab.mend(a, b))));
-		let flap = observe(&mut lab, &|lab| {
-			for _ in 0..8 {
-				lab.cut(a, b);
-				lab.pass(1);
-				lab.mend(a, b);
-				lab.pass(1);
+	if want_any(&[Failure::Close, Failure::Reopen, Failure::Flap, Failure::Twin]) {
+		let mut lab = fresh();
+		if let Some((a, b)) = lab.tree_link(0, true, &tree) {
+			out.push((Failure::Close, observe(&mut lab, &|lab| lab.cut(a, b))));
+			if want_any(&[Failure::Reopen, Failure::Flap, Failure::Twin]) {
+				out.push((Failure::Reopen, observe(&mut lab, &|lab| lab.mend(a, b))));
 			}
-		});
-		out.push((Failure::Flap, flap));
-		// The link farthest from the publisher that shares no relay with the first.
-		let other = (mesh.links.iter())
-			.filter(|&&(c, d, _)| ![c, d].contains(&a) && ![c, d].contains(&b) && ![c, d].contains(&home))
-			.max_by_key(|&&(c, d, _)| (depth[c] + depth[d], c, d));
-		if let Some(&(c, d, _)) = other {
-			let twin = observe(&mut lab, &|lab| {
-				lab.cut(a, b);
-				lab.cut(c, d);
-			});
-			out.push((Failure::Twin, twin));
+			if want_any(&[Failure::Flap, Failure::Twin]) {
+				let flap = observe(&mut lab, &|lab| {
+					for _ in 0..8 {
+						lab.cut(a, b);
+						lab.pass(1);
+						lab.mend(a, b);
+						lab.pass(1);
+					}
+				});
+				out.push((Failure::Flap, flap));
+			}
+			if want(Failure::Twin) {
+				// The link farthest from the publisher that shares no relay with the first.
+				let other = (mesh.links.iter())
+					.filter(|&&(c, d, _)| ![c, d].contains(&a) && ![c, d].contains(&b) && ![c, d].contains(&home))
+					.max_by_key(|&&(c, d, _)| (depth[c] + depth[d], c, d));
+				if let Some(&(c, d, _)) = other {
+					let twin = observe(&mut lab, &|lab| {
+						lab.cut(a, b);
+						lab.cut(c, d);
+					});
+					out.push((Failure::Twin, twin));
+				}
+			}
 		}
 	}
 
-	// The half of the relays farthest from the publisher lose every link to the rest.
-	let mut far: Vec<Node> = (0..mesh.relays).filter(|&relay| relay != home).collect();
-	far.sort_by_key(|&relay| (std::cmp::Reverse(depth[relay]), relay));
-	let far: BTreeSet<Node> = far.into_iter().take(mesh.relays / 2).collect();
-	let crossing: Vec<(Node, Node)> = (mesh.links.iter())
-		.filter(|&&(a, b, _)| far.contains(&a) != far.contains(&b))
-		.map(|&(a, b, _)| (a, b))
-		.collect();
-	let mut lab = fresh();
-	let partition = observe(&mut lab, &|lab| {
-		for &(a, b) in &crossing {
-			lab.cut(a, b);
+	if want_any(&[Failure::Partition, Failure::Heal]) {
+		// The half of the relays farthest from the publisher lose every link to the rest.
+		let mut far: Vec<Node> = (0..mesh.relays).filter(|&relay| relay != home).collect();
+		far.sort_by_key(|&relay| (std::cmp::Reverse(depth[relay]), relay));
+		let far: BTreeSet<Node> = far.into_iter().take(mesh.relays / 2).collect();
+		let crossing: Vec<(Node, Node)> = (mesh.links.iter())
+			.filter(|&&(a, b, _)| far.contains(&a) != far.contains(&b))
+			.map(|&(a, b, _)| (a, b))
+			.collect();
+		let mut lab = fresh();
+		let partition = observe(&mut lab, &|lab| {
+			for &(a, b) in &crossing {
+				lab.cut(a, b);
+			}
+		});
+		out.push((Failure::Partition, partition));
+		if want(Failure::Heal) {
+			let heal = observe(&mut lab, &|lab| {
+				for &(a, b) in &crossing {
+					lab.mend(a, b);
+				}
+			});
+			out.push((Failure::Heal, heal));
 		}
-	});
-	out.push((Failure::Partition, partition));
-	let heal = observe(&mut lab, &|lab| {
-		for &(a, b) in &crossing {
-			lab.mend(a, b);
-		}
-	});
-	out.push((Failure::Heal, heal));
+	}
 
 	let transit = transit(mesh, &tree);
 	if let Some(relay) = transit {
-		let mut lab = fresh();
-		out.push((Failure::Death, observe(&mut lab, &|lab| lab.crash(relay))));
-		out.push((Failure::Restart, observe(&mut lab, &|lab| lab.revive(relay))));
-		let mut lab = fresh();
-		let slow = observe(&mut lab, &|lab| lab.crash_over(relay, IDLE));
-		out.push((Failure::SlowDeath, slow));
-		let mut lab = fresh();
-		out.push((Failure::Goaway, observe(&mut lab, &|lab| lab.net.goaway(relay))));
-		let drained = observe(&mut lab, &|lab| {
-			for peer in lab.links_of(relay) {
-				lab.cut(relay, peer);
+		if want_any(&[Failure::Death, Failure::Restart]) {
+			let mut lab = fresh();
+			out.push((Failure::Death, observe(&mut lab, &|lab| lab.crash(relay))));
+			if want(Failure::Restart) {
+				out.push((Failure::Restart, observe(&mut lab, &|lab| lab.revive(relay))));
 			}
-		});
-		out.push((Failure::Drained, drained));
+		}
+		if want(Failure::SlowDeath) {
+			let mut lab = fresh();
+			let slow = observe(&mut lab, &|lab| lab.crash_over(relay, IDLE));
+			out.push((Failure::SlowDeath, slow));
+		}
+		if want_any(&[Failure::Goaway, Failure::Drained]) {
+			let mut lab = fresh();
+			out.push((Failure::Goaway, observe(&mut lab, &|lab| lab.net.goaway(relay))));
+			if want(Failure::Drained) {
+				let drained = observe(&mut lab, &|lab| {
+					for peer in lab.links_of(relay) {
+						lab.cut(relay, peer);
+					}
+				});
+				out.push((Failure::Drained, drained));
+			}
+		}
 	}
-	let hub = (0..mesh.relays)
-		.filter(|relay| !mesh.homes.contains(relay) && Some(*relay) != transit)
-		.max_by_key(|&relay| (degree(relay), std::cmp::Reverse(relay)));
-	if let Some(relay) = hub {
+	if want(Failure::HubDeath) {
+		let hub = (0..mesh.relays)
+			.filter(|relay| !mesh.homes.contains(relay) && Some(*relay) != transit)
+			.max_by_key(|&relay| (degree(relay), std::cmp::Reverse(relay)));
+		if let Some(relay) = hub {
+			let mut lab = fresh();
+			let slow = observe(&mut lab, &|lab| lab.crash_over(relay, IDLE));
+			out.push((Failure::HubDeath, slow));
+		}
+	}
+
+	if want_any(&[Failure::LoseOne, Failure::LoseBoth]) {
+		// A second home as far from the first as the mesh allows.
+		let second = (0..mesh.relays)
+			.filter(|&relay| relay != home)
+			.max_by_key(|&relay| (depth[relay], std::cmp::Reverse(relay)))
+			.expect("two relays");
 		let mut lab = fresh();
-		let slow = observe(&mut lab, &|lab| lab.crash_over(relay, IDLE));
-		out.push((Failure::HubDeath, slow));
+		lab.attach(node, second);
+		assert!(lab.settle());
+		out.push((Failure::LoseOne, observe(&mut lab, &|lab| lab.cut(node, home))));
+		if want(Failure::LoseBoth) {
+			out.push((Failure::LoseBoth, observe(&mut lab, &|lab| lab.cut(node, second))));
+		}
 	}
 
-	// A second home as far from the first as the mesh allows.
-	let second = (0..mesh.relays)
-		.filter(|&relay| relay != home)
-		.max_by_key(|&relay| (depth[relay], std::cmp::Reverse(relay)))
-		.expect("two relays");
-	let mut lab = fresh();
-	lab.attach(node, second);
-	assert!(lab.settle());
-	out.push((Failure::LoseOne, observe(&mut lab, &|lab| lab.cut(node, home))));
-	out.push((Failure::LoseBoth, observe(&mut lab, &|lab| lab.cut(node, second))));
-
-	let next = (mesh.links.iter()).find_map(|&(a, b, _)| match home {
-		_ if a == home => Some(b),
-		_ if b == home => Some(a),
-		_ => None,
-	});
-	if let Some(next) = next {
-		let mut lab = fresh();
-		let moved = observe(&mut lab, &|lab| {
-			lab.cut(node, home);
-			lab.attach(node, next);
+	if want(Failure::Move) {
+		let next = (mesh.links.iter()).find_map(|&(a, b, _)| match home {
+			_ if a == home => Some(b),
+			_ if b == home => Some(a),
+			_ => None,
 		});
-		out.push((Failure::Move, moved));
+		if let Some(next) = next {
+			let mut lab = fresh();
+			let moved = observe(&mut lab, &|lab| {
+				lab.cut(node, home);
+				lab.attach(node, next);
+			});
+			out.push((Failure::Move, moved));
+		}
 	}
 
-	let mut lab = fresh();
-	out.push((Failure::Leave, observe(&mut lab, &|lab| lab.cut(node, home))));
-	let mut lab = fresh();
-	out.push((Failure::Home, observe(&mut lab, &|lab| lab.crash(home))));
+	if want(Failure::Leave) {
+		let mut lab = fresh();
+		out.push((Failure::Leave, observe(&mut lab, &|lab| lab.cut(node, home))));
+	}
+	if want(Failure::Home) {
+		let mut lab = fresh();
+		out.push((Failure::Home, observe(&mut lab, &|lab| lab.crash(home))));
+	}
 	out
 }
 
@@ -618,7 +660,7 @@ fn a_relay_with_no_claim_offers_no_route() {
 #[test]
 fn a_failure_costs_the_same_with_more_publishers() {
 	let cost = |arm: Arm, mesh: &Mesh| {
-		let rows = fail(arm, mesh, false);
+		let rows = fail_only(arm, mesh, false, Some(&[Failure::Close, Failure::Partition]));
 		let of = |failure: Failure| {
 			rows.iter()
 				.find(|(found, _)| *found == failure)
@@ -643,7 +685,7 @@ fn a_failure_costs_the_same_with_more_publishers() {
 fn a_session_floor_stops_most_of_the_hunting() {
 	let mesh = chords(12, 2);
 	let cost = |arm: Arm| {
-		let rows = fail(arm, &mesh, false);
+		let rows = fail_only(arm, &mesh, false, Some(&[Failure::Drained]));
 		let drained = rows.iter().find(|(failure, _)| *failure == Failure::Drained);
 		drained.expect("a transit relay").1.cost.sent.msgs
 	};

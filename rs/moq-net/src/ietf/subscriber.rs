@@ -857,7 +857,7 @@ fn wants_feed(subscription: &track::Subscription, edge: Option<u64>) -> bool {
 	let one_key = subscription.ranges.iter().all(|range| {
 		matches!(
 			(range.start, range.end),
-			(Some(start), Some(end)) if end <= start
+			(track::Start::Time(start), Some(end)) if end <= start
 		)
 	});
 	subscription.feed || !history || !one_key
@@ -14469,7 +14469,7 @@ struct Update {
 type WireBounds = (Option<u64>, Option<u64>);
 
 /// The single wire span covering `subscription`'s ranges: mixed starts and ranges without one
-/// from group zero. A range with no start and a stated Min Age is the live join, which started
+/// from group zero. A live join started
 /// at the group it `joined`: one that holds every start keeps the live join, so a reader
 /// adding a range the join already delivers widens nothing.
 fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireBounds {
@@ -14481,10 +14481,13 @@ fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireB
 		.ranges
 		.iter()
 		.filter(|range| !range.is_empty())
-		.filter_map(|range| range.start)
+		.filter_map(|range| range.time())
 		.min();
-	let covered =
-		subscription.delay.min.is_some() && joined.is_some_and(|joined| first.is_none_or(|first| first >= joined));
+	// Every range without a time start joins live, so none reaches back past the join.
+	let joins = (subscription.ranges.iter())
+		.filter(|range| !range.is_empty())
+		.all(|range| range.start != track::Start::Oldest);
+	let covered = joins && joined.is_some_and(|joined| first.is_none_or(|first| first >= joined));
 	let start = match covered {
 		true => None,
 		false => first.map(|_| 0),
@@ -14616,15 +14619,17 @@ mod filter_tests {
 	#[test]
 	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
 		let live = |min: Option<Duration>, start: u64| {
-			track::Subscription::default()
-				.with_delay(track::Delay::default().with_min(min))
-				.with_ranges([
-					track::Range::default(),
-					track::Range {
-						start: Some(start),
-						end: None,
-					},
-				])
+			let first = match min {
+				Some(min) => track::Range::from(track::Start::Live(min)),
+				None => track::Range::default(),
+			};
+			track::Subscription::default().with_ranges([
+				first,
+				track::Range {
+					start: crate::track::Start::Time(start),
+					end: None,
+				},
+			])
 		};
 		let joined = Some(10);
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 10), joined), (None, None));

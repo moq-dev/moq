@@ -87,6 +87,8 @@ export const PresenceSchema = zeros({
 	wire_rx: counter,
 	credit_stalls: counter,
 	credit_stalled_us: counter,
+	credit_held_readers_us: counter,
+	credit_held_evicted_us: counter,
 	routes_refused: counter,
 	routes: RoutesSchema,
 });

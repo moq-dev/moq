@@ -1,3 +1,4 @@
+import { Duration as ClockDuration } from "@moq/clock";
 import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
@@ -5,7 +6,7 @@ import type { Reader, Writer } from "../stream.ts";
 import type { Order, Position, Range } from "../track.ts";
 import { UNBOUNDED } from "../util/key.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
-import { EMPTY } from "../window.ts";
+import { EMPTY, liveMillis, rangeTime } from "../window.ts";
 import * as Duration from "./duration.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
@@ -16,7 +17,6 @@ import {
 	hasFrameBounds,
 	hasGroupOrder,
 	hasGroupSpan,
-	hasMinDelay,
 	hasOrder,
 	hasRanges,
 	hasRefresh,
@@ -129,12 +129,16 @@ interface Span {
 }
 
 /**
- * One end of a lite-07 range: a model time (`time`), or a group by its start (`absolute`), as the
- * Rust `lite::Anchor` holds. A group's start is its time, so `absolute` goes out as a time, an end
- * (exclusive) as the time just before it, and decodes as one. One partway through the group, at a
- * nonzero `frame`, goes out as a Position: a start from that frame, an end before it.
+ * One end of a lite-07 range: a model time (`time`), a group by its start (`absolute`), or a live
+ * join's lag in whole milliseconds (`live`), as the Rust `lite::Anchor` holds. A group's start is
+ * its time, so `absolute` goes out as a time, an end (exclusive) as the time just before it, and
+ * decodes as one. One partway through the group, at a nonzero `frame`, goes out as a Position: a
+ * start from that frame, an end before it. A live join is a start only.
  */
-export type WireAnchor = { absolute: bigint; frame?: number; time?: never } | { time: bigint; absolute?: never };
+export type WireAnchor =
+	| { absolute: bigint; frame?: number; time?: never; live?: never }
+	| { time: bigint; absolute?: never; live?: never }
+	| { live: number; absolute?: never; time?: never };
 
 /** A lite-07 range as the wire carries it; see {@link WireAnchor}. */
 export interface WireRange {
@@ -142,23 +146,31 @@ export interface WireRange {
 	end?: WireAnchor;
 }
 
-/** The wire form of model `ranges`: the same times, a time being a group start. */
+/** The wire form of model `ranges`: the same times, a time being a group start, and live joins by lag. */
 export function toWireRanges(ranges: readonly Range[]): WireRange[] {
 	return ranges.map((range) => {
 		const out: WireRange = {};
-		if (range.start !== undefined) out.start = { time: range.start };
+		const time = rangeTime(range);
+		const live = liveMillis(range);
+		if (time !== undefined) out.start = { time };
+		else if (live !== undefined) out.start = { live };
 		if (range.end !== undefined) out.end = { time: range.end };
 		return out;
 	});
 }
 
 /**
- * The lite-07 Anchor Type and values of a range's start or `end`: None (0), Time (1), or Position
- * (2). Both time ends are inclusive, so an absolute end, exclusive, goes out as the time just
- * before it; one at group 0 holds nothing a time can say. An end or start partway through a group
- * is a Position: its start, then the frame.
+ * The lite-07 Anchor Type and values of a range's start or `end`: None (0), Time (1), Position (2),
+ * or Live (3). Both time ends are inclusive, so an absolute end, exclusive, goes out as the time
+ * just before it; one at group 0 holds nothing a time can say. An end or start partway through a
+ * group is a Position: its start, then the frame. A live join goes out as its lag in milliseconds,
+ * and only as a start.
  */
 function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, ...bigint[]] {
+	if (anchor?.live !== undefined) {
+		if (end) throw new Error("a range ends only at a group");
+		return [3, BigInt(anchor.live)];
+	}
 	if (anchor?.absolute !== undefined) {
 		if (anchor.frame) return [2, anchor.absolute, BigInt(anchor.frame)];
 		if (!end) return [1, anchor.absolute];
@@ -238,18 +250,19 @@ export function requestedRange(range: WireRange): Range {
 	if (frameEmpty(range)) return { ...EMPTY };
 	if (end === 0n) return { ...EMPTY };
 	const out: Range = {};
-	if (range.start) out.start = start ?? range.start.time;
+	if (range.start?.live !== undefined) out.start = { live: ClockDuration.millis(range.start.live) };
+	else if (range.start) out.start = start ?? range.start.time;
 	// An absolute end is exclusive; every model end includes its group.
 	if (range.end) out.end = end === undefined ? range.end.time : end - 1n;
 	return out;
 }
 
 /**
- * Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, or a position
- * partway through a group, never at frame 0, which a time says. Any other Anchor Type is a
- * protocol violation.
+ * Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, a position
+ * partway through a group, never at frame 0, which a time says, or a live join's lag in
+ * milliseconds, a start only. Any other Anchor Type is a protocol violation.
  */
-async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
+async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undefined> {
 	const kind = await r.u53();
 	switch (kind) {
 		case 0:
@@ -262,6 +275,9 @@ async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
 			if (frame === 0) throw new ProtocolViolation("a position at frame 0");
 			return { absolute, frame };
 		}
+		case 3:
+			if (end) throw new ProtocolViolation("a range ends at a live join");
+			return { live: await r.u53() };
 		default:
 			throw new ProtocolViolation(`unknown range anchor: ${kind}`);
 	}
@@ -269,8 +285,8 @@ async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
 
 /** Decode one lite-07 range: its start, then its end. */
 async function decodeRange(r: Reader): Promise<WireRange> {
-	const start = await decodeAnchor(r);
-	const end = await decodeAnchor(r);
+	const start = await decodeAnchor(r, false);
+	const end = await decodeAnchor(r, true);
 	const range: WireRange = {};
 	if (start) range.start = start;
 	if (end) range.end = end;
@@ -490,6 +506,7 @@ export function rangeKey(range: WireRange): string {
 	const anchor = (anchor: WireAnchor | undefined) => {
 		if (anchor?.absolute !== undefined) return `a${anchor.absolute}.${anchor.frame ?? 0}`;
 		if (anchor?.time !== undefined) return `t${anchor.time}`;
+		if (anchor?.live !== undefined) return `l${anchor.live}`;
 		return "-";
 	};
 	return `${anchor(range.start)}:${anchor(range.end)}`;
@@ -737,13 +754,6 @@ export function inclusiveGroupEnd(exclusive?: bigint): bigint | undefined {
 	return exclusive - 1n;
 }
 
-/** Encode the `Subscriber Min Age`: milliseconds plus one, zero meaning not stated. Dropped
- * on a wire without the field. */
-async function encodeMinDelay(w: Writer, version: Version, minDelay: number | undefined) {
-	if (!hasMinDelay(version)) return;
-	await Duration.encodeOptional(w, minDelay);
-}
-
 /** What lite-03 to lite-06 send for no `Subscriber Max Age` limit, which their bare milliseconds can't say. */
 const MAX_SAFE_DELAY_MS = Number.MAX_SAFE_INTEGER;
 
@@ -762,12 +772,6 @@ async function decodeMaxDelay(r: Reader, version: Version): Promise<number | nul
 	return r.u53();
 }
 
-/** Decode the `Subscriber Min Age`, as not stated on a wire without the field. */
-async function decodeMinDelay(r: Reader, version: Version): Promise<number | undefined> {
-	if (!hasMinDelay(version)) return undefined;
-	return Duration.decodeOptional(r);
-}
-
 export class SubscribeUpdate {
 	/** A refresh request for this group or later, judged against the local track's refresh. */
 	wantedGroup?: bigint;
@@ -779,11 +783,6 @@ export class SubscribeUpdate {
 	 * once a newer group is available. Lite-01/02 carry none and decode as `null`.
 	 */
 	maxDelay: number | null;
-	/**
-	 * Subscriber min delay (`Subscriber Min Age`) in milliseconds, or undefined when not stated.
-	 * Lite-07+; earlier wires decode it as not stated and drop it on encode.
-	 */
-	minDelay?: number;
 	startGroup?: bigint;
 	endGroup?: bigint;
 	/** See {@link Subscribe.startFrame}. */
@@ -803,7 +802,6 @@ export class SubscribeUpdate {
 		wantedGroup?: bigint;
 		order?: Order;
 		maxDelay?: number | null;
-		minDelay?: number;
 		startGroup?: bigint;
 		endGroup?: bigint;
 		startFrame?: number;
@@ -817,7 +815,6 @@ export class SubscribeUpdate {
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
 		this.maxDelay = props.maxDelay === undefined ? 0 : props.maxDelay;
-		this.minDelay = props.minDelay;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
@@ -836,7 +833,6 @@ export class SubscribeUpdate {
 				await w.u8(toWire(this.priority));
 				await encodeOrder(w, version, this.order);
 				await encodeMaxDelay(w, version, this.maxDelay);
-				await encodeMinDelay(w, version, this.minDelay);
 				if (hasRanges(version)) {
 					// An edit of the live ranges, which may add none: `ranges`, or else the span as
 					// the one range added once `remove` retires the rest.
@@ -868,7 +864,6 @@ export class SubscribeUpdate {
 				const priority = fromWire(await r.u8());
 				const order = await decodeOrder(r, version);
 				const maxDelay = await decodeMaxDelay(r, version);
-				const minDelay = await decodeMinDelay(r, version);
 				let span: Span & { ranges?: WireRange[]; remove?: bigint[] };
 				if (hasRanges(version)) {
 					// Not preallocated, like the ranges: each id costs a byte of the bounded message.
@@ -884,7 +879,6 @@ export class SubscribeUpdate {
 					priority,
 					order,
 					maxDelay,
-					minDelay,
 					...span,
 				});
 			}
@@ -923,11 +917,6 @@ export class Subscribe {
 	 * once a newer group is available. Lite-01/02 carry none and decode as `null`.
 	 */
 	maxDelay: number | null;
-	/**
-	 * Subscriber min delay (`Subscriber Min Age`) in milliseconds, or undefined when not stated.
-	 * Lite-07+; earlier wires decode it as not stated and drop it on encode.
-	 */
-	minDelay?: number;
 
 	startGroup?: bigint;
 	endGroup?: bigint;
@@ -959,7 +948,6 @@ export class Subscribe {
 		priority: number;
 		order?: Order;
 		maxDelay?: number | null;
-		minDelay?: number;
 		startGroup?: bigint;
 		endGroup?: bigint;
 		startFrame?: number;
@@ -973,7 +961,6 @@ export class Subscribe {
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
 		this.maxDelay = props.maxDelay === undefined ? 0 : props.maxDelay;
-		this.minDelay = props.minDelay;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
@@ -996,7 +983,6 @@ export class Subscribe {
 			default:
 				await encodeOrder(w, version, this.order);
 				await encodeMaxDelay(w, version, this.maxDelay);
-				await encodeMinDelay(w, version, this.minDelay);
 				await encodeSpan(w, version, this, this.ranges);
 				break;
 		}
@@ -1017,7 +1003,6 @@ export class Subscribe {
 			default: {
 				const order = await decodeOrder(r, version);
 				const maxDelay = await decodeMaxDelay(r, version);
-				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
 				return new Subscribe({
 					id,
@@ -1027,7 +1012,6 @@ export class Subscribe {
 					priority,
 					order,
 					maxDelay,
-					minDelay,
 					...span,
 				});
 			}

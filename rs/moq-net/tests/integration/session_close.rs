@@ -11,6 +11,7 @@ use support::AtStart;
 
 use std::time::Duration;
 
+use moq_net::transport::poll::{SendStream as _, Session as _};
 use moq_net::{Error, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -200,6 +201,45 @@ async fn close_gives_up_on_a_live_track_for(version: &str) {
 		.expect("close timed out");
 	assert!(matches!(res, Err(Error::Timeout)), "{res:?}");
 	assert_eq!((kio::clock::now() - started), Duration::from_secs(1));
+}
+
+/// A transport that never confirms this side's close, as WebTransport waits for a peer
+/// that is gone to acknowledge its close capsule, still ends the session after a grace,
+/// whether a handle closed it or the protocol did over a peer's violation.
+#[kio::test]
+async fn an_unconfirmed_close_still_ends_the_session() {
+	for by_protocol in [false, true] {
+		let pair = connect_mock(MockConnectOptions::new("moq-lite-06".parse().unwrap())).await;
+		pair.client_transport.withhold_close_confirmation();
+		let started = kio::clock::now();
+		// A second SETUP stream, which lite's protocol answers by closing the session. Held
+		// open, since dropping it resets it before the client reads it.
+		let transport = pair.server_transport.clone();
+		let _setup = match by_protocol {
+			true => {
+				let mut send = transport.open_uni(Default::default()).await.expect("open_uni");
+				send.write(&[0x01]).await.expect("write");
+				Some(send)
+			}
+			false => {
+				pair.client.abort(Error::GoawayTimeout);
+				None
+			}
+		};
+
+		let err = kio::clock::timeout(TIMEOUT, pair.client.closed())
+			.await
+			.unwrap_or_else(|_| panic!("by protocol {by_protocol}: the unconfirmed close never ended the session"));
+		assert!(
+			kio::clock::now() - started < Duration::from_secs(1),
+			"by protocol {by_protocol}: ended after {:?} with {err:?}",
+			kio::clock::now() - started
+		);
+		match by_protocol {
+			true => assert!(!matches!(err, Error::GoawayTimeout | Error::Cancel), "{err:?}"),
+			false => assert!(matches!(err, Error::GoawayTimeout), "{err:?}"),
+		}
+	}
 }
 
 /// An abort from another handle cuts a drain short.

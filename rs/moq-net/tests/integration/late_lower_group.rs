@@ -30,6 +30,10 @@ const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 /// From `start`, or with an unstated Min Age the oldest group still around when there is none.
 fn floored(start: Option<u64>) -> Range {
+	let start = match start {
+		Some(start) => moq_net::track::Start::Time(start),
+		None => moq_net::track::Start::Oldest,
+	};
 	Range { start, end: None }
 }
 
@@ -248,8 +252,15 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let subscribe = |range: Range, min: Option<Duration>| {
 		let track = remote.track("late").unwrap();
 		async move {
+			let range = match (range.start, min) {
+				(moq_net::track::Start::Oldest, Some(min)) => Range {
+					start: moq_net::track::Start::Live(min),
+					..range
+				},
+				_ => range,
+			};
 			let subscription = Subscription::default()
-				.with_delay(Delay::default().with_min(min).with_max(BUDGET))
+				.with_delay(Delay::default().with_max(BUDGET))
 				.with_ranges([range]);
 			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await
