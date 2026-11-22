@@ -1739,6 +1739,19 @@ export class Publisher {
 			if (end instanceof Error) throw end;
 			return end === done;
 		};
+		// Lite-07: `drained`, or `undefined` once a control arrives first. An update may move a stop
+		// a group is parked at, which only the loop applies, so the drain waits for it no longer.
+		const drainedOrControl = async (): Promise<boolean | undefined> => {
+			let dispose: (() => void) | undefined;
+			const control = new Promise<undefined>((resolve) => {
+				dispose = controls.changed(() => resolve(undefined));
+			});
+			try {
+				return await race([drained(), control]);
+			} finally {
+				dispose?.();
+			}
+		};
 		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_FINISH sent
 		// early could let the subscriber settle before the reset arrives. A subscription capped
 		// short of the end is owed no error, so its boundary goes out.
@@ -2000,7 +2013,9 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						if (!(await drained())) return false;
+						const drain = keepsSubscribeOpen(this.version) ? await drainedOrControl() : await drained();
+						if (drain === undefined) continue;
+						if (!drain) return false;
 						if (pendingDrops.length > 0) continue;
 						// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: an update may still ask
 						// for the ended track's history, and the subscriber FINs once it wants nothing

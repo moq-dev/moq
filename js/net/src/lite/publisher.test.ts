@@ -2326,6 +2326,32 @@ test("lite-07 a Position end parks the group, the stream open, until an update m
 		await ending.close();
 	}
 
+	// A track that ends while a group is parked still applies the update that moves its stop.
+	const ended = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		ended.serve(0n);
+		let served: Served | undefined;
+		const serving = ended.servedGroup().then((group) => {
+			served = group;
+		});
+		ended.track.finish();
+		await flush();
+		expect(served).toBeUndefined();
+		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
+			ended.client.writer,
+			version,
+		);
+		await serving;
+		expect(served).toMatchObject({ key: 0n, payloads: ["a", "b", "c"] });
+	} finally {
+		await ended.close();
+	}
+
 	// The subscriber leaving resets a parked stream: no update will move its stop.
 	const leaving = await servedSubscription({
 		version,

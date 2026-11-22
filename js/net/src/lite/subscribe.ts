@@ -235,8 +235,7 @@ export function requestedRange(range: WireRange): Range {
 	// Empty, as group bounds say it: keep its place, covering no group.
 	const start = range.start?.absolute;
 	const end = range.end && endGroup(range.end);
-	if (start !== undefined && range.end?.absolute !== undefined && endsBefore(range.end, range.start))
-		return { ...EMPTY };
+	if (frameEmpty(range)) return { ...EMPTY };
 	if (end === 0n) return { ...EMPTY };
 	const out: Range = {};
 	if (range.start) out.start = start ?? range.start.time;
@@ -329,6 +328,11 @@ function endGroup(end: WireAnchor): bigint | undefined {
 	return end.frame ? end.absolute + 1n : end.absolute;
 }
 
+/** Whether a range ends at or before its start, frames included: empty, covering no group. */
+function frameEmpty(range: WireRange): boolean {
+	return range.end !== undefined && endsBefore(range.end, range.start);
+}
+
 /** Whether absolute `end`, exclusive, stops at or before `start`, frames included. */
 function endsBefore(end: WireAnchor, start: WireAnchor | undefined): boolean {
 	if (end.absolute === undefined || start?.absolute === undefined) return false;
@@ -364,6 +368,7 @@ export function spanBetween(
 export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number> {
 	const positions: [bigint, number][] = [];
 	for (const range of ranges) {
+		if (frameEmpty(range)) continue;
 		const start = range.start;
 		// One ending at or before the group it starts partway through covers nothing.
 		const [, to] = rangeBounds(range);
@@ -380,6 +385,7 @@ export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number
 export function positionStops(ranges: readonly WireRange[]): Map<bigint, number> {
 	const positions: [bigint, number][] = [];
 	for (const range of ranges) {
+		if (frameEmpty(range)) continue;
 		const end = range.end;
 		// One starting past the group it stops partway through covers nothing.
 		const [from, to] = rangeBounds(range);
@@ -400,6 +406,7 @@ function onlyCovered(positions: readonly [bigint, number][], ranges: readonly Wi
 	const ends: bigint[] = [];
 	let count = 0;
 	for (const range of ranges) {
+		if (frameEmpty(range)) continue;
 		// No start, or no end, may cover it.
 		const [from, to] = rangeBounds(range);
 		if (from !== undefined && to !== undefined && from >= to) continue;
