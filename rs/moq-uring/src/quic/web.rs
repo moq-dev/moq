@@ -1409,7 +1409,10 @@ mod tests {
 		buf.extend_from_slice(&frame(FRAME_DATA, &close_capsule(9, "pipelined")));
 
 		let mut partial = BytesMut::from(&buf[..headers - 1]);
-		assert!(take_connect(&mut partial).expect("parse").is_none(), "the headers are cut short");
+		assert!(
+			take_connect(&mut partial).expect("parse").is_none(),
+			"the headers are cut short"
+		);
 
 		let request = take_connect(&mut buf).expect("parse").expect("whole headers");
 		assert_eq!(request.url.path(), "/anon");

@@ -5271,7 +5271,10 @@ mod tests {
 			1200,
 		);
 		let rs = server.recv[&id].as_ref().unwrap();
-		assert_eq!(rs.max_stream_data(VarInt::MAX.into_inner()), (VarInt::MAX.into_inner(), false));
+		assert_eq!(
+			rs.max_stream_data(VarInt::MAX.into_inner()),
+			(VarInt::MAX.into_inner(), false)
+		);
 	}
 
 	/// Streams the peer frees never raise MAX_STREAMS past the 2^60 a peer accepts.
