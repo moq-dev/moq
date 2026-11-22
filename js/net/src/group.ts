@@ -1185,9 +1185,19 @@ export class Consumer {
 		return false;
 	}
 
-	// Judge a short close final.
-	#end(): void {
-		this.#ended = true;
+	// Judge a short close final. One below the frames an earlier copy delivered is no end of
+	// this read, since no route said the group ends there, so it fails the reader instead, with
+	// Old once its budget gave up.
+	#end(expired = false): void {
+		if (this.#skip > this.#state.total.peek()) {
+			this.#fail(
+				new StreamError(expired ? StreamCode.Old : StreamCode.NotFound, {
+					message: `group ${this.start} closed below frame ${this.#skip}`,
+				}),
+			);
+		} else {
+			this.#ended = true;
+		}
 		this.#refresh();
 	}
 
@@ -1199,7 +1209,7 @@ export class Consumer {
 		if (!this.#continues(false) || (!decide && !this.#recover?.wants(undefined)) || !this.#continues(true))
 			return false;
 		if (this.#expiry?.expired()) {
-			this.#end();
+			this.#end(true);
 			return false;
 		}
 		await this.#resume({ kind: "closed" });
@@ -1603,8 +1613,9 @@ export class Consumer {
 				throw closed;
 			}
 			if (closed !== undefined) {
-				// Closed short after a newer route took over, which may hold more.
-				if (await this.#readOn(true)) continue;
+				// Closed short after a newer route took over, which may hold more. A close that
+				// failed the reader throws above.
+				if ((await this.#readOn(true)) || this.#verdict.peek()) continue;
 				// The copy finished the group: a replacement asked for meanwhile is moot.
 				this.#abandon();
 				this.#refresh();

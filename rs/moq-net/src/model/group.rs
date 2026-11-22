@@ -4199,10 +4199,10 @@ impl Consumer {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
 					// The copy being read still serves and holds no more than was read, so
-					// nothing continues the group.
+					// nothing continues the group. The recovery stays, so a later read, such as
+					// the next one of a batch that swallowed this error, fails the same way.
 					Cause::Closed if past => {
 						recover.failed(index, &Error::NotFound);
-						self.let_go();
 						return Poll::Ready(Err(Error::NotFound));
 					}
 					// The copy being read still serves, so its close is the group's end.
@@ -4236,11 +4236,11 @@ impl Consumer {
 							.as_ref()
 							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
 				{
+					if !closed {
+						return Poll::Ready(Err(Error::Old));
+					}
 					self.let_go();
-					return match closed {
-						true => res,
-						false => Poll::Ready(Err(Error::Old)),
-					};
+					return res;
 				}
 				Poll::Pending => return Poll::Pending,
 			};

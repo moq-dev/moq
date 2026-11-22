@@ -9192,14 +9192,17 @@ mod test {
 		second.write_frame(ts(1), b"a".as_ref()).unwrap();
 		a.clone().abort(Error::Dropped).unwrap();
 		second.finish().unwrap();
-		let Poll::Ready(res) = reading.poll_read_frame(&kio::Waiter::noop()) else {
-			panic!("the group ends");
-		};
-		assert!(
-			res.is_err(),
-			"ended {:?}",
-			res.map(|frame| frame.map(|frame| frame.payload))
-		);
+		// Every read fails, so a batch that swallowed the first error still sees it.
+		for _ in 0..2 {
+			let Poll::Ready(res) = reading.poll_read_frame(&kio::Waiter::noop()) else {
+				panic!("the group ends");
+			};
+			assert!(
+				res.is_err(),
+				"ended {:?}",
+				res.map(|frame| frame.map(|frame| frame.payload))
+			);
+		}
 		drop(first);
 	}
 

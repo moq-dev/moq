@@ -1727,6 +1727,35 @@ test("a short group ends once no route holds more of it", async () => {
 	close();
 });
 
+// No route said the group ends at the frames already read. Mirrors the Rust test.
+test("a short close below the frames read fails the group", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	const first = ta.write(0n, 2, false);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+	// The route replacing a holds one frame, then a fails and b closes the group there.
+	const second = tb.write(0n, 1, false);
+	await swap();
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	second.finish();
+	await settle();
+	const err = await group.readFrame().then(
+		(frame) => frame,
+		(e: unknown) => e,
+	);
+	expect(err).toBeInstanceOf(Error);
+	expect(await group.closed).toBeInstanceOf(Error);
+	expect(first).toBeDefined();
+
+	sub.close();
+	close();
+});
+
 test("a short group ends as it closed while its copy still serves", async () => {
 	const { a, active, close } = await setup();
 	const ta = copy(a);
