@@ -73,6 +73,10 @@ test:
     #!/usr/bin/env bash
     set -euo pipefail
     max=${CHECK_TOOLING_JOBS:-8}
+    if ! [[ $max =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: CHECK_TOOLING_JOBS must be a positive integer, got '$max'" >&2
+        exit 1
+    fi
     pids=()
     fail=0
     run() { "$@" || { echo "error: $* failed" >&2; return 1; }; }

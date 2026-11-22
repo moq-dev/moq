@@ -23,10 +23,12 @@ misses, 48 not looked up, 11 incremental, 105 bypassed`.
 - Audit `sh/rs/select.sh` and `sh/rs/reads.sh` for over-selection so routine
   single-crate edits do not rebuild unrelated dependents or trigger unnecessary
   passes.
-- Narrow `rs_cross` (`aarch64-apple-darwin` and `x86_64-pc-windows-msvc`) to
-  crates that contain platform `#[cfg(...)]` gates or changed public APIs
-  reaching them, and skip `cargo doc` over unchanged dependents when only
-  private code or tests changed.
+- Keep changed crates in `rs_cross` (`aarch64-apple-darwin` and
+  `x86_64-pc-windows-msvc`) unless the selector proves their changes cannot
+  affect cross targets (so private edits introducing platform-specific APIs are
+  still caught), narrow only unchanged dependents without platform `#[cfg(...)]`
+  gates or public API changes reaching them, and skip `cargo doc` over unchanged
+  dependents when only private code or tests changed.
 - Measure weekly `just check` CPU-minutes and `queue.yml` `mbx` hit rate before
   and after.
 

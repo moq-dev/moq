@@ -155,13 +155,15 @@ module biome '' \
 # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
 # fails a check that reads a cross-tree input this pattern misses.
 # Root Nix inputs own the browser version every npm Playwright pin matches.
+# js and dead_code share a lane because package builds remove and recreate
+# js/*/dist/ while fallow resolves js/*/test-dts/*.ts imports against dist/.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
-    tools='bun python3 uv' fix
+    tools='bun python3 uv' lane=js_dist fix
 # fallow over the whole workspace: removing the last use of an export in one
 # package leaves it dead in the package that defines it, which a run scoped to
 # the changed packages would never analyze.
 module dead_code '(\.([mc]?[jt]sx?|vue)|(^|/)package\.json|^bun\.lock|^\.fallowrc\.jsonc)$' \
-    tools='bun uv'
+    tools='bun uv' lane=js_dist
 # The recorded-trace replays play through the player's container consumer and
 # ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
 # for the install step), so they gate every diff that can move a row. It shares
