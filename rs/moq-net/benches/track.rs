@@ -68,15 +68,16 @@
 //! on the next one, re-polling whichever reader the write woke: a frame wakes no track
 //! reader, so waking them shows up as a slope over the subscribers.
 //!
-//! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
-//! retained-history axes, so expiry work that scans either table appears as a slope.
+//! `track_fetch_expiry` polls fetched readers expiring at the track's max age over
+//! independent fanout and retained-history axes, so expiry work that scans either table
+//! appears as a slope.
 //!
-//! `track_fetch_budgets` writes the frame that crosses every budgeted fetch's deadline, over
-//! live readers and finished fetches with budgets of their own: deadlines the finished
-//! fetches left indexed show up as a slope over them.
+//! `track_fetch_budgets` writes the frame that crosses every fetch's max-age deadline, over
+//! live readers and finished fetches: deadlines the finished fetches left registered show up
+//! as a slope over them.
 //!
-//! `track_fetch_park` parks one more budgeted fetch beside live readers on deadlines of their
-//! own, so a park that sweeps the whole index shows up as a slope over the readers.
+//! `track_fetch_park` parks one more fetch beside live readers waiting on the same max age,
+//! so a park that sweeps every registered deadline shows up as a slope over the readers.
 //!
 //! `track_range_demand` moves one reader between ranges nobody else holds, over readers
 //! holding a given number of distinct overlapping ranges: both axes must stay flat, since
@@ -227,7 +228,8 @@ const AGED_TRACKS: [usize; 4] = [1, 64, 1_024, 10_000];
 /// Groups cached per track behind its parked read.
 const AGED_GROUPS: [usize; 3] = [1, 32, 1_024];
 
-/// The budget a parked read's wall deadline is armed for, past any setup on the real clock.
+/// The budget a parked read's wall deadline is armed for, past any setup on the real clock:
+/// a live join's `max`, or the max age a fetched read expires at.
 const AGED_BUDGET: Duration = Duration::from_secs(3600);
 
 /// Fetched readers and retained groups sweep both sides of the expiry lookup.
@@ -244,7 +246,9 @@ struct FetchReaders {
 impl FetchReaders {
 	fn new(readers: usize, history: usize) -> Self {
 		let broadcast = broadcast::Producer::new(broadcast::Info::default());
-		let track = broadcast.create_track("bench", timed()).unwrap();
+		let track = broadcast
+			.create_track("bench", timed().with_max_age(AGED_BUDGET))
+			.unwrap();
 		let mut open = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		open.write_frame(Timestamp::ZERO, Bytes::from_static(b"f")).unwrap();
 		for key in 1..=history as u64 {
@@ -254,11 +258,10 @@ impl FetchReaders {
 		}
 
 		let consumer = track.consume();
-		let options = moq_net::group::Fetch::default().with_max_delay(AGED_BUDGET);
 		let waiter = kio::Waiter::noop();
 		let mut fetched = Vec::with_capacity(readers);
 		for _ in 0..readers {
-			let mut pending = consumer.fetch_group(0, options.clone());
+			let mut pending = consumer.fetch_group(0, None);
 			let Poll::Ready(Ok(mut group)) = kio::Task::poll(&mut *pending, &waiter) else {
 				panic!("cached fetch must resolve");
 			};
@@ -836,9 +839,9 @@ fn bench_fanout_frame(c: &mut Criterion) {
 	group.finish();
 }
 
-/// A track with groups presenting at 0..4 s and the last still open, `readers` budgeted
-/// fetches of group 2 parked on its expiry, and `history` finished fetches of it, each with
-/// its own budget, so each indexed a deadline of its own.
+/// A track with groups presenting at 0..4 s and the last still open, `readers` fetches of
+/// group 2 parked on its expiry at the track's 1.5 s max age, and `history` finished fetches
+/// of it.
 struct FetchBudgets {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
@@ -851,7 +854,9 @@ struct FetchBudgets {
 impl FetchBudgets {
 	fn new(readers: usize, history: usize) -> Self {
 		let broadcast = broadcast::Producer::new(broadcast::Info::default());
-		let track = broadcast.create_track("bench", timed()).unwrap();
+		let track = broadcast
+			.create_track("bench", timed().with_max_age(Duration::from_millis(1_500)))
+			.unwrap();
 		for key in (0..4u64).map(|second| second * 1000) {
 			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"f")).unwrap();
@@ -867,43 +872,36 @@ impl FetchBudgets {
 			open,
 			_readers: Vec::with_capacity(readers),
 		};
-		for i in 0..history {
-			drop(fetched.fetch(readers + i));
+		for _ in 0..history {
+			drop(fetched.fetch());
 		}
-		fetched._readers = (0..readers).map(|i| fetched.fetch(i)).collect();
+		fetched._readers = (0..readers).map(|_| fetched.fetch()).collect();
 		fetched
 	}
 
-	/// Fetch the group at 2 seconds with budget `i`, distinct from every other, returning the
-	/// waiter that keeps its deadlines registered.
-	fn fetch(&self, i: usize) -> kio::Waiter {
+	/// Fetch the group at 2 seconds, returning the waiter that keeps its deadlines registered.
+	fn fetch(&self) -> kio::Waiter {
 		let waiter = kio::Waiter::noop();
-		let budget = Duration::from_millis(1_500) + Duration::from_micros(i as u64);
-		let options = moq_net::group::Fetch::default().with_max_delay(budget);
-		let mut pending = self.consumer.fetch_group(2000, options);
+		let mut pending = self.consumer.fetch_group(2000, None);
 		assert!(matches!(kio::Task::poll(&mut *pending, &waiter), Poll::Ready(Ok(_))));
 		waiter
 	}
 }
 
-/// One more budgeted fetch, with a budget of its own, beside `readers` live ones: parking it
-/// must not scan the deadlines the live readers hold, so a sweep per park shows up as a slope.
+/// One more fetch beside `readers` live ones: parking it must not scan the deadlines the live
+/// readers hold, so a sweep per park shows up as a slope.
 fn bench_fetch_park(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_fetch_park");
 	for readers in [1, 64, 1_024] {
 		group.bench_with_input(BenchmarkId::from_parameter(readers), &readers, |b, &readers| {
 			let fetched = FetchBudgets::new(readers, 0);
-			let mut next = readers;
-			b.iter(|| {
-				next += 1;
-				fetched.fetch(next)
-			});
+			b.iter(|| fetched.fetch());
 		});
 	}
 	group.finish();
 }
 
-/// The write that crosses every budgeted fetch's deadline, beside live readers and the
+/// The write that crosses every fetch's deadline, beside live readers and the
 /// finished fetches before them: the write must cost what the live readers do, so deadlines
 /// left indexed by fetches that already finished show up as a slope over the history.
 fn bench_fetch_budgets(c: &mut Criterion) {
@@ -2046,7 +2044,7 @@ struct Fills {
 }
 
 impl Fills {
-	fn new(readers: usize, runs: u64, budget: Option<Duration>) -> Self {
+	fn new(readers: usize, runs: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		let dynamic = track.requests();
@@ -2121,23 +2119,17 @@ impl Fills {
 /// swept over the readers and the runs. Each reader must pay the same per run, so a cost
 /// that grows with the audience or the runs shows up as a slope.
 fn bench_fill(c: &mut Criterion) {
-	for (name, budget) in [("track_fill", Some(AGED_BUDGET)), ("track_fill_unlimited", None)] {
-		let mut group = c.benchmark_group(name);
-		group.sample_size(10);
-		for readers in [1usize, 8, 64] {
-			for runs in [1u64, 64, 1024] {
-				group.throughput(Throughput::Elements(runs * readers as u64));
-				group.bench_function(BenchmarkId::new(format!("{readers}r"), runs), |b| {
-					b.iter_batched_ref(
-						|| Fills::new(readers, runs, budget),
-						Fills::run,
-						BatchSize::PerIteration,
-					);
-				});
-			}
+	let mut group = c.benchmark_group("track_fill");
+	group.sample_size(10);
+	for readers in [1usize, 8, 64] {
+		for runs in [1u64, 64, 1024] {
+			group.throughput(Throughput::Elements(runs * readers as u64));
+			group.bench_function(BenchmarkId::new(format!("{readers}r"), runs), |b| {
+				b.iter_batched_ref(|| Fills::new(readers, runs), Fills::run, BatchSize::PerIteration);
+			});
 		}
-		group.finish();
 	}
+	group.finish();
 }
 
 /// Readers whose disjoint ranges all fall below where the feed starts, and the handler that

@@ -2999,13 +2999,13 @@ fn subscription_ranges_parse() {
 	assert_eq!(parse(&[], false).unwrap(), Vec::new());
 	assert_eq!(
 		parse(&[], true).unwrap(),
-		moq_net::track::Subscription::default().ranges,
-		"NULL keeps the default"
+		[moq_net::track::Range::ALL],
+		"NULL is one range with no start, which the delay places"
 	);
 
 	assert_eq!(
 		parse(&[moq_range::default()], false).unwrap(),
-		vec![moq_net::track::Range::default()]
+		vec![moq_net::track::Range::ALL]
 	);
 	// An absent time is never read, so its scale is never checked.
 	assert_eq!(
@@ -3019,7 +3019,7 @@ fn subscription_ranges_parse() {
 			false
 		)
 		.unwrap(),
-		vec![moq_net::track::Range::default()]
+		vec![moq_net::track::Range::ALL]
 	);
 	assert!(matches!(
 		parse(&[moq_range { end: micros(1), ..span }], false),
@@ -8004,12 +8004,13 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.quic.resolve().keylog.is_none());
 }
 
-/// `moq_subscription_defaults` and a zeroed struct both read back as moq-net's defaults, and
-/// the flags reach the stated minimum and the unlimited max.
+/// `moq_subscription_defaults` and a zeroed struct both read back as one range with no start
+/// under the default delay, which places it as moq-net's default, and the flags reach the stated
+/// minimum and the unlimited max.
 #[test]
 fn subscription_defaults_are_moq_net_defaults() {
 	let expected = (
-		moq_net::track::Subscription::default(),
+		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
 		moq_mux::container::Delay::default(),
 	);
 	let defaults = unsafe { crate::api::parse_subscription(&moq_subscription_defaults()) }.unwrap();

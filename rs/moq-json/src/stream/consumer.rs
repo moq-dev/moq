@@ -118,7 +118,7 @@ mod timestamps {
 				.unwrap();
 			let mut subscriber = track.subscribe(None);
 			let mut subscription = subscriber.subscription();
-			subscription.delay.max = None;
+			subscription.ranges = vec![moq_net::track::Range::ALL];
 			subscriber.update(subscription).unwrap();
 			let config = crate::stream::Config::default();
 			let mut producer = crate::stream::Producer::new(track, config.clone());

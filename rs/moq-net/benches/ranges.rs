@@ -24,7 +24,6 @@
 
 use std::hint::black_box;
 use std::task::Poll;
-use std::time::Duration;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -32,9 +31,6 @@ use moq_net::{Timestamp, broadcast, group, track};
 
 /// Ranges in the one subscription, up to about what a lite-07 SUBSCRIBE fits.
 const RANGES: [u64; 4] = [1, 64, 1024, 16_384];
-
-/// A budget the run never outlasts, so nothing goes stale.
-const BUDGET: Duration = Duration::from_secs(3600);
 
 /// Where the live feed starts, in milliseconds, past every time a range names.
 const LIVE: u64 = 1 << 32;

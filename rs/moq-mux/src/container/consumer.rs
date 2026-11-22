@@ -345,6 +345,10 @@ impl Delay {
 	/// `subscription` at this delay: each range starting at the oldest group joins live
 	/// [`Self::min`] behind the live edge, or [`Self::max`] when only that is stated, and each
 	/// live join takes [`Self::max`] as its own. A time start stays history.
+	///
+	/// [`Subscription::default`](moq_net::track::Subscription::default) is already a live join,
+	/// at the latest group, so a range this delay should place starts at
+	/// [`Range::ALL`](moq_net::track::Range::ALL) instead.
 	pub fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
 		use moq_net::track::{Range, Start};
 		let ranges: Vec<Range> = subscription
@@ -1763,8 +1767,10 @@ mod tests {
 
 		/// Subscribe to the copy at `delay`.
 		async fn subscribe(&self, delay: Delay) -> moq_net::track::Subscriber {
-			self.subscribe_with(delay.subscription(moq_net::track::Subscription::default()))
-				.await
+			self.subscribe_with(
+				delay.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
+			)
+			.await
 		}
 
 		async fn subscribe_with(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscriber {
@@ -2602,10 +2608,9 @@ mod tests {
 			let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
 			let subscriber = copy
 				.subscribe_with(
-					Delay::default()
-						.with_min(min)
-						.with_max(max)
-						.subscription(moq_net::track::Subscription::default()),
+					Delay::default().with_min(min).with_max(max).subscription(
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
+					),
 				)
 				.await;
 			let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
@@ -2725,14 +2730,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_hole_and_an_arrived_group_both_wait_up_to_the_max_delay() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
-		// From group 0, which the playout delay set below doesn't move.
+		// From group 0, which the playout delay set below doesn't move: a live join, so a missing
+		// group can go stale.
 		let subscriber = copy
-			.subscribe_with(
-				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
-					start: moq_net::track::Start::Time(0),
-					end: None,
-				}]),
-			)
+			.subscribe_with(crate::container::test_util::within(Duration::from_secs(1)))
 			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 		reader.set_delay(
@@ -3387,15 +3388,7 @@ mod tests {
 	async fn latency_skip_delivers_recent_groups() {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track =
-			track.subscribe(
-				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-					moq_net::track::Start::Live {
-						min: Duration::from_millis(100),
-						max: Some(Duration::from_millis(100)),
-					},
-				)]),
-			);
+		let consumer_track = track.subscribe(crate::container::test_util::within(Duration::from_millis(100)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 0: 5 frames, NOT finished (blocks consumer)
@@ -4190,15 +4183,7 @@ mod tests {
 	#[kio::test]
 	async fn gap_in_group_sequence_recovery() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track =
-			track.subscribe(
-				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-					moq_net::track::Start::Live {
-						min: Duration::from_millis(100),
-						max: Some(Duration::from_millis(100)),
-					},
-				)]),
-			);
+		let consumer_track = track.subscribe(crate::container::test_util::within(Duration::from_millis(100)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
@@ -4216,15 +4201,7 @@ mod tests {
 	#[kio::test]
 	async fn gap_at_start_of_sequence() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track =
-			track.subscribe(
-				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-					moq_net::track::Start::Live {
-						min: Duration::from_millis(80),
-						max: Some(Duration::from_millis(80)),
-					},
-				)]),
-			);
+		let consumer_track = track.subscribe(crate::container::test_util::within(Duration::from_millis(80)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 5, &[ts(0), ts(20_000)]);
@@ -4255,14 +4232,7 @@ mod tests {
 		let track = broadcast
 			.track("video")
 			.unwrap()
-			.subscribe(
-				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-					moq_net::track::Start::Live {
-						min: Duration::from_secs(2),
-						max: Some(Duration::from_secs(2)),
-					},
-				)]),
-			)
+			.subscribe(crate::container::test_util::within(Duration::from_secs(2)))
 			.await
 			.unwrap();
 		let format = Container::Legacy(crate::container::Kind::Data);
@@ -4545,7 +4515,9 @@ mod tests {
 			},
 			warmup,
 		);
-		let consumer_track = track.subscribe(playout.subscription(moq_net::track::Subscription::default()));
+		let consumer_track = track.subscribe(
+			playout.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
+		);
 		playout.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data))
 	}
 
@@ -4559,7 +4531,9 @@ mod tests {
 			warmup,
 		);
 		let subscriber = copy
-			.subscribe_with(playout.subscription(moq_net::track::Subscription::default()))
+			.subscribe_with(
+				playout.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
+			)
 			.await;
 		playout.consumer(subscriber, Container::Legacy(crate::container::Kind::Data))
 	}
@@ -4916,11 +4890,11 @@ mod tests {
 		let subscription = subscribed(&consumer).subscription();
 		assert_eq!(
 			subscription.ranges,
-			[moq_net::track::Range::from(moq_net::track::Start::Live(
-				Duration::from_millis(2_300)
-			))]
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Duration::from_millis(2_300),
+				max: Some(Duration::from_millis(500)),
+			})]
 		);
-		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 	}
 
@@ -4933,17 +4907,19 @@ mod tests {
 			min: Some(Duration::from_millis(100)),
 			max: Some(Duration::from_millis(200)),
 		};
-		let consumer_track = track.subscribe(delay.subscription(moq_net::track::Subscription::default()));
+		let consumer_track = track.subscribe(
+			delay.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
+		);
 		let consumer = Playout::new(delay, Duration::from_millis(300))
 			.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		let subscription = subscribed(&consumer).subscription();
 		assert_eq!(
 			subscription.ranges,
-			[moq_net::track::Range::from(moq_net::track::Start::Live(
-				Duration::from_millis(100)
-			))]
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Duration::from_millis(100),
+				max: Some(Duration::from_millis(500)),
+			})]
 		);
-		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 		assert_eq!(consumer.warmup, Duration::from_millis(300));
 	}
@@ -4955,12 +4931,17 @@ mod tests {
 		let delay = Delay::default().with_max(Some(Duration::from_millis(200)));
 		let playout = Playout::new(delay, Duration::from_secs(3600));
 		let consumer = playout.consumer(
-			track.subscribe(playout.subscription(moq_net::track::Subscription::default())),
+			track.subscribe(
+				playout.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
+			),
 			Container::Legacy(crate::container::Kind::Data),
 		);
 		assert_eq!(
-			subscribed(&consumer).subscription().delay.max,
-			Some(Duration::from_millis(200) + DELAY_MAX)
+			subscribed(&consumer).subscription().ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Duration::from_millis(200) + DELAY_MAX,
+				max: Some(Duration::from_millis(200) + DELAY_MAX),
+			})]
 		);
 		assert_eq!(consumer.warmup, DELAY_MAX);
 	}
@@ -4985,7 +4966,11 @@ mod tests {
 			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
 		let subscriber = copy.subscribe_with(playout.subscription(from_zero)).await;
 		let mut consumer = playout.consumer(subscriber, Container::Legacy(crate::container::Kind::Data));
-		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
+		assert_eq!(
+			subscribed(&consumer).subscription().ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Time(0))],
+			"a time start stays history, so nothing it reaches goes stale"
+		);
 		let _track = copy.track.finish().unwrap();
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
@@ -5862,7 +5847,7 @@ mod tests {
 		let subscription = Delay::default()
 			.with_min(Duration::from_millis(200))
 			.with_max(Duration::from_secs(10))
-			.subscription(moq_net::track::Subscription::default());
+			.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]));
 		let consumer_track = track.subscribe(subscription);
 		assert_eq!(consumer_track.floor(), Some(700_000));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
@@ -5885,7 +5870,7 @@ mod tests {
 				Delay::default()
 					.with_min(Duration::from_millis(200))
 					.with_max(Duration::from_secs(10))
-					.subscription(moq_net::track::Subscription::default()),
+					.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
 			)
 			.await;
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
@@ -5912,7 +5897,7 @@ mod tests {
 				Delay::default()
 					.with_min(Duration::ZERO)
 					.with_max(Duration::from_secs(10))
-					.subscription(moq_net::track::Subscription::default()),
+					.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
 			)
 			.await;
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));

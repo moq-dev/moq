@@ -229,7 +229,10 @@ mod subscription {
 		let _consumer = Consumer::<serde_json::Value>::new(track.consume(), config);
 		let subscription = track.subscription().expect("the consumer subscribed");
 		assert_eq!(subscription.priority, 5);
-		assert_eq!(subscription.delay.max, Some(std::time::Duration::ZERO));
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::LATEST)]
+		);
 	}
 
 	#[test]
@@ -247,9 +250,11 @@ mod subscription {
 		let subscription = track.subscription().expect("the consumer subscribed");
 		assert_eq!(
 			subscription.ranges,
-			[moq_net::track::Range::from(moq_net::track::Start::Live(delay))]
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: delay,
+				max: Some(delay),
+			})]
 		);
-		assert_eq!(subscription.delay.max, Some(delay));
 	}
 }
 

@@ -1511,10 +1511,13 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	);
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
-			if track
-				.subscription()
-				.is_some_and(|subscription| subscription.delay.max == Some(Duration::from_millis(100)))
-			{
+			// Every wire carries the budget, though one before lite-07 reaches the publisher
+			// with a lag of its own.
+			if track.subscription().is_some_and(|subscription| {
+				subscription.ranges.iter().any(|range| {
+					matches!(range.start, moq_net::track::Start::Live { max: Some(max), .. } if max == Duration::from_millis(100))
+				})
+			}) {
 				break;
 			}
 			track.subscription_changed().await.unwrap();
