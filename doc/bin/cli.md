@@ -564,8 +564,8 @@ usable within that window adds no gap. Congestion can starve the old instance
 sooner or leave the replacement acquiring past the window, causing a gap. With
 `--passthrough`, `--stitch` instead switches as soon as the replacement's catalog
 subscription is served, with no overlap window: the old instance's buffered tail
-goes out on its clock, then the replacement's packets verbatim from its first
-group, so the seam is each PID's continuity break.
+goes out on its clock, then the replacement's packets verbatim from the first
+group its live subscription delivers, so the seam is each PID's continuity break.
 Timestamps across instances are not aligned. Without `--stitch` the export
 stays on the old publisher while it is up. Only lite-07 sessions carry
 instances, so on the default version every return is a replacement. A failure other than the

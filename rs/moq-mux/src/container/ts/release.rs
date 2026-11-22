@@ -28,10 +28,10 @@ use crate::jitter::{self, Arrival, Push};
 /// jump; the bytes carry the break as the source sent it.
 ///
 /// A [`Follower`](super::Follower) carries it across its broadcast's returns and, when
-/// stitching, onto another publisher instance, whose track it reads from its first group once
-/// what was already buffered has gone out. Its packets follow verbatim, so the output shows the
-/// seam as each PID's continuity break, as the source would show a splice, and its timeline
-/// keeps the clock or steps to a new one as an encoder changeover does.
+/// stitching, onto another publisher instance, whose track it reads from the first group its
+/// live subscription delivers, after what was already buffered has gone out. Its packets follow
+/// verbatim, so the output shows the seam as each PID's continuity break, as the source would
+/// show a splice, and they go out on a clock of their own, as after an encoder changeover.
 pub struct Release {
 	source: crate::Source,
 	/// The format of the catalog being read, kept for following another instance.

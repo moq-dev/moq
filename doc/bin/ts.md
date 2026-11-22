@@ -147,9 +147,9 @@ clock was, and the bytes still go out unchanged, step and all.
 `export ts --passthrough` writes each run `--delay` after its time on the
 source clock, so two exporters emit the same bytes. It takes no `--mux-rate`.
 `--follow` and `--stitch` carry it across the broadcast's returns and
-replacements as they do the demultiplexed export: a restarted import is a new
-publisher instance, so `--stitch` writes its packets from its first group,
-verbatim, after what the old one delivered. The seam shows as each PID's
+replacements: a restarted import is a new publisher instance, so `--stitch`
+writes its packets verbatim from the first group its live subscription delivers,
+after what the old one delivered, with no overlap window. The seam shows as each PID's
 continuity break, as a splice in the source would. Only the hang catalog names the
 track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
