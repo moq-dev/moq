@@ -24,8 +24,9 @@ class BuildTest(unittest.TestCase):
                 scratch = Path(directory)
                 calls = scratch / "calls"
                 compiler_env = scratch / "compiler-env"
+                library_out = scratch / "library.path"
                 target = scratch / "external output"
-                target = target if release else ROOT / "target/dart"
+                target = target if release else ROOT / "target/ffi-testing"
                 metadata = json.dumps({"target_directory": str(target)})
                 library = target / ("x86_64-unknown-linux-gnu" if configured else "") / profile / "libmoq_ffi.so"
                 artifact = json.dumps(
@@ -50,9 +51,11 @@ class BuildTest(unittest.TestCase):
                     os.environ,
                     PATH=f"{scratch}:{os.environ['PATH']}",
                     MOQ_FFI_PROFILE=profile,
+                    MOQ_DART_LIBRARY_OUT=str(library_out),
                     BASH_ENV=os.devnull,
                     CC="fixture-compiler",
                 )
+                env.pop("CARGO_TARGET_DIR", None)
                 result = subprocess.run(
                     ["bash", "sh/dart/generate.sh", str(scratch / "generated")],
                     cwd=ROOT,
@@ -61,14 +64,19 @@ class BuildTest(unittest.TestCase):
                     capture_output=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(compiler_env.read_text(), "fixture-compiler" if release else "unset")
+                self.assertEqual(compiler_env.read_text(), "fixture-compiler")
+                self.assertEqual(library_out.read_text().strip(), str(library))
                 args = calls.read_text().split()
                 self.assertEqual(args[0], "build-ffi")
                 self.assertEqual("--release" in args, release)
                 self.assertNotIn("--target", args)
                 self.assertEqual(
                     args[1:],
-                    (["--release"] if release else ["--features", "testing", "--target-dir", str(ROOT / "target/dart")])
+                    (
+                        ["--release"]
+                        if release
+                        else ["--features", "testing", "--target-dir", str(ROOT / "target/ffi-testing")]
+                    )
                     + ["--message-format=json-render-diagnostics"],
                 )
 
