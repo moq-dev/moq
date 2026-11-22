@@ -242,15 +242,20 @@ def restart(source: list[bytes], first: Placement, second: Placement) -> Restart
 
 
 def restart_shortfall(placement: Placement, clock: Clock, bound: Restart) -> str | None:
-    """Why the capture of a restarted import misses more than `bound` allows, or None."""
+    """Why the capture of a restarted import does not span the restart with one run missing,
+    no longer than `bound` allows, or None."""
     if placement.tail:
         return f"the capture ends {placement.tail} packets before its source"
-    if len(placement.gaps) > 1:
-        return f"the capture misses {len(placement.gaps)} runs of its source; a restart may cost one"
-    for start, length in placement.gaps:
-        lost = clock.at(start + length) - clock.at(start)
-        if lost > bound.bound:
-            return f"the capture misses {lost:.3f} s at the restart, past the {bound.bound:.3f} s bound"
+    if placement.start >= bound.held:
+        return f"the capture opens at source packet {placement.start}, after the killed import's last object"
+    if len(placement.gaps) != 1:
+        return f"the capture misses {len(placement.gaps)} runs of its source; a restart costs one"
+    start, length = placement.gaps[0]
+    if not start <= bound.resumed <= start + length:
+        return f"the capture misses source packets {start} to {start + length}, not the restart at {bound.resumed}"
+    lost = clock.at(start + length) - clock.at(start)
+    if lost > bound.bound:
+        return f"the capture misses {lost:.3f} s at the restart, past the {bound.bound:.3f} s bound"
     return None
 
 
@@ -333,6 +338,11 @@ def main() -> int:
             "resumed": resumed,
         }
     code = 0
+    # A restart always costs a run, so its capture never reaches the comparison of a complete one.
+    reason = restart_shortfall(placement, clock, bound) if args.restart else shortfall(placement, args.loss_ok)
+    if reason:
+        print(f"passthrough: FAIL: {reason}", file=sys.stderr)
+        code = 1
     if placement.complete:
         with tempfile.NamedTemporaryFile(suffix=".ts") as interval:
             interval.write(source_data[placement.start * PACKET :])
@@ -356,10 +366,6 @@ def main() -> int:
         print("### compliance.py on the capture (report only: it has gaps)")
         for name, (status, detail) in report["compliance"]["capture"].items():
             print(f"  {name}: {status}  {detail}")
-        reason = restart_shortfall(placement, clock, bound) if args.restart else shortfall(placement, args.loss_ok)
-        if reason:
-            print(f"passthrough: FAIL: {reason}", file=sys.stderr)
-            code = 1
 
     if args.report_json:
         args.report_json.write_text(json.dumps(report, indent=2))

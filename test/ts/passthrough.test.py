@@ -149,6 +149,17 @@ class Restart(unittest.TestCase):
         short = PROGRAM[: interval(102)] + PROGRAM[interval(125) : -10]
         self.assertIn("ends", passthrough.restart_shortfall(passthrough.place(PROGRAM, short), self.clock, self.bound))
 
+    def test_a_capture_missing_the_restart_fails(self):
+        # Only the restarted import's output, whole from its first group: nothing before the restart.
+        suffix = passthrough.place(PROGRAM, PROGRAM[interval(125) :])
+        self.assertIn("opens", passthrough.restart_shortfall(suffix, self.clock, self.bound))
+        # Nothing missing at all, so it never crossed the restart.
+        whole = passthrough.place(PROGRAM, PROGRAM)
+        self.assertIn("0 runs", passthrough.restart_shortfall(whole, self.clock, self.bound))
+        # One run missing, but not where the import was down.
+        early = PROGRAM[: interval(50)] + PROGRAM[interval(51) :]
+        self.assertIn("not the restart", passthrough.restart_shortfall(passthrough.place(PROGRAM, early), self.clock, self.bound))
+
     def test_a_restart_needs_one_program_and_a_downtime(self):
         with self.assertRaises(passthrough.Mismatch):
             passthrough.restart(PROGRAM, self.second, self.first)

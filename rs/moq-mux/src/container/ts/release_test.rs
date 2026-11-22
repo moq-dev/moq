@@ -283,6 +283,34 @@ fn payloads(released: &[(Instant, Frame)]) -> Vec<u8> {
 	bytes(released.iter().map(|(_, frame)| &frame.payload))
 }
 
+/// Assert `released` is the objects of each of `runs` in turn, each run going out on its own
+/// PCR pace: every object its PCR step after the one before it.
+fn assert_paced(released: &[(Instant, Frame)], runs: &[&[Object]]) {
+	let mut released = released.iter();
+	for (run, objects) in runs.iter().enumerate() {
+		let mut previous: Option<(Instant, u64)> = None;
+		for (i, object) in objects.iter().enumerate() {
+			let (at, frame) = released.next().expect("every object released");
+			assert!(
+				frame.payload == object.payload,
+				"run {run} object {i} at {:?}, not the object at {} µs",
+				frame.timestamp,
+				object.micros
+			);
+			if let Some((then, micros)) = previous {
+				let pause = at.duration_since(then).as_micros() as i64;
+				let step = (object.micros - micros) as i64;
+				assert!(
+					(pause - step).abs() <= 10_000,
+					"run {run} object {i} went out {pause} µs after the one before, not its PCR step of {step} µs"
+				);
+			}
+			previous = Some((*at, object.micros));
+		}
+	}
+	assert!(released.next().is_none(), "nothing past the runs");
+}
+
 /// Either catalog names the track: the `mpegts` section rides both.
 #[tokio::test(start_paused = true)]
 async fn a_capture_is_released_byte_identical_on_its_own_pcr() {
@@ -633,6 +661,8 @@ struct Restart {
 	/// How far behind the first's last object its clock starts, or `None` to carry on from the
 	/// source's own.
 	back: Option<Duration>,
+	/// The clip's group it opens on.
+	from: usize,
 }
 
 impl Restart {
@@ -642,12 +672,13 @@ impl Restart {
 			instance,
 			after: Duration::from_secs(1),
 			back: None,
+			from: 3,
 		}
 	}
 }
 
 /// A clip into its second group published as instance `first`, ending as `ending` says, then
-/// from its fourth group on as `second` says, released through a [`Follower`](super::Follower)
+/// from a later group on as `second` says, released through a [`Follower`](super::Follower)
 /// with `stitch`. Returns what it released, how it ended, and the objects each instance
 /// published.
 async fn follow(
@@ -666,9 +697,9 @@ async fn follow(
 	let mut groups: Vec<u64> = objects.iter().map(|object| object.group).collect();
 	groups.dedup();
 	assert!(groups.len() >= 5, "{} groups", groups.len());
-	// The first instance stops partway into its second group; the second opens on its fourth.
+	// The first instance stops partway into its second group.
 	let before = objects.iter().position(|object| object.group == groups[1]).unwrap() + 2;
-	let from = objects.iter().position(|object| object.group == groups[3]).unwrap();
+	let from = objects.iter().position(|object| object.group == groups[second.from]).unwrap();
 	let (head, mut tail) = (objects[..before].to_vec(), objects[from..].to_vec());
 	if let Some(back) = second.back {
 		let rewind = tail[0].micros - head.last().unwrap().micros + back.as_micros() as u64;
@@ -729,10 +760,7 @@ async fn follow(
 async fn a_stitched_release_carries_on_into_a_restarted_import() {
 	let (first, second) = (moq_net::Instance::random(), moq_net::Instance::random());
 	let (released, end, head, tail) = follow(first, Ending::Silent, Restart::new(second), true).await;
-	assert!(
-		payloads(&released) == bytes(head.iter().chain(&tail).map(|object| &object.payload)),
-		"the first instance's objects, then the second's from its first group"
-	);
+	assert_paced(&released, &[&head, &tail]);
 	let pauses = released.windows(2).map(|pair| pair[1].0.duration_since(pair[0].0));
 	assert!(
 		pauses.max().unwrap() < Duration::from_secs(2),
@@ -747,7 +775,7 @@ async fn a_stitched_release_carries_on_into_a_restarted_import() {
 /// A replacement's clock may start behind the first's, as a restarted encoder's does: arriving
 /// while the first's last objects still wait out the delay, a step back by less than the delay
 /// carries no marker of its own, yet the replacement goes out whole on a clock of its own after
-/// them, none of it late.
+/// them, on its own pace and none of it late.
 #[tokio::test(start_paused = true)]
 async fn a_stitched_release_carries_on_into_a_rewound_clock() {
 	let (first, second) = (moq_net::Instance::random(), moq_net::Instance::random());
@@ -756,12 +784,10 @@ async fn a_stitched_release_carries_on_into_a_rewound_clock() {
 		instance: second,
 		after: Duration::from_millis(40),
 		back: Some(Duration::from_millis(300)),
+		from: 3,
 	};
 	let (released, end, head, tail) = follow(first, Ending::Silent, second, true).await;
-	assert!(
-		payloads(&released) == bytes(head.iter().chain(&tail).map(|object| &object.payload)),
-		"the first instance's objects, then the second's from its first group"
-	);
+	assert_paced(&released, &[&head, &tail]);
 	assert!(matches!(end, Some(Ok(()))), "{end:?}");
 }
 
@@ -775,12 +801,33 @@ async fn an_unstitched_release_stays_on_the_instance_it_started_on() {
 }
 
 /// The same instance returning on a new route after its first went resumes on the same clock:
-/// what it missed is a gap, and both runs go out, stitching or not.
+/// what it missed is a gap, and both runs go out, stitching or not. What the release buffered
+/// when the route went still goes out on its pace, not in a burst once the instance returns.
 #[tokio::test(start_paused = true)]
 async fn the_same_instance_returning_resumes_the_release() {
 	let instance = moq_net::Instance::random();
 	let gone = Ending::Abort(moq_net::Error::Unroutable);
 	let (released, end, head, tail) = follow(instance.clone(), gone, Restart::new(instance), false).await;
-	assert!(payloads(&released) == bytes(head.iter().chain(&tail).map(|object| &object.payload)));
+	assert_paced(&released, &[&head, &tail]);
 	assert!(matches!(end, Some(Ok(()))), "the return's finish ends it: {end:?}");
+}
+
+/// The same instance returning, while what it last delivered still waits out the delay, with the
+/// group it was reading published again from its start: the release carries on past that group
+/// rather than writing again the objects it already took from it.
+#[tokio::test(start_paused = true)]
+async fn the_same_instance_returning_skips_the_group_it_was_reading() {
+	let instance = moq_net::Instance::random();
+	let gone = Ending::Abort(moq_net::Error::Unroutable);
+	let again = Restart {
+		instance: instance.clone(),
+		after: Duration::from_millis(300),
+		back: None,
+		from: 1,
+	};
+	let (released, end, head, tail) = follow(instance, gone, again, false).await;
+	let reading = head.last().unwrap().group;
+	let past: Vec<Object> = tail.into_iter().filter(|object| object.group != reading).collect();
+	assert_paced(&released, &[&head, &past]);
+	assert!(matches!(end, Some(Ok(()))), "{end:?}");
 }

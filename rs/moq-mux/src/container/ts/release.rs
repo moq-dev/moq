@@ -11,7 +11,7 @@ use super::export;
 use crate::catalog::hang::Catalog;
 use crate::catalog::{CatalogFormat, Stream};
 use crate::container::consumer::Event;
-use crate::container::{ExportSource, Frame};
+use crate::container::{ExportSource, Frame, Resume};
 use crate::jitter::{self, Arrival, Push};
 
 /// Writes the multiplex a broadcast's [passthrough track](super::Mpegts::passthrough) carries
@@ -47,6 +47,11 @@ pub struct Release {
 	/// however long the cache held it.
 	subscribed: Instant,
 	finished: bool,
+	/// Where the track read before its instance went stopped, for that instance's return.
+	resume: Option<Resume>,
+	/// The publisher left with this error; it is reported once what the jitter buffer holds
+	/// has gone out on its clock.
+	failed: Option<crate::Error>,
 	/// An object has gone out.
 	released: bool,
 	/// Timeline restarts and gaps counted by tracks read before the current one, whose own
@@ -78,6 +83,8 @@ impl Release {
 			track: None,
 			subscribed: kio::clock::now(),
 			finished: false,
+			resume: None,
+			failed: None,
 			released: false,
 			restarts: 0,
 			gaps: 0,
@@ -144,12 +151,13 @@ impl Release {
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
-			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => {
+			match catalog.poll_next(waiter) {
+				Poll::Ready(Ok(Some(snapshot))) => {
 					self.cataloged = true;
 					self.update_catalog(&snapshot)?
 				}
-				Poll::Ready(None) => self.catalog = None,
+				Poll::Ready(Ok(None)) => self.catalog = None,
+				Poll::Ready(Err(err)) => self.leave(err)?,
 				Poll::Pending => break,
 			}
 		}
@@ -169,7 +177,10 @@ impl Release {
 						self.finished = true;
 						break;
 					}
-					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Ready(Err(err)) => {
+						self.leave(err)?;
+						break;
+					}
 					Poll::Pending => break,
 				};
 				// Judged on when the object landed, so a sink that leaves arrived objects unread
@@ -200,10 +211,27 @@ impl Release {
 			Some(_) => self.finished,
 			None => self.catalog.is_none(),
 		};
-		match ended && self.jitter.is_empty() {
-			true => Poll::Ready(Ok(None)),
-			false => Poll::Pending,
+		if !(ended && self.jitter.is_empty()) {
+			return Poll::Pending;
 		}
+		match self.failed.take() {
+			Some(err) => Poll::Ready(Err(err)),
+			None => Poll::Ready(Ok(None)),
+		}
+	}
+
+	/// The catalog or track failed with `err`. Only a publisher that left is survivable: reading
+	/// stops at once, what the jitter buffer holds goes out on its clock, and then the release
+	/// reports `err`, so a [`Follower`](super::Follower) waits for a return only once the output
+	/// before the gap has gone out, rather than leaving it buffered to go out late behind the gap.
+	fn leave(&mut self, err: crate::Error) -> crate::Result<()> {
+		if !super::follower::left(&err) {
+			return Err(err);
+		}
+		self.catalog = None;
+		self.finished = true;
+		self.failed = Some(err);
+		Ok(())
 	}
 
 	/// Subscribe to the passthrough track the catalog names, the first time it names one.
@@ -224,6 +252,12 @@ impl Release {
 				let source = match self.replay {
 					true => source,
 					false => source.live(),
+				};
+				// The instance returning carries on after the group it was reading, which it
+				// would otherwise replay.
+				let source = match self.resume.take() {
+					Some(resume) => source.resuming(&resume),
+					None => source,
 				};
 				self.track = Some((passthrough.track.clone(), source));
 				self.subscribed = kio::clock::now();
@@ -259,27 +293,37 @@ impl super::follower::sealed::Followed for Release {
 	}
 
 	/// Drop the track being read and read the passthrough track `catalog` names next. What the
-	/// jitter buffer holds still goes out on its clock.
+	/// jitter buffer holds still goes out on its clock. The same instance returning carries on
+	/// past the group it was reading; another opens a new timeline, whose clock owes the old
+	/// one nothing.
 	fn followed(
 		&mut self,
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: crate::catalog::Consumer<super::Ext>,
 		_follow: Duration,
 	) -> crate::Result<()> {
-		if let Some((_, track)) = self.track.take() {
+		let same = self.instance.is_some() && broadcast.info().instance == self.instance;
+		let track = self.track.take();
+		if let Some((_, track)) = &track {
 			self.gaps += track.skips() - track.markers();
 			self.restarts += track.markers();
 		}
-		let same = self.instance.is_some() && broadcast.info().instance == self.instance;
 		if same {
 			self.source.pin(broadcast);
+			// A track never read has no cursor, but an earlier one still might.
+			if let Some((_, track)) = &track {
+				self.resume = Some(track.resume());
+			}
 		} else {
 			self.source = self.source.switched(broadcast);
 			self.instance = broadcast.info().instance.clone();
+			self.resume = None;
+			self.restarts += 1;
 		}
 		self.catalog = Some(catalog);
 		self.cataloged = false;
 		self.finished = false;
+		self.failed = None;
 		Ok(())
 	}
 
