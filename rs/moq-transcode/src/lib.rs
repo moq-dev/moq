@@ -997,7 +997,7 @@ mod tests {
 
 		let past = moq_net::track::Subscription::default()
 			.with_ranges([moq_net::track::Range {
-				start: Some(3),
+				start: moq_net::track::Start::Time(3),
 				end: Some(4),
 			}])
 			.with_delay(moq_net::track::Delay::default().with_max(None));
@@ -2174,8 +2174,9 @@ mod tests {
 		let (rung, live) = instance().await;
 		let mut subscriber = rung
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::ZERO)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live(std::time::Duration::ZERO),
+				)]),
 			)
 			.await
 			.unwrap()

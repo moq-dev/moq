@@ -14,7 +14,7 @@ use super::decoder::{Config, Decoder};
 use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
-pub use moq_net::track::Delay;
+pub use moq_mux::container::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: decoded PCM, or a break in it.
 ///
@@ -1070,7 +1070,7 @@ mod tests {
 			.unwrap();
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.warmup = Some(Duration::from_millis(100));
-		let delay = moq_net::track::Delay {
+		let delay = Delay {
 			min: Some(Duration::from_millis(300)),
 			max: Some(Duration::from_millis(500)),
 		};
@@ -1092,12 +1092,13 @@ mod tests {
 			first = track.subscription_changed() => first.unwrap(),
 		};
 		assert_eq!(
-			first.map(|sub| sub.delay),
-			Some(
-				delay
-					.with_min(Duration::from_millis(400))
-					.with_max(Duration::from_millis(600))
-			)
+			first.map(|sub| (sub.delay, sub.ranges)),
+			Some((
+				moq_net::track::Delay::default().with_max(Duration::from_millis(600)),
+				vec![moq_net::track::Range::from(moq_net::track::Start::Live(
+					Duration::from_millis(400)
+				))],
+			))
 		);
 	}
 

@@ -7118,7 +7118,8 @@ async fn server_new_validates_the_config() {
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
-	assert_eq!(defaults.delay.min, None);
+	assert_eq!(moq_subscription_defaults().delay.min, None);
+	assert_eq!(defaults.ranges, [moq_net::track::Range::default()]);
 	assert_eq!(defaults.delay.max, Some(Duration::ZERO));
 }
 
@@ -9312,10 +9313,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	assert_eq!(converted.order, moq_net::track::Order::Ascending);
 	assert_eq!(
 		converted.ranges,
-		vec![moq_net::track::Range {
-			start: Some(0),
-			end: None,
-		}]
+		vec![moq_net::track::Range::from(moq_net::track::Start::Time(0))]
 	);
 
 	let consumer = track.consume(Some(subscription)).unwrap();
@@ -9813,7 +9811,7 @@ async fn range_times_select_the_containing_groups() {
 	assert_eq!(
 		migrated.resolve().unwrap(),
 		moq_net::track::Range {
-			start: Some(1_500),
+			start: moq_net::track::Start::Time(1_500),
 			end: Some(1_999),
 		}
 	);
