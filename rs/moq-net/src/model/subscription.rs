@@ -124,7 +124,9 @@ pub struct Delay {
 	/// # How delay is measured
 	///
 	/// By two clocks, and a group is stale once either reaches the budget. Both start at
-	/// its immediate servable successor, so the newest group is never stale.
+	/// its immediate servable successor, so the newest group is stale only once it finished
+	/// whole and the wall clock passed its arrival plus its span by the budget: the last group
+	/// of a paused or finished track ages out too.
 	///
 	/// In presentation time, a group is measured by its *reach*, where its successor
 	/// begins, against the newest frame of the latest group: it cannot present past its
