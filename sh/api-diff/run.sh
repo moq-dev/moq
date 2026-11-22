@@ -246,7 +246,8 @@ js() {
         jq -e "$published" <<<"$entry" >/dev/null || continue
         js_versions[$(jq -r .name <<<"$entry")]=$(jq -r .version <<<"$entry")
     done <<<"$manifests"
-    for name in "${!js_versions[@]}"; do
+    # Sorted, since an associative array iterates in hash order and the report's rows should not shuffle.
+    while read -r name; do
         dir=${js_dirs[$name]:-/nonexistent}
         while read -r file; do
             entry=${file%.api.md}
@@ -254,7 +255,7 @@ js() {
             [[ "$entry" != index ]] || surface=$name
             compare "$surface" "${js_versions[$name]}" "$out/js/baseline/$name/$file" "$dir/api/$file"
         done < <(find "$out/js/baseline/$name" "$dir/api" -name '*.api.md' -printf '%f\n' 2>/dev/null | sort -u)
-    done
+    done < <(printf '%s\n' "${!js_versions[@]}" | LC_ALL=C sort)
 }
 
 ffi() {
