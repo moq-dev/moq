@@ -1715,9 +1715,10 @@ class Reader implements ResumeSource {
 
 	/**
 	 * End the logical track cleanly, once its serving copy did and nothing it replaced may still
-	 * deliver a group below that end: settle `closed` and leave the route, keeping each copy only
-	 * while it holds something left to read. The other channel's backlog stays readable. Whether
-	 * the track ended.
+	 * deliver a group below that end: settle `closed`, keeping each copy only while it holds
+	 * something left to read. The other channel's backlog stays readable. The reader follows the
+	 * route only for the groups still read, and {@link #unroute} leaves it once it reads and holds
+	 * nothing. Whether the track ended.
 	 */
 	#conclude(): boolean {
 		if (this.#closed) return false;
