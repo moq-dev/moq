@@ -14494,11 +14494,13 @@ fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireB
 }
 
 /// The start group a SUBSCRIBE asks from before it knows the live edge, `None` for a live join.
-/// A range from the oldest group asks from group zero, so the publisher delivers the backlog it
-/// holds; a wire without ranges can't name the oldest any other way.
+/// A range from the oldest group whose budget reaches back asks from group zero, so the
+/// publisher delivers the backlog it holds: a wire without ranges can't name the oldest any other
+/// way. A zero budget keeps only the latest group, which a live join already delivers.
 fn wire_start(subscription: &track::Subscription) -> Option<u64> {
+	let reaches = subscription.delay.max != Some(Duration::ZERO);
 	// Only a time start can be empty, so every Oldest range delivers something.
-	let oldest = (subscription.ranges.iter()).any(|range| range.start == track::Start::Oldest);
+	let oldest = reaches && (subscription.ranges.iter()).any(|range| range.start == track::Start::Oldest);
 	match oldest {
 		true => Some(0),
 		false => subscription.start(),
@@ -14625,7 +14627,8 @@ mod filter_tests {
 
 	/// A live join with a range starting at or after the group it joined keeps its bounds, so
 	/// the copy sends no update widening it from group zero; a range below that group, or one
-	/// beside a range reaching back to the oldest group, widens the span to group zero.
+	/// beside a range reaching back to the oldest group under a budget that keeps it, widens the
+	/// span to group zero.
 	#[test]
 	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
 		let live = |min: Option<Duration>, start: u64| {
@@ -14646,31 +14649,44 @@ mod filter_tests {
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), joined), (None, None));
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 9), joined), (Some(0), None));
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), None), (Some(0), None));
-		assert_eq!(wire_bounds(&live(None, 19), joined), (Some(0), None));
+		// The oldest group reaches back only under a budget that keeps more than the latest.
+		let patient = track::Delay::default().with_max(None);
+		assert_eq!(wire_bounds(&live(None, 19).with_delay(patient), joined), (Some(0), None));
+		assert_eq!(wire_bounds(&live(None, 19), joined), (None, None));
 	}
 
-	/// A range from the oldest group asks from group zero, alone or beside a live join, before
-	/// and after the join is placed, so the publisher delivers the backlog it holds.
+	/// A range from the oldest group whose budget reaches back asks from group zero, alone or
+	/// beside a live join, before and after the join is placed, so the publisher delivers the
+	/// backlog it holds.
 	#[test]
 	fn an_oldest_range_asks_from_group_zero() {
 		let oldest = track::Range::from(track::Start::Oldest);
 		let live = track::Range::from(track::Start::Live(Duration::ZERO));
+		let reaching = |ranges: &[track::Range], max: Option<Duration>| {
+			track::Subscription::default()
+				.with_ranges(ranges.iter().copied())
+				.with_delay(track::Delay::default().with_max(max))
+		};
 		for ranges in [vec![oldest], vec![oldest, live], vec![live, oldest]] {
-			let subscription = track::Subscription::default().with_ranges(ranges.clone());
-			assert_eq!(wire_start(&subscription), Some(0), "{ranges:?}");
-			for joined in [None, Some(10)] {
-				assert_eq!(wire_bounds(&subscription, joined), (Some(0), None), "{ranges:?} {joined:?}");
+			for max in [None, Some(Duration::from_secs(10))] {
+				let subscription = reaching(&ranges, max);
+				assert_eq!(wire_start(&subscription), Some(0), "{ranges:?} {max:?}");
+				for joined in [None, Some(10)] {
+					assert_eq!(wire_bounds(&subscription, joined), (Some(0), None), "{ranges:?} {joined:?}");
+				}
 			}
 		}
-		let bounded = track::Subscription::default().with_ranges([track::Range {
+		let bounded = [track::Range {
 			start: track::Start::Oldest,
 			end: Some(4),
-		}]);
-		assert_eq!(wire_bounds(&bounded, None), (Some(0), Some(5)));
-		// A live join alone still joins live.
-		let live = track::Subscription::default().with_ranges([live]);
-		assert_eq!(wire_start(&live), None);
-		assert_eq!(wire_bounds(&live, Some(10)), (None, None));
+		}];
+		assert_eq!(wire_bounds(&reaching(&bounded, None), None), (Some(0), Some(5)));
+		// A zero budget keeps only the latest group, which a live join delivers, as does a live
+		// join alone.
+		for subscription in [reaching(&[oldest], Some(Duration::ZERO)), reaching(&[live], None)] {
+			assert_eq!(wire_start(&subscription), None, "{subscription:?}");
+			assert_eq!(wire_bounds(&subscription, Some(10)), (None, None), "{subscription:?}");
+		}
 	}
 
 	/// The live join is the draft's own: the subscription starts after the live edge and a

@@ -149,13 +149,16 @@ function sees(filter: Filter, path: Path.Valid): boolean {
 }
 
 /**
- * The group a SUBSCRIBE asks from, undefined for a live join. A range from the oldest group asks
- * from group 0, so the publisher delivers the backlog it holds: a wire without ranges can't name
- * the oldest any other way. Mirrors the Rust `wire_start`.
+ * The group a SUBSCRIBE asks from, undefined for a live join. A range from the oldest group whose
+ * budget reaches back asks from group 0, so the publisher delivers the backlog it holds: a wire
+ * without ranges can't name the oldest any other way. A zero budget keeps only the latest group,
+ * which a live join already delivers. Mirrors the Rust `wire_start`.
  */
-function wireStart(ranges: readonly track.Range[]): bigint | undefined {
+function wireStart(ranges: readonly track.Range[], delay: track.Delay | undefined): bigint | undefined {
+	const max = delay?.max;
+	const reaches = max === null || (max !== undefined && !max.isZero());
 	// Only a time start can be empty, so every range from the oldest group delivers something.
-	if (ranges.some((range) => range.start === undefined)) return 0n;
+	if (reaches && ranges.some((range) => range.start === undefined)) return 0n;
 	return wireSpan(ranges).start;
 }
 
@@ -1590,7 +1593,7 @@ export class Subscriber {
 		this.#aliases.resubscribe({ broadcast, name: request.name });
 		const ranges = request.subscription.ranges ?? [{}];
 		const bounds = wireSpan(ranges);
-		const start = wireStart(ranges);
+		const start = wireStart(ranges, request.subscription.delay);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,

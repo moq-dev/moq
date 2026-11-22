@@ -636,9 +636,8 @@ for (const version of VERSIONS) {
 		group.writeFrame(textFrame("v2"));
 		group.finish();
 		expect(await frames(videoGroup)).toEqual(["v0", "v1", "v2"]);
-		// A default reader starts at the oldest group, which subscribes from group 0 without a
-		// filter: the publisher's latest group arrives whole, and nothing sits below it to fetch.
-		expect(sent.mock.calls).toHaveLength(0);
+		// Draft 18 sends a joining FETCH per track; drafts 20 and 22 request a fill.
+		expect(sent.mock.calls).toHaveLength(version === VERSION ? 2 : 0);
 	});
 }
 
