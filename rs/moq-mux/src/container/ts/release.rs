@@ -13,7 +13,7 @@ use crate::catalog::CatalogFormat;
 use crate::catalog::Stream;
 use crate::catalog::hang::Catalog;
 use crate::container::consumer::Event;
-use crate::container::{ExportSource, Frame};
+use crate::container::{ExportSource, Frame, Resume};
 use crate::jitter::{self, Arrival, Push};
 
 /// Writes the multiplex a broadcast's [passthrough track](super::Mpegts::passthrough) carries
@@ -40,6 +40,8 @@ pub struct Release {
 	catalog_format: crate::catalog::CatalogFormat,
 	/// The passthrough track, once a catalog names it.
 	track: Option<(String, ExportSource)>,
+	/// Where the track stopped, for the same instance's return to read on from.
+	resume: Option<Resume>,
 	/// When the track was subscribed. Nothing it delivers reached the release before then,
 	/// however long the cache held it.
 	subscribed: Instant,
@@ -73,6 +75,7 @@ impl Release {
 			catalog: Some(catalog),
 			catalog_format,
 			track: None,
+			resume: None,
 			subscribed: kio::clock::now(),
 			finished: false,
 			released: false,
@@ -105,19 +108,30 @@ impl Release {
 		self.catalog_format
 	}
 
-	/// Carry on into `broadcast`, whose `catalog` is subscribed: its passthrough track replaces the
-	/// one being read, and its objects go out on a new clock once what is queued has.
+	/// Carry on into `broadcast`, whose `catalog` is subscribed. The same instance's return reads
+	/// its track on after the group last delivered, on the same clock, giving up the rest of the
+	/// group it was reading. Another instance's track replaces the one being read, and its objects
+	/// go out on a new clock once what is queued has.
 	pub(super) fn followed(
 		&mut self,
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: crate::catalog::Consumer<super::Ext>,
 	) {
-		self.source = self.source.switched(broadcast);
-		self.instance = broadcast.info().instance.clone();
+		let same = self.instance.is_some() && broadcast.info().instance == self.instance;
+		if same {
+			self.source.pin(broadcast);
+		} else {
+			self.source = self.source.switched(broadcast);
+			self.instance = broadcast.info().instance.clone();
+		}
 		self.catalog = Some(catalog);
+		self.resume = None;
 		if let Some((_, track)) = self.track.take() {
-			self.restarts += track.markers() + 1;
+			self.restarts += track.markers() + u64::from(!same);
 			self.gaps += track.skips() - track.markers();
+			if same {
+				self.resume = Some(track.resume());
+			}
 		}
 		self.finished = false;
 	}
@@ -252,9 +266,10 @@ impl Release {
 				let source =
 					ExportSource::for_stream(&self.source, &passthrough.track, export::subscribed(self.delay))?;
 				let source = export::skipping(source, self.delay);
-				let source = match self.replay {
-					true => source,
-					false => source.live(),
+				let source = match (self.resume.take(), self.replay) {
+					(Some(resume), _) => source.resuming(&resume),
+					(None, true) => source,
+					(None, false) => source.live(),
 				};
 				self.track = Some((passthrough.track.clone(), source));
 				self.subscribed = kio::clock::now();

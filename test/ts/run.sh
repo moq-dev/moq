@@ -998,22 +998,27 @@ if [[ -n "$PASSTHROUGH" ]]; then
     fi
     echo
     # The one export carried on past the kill, so it may lose what the import missed while down,
-    # from the kill until its restart connected, and the restart's first group.
+    # from the kill until its restart connected, and the restart's first group. The source plays
+    # from the import's start, so a capture lacking the first RESTART seconds began after the kill.
     if [[ -n "$RESTART" ]]; then
-        python3 - "$HARNESS_RUN/pub.log" "$KILLED_AT" "$HARNESS_RUN/passthrough.json" "$BITRATE" "$RESTART_GROUP" <<'EOF' || exit 1
+        python3 - "$HARNESS_RUN/pub.log" "$KILLED_AT" "$HARNESS_RUN/passthrough.json" "$BITRATE" "$RESTART_GROUP" "$RESTART" <<'EOF' || exit 1
 import json, re, sys
 from datetime import datetime
 
-log, killed, report, bitrate, group = sys.argv[1], float(sys.argv[2]), sys.argv[3], int(sys.argv[4]), float(sys.argv[5])
+log, killed, report, bitrate, group, restart = sys.argv[1], float(sys.argv[2]), sys.argv[3], int(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6])
 lines = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in open(log, errors="replace")]
 stamps = [datetime.fromisoformat(line.split()[0].replace("Z", "+00:00")).timestamp() for line in lines if "client: connected" in line]
 down = next((t - killed for t in stamps if t > killed), None)
 if down is None:
     sys.exit("restart: FAIL: the restarted import never connected")
 placement = json.load(open(report))
+start = placement["prefix_packets"] * 188 * 8 / bitrate
+if start >= restart:
+    sys.exit(f"restart: FAIL: the capture starts {start:.3f} s into the clip, after the kill {restart:g} s in")
 lost = sum(n for _, n in placement["gaps"]) + placement["tail_packets"]
 gap = lost * 188 * 8 / bitrate
 print("### restart")
+print(f"  the capture starts {start:.3f} s into the clip, before the kill {restart:g} s in")
 print(f"  import down {down:.3f} s; the export lost {gap:.3f} s of the clip, and ran on as one process to exit 0")
 if gap > down + group:
     sys.exit(f"restart: FAIL: lost {gap:.3f} s, over the {down:.3f} s the import was down plus a {group:g} s group")

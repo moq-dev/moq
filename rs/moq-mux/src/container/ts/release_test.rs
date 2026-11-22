@@ -257,18 +257,29 @@ async fn a_capture_is_released_byte_identical_on_its_own_pcr() {
 fn publish_import(
 	origin: &moq_net::origin::Producer,
 	data: &[u8],
+	instance: moq_net::Instance,
 ) -> (
 	moq_net::origin::Route,
 	crate::catalog::Producer<Ext>,
 	crate::container::ts::passthrough::Finished,
 ) {
-	let options = moq_net::origin::RouteOptions::default().with_instance(moq_net::Instance::random(), 0);
+	let (route, catalog, passthrough) = importing(origin, data, instance);
+	(route, catalog, passthrough.finish().unwrap())
+}
+
+/// [`publish_import`] with the import still running, its passthrough track still in the catalog.
+fn importing(
+	origin: &moq_net::origin::Producer,
+	data: &[u8],
+	instance: moq_net::Instance,
+) -> (moq_net::origin::Route, crate::catalog::Producer<Ext>, Passthrough<Ext>) {
+	let options = moq_net::origin::RouteOptions::default().with_instance(instance, 0);
 	let route = origin.route("live", options).unwrap();
 	let mut broadcast = route.broadcast().clone();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	let mut passthrough = Passthrough::new(broadcast, catalog.reserve()).unwrap();
 	passthrough.decode(data).unwrap();
-	(route, catalog, passthrough.finish().unwrap())
+	(route, catalog, passthrough)
 }
 
 /// Every object `follower` writes until it ends, stalls or fails, and how it ended.
@@ -296,7 +307,7 @@ async fn a_follower_carries_a_release_on_into_a_restarted_importer() {
 	let second: Vec<Bytes> = objects(import(KYRION_H264).await).collect();
 	for stitch in [true, false] {
 		let origin = crate::source::produce_origin();
-		let killed = publish_import(&origin, KYRION);
+		let killed = publish_import(&origin, KYRION, moq_net::Instance::random());
 		let source = crate::source::resolved(&origin, "live").await;
 		let release = Release::new(source, CatalogFormat::Hang, RECORDING)
 			.await
@@ -311,7 +322,7 @@ async fn a_follower_carries_a_release_on_into_a_restarted_importer() {
 		assert_eq!(payloads(&before), bytes(&first), "stitch {stitch}");
 
 		drop(killed);
-		let _restarted = publish_import(&origin, KYRION_H264);
+		let _restarted = publish_import(&origin, KYRION_H264, moq_net::Instance::random());
 		let (after, end) = drain_follower(&mut follower).await;
 		match stitch {
 			true => {
@@ -325,6 +336,59 @@ async fn a_follower_carries_a_release_on_into_a_restarted_importer() {
 			}
 		}
 	}
+}
+
+/// The same instance back a second after its route went, as a relay that lost and regained it
+/// serves it, the source having run on meanwhile: the follower reads on after the last group
+/// delivered, on the same clock. It writes no object twice and skips no group but the one it
+/// was reading, which it gives up as the demultiplexed export does.
+#[tokio::test(start_paused = true)]
+async fn a_follower_reads_a_release_on_when_the_same_instance_returns() {
+	let continued = stepped(0, false);
+	let objects: Vec<_> = import(&continued)
+		.await
+		.objects
+		.into_iter()
+		.filter(|object| !object.payload.is_empty())
+		.collect();
+	let capture = import(KYRION).await.objects.len();
+	let origin = crate::source::produce_origin();
+	let instance = moq_net::Instance::random();
+	let gone = importing(&origin, KYRION, instance.clone());
+	let source = crate::source::resolved(&origin, "live").await;
+	let release = Release::new(source, CatalogFormat::Hang, RECORDING)
+		.await
+		.unwrap()
+		.with_replay();
+	let mut follower = super::Follower::new(release).unwrap().with_follow(RECORDING * 4);
+	let mut released = Vec::new();
+	while released.len() < 10 {
+		released.push(follower.next().await.unwrap().unwrap());
+	}
+
+	drop(gone);
+	let away = Instant::now().saturating_add(Duration::from_secs(1));
+	while let Ok(frame) = kio::clock::timeout(away.saturating_duration_since(Instant::now()), follower.next()).await {
+		released.push(frame.unwrap().unwrap());
+	}
+	let mut back = importing(&origin, &continued, instance);
+	std::ops::DerefMut::deref_mut(&mut back.1.modify(back.1.next_timestamp()).unwrap());
+	let (after, end) = drain_follower(&mut follower).await;
+	assert!(end.is_none(), "following the returned instance: {end:?}");
+	released.extend(after.into_iter().map(|(_, frame)| frame));
+
+	let (mut next, mut skipped) = (0, Vec::new());
+	for frame in &released {
+		let at = objects[next..]
+			.iter()
+			.position(|object| object.payload == frame.payload)
+			.expect("an object out of order or written twice");
+		skipped.extend(objects[next..next + at].iter().map(|object| object.group));
+		next += at + 1;
+	}
+	skipped.dedup();
+	assert!(next > capture, "the return's own groups went out");
+	assert!(skipped.len() <= 1, "groups skipped: {skipped:?}");
 }
 
 /// The capture, then the capture again with its PCRs moved by `step` 90 kHz ticks around the
