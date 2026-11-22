@@ -516,6 +516,7 @@ export namespace Origin {
 		reject(err: Error): void;
 		route(options?: Origin.RouteOptions): Origin.Route;
 		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
+		unwanted(): Promise<void>;
 	}
 	export interface RequestOptions {
 		instance?: Instance.Valid;

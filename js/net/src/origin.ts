@@ -3200,6 +3200,8 @@ export class Request {
 	 * Resolves once no requester waits on the answer any more: each left, or the origin moved
 	 * them to another route. Final: a later requester gets a new request.
 	 */
+	// Public API for a claimant's owner, such as an orchestrator deciding whether to launch work.
+	// fallow-ignore-next-line unused-class-member
 	async unwanted(): Promise<void> {
 		await this.#unwanted;
 	}

@@ -14081,7 +14081,10 @@ mod tests {
 			kio::clock::sim::yield_now().await;
 		}
 		assert!(!unwanted(&request), "the second requester still waits");
-		assert!(claim.poll_requested(&kio::Waiter::noop()).is_pending(), "one request for both");
+		assert!(
+			claim.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"one request for both"
+		);
 
 		drop(second);
 		settle(|| unwanted(&request)).await;
