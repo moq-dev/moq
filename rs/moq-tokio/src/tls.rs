@@ -416,6 +416,7 @@ pub struct Connect {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-tls-root",
+		delimiter = ',',
 		long = "connect-tls-root",
 		env = "MOQ_CONNECT_TLS_ROOT",
 		setting = "connect.tls.root"
@@ -455,6 +456,7 @@ pub struct Connect {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-tls-fingerprint",
+		delimiter = ',',
 		long = "connect-tls-fingerprint",
 		env = "MOQ_CONNECT_TLS_FINGERPRINT",
 		setting = "connect.tls.fingerprint"
@@ -1206,6 +1208,7 @@ pub struct Listen {
 	#[usage(
 		long = "listen-tls-cert",
 		name = "listen-tls-cert",
+		delimiter = ',',
 		env = "MOQ_LISTEN_TLS_CERT",
 		setting = "listen.tls.cert"
 	)]
@@ -1218,6 +1221,7 @@ pub struct Listen {
 	#[usage(
 		long = "listen-tls-key",
 		name = "listen-tls-key",
+		delimiter = ',',
 		env = "MOQ_LISTEN_TLS_KEY",
 		setting = "listen.tls.key"
 	)]
@@ -3484,6 +3488,27 @@ mod legacy_tests {
 	fn parse(args: &[&str]) -> Cli {
 		let argv = args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
 		Cli::parse_from(&argv).unwrap()
+	}
+
+	/// A list variable splits on commas, as `services.moq-relay.tls.certs` joins two or more
+	/// certificates and keys into one value.
+	#[test]
+	fn list_environment_splits_on_commas() {
+		if !test_env::Env::default()
+			.set("MOQ_LISTEN_TLS_CERT", "a.pem,b.pem")
+			.set("MOQ_LISTEN_TLS_KEY", "a.key,b.key")
+			.set("MOQ_CONNECT_TLS_ROOT", "ca.pem,ca2.pem")
+			.set("MOQ_CONNECT_TLS_FINGERPRINT", "aa,bb")
+			.isolate()
+		{
+			return;
+		}
+		let cli = parse(&[]);
+		let paths = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+		assert_eq!(cli.listen.cert, paths(&["a.pem", "b.pem"]));
+		assert_eq!(cli.listen.key, paths(&["a.key", "b.key"]));
+		assert_eq!(cli.connect.root, paths(&["ca.pem", "ca2.pem"]));
+		assert_eq!(cli.connect.fingerprint, ["aa", "bb"]);
 	}
 
 	/// The released `--client-tls-*` spellings parse so the process can name their
