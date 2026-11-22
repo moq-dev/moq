@@ -162,7 +162,8 @@ struct Rollback<'a>(&'a std::sync::Mutex<Phase>);
 
 impl Drop for Rollback<'_> {
 	fn drop(&mut self) {
-		let mut phase = self.0.lock().unwrap();
+		// A drop may run while a panic unwinds, so a poisoned lock must not panic again.
+		let mut phase = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		if matches!(*phase, Phase::Starting(_)) {
 			let Phase::Starting(listening) = std::mem::replace(&mut *phase, Phase::Cancelled(Default::default()))
 			else {
