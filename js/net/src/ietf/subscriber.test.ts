@@ -1226,9 +1226,18 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 	},
 );
 
-test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
-	"a start of group 0 joins live with no filter and fetches the groups below Largest (%s)",
-	async (version) => {
+// A range from the oldest group asks the same as one from time 0, so a publisher that answers
+// the FETCH delivers the backlog it holds.
+test.each(
+	[Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22].flatMap((version) =>
+		[
+			["time 0", { start: 0n }],
+			["the oldest group", {}],
+		].map(([name, range]) => [name, version, range] as const),
+	),
+)(
+	"a start of group 0 joins live with no filter and fetches the groups below Largest (from %s, draft %d)",
+	async (_name, version, range) => {
 		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const subscriber = new Subscriber({ session: new NativeSession(pair.server, version, true) });
 		const consumer = subscriber
@@ -1236,7 +1245,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: 0n }],
+				ranges: [range],
 				order: "ascending",
 				delay: { max: null },
 			});
