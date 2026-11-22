@@ -137,7 +137,7 @@ impl Config {
 				"no --auth-url or --auth-public configured; nobody can authenticate (a client certificate admits nothing on its own)"
 			),
 			(None, Some(_)) if client_ca => anyhow::bail!(
-				"a client CA (--listen-tls-root, --web-https-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
+				"a client CA (--listen-tls-root, --web-https-root, --cluster-listen-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
 			),
 			_ => {}
 		}

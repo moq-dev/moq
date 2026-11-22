@@ -744,8 +744,8 @@ async function subscribeTrack({
 		.subscribe(
 			subscription ?? {
 				...track.Subscription.default(),
-				delay: { min: Duration.ZERO, max: Duration.ZERO },
-				ranges: [{}],
+				delay: { max: Duration.ZERO },
+				ranges: [{ start: { live: Duration.ZERO } }],
 			},
 		);
 

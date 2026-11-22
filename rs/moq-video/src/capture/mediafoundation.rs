@@ -78,7 +78,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		Box::new(guard),
 	))
 }
-use crate::mf::{ComGuard, create_d3d_device, mf_err, pack_2x32, unpack_2x32};
+use crate::mf::{ComGuard, Locked, create_d3d_device, mf_err, pack_2x32, unpack_2x32};
 
 /// An open camera, read frame-by-frame via [`read`](Self::read) on the pump thread.
 struct Camera {
@@ -247,18 +247,7 @@ impl Camera {
 			}
 			data
 		} else {
-			let mut ptr_out: *mut u8 = ptr::null_mut();
-			let mut current_len: u32 = 0;
-			unsafe {
-				buffer
-					.Lock(&mut ptr_out, None, Some(&mut current_len))
-					.map_err(|e| mf_err("lock buffer", e))?;
-			}
-			let data = unsafe { slice::from_raw_parts(ptr_out, current_len as usize) }.to_vec();
-			unsafe {
-				let _ = buffer.Unlock();
-			}
-			data
+			Locked::new(&buffer)?.data().to_vec()
 		};
 
 		Ok(Surface::I420(I420::from_nv12(

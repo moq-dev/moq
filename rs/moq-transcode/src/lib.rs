@@ -234,6 +234,8 @@ impl Transcoder {
 						Err(err) => tracing::warn!(%err, "could not resolve the new source's timescale"),
 					}
 				},
+				// A closed source may keep its catalog track open, so the catalog alone may never end.
+				() = source.closed() => break,
 				Some(result) = tasks.join_next() => match result {
 					Ok(Ok(())) => {}
 					Ok(Err(err)) => tracing::warn!(%err, "rung failed"),
@@ -997,7 +999,7 @@ mod tests {
 
 		let past = moq_net::track::Subscription::default()
 			.with_ranges([moq_net::track::Range {
-				start: Some(3),
+				start: moq_net::track::Start::Time(3),
 				end: Some(4),
 			}])
 			.with_delay(moq_net::track::Delay::default().with_max(None));
@@ -2174,8 +2176,9 @@ mod tests {
 		let (rung, live) = instance().await;
 		let mut subscriber = rung
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::ZERO)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live(std::time::Duration::ZERO),
+				)]),
 			)
 			.await
 			.unwrap()
@@ -2526,6 +2529,39 @@ mod tests {
 
 		let result = kio::clock::timeout(std::time::Duration::from_secs(5), transcoder).await;
 		result.expect("run did not shut down within 5s").unwrap().unwrap();
+	}
+
+	/// A source that closes while its catalog track stays open still ends a serving transcoder.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_source_ends_the_serve_loop() {
+		let source = source_broadcast(1, 3);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| !snapshot.video.renditions.is_empty()).await;
+
+		source.broadcast.close();
+		let result = kio::clock::timeout(std::time::Duration::from_secs(5), transcoder).await;
+		result
+			.expect("closing the source ends the transcoder")
+			.unwrap()
+			.unwrap();
+		drop(source);
 	}
 
 	/// A rung finishes only when its source track finishes. Any other end, here

@@ -148,7 +148,7 @@ impl Flavor {
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	delay: moq_net::track::Delay,
+	delay: crate::container::Delay,
 	/// Frames as tags, encoded only once released.
 	jitter: crate::jitter::Buffer<(u8, usize), Tag>,
 	/// Emit every rendition as an enhanced-RTMP multitrack track, rather than only
@@ -394,7 +394,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			delay: moq_net::track::Delay::default(),
+			delay: crate::container::Delay::default(),
 			jitter: crate::jitter::Buffer::new(std::time::Duration::ZERO),
 			multitrack: false,
 			video: Vec::new(),
@@ -408,13 +408,13 @@ impl<S: Stream> Export<S> {
 
 	/// Set how far behind the live edge the export plays.
 	///
-	/// [`Delay::min`](moq_net::track::Delay::min) releases each frame that long after its decode
+	/// [`Delay::min`](crate::container::Delay::min) releases each frame that long after its decode
 	/// time, dropping frames that arrive later, and is where each per-track source starts. A source
 	/// whose clock runs further off ours than the output's may follow fails the export once it has
-	/// used half of it. [`Delay::max`](moq_net::track::Delay::max) is how late a source's group may
+	/// used half of it. [`Delay::max`](crate::container::Delay::max) is how late a source's group may
 	/// fall before it is skipped. Zero for both (the default) releases each frame as soon as it is
 	/// read and drops none as late, but a stalled group is still skipped once a newer one is ready.
-	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+	pub fn with_delay(mut self, delay: crate::container::Delay) -> Self {
 		self.delay = delay;
 		self.jitter = crate::jitter::Buffer::new(delay.min.unwrap_or_default());
 		self

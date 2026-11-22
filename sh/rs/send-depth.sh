@@ -35,6 +35,9 @@ export RUSTDOC="$send_sysroot/bin/rustdoc"
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D recursion_depth_exceeding_limit"
 rustc --version
 cargo --version
-cargo check --locked -p moq-net --features async --lib --test send
+# Nightly shares no artifacts with stable target/; isolate its target dir so it
+# never blocks on target/.cargo-lock while stable checks run in parallel.
+target_dir="${CARGO_TARGET_DIR:-$PWD/target}/send-depth"
+cargo check --locked --target-dir "$target_dir" -p moq-net --features async --lib --test send
 # moq-tokio spawns the session future, which must prove Send at the same limit.
-cargo check --locked -p moq-tokio --lib
+cargo check --locked --target-dir "$target_dir" -p moq-tokio --lib

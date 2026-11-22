@@ -599,7 +599,7 @@ class Rendition {
 
 	// The playout delay is where a cold join starts, and the shared max delay how late it may fall.
 	// Its subscription and its consumer take the same delay.
-	#delay: Getter<Moq.Track.Delay>;
+	#delay: Getter<Container.Delay>;
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<Container.BufferedRanges>([]);
