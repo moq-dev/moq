@@ -280,11 +280,14 @@ class Route {
 		return true;
 	}
 
-	/** Between routes: readers wait for the next one, keeping what they have. */
+	/**
+	 * Between routes: readers wait for the next one, keeping what they have. The source that served
+	 * stays the incumbent until a later one delivers, as a replacement's would.
+	 */
 	park(): void {
 		if (!this.source) return;
 		this.generation++;
-		this.#hold(undefined);
+		if (!this.incumbent) this.#hold(this.source);
 		this.source = undefined;
 		this.#bump();
 	}

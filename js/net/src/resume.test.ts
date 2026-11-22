@@ -4334,6 +4334,56 @@ test("a switch before any group drops a replaced copy that never delivered", asy
 	}
 });
 
+// Parking between routes replaces the serving route with none: the copy that served stays until the
+// next route delivers, as the Rust front keeps reading it until the replacement splices.
+test("a switch before any group after a park keeps the parked copy until the new route delivers", async () => {
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb] = sources.map(copy);
+	front.serve(sources[0].consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		await settle();
+		front.park();
+		front.serve(sources[1].consume());
+		await settle();
+		ta.write(0n);
+		await settle();
+		expect(drain(sub)).toEqual([0n]);
+		tb.write(1n);
+		expect(drain(sub)).toEqual([1n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const source of sources) source.close();
+	}
+});
+
+// A replacement after a park that fails before delivering leaves the parked copy serving.
+test("a replacement after a park that aborts before any group leaves the parked copy serving", async () => {
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb] = sources.map(copy);
+	front.serve(sources[0].consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		await settle();
+		front.park();
+		front.serve(sources[1].consume());
+		await settle();
+		tb.producer.abort(new StreamError(StreamCode(64)));
+		await settle();
+		expect(sub.closed.peek()).toBeUndefined();
+		ta.write(1n);
+		await settle();
+		expect(drain(sub)).toEqual([1n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const source of sources) source.close();
+	}
+});
+
 test("a group the new route replays bounds nothing, so the old route's next group still arrives", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
