@@ -5370,11 +5370,10 @@ export class Subscriber {
 				const queued = this.#nextResumedDrop();
 				if (queued) return queued;
 				const next = this.#resume.tryDrop(this.#delivered);
-				if (!next) {
-					// Taken back by a widening during this poll, so before the read returns a gap.
-					this.#takeBack();
-					return undefined;
-				}
+				// Taken back by a widening during this poll, so before what it reported, or before the
+				// read returns a gap: it never takes back this report.
+				this.#takeBack();
+				if (!next) return undefined;
 				this.#queueResumedDrop(next);
 			}
 		}

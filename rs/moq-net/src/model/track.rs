@@ -12099,6 +12099,9 @@ impl Subscriber {
 					return Poll::Ready(next);
 				}
 				let (range, hole) = std::task::ready!(resume.poll_drop(&logical.record.delivered, probe, waiter));
+				// What the copy took back before reporting this goes first, so it never takes
+				// back this report.
+				logical.take_back(resume);
 				logical.record.pending.insert(range, Pending::own(hole));
 			},
 		}

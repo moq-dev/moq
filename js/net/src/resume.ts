@@ -523,6 +523,12 @@ class Reader implements ResumeSource {
 	 * `Reader::withdrawing`.
 	 */
 	#withdrawing = false;
+	/**
+	 * What the serving copy took back after a widening, for the owner to forget, in order with what
+	 * it reports: a run it gives up again after taking it back is queued in {@link #drops} and kept.
+	 * Mirrors the Rust `Reader::withdrawn`.
+	 */
+	#withdrawn: Run[] = [];
 	/** A copy that declared the track's end ran out cleanly at it, even if since let go. */
 	#settled = false;
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
@@ -598,8 +604,10 @@ class Reader implements ResumeSource {
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
-		// What a former route gave up is no verdict on the one that serves now.
+		// What a former route gave up is no verdict on the one that serves now, nor is what it took
+		// back: its reports stand.
 		this.#drops = [];
+		this.#withdrawn = [];
 		const source = route.source;
 		if (!source) return;
 		// The new copy starts at the boundary, so a lower group no replaced copy holds is asked of
@@ -998,11 +1006,14 @@ class Reader implements ResumeSource {
 			this.#mirrored = subscription;
 			// New preferences may ask what a backfill failed to get.
 			this.#refused = undefined;
+			const serving = this.#serving();
 			for (const copy of [...this.#copies, ...this.#rerouted]) {
-				// A widening judges the copy again, which may then take back a drop it reported that the
-				// reader's owner has yet to settle. Set first, so another front's reader as a copy carries
-				// it to its own copies as it follows the change.
-				if (this.#withdrawing) hooks.withdrawing(copy.sub);
+				// A widening judges the serving copy again, which may then take back a drop it reported
+				// that the reader's owner has yet to settle. Only the serving copy's verdicts reach the
+				// reader, so only it may: a replaced copy would ask again what it then answers to nobody.
+				// Set first, so another front's reader as a copy carries it to its own copies as it
+				// follows the change.
+				if (this.#withdrawing && copy === serving) hooks.withdrawing(copy.sub);
 				this.#update(copy);
 			}
 			// A copy just resolved replaced ranges against its cache, before its failover cap raised
@@ -1529,14 +1540,21 @@ class Reader implements ResumeSource {
 		this.#withdrawing = true;
 	}
 
+	/**
+	 * What the serving copy took back since the last call, in order with what {@link tryDrop}
+	 * reported. A replaced copy's take-backs are dropped: it answers nobody, so what it reported
+	 * stands. Mirrors the Rust `Reader::take_withdrawn`.
+	 */
 	takeWithdrawn(): Run[] {
-		const withdrawn: Run[] = [];
+		const serving = this.#serving();
 		for (const copy of this.#copies) {
-			for (const run of hooks.takeWithdrawn(copy.sub)) {
-				insertRun(withdrawn, run.start, run.end);
-				this.#drops = removeRun(this.#drops, run.start, run.end);
-			}
+			const taken = hooks.takeWithdrawn(copy.sub);
+			if (copy !== serving) continue;
+			for (const run of taken) insertRun(this.#withdrawn, run.start, run.end);
 		}
+		const withdrawn = this.#withdrawn;
+		this.#withdrawn = [];
+		for (const run of withdrawn) this.#drops = removeRun(this.#drops, run.start, run.end);
 		return withdrawn;
 	}
 
@@ -1573,7 +1591,15 @@ class Reader implements ResumeSource {
 				for (const gap of runGaps(held, run.start, run.end))
 					this.#drops = removeRun(this.#drops, gap.start, gap.end);
 			}
-			for (let dropped = hooks.tryDrop(serving.sub); dropped; dropped = hooks.tryDrop(serving.sub)) {
+			for (;;) {
+				const dropped = hooks.tryDrop(serving.sub);
+				// Taken back by a widening during this poll, so before what it reported: a run given up
+				// again after is a new verdict, and stays.
+				for (const run of hooks.takeWithdrawn(serving.sub)) {
+					this.#drops = removeRun(this.#drops, run.start, run.end);
+					insertRun(this.#withdrawn, run.start, run.end);
+				}
+				if (!dropped) break;
 				// A route failing is no verdict: another route may still deliver the group, and
 				// one it failed while buffered is handed out to continue through its recovery.
 				if (routeFailed(dropped.error)) continue;

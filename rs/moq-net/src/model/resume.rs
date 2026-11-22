@@ -595,6 +595,7 @@ impl Consumer {
 				received: RangeSet::new(),
 				received_checked: None,
 				withdrawing: false,
+				withdrawn: RangeSet::new(),
 				declared: None,
 				declared_error: None,
 			})
@@ -1459,20 +1460,10 @@ impl Subscriber {
 		self.reader().withdrawing = true;
 	}
 
-	/// The drops the copies took back after a widening since the last call, none of which is
-	/// reported any more; see [`track::Subscriber::take_withdrawn`].
+	/// The drops the serving copy took back after a widening since the last call, none of
+	/// which is reported any more; see [`track::Subscriber::take_withdrawn`].
 	pub(super) fn take_withdrawn(&mut self) -> RangeSet<u64> {
-		let mut reader = self.reader();
-		let mut withdrawn = RangeSet::new();
-		for copy in &mut reader.copies {
-			if let Sub::Ready(sub) = &mut copy.sub {
-				withdrawn.extend(sub.take_withdrawn());
-			}
-		}
-		for run in withdrawn.iter() {
-			reader.remove_drop(run.clone());
-		}
-		withdrawn
+		self.reader().take_withdrawn()
 	}
 
 	/// Settle `keys` on every copy, which the reader reported for good, so a widening never
@@ -1935,6 +1926,10 @@ struct Reader {
 	/// [`track::Ordered`] does, so a widening may take back the copies' drops too; see
 	/// [`track::Subscriber::set_withdrawing`].
 	withdrawing: bool,
+	/// What the serving copy took back after a widening, for the owner to forget, in order
+	/// with what it reports: a run it gives up again after taking it back is queued in
+	/// [`Self::drops`] and kept. See [`Reader::take_withdrawn`].
+	withdrawn: RangeSet<u64>,
 	/// The part of [`Self::drops`] that is a received stale run the serving copy held, which
 	/// a new upstream subscription can supersede. Kept apart so a poll costs these runs, not every queued one.
 	received: RangeSet<u64>,
@@ -2222,11 +2217,15 @@ impl Reader {
 			};
 			// New preferences may ask what a backfill failed to get.
 			self.refused = None;
-			for copy in &mut self.copies {
-				// A widening judges the copy again, which may then take back a drop it reported
-				// that the reader's owner has yet to settle. Set first: another front's reader
-				// as a copy mirrors the change into its own copies at once.
+			let serving = self.serving_copy();
+			for (index, copy) in self.copies.iter_mut().enumerate() {
+				// A widening judges the serving copy again, which may then take back a drop it
+				// reported that the reader's owner has yet to settle. Only the serving copy's
+				// verdicts reach the reader, so only it may: a replaced copy would ask again
+				// what it then answers to nobody. Set first: another front's reader as a copy
+				// mirrors the change into its own copies at once.
 				if self.withdrawing
+					&& Some(index) == serving
 					&& let Sub::Ready(sub) = &mut copy.sub
 				{
 					sub.set_withdrawing();
@@ -2273,8 +2272,10 @@ impl Reader {
 			return;
 		}
 		self.generation = Some(generation);
-		// What a former route gave up is no verdict on the one that serves now.
+		// What a former route gave up is no verdict on the one that serves now, nor is what
+		// it took back: its reports stand.
 		self.drops = RangeMap::new();
+		self.withdrawn = RangeSet::new();
 		self.received = RangeSet::new();
 		self.received_checked = None;
 		let Some(track) = serving else { return };
@@ -3090,8 +3091,9 @@ impl Reader {
 		probe: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
-		let mut given_up = Vec::new();
+		let mut given_up: Vec<(std::ops::Range<u64>, track::Hole, bool)> = Vec::new();
 		let mut superseded = Vec::new();
+		let mut withdrawn = RangeSet::new();
 		let ready = matches!(self.poll_serving(waiter), Poll::Ready(Some(_)));
 		// The serving copy's subscription, borrowed apart from the received runs it checks.
 		if let Some(Sub::Ready(sub)) = self.copies.last_mut().filter(|_| ready).map(|copy| &mut copy.sub) {
@@ -3115,6 +3117,21 @@ impl Reader {
 					true => sub.poll_drop(waiter),
 					false => sub.poll_queued_drop(waiter),
 				};
+				// Taken back by a widening during this poll, so before what it reported: a run
+				// given up again after is a new verdict, and stays.
+				for run in sub.take_withdrawn().iter() {
+					given_up = given_up
+						.into_iter()
+						.flat_map(|(given, hole, received)| {
+							let mut rest = RangeSet::from_iter([given]);
+							rest.remove(run.clone());
+							rest.iter()
+								.map(|part| (part.clone(), hole.clone(), received))
+								.collect::<Vec<_>>()
+						})
+						.collect();
+					withdrawn.insert(run.clone());
+				}
 				let Poll::Ready((run, hole)) = polled else { break };
 				// A stale run the copy holds came from its upstream, which a new upstream
 				// subscription may supersede.
@@ -3124,6 +3141,10 @@ impl Reader {
 		}
 		for run in superseded {
 			self.remove_drop(run);
+		}
+		for run in withdrawn.iter() {
+			self.remove_drop(run.clone());
+			self.withdrawn.insert(run.clone());
 		}
 		for (run, hole, received) in given_up {
 			if !Error::Stream(hole.error()).retryable() {
@@ -3187,6 +3208,33 @@ impl Reader {
 		// up) may still land, and is handed out if it does.
 		self.remove_drop(open.clone());
 		Poll::Ready((open, err))
+	}
+
+	/// What the serving copy took back since the last call, in order with what
+	/// [`Self::poll_drop`] reported. A replaced copy's take-backs are dropped: it answers
+	/// nobody, so what it reported stands.
+	fn take_withdrawn(&mut self) -> RangeSet<u64> {
+		let serving = self.serving_copy();
+		for (index, copy) in self.copies.iter_mut().enumerate() {
+			let Sub::Ready(sub) = &mut copy.sub else { continue };
+			let taken = sub.take_withdrawn();
+			if Some(index) == serving {
+				for run in taken.iter() {
+					self.withdrawn.insert(run.clone());
+				}
+			}
+		}
+		let withdrawn = std::mem::take(&mut self.withdrawn);
+		for run in withdrawn.iter() {
+			self.remove_drop(run.clone());
+		}
+		withdrawn
+	}
+
+	/// The index of the copy serving the current route, if it is in [`Self::copies`].
+	fn serving_copy(&self) -> Option<usize> {
+		let index = self.copies.len().checked_sub(1)?;
+		(self.generation.is_some() && Some(self.copies[index].generation) == self.generation).then_some(index)
 	}
 
 	/// Forget `run` as queued, received or not.
@@ -7775,6 +7823,60 @@ mod test {
 				.unwrap();
 			assert_eq!(read(&mut ordered), [Ok(1200), Err(1201..1500)], "routed={routed}");
 		}
+	}
+
+	/// A copy a switch replaced takes back nothing a widening reverses: only the serving
+	/// copy's verdicts reach the reader, so the gap a replaced copy reported stands, and
+	/// the serving copy's own verdict on those keys is not lost with it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_replaced_copys_stale_gap_stands_once_the_read_widens() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		a.received();
+		a.anchored();
+		let dynamic = a.requests();
+		routes.serve(a.consume());
+		write(&a, 0);
+		write(&a, 3);
+		// Judged under a budget narrower than the reader's, so the reader asks for it itself.
+		a.give_up(2..3, track::Hole::stale(Duration::from_millis(500)));
+		let mut ordered = logical
+			.consume()
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let read = |ordered: &mut track::Ordered| {
+			let mut items = Vec::new();
+			loop {
+				match ordered.poll_next_item(&kio::Waiter::noop()) {
+					Poll::Pending => return items,
+					Poll::Ready(Ok(Some(track::Item::Group(group)))) => items.push(Ok(group.start)),
+					Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => items.push(Err(range)),
+					Poll::Ready(res) => panic!("ended: {:?}", res.map(|_| ())),
+				}
+			}
+		};
+		assert_eq!(read(&mut ordered), [Ok(0)]);
+		let fill = dynamic.requested_fill().now_or_never().expect("asked").unwrap();
+		assert_eq!(fill.start().group..fill.end(), 2..3);
+		fill.refuse_groups(2..3, Error::Old);
+		assert_eq!(read(&mut ordered), [], "the gap waits behind group 1");
+
+		// A newer route gives group 2 up for good, held back while the old one may deliver it.
+		let b = copy();
+		routes.serve(b.consume());
+		b.drop_groups(2..3, StreamError::NotFound);
+		assert_eq!(read(&mut ordered), []);
+		ordered
+			.update(ordered.subscription().with_delay(Delay::default().with_max(None)))
+			.unwrap();
+		assert_eq!(read(&mut ordered), []);
+		write(&a, 1);
+		assert_eq!(read(&mut ordered), [Ok(1), Err(2..3), Ok(3)]);
 	}
 
 	/// A gap a front's ordered read returned stands once it widens, as does a drop a front's
