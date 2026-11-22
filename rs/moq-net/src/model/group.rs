@@ -1340,6 +1340,13 @@ impl GroupState {
 
 	/// The group's outcome once final: `Ok` once finished, which a later abort only frees
 	/// the cache of, or the abort error.
+	/// Closed, or holding a timed frame past `time`: either fixes whether the group's span
+	/// reaches past it.
+	fn places(&self, time: u64) -> bool {
+		matches!(self.timeline, Timeline::Timed { latest, .. } if latest.value() > time)
+			|| self.poll_outcome().is_ready()
+	}
+
 	fn poll_outcome(&self) -> Poll<Result<()>> {
 		match &self.outcome {
 			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
@@ -3393,11 +3400,16 @@ impl Handle {
 	/// Poll until the group places `time`: closed, or holding a timed frame past it, which puts
 	/// its End past the time too, so it contains the time whatever it ends at.
 	pub(crate) fn poll_past(&self, waiter: &kio::Waiter, time: u64) -> Poll<()> {
-		(self.state.poll_ref(waiter, |state| match state.timeline {
-			Timeline::Timed { latest, .. } if latest.value() > time => Poll::Ready(Ok(())),
-			_ => state.poll_outcome(),
+		(self.state.poll_ref(waiter, |state| match state.places(time) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
 		}))
 		.map(|_| ())
+	}
+
+	/// Whether the group places `time` now; see [`Self::poll_past`].
+	pub(crate) fn places(&self, time: u64) -> bool {
+		self.state.read().places(time)
 	}
 
 	/// Poll until the group is aborted, including by eviction and after it finished; ready

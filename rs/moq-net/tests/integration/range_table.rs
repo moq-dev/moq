@@ -100,6 +100,8 @@ struct Case {
 	append: bool,
 	/// How long after its start each group ends whole, `None` for no declared end.
 	span: Option<u64>,
+	/// The groups the origin leaves unfinished.
+	open: Vec<u64>,
 	copy: Vec<Ask>,
 	evict: bool,
 	read: Ask,
@@ -131,6 +133,7 @@ fn cases() -> Vec<Case> {
 				.get("append")
 				.is_none_or(|append| append.as_bool().expect("append")),
 			span: case.get("span").map(|span| span.as_u64().expect("a span")),
+			open: case.get("open").map(keys).unwrap_or_default(),
 			copy: case
 				.get("copy")
 				.map(|copy| copy.as_array().expect("copy").iter().map(Ask::parse).collect())
@@ -175,6 +178,8 @@ struct Source {
 	origin: origin::Producer,
 	track: track::Producer,
 	_route: origin::Route,
+	// The groups the case leaves unfinished, held so they stay open.
+	open: std::sync::Mutex<Vec<moq_net::group::Producer>>,
 }
 
 impl Source {
@@ -193,6 +198,7 @@ impl Source {
 			origin,
 			track,
 			_route: route,
+			open: Default::default(),
 		}
 	}
 
@@ -205,6 +211,7 @@ impl Source {
 			};
 			group.write_frame(time, &b"x"[..]).unwrap();
 			match case.span {
+				_ if case.open.contains(&start) => self.open.lock().unwrap().push(group),
 				Some(span) => drop(group.finish_at(start + span).unwrap()),
 				None => drop(group.finish().unwrap()),
 			}
@@ -278,7 +285,10 @@ async fn warm(broadcast: &moq_net::broadcast::Consumer, case: &Case) -> Vec<trac
 	let mut readers = Vec::new();
 	for ask in &case.copy {
 		let mut reader = subscribe(broadcast, ask).await.expect("a copy reader subscribes");
-		Got::default().read(&mut reader, 0).await;
+		// Each group's frames too, so the copy pulls them whole, as a JavaScript copy always does.
+		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(QUIET, reader.recv_group()).await {
+			while let Ok(Ok(Some(_))) = kio::clock::timeout(QUIET, group.read_frame()).await {}
+		}
 		readers.push(reader);
 	}
 	readers

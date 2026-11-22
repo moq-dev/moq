@@ -389,6 +389,15 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> any
 	};
 	let append = case.get("append").and_then(serde_json::Value::as_bool) != Some(false);
 	let span = case.get("span").and_then(serde_json::Value::as_u64);
+	let open: Vec<u64> = (case
+		.get("open")
+		.and_then(serde_json::Value::as_array)
+		.into_iter()
+		.flatten())
+	.filter_map(serde_json::Value::as_u64)
+	.collect();
+	// The groups the case leaves unfinished, held so they stay open.
+	let mut unfinished = Vec::new();
 	for start in starts {
 		let time = Timestamp::from_millis(start)?;
 		let mut group = match append {
@@ -397,6 +406,7 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> any
 		};
 		group.write_frame(time, b"x".to_vec())?;
 		match span {
+			_ if open.contains(&start) => unfinished.push(group),
 			Some(span) => drop(group.finish_at(start + span)?),
 			None => drop(group.finish()?),
 		}

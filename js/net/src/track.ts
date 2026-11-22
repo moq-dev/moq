@@ -997,6 +997,9 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
 // Where the held group at `key` ends, once finished whole; assigned in its static block.
 let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
+// Whether the held group at `key` places `time`: closed, or holding a frame past it. Mirrors the Rust
+// `group::Handle::places`; assigned in its static block.
+let placesAt: (producer: Producer, key: bigint, time: bigint) => boolean;
 // The first key past the group held at `key` that its own End does not give up: its End once whole,
 // even after the skip its GROUP_END recorded expired, else the next key. Mirrors the Rust
 // `TrackState::past_span`.
@@ -1619,6 +1622,10 @@ export class Producer {
 		wholeAt = (producer, key) => {
 			const entry = producer.#cached.get(key);
 			return entry && hooks.groupWholeEnd(entry.group);
+		};
+		placesAt = (producer, key, time) => {
+			const entry = producer.#cached.get(key);
+			return entry !== undefined && hooks.groupPast(entry.group, time);
 		};
 		wholeAround = (producer, key) => {
 			const keys = producer.#keys;
@@ -3929,7 +3936,13 @@ export class Subscriber {
 				// between, nor does a stale drop of a reader wider than the budget it was judged under.
 				// Mirrors the Rust `TrackState::containing_received`.
 				if (wire) {
-					if (below !== undefined && drops.givenUp(pastSpan(producer, below), time + 1n, budget))
+					// An open group's End may yet land at or before the time, so only a frame past it, or the
+					// group closing, proves the group reaches it.
+					if (
+						below !== undefined &&
+						(below === time || placesAt(producer, below, time)) &&
+						drops.givenUp(pastSpan(producer, below), time + 1n, budget)
+					)
 						return at(below);
 					const reported = timeStartContaining(anchors.starts.get(time), time, budget);
 					if (reported !== undefined) return reported;

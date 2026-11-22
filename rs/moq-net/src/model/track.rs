@@ -1470,7 +1470,10 @@ impl TrackState {
 	/// [`Subscriber::asks`]): a group held after the time says nothing of one between.
 	fn containing_received(&self, time: u64, budget: Duration) -> Containing {
 		let held = self.lookup.range(..=time).next_back();
+		// An open group's End may yet land at or before the time, so only a frame past it, or
+		// the group closing, proves the group reaches it.
 		if let Some((&key, slot)) = held
+			&& (key == time || slot.copies().any(|copy| copy.places(time)))
 			&& self.given_up_for(Self::past_span(key, slot)..time.saturating_add(1), budget)
 		{
 			return Containing::At(slot.reached(key, time));
@@ -17110,6 +17113,45 @@ mod test {
 			None,
 			"the pause is unproven again"
 		);
+	}
+
+	/// A lite-07 copy holding an open group whose successor already arrived places a time past
+	/// the group's frames only once a frame passes the time or the group ends: its End may yet
+	/// leave the time in a pause, where its upstream starts at the successor instead.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_waits_for_an_open_group_to_reach_a_time() {
+		let start = |producer: &Producer, time| {
+			let from = Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None));
+			producer
+				.subscribe(from)
+				.resolved_range(0)
+				.map(|resolved| resolved.start)
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut group = producer.create_group(group::Info { start: 1000 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"x"[..])
+			.unwrap();
+		// As the successor's Previous Start links it to 1000, while 1000 is still open.
+		producer.skip_groups(1001..3000);
+		write_group(&producer, 3000);
+		assert_eq!(start(&producer, 1000), Some(1000), "its own start");
+		assert_eq!(start(&producer, 1700), None, "its End may leave 1700 in a pause");
+		group
+			.write_frame(Timestamp::from_millis(1800).unwrap(), &b"x"[..])
+			.unwrap();
+		assert_eq!(start(&producer, 1700), Some(1000), "a frame past it");
+		assert_eq!(start(&producer, 1900), None);
+		group.finish_at(1900).unwrap();
+		assert_eq!(start(&producer, 1950), Some(1900), "past its End");
 	}
 
 	/// A time start an answer places only within a narrower budget than the reader's waits, and

@@ -29,6 +29,7 @@ type Case = {
 	groups?: number[];
 	append?: boolean;
 	span?: number;
+	open?: number[];
 	copy?: Ask[];
 	evict?: boolean;
 	read: Ask;
@@ -82,6 +83,7 @@ function source() {
 				const time = Timestamp.fromMillis(start);
 				const group = c.append === false ? track.createGroup(BigInt(start)) : track.appendGroup(time);
 				group.writeFrame({ payload: new Uint8Array([0x78]), timestamp: time });
+				if (c.open?.includes(start)) continue;
 				if (c.span === undefined) group.finish();
 				else group.finishAt(BigInt(start + c.span));
 			}
