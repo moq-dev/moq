@@ -9,6 +9,7 @@ import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
@@ -19,7 +20,6 @@ import { encodeSubscribeResponse, Subscribe, SubscribeStart } from "./subscribe.
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, Version } from "./version.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
 	/** A subscriber whose publisher the test plays by hand, up to the SUBSCRIBE. */

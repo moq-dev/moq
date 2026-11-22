@@ -13,10 +13,10 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { FillGroups, Producer, Requests, Subscription } from "./track.ts";
 import { wireOf } from "./wire.ts";
-import { withMax } from "./subscription.test-util.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -295,17 +295,21 @@ test("fill: a group a lowered floor asks the feed for is not asked of a fill", a
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
 	hooks.receiveTrack(track);
-	const live = track.subscribe(withMax({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }], delay: { max: null } }));
+	const live = track.subscribe(
+		withMax({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }], delay: { max: null } }),
+	);
 	hooks.startTrack(track, { start: 1n });
 	hooks.receiveGroup(track, { start: 1n, offset: 0 }).finish();
 	expect((await live.recvGroup())?.start).toBe(1n);
 	const requests = track.requests();
 	const asked = requests.requestedFill();
 
-	const history = track.subscribe(withMax({
-		ranges: [{ start: 0n, end: 0n }],
-		delay: { max: null },
-	}));
+	const history = track.subscribe(
+		withMax({
+			ranges: [{ start: 0n, end: 0n }],
+			delay: { max: null },
+		}),
+	);
 	const next = history.recvGroup();
 	expect(await Promise.race([asked.then(() => "asked"), yieldNow().then(() => "waiting")])).toBe("waiting");
 	hooks.receiveGroup(track, { start: 0n, offset: 0 }).finish();
@@ -373,10 +377,12 @@ test("fill: a held answer that fails keeps its frames and its failure", async ()
 test("fill: an answer withheld after a probe judged it is asked again", async () => {
 	const { broadcast, track } = resumed(4n);
 	const requests = track.requests();
-	const reader = track.subscribe(withMax({
-		ranges: [{ start: 0n, end: 5n }],
-		delay: { max: null },
-	}));
+	const reader = track.subscribe(
+		withMax({
+			ranges: [{ start: 0n, end: 5n }],
+			delay: { max: null },
+		}),
+	);
 	const ordered = reader.ordered();
 	const first = ordered.nextGroup();
 	const fill = await requests.requestedFill();
@@ -521,10 +527,12 @@ test("fill: a bounded reader ends once its fill answers every group", async () =
 	const requests = track.requests();
 	respond(requests, new Map([[1n, ["g1"]]]));
 
-	const reader = track.subscribe(withMax({
-		ranges: [{ start: 0n, end: 2n }],
-		delay: { max: null },
-	}));
+	const reader = track.subscribe(
+		withMax({
+			ranges: [{ start: 0n, end: 2n }],
+			delay: { max: null },
+		}),
+	);
 	const got: bigint[] = [];
 	for (let group = await reader.recvGroup(); group; group = await reader.recvGroup()) got.push(group.start);
 	expect(got).toEqual([1n]);
@@ -606,10 +614,12 @@ test("fill: a group arriving after a refusal reaches the reader the refusal name
 test("fill: the track's skip of a run a reader's fill refused is what the reader reports", async () => {
 	const { broadcast, track } = resumed(4n);
 	const requests = track.requests();
-	const reader = track.subscribe(withMax({
-		ranges: [{ start: 0n, end: 2n }],
-		delay: { max: null },
-	}));
+	const reader = track.subscribe(
+		withMax({
+			ranges: [{ start: 0n, end: 2n }],
+			delay: { max: null },
+		}),
+	);
 	const first = reader.recvGroup();
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill of groups");
@@ -802,10 +812,12 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		await clock.advance(Duration.millis(500));
 		write(5n);
 		const requests = track.requests();
-		const reader = track.subscribe(withMax({
-			ranges: [{ start: 0n, end: 5n }],
-			delay: { max: Duration.millis(1000) },
-		}));
+		const reader = track.subscribe(
+			withMax({
+				ranges: [{ start: 0n, end: 5n }],
+				delay: { max: Duration.millis(1000) },
+			}),
+		);
 		expect((await reader.recvGroup())?.start).toBe(2n);
 		expect((await reader.recvGroup())?.start).toBe(5n);
 		const next = reader.recvGroup();
@@ -838,25 +850,29 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 test("fill: a reader joining a wider fill is owed only its own ranges", async () => {
 	const { broadcast, track } = resumed(10n);
 	const requests = track.requests();
-	const wide = track.subscribe(withMax({
-		ranges: [{ start: 0n, end: 9n }],
-		delay: { max: null },
-		order: "ascending",
-	}));
+	const wide = track.subscribe(
+		withMax({
+			ranges: [{ start: 0n, end: 9n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
 	void drain(wide);
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 10n]);
 
 	// A narrower reader joins the same fill for 2 and 7 alone.
-	const narrow = track.subscribe(withMax({
-		ranges: [
-			{ start: 2n, end: 2n },
-			{ start: 7n, end: 7n },
-		],
-		delay: { max: null },
-		order: "ascending",
-	}));
+	const narrow = track.subscribe(
+		withMax({
+			ranges: [
+				{ start: 2n, end: 2n },
+				{ start: 7n, end: 7n },
+			],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
 	const got: bigint[] = [];
 	const done = (async () => {
 		for (let group = await narrow.recvGroup(); group; group = await narrow.recvGroup()) {
@@ -960,7 +976,9 @@ test("fill: a filled group stays wanted only while a reader will still read it",
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	// A live reader already passed every group below the edge.
-	const live = track.subscribe(withMax({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }], delay: { max: null } }));
+	const live = track.subscribe(
+		withMax({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }], delay: { max: null } }),
+	);
 	expect((await live.ordered().nextGroup())?.start).toBe(5n);
 
 	const reader = track.subscribe(history);
@@ -1085,10 +1103,12 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 	const { broadcast, track } = resumed(2n);
 	const requests = track.requests();
 	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
-	const reader = track.subscribe(withMax({
-		ranges: [{ start: 0n, end: 1n }],
-		delay: { max: Duration.millis(500) },
-	}));
+	const reader = track.subscribe(
+		withMax({
+			ranges: [{ start: 0n, end: 1n }],
+			delay: { max: Duration.millis(500) },
+		}),
+	);
 	void drain(reader);
 	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
 	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
@@ -1106,10 +1126,12 @@ test("fill: a stale run given up after a probe is asked on the next", async () =
 	const { broadcast, track } = resumed(2n);
 	const requests = track.requests();
 	hooks.dropTrackGroups(track, 5n, 7n, staleHole(60_000));
-	const reader = track.subscribe(withMax({
-		ranges: [{ start: 2n, end: 19n }],
-		delay: { max: Duration.millis(500) },
-	}));
+	const reader = track.subscribe(
+		withMax({
+			ranges: [{ start: 2n, end: 19n }],
+			delay: { max: Duration.millis(500) },
+		}),
+	);
 	expect(reader.tryRecvGroup()?.start).toBe(2n);
 	reader.tryRecvGroup();
 	const asked = async () => {
@@ -1136,10 +1158,12 @@ test("fill: a stale run that does not settle the reader leaves its own refusal r
 	const { broadcast, track } = resumed(2n);
 	const requests = track.requests();
 	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
-	const reader = track.subscribe(withMax({
-		ranges: [{ start: 0n, end: 1n }],
-		delay: { max: Duration.millis(500) },
-	}));
+	const reader = track.subscribe(
+		withMax({
+			ranges: [{ start: 0n, end: 1n }],
+			delay: { max: Duration.millis(500) },
+		}),
+	);
 	const first = reader.recvGroup();
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill of groups");
@@ -1156,10 +1180,12 @@ test("fill: a stale run that does not settle the reader leaves its own refusal r
 test("fill: a stale run that does not settle the reader keeps its pending refusals", async () => {
 	const { broadcast, track } = resumed(6n);
 	const requests = track.requests();
-	const reader = track.subscribe(withMax({
-		ranges: [{ start: 0n, end: 5n }],
-		delay: { max: Duration.millis(500) },
-	}));
+	const reader = track.subscribe(
+		withMax({
+			ranges: [{ start: 0n, end: 5n }],
+			delay: { max: Duration.millis(500) },
+		}),
+	);
 	const first = reader.recvGroup();
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill of groups");
@@ -1287,11 +1313,13 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 test("fill: a lite-07 ranged subscription reads history the publisher never cached", async () => {
 	const peer = await session(Lite.ALPN_07_WIP);
 	try {
-		const reader = peer.remote.track("video").subscribe(withMax({
-			ranges: [{ start: 0n, end: 3n }],
-			delay: { max: null },
-			order: "ascending",
-		}));
+		const reader = peer.remote.track("video").subscribe(
+			withMax({
+				ranges: [{ start: 0n, end: 3n }],
+				delay: { max: null },
+				order: "ascending",
+			}),
+		);
 		const got: [bigint, string[]][] = [];
 		for (let group = await reader.recvGroup(); group; group = await reader.recvGroup()) {
 			got.push([group.start, await frames(group)]);
@@ -1578,11 +1606,12 @@ function lookups(requests: Requests, lookup: (time: bigint) => bigint | undefine
 	return times;
 }
 
-const fromTime = (ms: bigint): Subscription => (withMax({
-	ranges: [{ start: ms }],
-	delay: { max: null },
-	order: "ascending",
-}));
+const fromTime = (ms: bigint): Subscription =>
+	withMax({
+		ranges: [{ start: ms }],
+		delay: { max: null },
+		order: "ascending",
+	});
 
 test("fill: a time start no held group resolves is looked up, and the range starts at the answer", async () => {
 	const { broadcast, track } = timed();
@@ -1650,11 +1679,13 @@ test("fill: a time start dropped after its floor's group is evicted starts at th
 		};
 		write(1n);
 		write(9n);
-		const reader = track.subscribe(withMax({
-			ranges: [{ start: 7n, end: 7n }],
-			delay: { max: null },
-			order: "ascending",
-		}));
+		const reader = track.subscribe(
+			withMax({
+				ranges: [{ start: 7n, end: 7n }],
+				delay: { max: null },
+				order: "ascending",
+			}),
+		);
 		const next = reader.ordered().nextGroup();
 		const first = defined(await requests.requestedFill());
 		expect([first.start, first.floor]).toEqual([7n, 2n]);

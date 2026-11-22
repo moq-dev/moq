@@ -8,9 +8,9 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timestamp } from "../time.ts";
 import { ALPN_06, ALPN_07_WIP } from "./version.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 	test(`compressed publishing on ${downstream}, FETCH and independent datagrams`, async () => {

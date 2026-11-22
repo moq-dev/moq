@@ -14,12 +14,12 @@ import { createMockTransportPair, manual } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import type { Reader } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Subscription, Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { SubscribeDrop, SubscribeSkip, SubscribeStart, SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 const path = Path.from("room");
@@ -441,7 +441,9 @@ test("through a lite-06 upstream, a group reported dropped as it lands is fetche
 		if (key !== 7n) chained.write(key, Number(key) * 1000);
 	}
 	// Reaches groups 5 and up by media time.
-	const first = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(3500) }, ranges: [{}] }));
+	const first = chained.remote
+		.track("video")
+		.subscribe(withMax({ delay: { max: Duration.millis(3500) }, ranges: [{}] }));
 	await chained.reached();
 	expect(groupsOf(await drain(clock, first))).toEqual([5n, 6n, 8n, 9n]);
 
@@ -459,7 +461,9 @@ test("through a lite-06 upstream, a group reported dropped as it lands is fetche
 	const all = [0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n];
 	first.update(withMax({ delay: { max: Duration.millis(60_000) }, ranges: [{}] }));
 	expect(groupsOf(await drain(clock, first))).toEqual([7n]);
-	const second = chained.remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(60_000) }, ranges: [{}] }));
+	const second = chained.remote
+		.track("video")
+		.subscribe(withMax({ delay: { max: Duration.millis(60_000) }, ranges: [{}] }));
 	expect(groupsOf(await drain(clock, second))).toEqual(all);
 
 	chained.track.finish();
@@ -512,10 +516,12 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 			// Judged stale by its own budget while the viewer still holds the run. Once every hop forgot
 			// it, the relay recovers it with no max delay, as the Rust `Recovery` does, so the narrow
 			// reader takes the stale history: no hop still holds a newer group to judge it by.
-			const narrow = chained.remote.track("video").subscribe(withMax({
-				delay: { max: Duration.millis(1500) },
-				ranges: [{ start: 1n }],
-			}));
+			const narrow = chained.remote.track("video").subscribe(
+				withMax({
+					delay: { max: Duration.millis(1500) },
+					ranges: [{ start: 1n }],
+				}),
+			);
 			expect(groupsOf(await drain(clock, narrow))).toEqual([1n, 2n, 3n, 4n, 5n]);
 			narrow.close();
 		}

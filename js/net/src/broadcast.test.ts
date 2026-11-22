@@ -7,11 +7,11 @@ import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, TooFarBehind } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { wireOf } from "./wire.ts";
-import { withMax } from "./subscription.test-util.ts";
 
 // The public API mints consumers internally (Producer.consume, the wire layers); tests act
 // as a wire layer by subclassing, the same way lite's ConsumeBroadcast does.
@@ -325,24 +325,30 @@ test("closing a broadcast rejects a dequeued request", async () => {
 test("a request exposes the aggregate subscription options", async () => {
 	const consumer = new TestConsumer();
 
-	consumer.track("video").subscribe(withMax({
-		priority: 3,
-		delay: { max: Duration.millis(100) },
-		ranges: [{ start: 10n, end: 19n }],
-	}));
-	consumer.track("video").subscribe(withMax({
-		priority: 7,
-		delay: { max: Duration.millis(250) },
-		ranges: [{ start: 0n, end: 29n }],
-	}));
+	consumer.track("video").subscribe(
+		withMax({
+			priority: 3,
+			delay: { max: Duration.millis(100) },
+			ranges: [{ start: 10n, end: 19n }],
+		}),
+	);
+	consumer.track("video").subscribe(
+		withMax({
+			priority: 7,
+			delay: { max: Duration.millis(250) },
+			ranges: [{ start: 0n, end: 29n }],
+		}),
+	);
 
 	const request = await pendingRequest(consumer);
-	expect(request?.subscription).toEqual(withMax({
-		priority: 7,
-		delay: { max: Duration.millis(250) },
-		order: "descending",
-		ranges: [{ start: 0n, end: 29n }],
-	}));
+	expect(request?.subscription).toEqual(
+		withMax({
+			priority: 7,
+			delay: { max: Duration.millis(250) },
+			order: "descending",
+			ranges: [{ start: 0n, end: 29n }],
+		}),
+	);
 	expect(request?.priority).toBe(7);
 });
 

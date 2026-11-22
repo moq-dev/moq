@@ -230,7 +230,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const stretch = options.stretch !== undefined ? Duration.millis(options.stretch) : STRETCH;
 	const sync = new Sync({ delay: options.delay, lookahead, stretch });
 	const track = new Track.Producer("audio");
-	// The subscription's max delay, as the decoder sets it, which the consumer drops aged media at too.
+	// The live join max, as the decoder sets it, which the consumer drops aged media at too.
 	const maxDelay = new Derived([sync.out.delay, sync.out.maxDelay], (delay, max) =>
 		audioMaxDelay({ delay, maxDelay: max }),
 	);

@@ -18,6 +18,7 @@ import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Front } from "../resume.ts";
 import { Reader, Readers, Stream, Writer, writeBudget } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
@@ -46,7 +47,6 @@ import {
 	Version,
 	versionName,
 } from "./version.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);
@@ -1073,7 +1073,10 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 		expect(start.start.starts).toEqual([0n]);
 
 		// A live join 2 ms behind the newest frame, at group 2, which takes Range ID 1.
-		await replayUpdate({ priority: 0, ranges: [{ start: { live: { min: 2, max: null } } }] }).encode(sub.client.writer, version);
+		await replayUpdate({ priority: 0, ranges: [{ start: { live: { min: 2, max: null } } }] }).encode(
+			sub.client.writer,
+			version,
+		);
 		const started = await next();
 		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([started.started.id, started.started.start]).toEqual([1n, 2n]);
@@ -2182,7 +2185,10 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 
 		// Group 0, already popped, lies outside every range the update asks for, so no live join's
 		// max keeps it: its stream resets as stale.
-		const reset = await sub.servedSequence().then(() => undefined, (err: unknown) => err);
+		const reset = await sub.servedSequence().then(
+			() => undefined,
+			(err: unknown) => err,
+		);
 		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
 		expect(await sub.servedSequence()).toBe(2n);
 		expect(lastGroups(ranges)).toEqual({ start: { included: 2n }, end: undefined });
@@ -2239,7 +2245,10 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 
 		// Group 0, already popped, lies outside every range the update asks for, so its stream resets
 		// as stale.
-		const reset = await sub.servedGroup().then(() => undefined, (err: unknown) => err);
+		const reset = await sub.servedGroup().then(
+			() => undefined,
+			(err: unknown) => err,
+		);
 		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
 		expect(await sub.servedGroup()).toEqual({ key: 1n, frameStart: 2, payloads: ["c"] });
 		expect(lastGroups(ranges)).toEqual({ start: { included: 1n }, end: undefined });
@@ -2447,13 +2456,15 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		await replayUpdate({ priority: 9, endGroup: 5n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 
-		expect(sub.track.subscription.peek()).toEqual(withMax({
-			priority: 9,
-			// Lite-06 cannot state a minimum.
-			delay: { max: Duration.millis(TEST_MAX_DELAY_MS) },
-			order: "descending",
-			ranges: [{ end: 5n }],
-		}));
+		expect(sub.track.subscription.peek()).toEqual(
+			withMax({
+				priority: 9,
+				// Lite-06 cannot state a minimum.
+				delay: { max: Duration.millis(TEST_MAX_DELAY_MS) },
+				order: "descending",
+				ranges: [{ end: 5n }],
+			}),
+		);
 		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
@@ -3699,9 +3710,7 @@ test("lite draft-07: a fetch whose max age gives up partway resets as too old", 
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("live"));
-	const track = defined(
-		broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }),
-	);
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	// Left open, so the fetch is still serving when the track runs on.
 	const open = track.createGroup(0n);
@@ -3747,9 +3756,7 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("live"));
-	const track = defined(
-		broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }),
-	);
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	const whole = track.createGroup(0n);
 	whole.writeFrame(frame(0));
@@ -3815,9 +3822,7 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 	const upstream = createMockTransportPair(ALPN_07_WIP);
 	const source = new OriginProducer();
 	const broadcast = publish(source, Path.from("live"));
-	const track = defined(
-		broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }),
-	);
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	const whole = track.createGroup(0n);
 	whole.writeFrame(frame(0));

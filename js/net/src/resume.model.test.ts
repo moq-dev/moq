@@ -26,10 +26,10 @@ import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
 import { routeFailed } from "./resume.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
-import { withMax } from "./subscription.test-util.ts";
 
 /** Groups in the logical track; group `g` has `1 + g % 3` frames. */
 const GROUPS = 12;

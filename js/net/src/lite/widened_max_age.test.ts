@@ -9,11 +9,11 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 

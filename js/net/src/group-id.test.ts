@@ -10,9 +10,9 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
-import { withMax } from "./subscription.test-util.ts";
 
 // The first group ID a `number` cannot hold, and the largest a QUIC varint carries.
 const PAST_SAFE = 2n ** 53n + 1n;

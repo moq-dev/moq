@@ -9,6 +9,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import * as track from "../track.ts";
@@ -27,7 +28,6 @@ import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDon
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 const VERSION = Version.DRAFT_18;
 
@@ -743,11 +743,12 @@ async function subscribeTrack({
 		.consume(Path.from("room"))
 		.track("video")
 		.subscribe(
-			subscription ?? withMax({
-				...track.Subscription.default(),
-				delay: { max: Duration.ZERO },
-				ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }],
-			}),
+			subscription ??
+				withMax({
+					...track.Subscription.default(),
+					delay: { max: Duration.ZERO },
+					ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }],
+				}),
 		);
 
 	const peer = await nextStream(pair.client);
@@ -1175,12 +1176,14 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 		const consumer = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe(withMax({
-				...track.Subscription.default(),
-				ranges: [{ start: 1n }],
-				order: "ascending",
-				delay: { max: null },
-			}));
+			.subscribe(
+				withMax({
+					...track.Subscription.default(),
+					ranges: [{ start: 1n }],
+					order: "ascending",
+					delay: { max: null },
+				}),
+			);
 		const peer = await nextStream(pair.client, version);
 		try {
 			expect(await peer.reader.u53()).toBe(Subscribe.id);
@@ -1235,12 +1238,14 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 		const consumer = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe(withMax({
-				...track.Subscription.default(),
-				ranges: [{ start: 0n }],
-				order: "ascending",
-				delay: { max: null },
-			}));
+			.subscribe(
+				withMax({
+					...track.Subscription.default(),
+					ranges: [{ start: 0n }],
+					order: "ascending",
+					delay: { max: null },
+				}),
+			);
 		const peer = await nextStream(pair.client, version);
 		const ordered = consumer.ordered();
 		let fetch: Stream | undefined;
@@ -1298,12 +1303,14 @@ test("a bounded subscription asks upstream from its start without an end", async
 	const consumer = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe(withMax({
-			...track.Subscription.default(),
-			ranges: [{ start: 4n, end: 9n }],
-			order: "ascending",
-			delay: { max: null },
-		}));
+		.subscribe(
+			withMax({
+				...track.Subscription.default(),
+				ranges: [{ start: 4n, end: 9n }],
+				order: "ascending",
+				delay: { max: null },
+			}),
+		);
 	// The range reaches past the live edge TRACK_STATUS names, so it subscribes.
 	const status = await nextStream(pair.client, version);
 	expect(await status.reader.u53()).toBe(TrackStatusRequest.id);

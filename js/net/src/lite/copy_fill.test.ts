@@ -19,13 +19,13 @@ import { createMockTransportPair } from "../mock.ts";
 import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { FillGroups, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import * as Lite from "./index.ts";
 import { Publisher as LitePublisher } from "./publisher.ts";
 import { Subscriber as LiteSubscriber } from "./subscriber.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -375,7 +375,9 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 	try {
 		// A live reader keeps the copy up, and has read past group 0 before it lands. It never
 		// reads again, so the copy it still buffers is all that is left of it.
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		expect((await reader.ordered().nextGroup())?.start).toBe(1n);
 		const history = remote.track("video").subscribe({ ...WIDE, ranges: [{ start: 0n, end: 0n }] });
 		const group = await history.recvGroup();
@@ -437,7 +439,9 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		// A live reader keeps the copy up. It reads in order, so it lets go of what it passes.
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		const live = reader.ordered();
 		expect((await live.nextGroup())?.start).toBe(1n);
 		const history = remote.track("video").subscribe({ ...WIDE, ranges: [{ start: 0n, end: 0n }] });
@@ -507,7 +511,9 @@ test("copy fill: a group reset to make room ends", async () => {
 	})();
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		const live = await reader.ordered().nextGroup();
 		expect(live?.start).toBe(2n);
 		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 2");
@@ -624,10 +630,12 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			archived = true;
 			const before = fetched.length;
 
-			const bounded = remote.track("video").subscribe(withMax({
-				ranges: [{ start: 2n, end: 2n }],
-				delay: { max: null },
-			}));
+			const bounded = remote.track("video").subscribe(
+				withMax({
+					ranges: [{ start: 2n, end: 2n }],
+					delay: { max: null },
+				}),
+			);
 			const group = await bounded.recvGroup();
 			if (!group) throw new Error("no group");
 			const got: string[] = [];
@@ -721,11 +729,13 @@ test.each([
 		})();
 		const remote = wireOf(client).consume(Path.from("room"));
 		try {
-			const reader = remote.track("video").subscribe(withMax({
-				ranges: [{ start: 2n }],
-				delay: { max: null },
-				order: "ascending",
-			}));
+			const reader = remote.track("video").subscribe(
+				withMax({
+					ranges: [{ start: 2n }],
+					delay: { max: null },
+					order: "ascending",
+				}),
+			);
 			const ordered = reader.ordered();
 			const got: [bigint, string[]][] = [];
 			for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {

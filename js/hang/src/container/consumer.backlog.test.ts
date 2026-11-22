@@ -7,10 +7,10 @@ import { Duration, type Installed, Instant, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track, Varint } from "@moq/net";
 import { race } from "@moq/signals";
+import { within } from "../subscription.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Jitter } from "./jitter.ts";
 import { Format } from "./legacy.ts";
-import { within } from "../subscription.test-util.ts";
 
 let clock: Manual;
 let installed: Installed;

@@ -5,9 +5,9 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
 import { u53 } from "../catalog/integers.ts";
+import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read, subscription } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
-import { within } from "../subscription.test-util.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 

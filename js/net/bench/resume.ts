@@ -6,7 +6,6 @@
  * direct read does, and each swap should leave nothing behind once its groups are read.
  */
 
-import { Duration } from "@moq/clock";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { defined } from "../src/defined.test-util.ts";
 import { Producer as GroupProducer } from "../src/group.ts";
@@ -151,9 +150,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 		return group;
 	});
 	front.serve(handles[0]);
-	const subscribers = Array.from({ length: readers }, () =>
-		front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } }),
-	);
+	const subscribers = Array.from({ length: readers }, () => front.consumer.track("seq").subscribe({ ranges: [{}] }));
 	const held = subscribers.map((subscriber) => {
 		const group = subscriber.tryRecvGroup();
 		if (!group) throw new Error("missing held group");

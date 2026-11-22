@@ -1506,7 +1506,9 @@ test("default audio replays the last second after three seconds without a subscr
 // live viewer rejoining after seconds idle would otherwise wade through all of them first. A live
 // join states how far back it plays as its lag, which bounds the replay however far its max reaches,
 // and a join reaching back further (as one before lite-07 does) is bounded by its max alone.
-const live = (min: number, max: number) => [{ start: { live: { min: Duration.millis(min), max: Duration.millis(max) } } }];
+const live = (min: number, max: number) => [
+	{ start: { live: { min: Duration.millis(min), max: Duration.millis(max) } } },
+];
 for (const [name, subscription] of [
 	["a live join's lag", { ranges: live(130, 10_000) }],
 	["a live join's max when that is shorter than its lag", { ranges: live(10_000, 130) }],

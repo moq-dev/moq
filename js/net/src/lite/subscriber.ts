@@ -56,17 +56,7 @@ import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/deman
 import { max, min, UNBOUNDED } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
-import {
-	AT_KEYS,
-	EMPTY,
-	rangesStart,
-	sameRanges,
-	span,
-	Window,
-	widest,
-	wireRanges,
-	wireSpan,
-} from "../window.ts";
+import { AT_KEYS, EMPTY, rangesStart, sameRanges, span, Window, widest, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	type AnnounceBroadcast,
@@ -1967,9 +1957,7 @@ export class Subscriber {
 			// caller leaving, or Subscriber.close() closing the group, releases the setup at any
 			// stage and resets the streams it opened.
 			const deadline = new Deadline();
-			const setup = deadline.wait(
-				this.#fetchSetup(broadcast, consumed, track, slot, priority, group, deadline),
-			);
+			const setup = deadline.wait(this.#fetchSetup(broadcast, consumed, track, slot, priority, group, deadline));
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
 				accepted = await untilAbandoned(group, setup);
@@ -2159,14 +2147,7 @@ export class Subscriber {
 		const id = this.#subscribeNext++;
 		const ranges: track.Range[] = [span(groups.start, groups.end) ?? EMPTY];
 		const msg = this.#withRanges(
-			this.#subscribeMessage(
-				id,
-				broadcast,
-				consumed,
-				producer.name,
-				{ priority, order: "ascending" },
-				ranges,
-			),
+			this.#subscribeMessage(id, broadcast, consumed, producer.name, { priority, order: "ascending" }, ranges),
 			ranges,
 		);
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
@@ -2825,7 +2806,10 @@ export class Subscriber {
 				for (const [id, range] of entry.live.entries()) {
 					const live = range.start?.live;
 					if (live === undefined || entry.joinTicks.has(id)) continue;
-					entry.joinBudgets.set(id, Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(live.max)));
+					entry.joinBudgets.set(
+						id,
+						Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(live.max)),
+					);
 				}
 				const edited = entry.live.edit(
 					[...fitted.ranges, ...probed, ...fillRanges],

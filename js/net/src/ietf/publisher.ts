@@ -2519,11 +2519,7 @@ const LIVE_JOIN: Pick<Subscription, "ranges"> = {
  * retained, and a live join would start at whichever group lands first. Mirrors the Rust
  * `ServeRange::request`.
  */
-function serveRequest(
-	range: ServeRange,
-	filter?: Filter.Filter,
-	edge?: LiveEdge,
-): Pick<Subscription, "ranges"> {
+function serveRequest(range: ServeRange, filter?: Filter.Filter, edge?: LiveEdge): Pick<Subscription, "ranges"> {
 	const latest = edge?.latest;
 	const live =
 		filter !== undefined &&

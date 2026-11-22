@@ -4,6 +4,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { type Subscription, Producer as TrackProducer } from "../track.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
 import { EndOfRange, FetchEndOfRange, FetchFrame } from "./object.ts";
@@ -13,7 +14,6 @@ import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 const ALPNS = {
@@ -21,11 +21,12 @@ const ALPNS = {
 	[Version.DRAFT_20]: ALPN.DRAFT_20,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
 };
-const ranges = (start: bigint, end: bigint): Subscription => (withMax({
-	ranges: [{ start: start, end: end - 1n }],
-	delay: { max: null },
-	order: "ascending",
-}));
+const ranges = (start: bigint, end: bigint): Subscription =>
+	withMax({
+		ranges: [{ start: start, end: end - 1n }],
+		delay: { max: null },
+		order: "ascending",
+	});
 
 function fixture(version: IetfVersion) {
 	const pair = createMockTransportPair(ALPNS[version]);

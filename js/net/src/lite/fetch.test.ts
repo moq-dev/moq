@@ -46,4 +46,3 @@ test("Fetch round-trips on draft-03/04/05", async () => {
 		expect(got.group).toBe(42n);
 	}
 });
-

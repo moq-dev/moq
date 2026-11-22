@@ -4,9 +4,9 @@ import { Manual } from "@moq/clock/test";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
-import { withMax } from "./subscription.test-util.ts";
 
 // Run `fn` on a manual clock, stepped in milliseconds.
 async function withClock(fn: (clock: { advance: (ms: number) => Promise<void> }) => Promise<void> | void) {
@@ -175,11 +175,13 @@ test("a forgotten stale run is asked of a fill", async () => {
 		producer.createGroup(3n).finish();
 		await clock.advance(2_000);
 
-		const reader = producer.subscribe(withMax({
-			ranges: [{ start: 1n }],
-			delay: { max: Duration.millis(60_000) },
-			order: "ascending",
-		}));
+		const reader = producer.subscribe(
+			withMax({
+				ranges: [{ start: 1n }],
+				delay: { max: Duration.millis(60_000) },
+				order: "ascending",
+			}),
+		);
 		// The live group first, in arrival order; the next read asks for what it misses.
 		expect((await reader.recvGroup())?.start).toBe(3n);
 		const next = reader.recvGroup();

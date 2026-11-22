@@ -37,7 +37,7 @@ function payload(bytes: Uint8Array, size: number) {
 
 const live = await connect();
 const source = wireOf(live).consume(path);
-const holder = source.track("test").subscribe({ delay: { max: null } });
+const holder = source.track("test").subscribe({ ranges: [{}] });
 try {
 	// Give TRACK_STATUS a real live edge without sharing this connection's cache with FETCH.
 	for (;;) {
@@ -56,7 +56,6 @@ try {
 		] as const) {
 			const reader = broadcast.track("test").subscribe({
 				ranges: [{ ...(start === 0n ? {} : { start }), end: end - 1n }],
-				delay: { max: null },
 				order: "ascending",
 			});
 			try {

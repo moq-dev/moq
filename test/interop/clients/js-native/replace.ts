@@ -1,6 +1,5 @@
 /** Replace a claimed track while its relay is still reading, then subscribe immediately. @module */
 import assert from "node:assert/strict";
-import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
 
@@ -70,7 +69,7 @@ try {
 	const subscribe = (index: number, sequence: bigint) =>
 		active[index]
 			.track("value")
-			.subscribe({ delay: { max: null }, order: "ascending", ranges: [{ start: sequence }] })
+			.subscribe({ order: "ascending", ranges: [{ start: sequence }] })
 			.ordered();
 	const check = (frame: Awaited<ReturnType<Moq.Track.Ordered["readFrame"]>>, sequence: bigint) => {
 		assert(frame, "track ended before its replacement");
@@ -116,7 +115,6 @@ try {
 					if (fill.start < sequence) continue; // history the replacement no longer holds
 					assert.equal(fill.start, future);
 					assert.equal(fill.end, future + 1n);
-					assert.equal(fill.maxDelay, null);
 					const group = fill.accept(future);
 					if (!group) continue; // already answered by an earlier fill
 					group.writeFrame({
@@ -136,9 +134,7 @@ try {
 			// Explicitly fetch the next group so this always crosses FETCH in both directions.
 			// The live subscription may also ask for the old group's tail, but its fill alone
 			// could be served by SUBSCRIBE, hiding a broken FETCH decoder.
-			const fetching: Promise<Moq.Group.Consumer> = active[index + 1]
-				.track("value")
-				.fetchGroup(future, { maxDelay: Duration.millis(Number.MAX_SAFE_INTEGER) });
+			const fetching: Promise<Moq.Group.Consumer> = active[index + 1].track("value").fetchGroup(future);
 			const [resumed, , fetched] = await Promise.all([
 				continued,
 				reach(next, sequence),

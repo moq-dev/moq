@@ -45,7 +45,9 @@ export class Consumer<T> {
 			.subscribe({
 				...Moq.Track.Subscription.default(),
 				priority: config.priority ?? 0,
-				ranges: [{ start: { live: { min: config.delay ?? Duration.ZERO, max: config.delay ?? Duration.ZERO } } }],
+				ranges: [
+					{ start: { live: { min: config.delay ?? Duration.ZERO, max: config.delay ?? Duration.ZERO } } },
+				],
 			})
 			.ordered();
 		this.#decoder = new Decoder(config);

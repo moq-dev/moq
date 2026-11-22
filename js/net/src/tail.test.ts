@@ -10,11 +10,11 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, manual, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Tail } from "./tail.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Ordered } from "./track.ts";
 import { wireOf } from "./wire.ts";
-import { withMax } from "./subscription.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 

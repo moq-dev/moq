@@ -112,4 +112,6 @@ export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): Buffe
 export function subscription(delay: Delay, subscription?: Net.Track.Subscription): Net.Track.Subscription;
 
 export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
+
+export function update(delay: Delay, current: Net.Track.Subscription, asked?: Net.Track.Subscription): Net.Track.Subscription;
 ```

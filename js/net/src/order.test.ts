@@ -19,10 +19,10 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { sendOrder } from "./priority.ts";
 import type { SendStream } from "./stream.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
-import { withMax } from "./subscription.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -153,11 +153,13 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 	const groups = [0, 1, 2].map(() => writeGroup(video));
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe(withMax({
-		delay: { max: MAX_DELAY },
-		order,
-		ranges: [{ start: 0n }],
-	}));
+	const subscriber = remote.track("video").subscribe(
+		withMax({
+			delay: { max: MAX_DELAY },
+			order,
+			ranges: [{ start: 0n }],
+		}),
+	);
 	await receive(subscriber, groups.length);
 
 	if (update !== undefined) {
@@ -312,7 +314,9 @@ test("a shared track aggregates descending and serves each subscriber in its own
 	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const ascendingRemote = wireOf(ascending.client).consume(Path.from("test"));
-	const ascendingTrack = ascendingRemote.track("video").subscribe(withMax({ delay: { max: MAX_DELAY }, order: "ascending" }));
+	const ascendingTrack = ascendingRemote
+		.track("video")
+		.subscribe(withMax({ delay: { max: MAX_DELAY }, order: "ascending" }));
 	await aggregate(video, (order) => order === "ascending");
 
 	const descendingRemote = wireOf(descending.client).consume(Path.from("test"));

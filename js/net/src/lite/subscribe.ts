@@ -1,11 +1,11 @@
 import { Duration as ClockDuration } from "@moq/clock";
 import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type * as Instance from "../instance.ts";
+import { NO_MAX_DELAY, PAST_EVERY_GROUP } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order, Position, Range, Start } from "../track.ts";
 import { UNBOUNDED } from "../util/key.ts";
-import { NO_MAX_DELAY, PAST_EVERY_GROUP } from "../internal.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import { EMPTY, liveMillis, rangeBudget, rangeTime } from "../window.ts";
 import * as Duration from "./duration.ts";
@@ -291,8 +291,7 @@ export function requestedRange(range: WireRange): Range {
 	if (live !== undefined) {
 		const max = live.max === null || live.max >= NO_MAX_DELAY ? null : ClockDuration.millis(live.max);
 		out.start = { live: { min: ClockDuration.millis(live.min), max } };
-	}
-	else if (range.start) out.start = start ?? range.start.time;
+	} else if (range.start) out.start = start ?? range.start.time;
 	// An absolute end is exclusive; every model end includes its group.
 	if (range.end) out.end = end === undefined ? range.end.time : end - 1n;
 	return out;
@@ -724,9 +723,7 @@ export class LiveRanges {
 			const end = rangeKey({ end: this.#live.get(id)?.end });
 			const index = adding.findIndex(
 				([range, kind]) =>
-					kind === kindOf(id) &&
-					range.start?.live?.min === live.min &&
-					rangeKey({ end: range.end }) === end,
+					kind === kindOf(id) && range.start?.live?.min === live.min && rangeKey({ end: range.end }) === end,
 			);
 			if (index < 0) return true;
 			retuned.push([id, adding[index][0]]);

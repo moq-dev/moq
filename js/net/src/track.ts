@@ -3358,10 +3358,7 @@ export class Subscriber {
 	// `Filter::refused`.
 	#refusal?: Error;
 
-	#drift(
-		scope = this.#fetch ? WHOLE : undefined,
-		end = scope ? undefined : this.#cursor.peek().end,
-	): Drift {
+	#drift(scope = this.#fetch ? WHOLE : undefined, end = scope ? undefined : this.#cursor.peek().end): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
 		// newer group outside its one-group window still supersedes it. A moved group's scope
 		// brings its own end, unbounded when its logical reader's is.
@@ -4715,12 +4712,7 @@ export class Subscriber {
 			// A preview never takes an answer recorded before it: the live edge has moved since.
 			const tick = joinTick();
 			const ranges = (subscription.ranges ?? [{}]).map((range, index) => [BigInt(index), range] as const);
-			return Window.keyed(
-				ranges,
-				subscriber.#latestGroup(),
-				subscriber.#holdings(),
-				() => tick,
-			).resolved();
+			return Window.keyed(ranges, subscriber.#latestGroup(), subscriber.#holdings(), () => tick).resolved();
 		};
 		hooks.tryNextGroup = (subscriber, floor) => {
 			subscriber.#raiseNext(floor);

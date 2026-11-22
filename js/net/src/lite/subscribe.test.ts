@@ -599,9 +599,9 @@ test("a live start round-trips only on lite-07", async () => {
 		expect((await SubscribeUpdate.decode(new Reader(undefined, update, version), version)).ranges).toEqual(ranges);
 	}
 	// The model rounds a lag up to whole milliseconds, as the wire carries it.
-	expect(
-		toWireRanges(rangesOf([{ start: { live: { min: Duration.micros(1500), max: Duration.ZERO } } }])),
-	).toEqual([{ start: { live: { min: 2, max: 0 } } }]);
+	expect(toWireRanges(rangesOf([{ start: { live: { min: Duration.micros(1500), max: Duration.ZERO } } }]))).toEqual([
+		{ start: { live: { min: 2, max: 0 } } },
+	]);
 	expect(requestedRanges({ startFrame: 0, ranges: [{ start: { live: { min: 250, max: null } } }] })).toEqual([
 		{ start: { live: { min: Duration.millis(250), max: null } } },
 	]);
@@ -775,7 +775,10 @@ test("lite-07 retunes a live join in place", async () => {
 	const edit = sent.edit([live(100, 2000), time]);
 	expect(edit).toEqual({ remove: [], add: [], retune: [[0n, 2000]], fillIds: [], probeIds: [] });
 	const update = new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add, retune: edit.retune });
-	const got = await SubscribeUpdate.decode(new Reader(undefined, await encodeMessage(version, update), version), version);
+	const got = await SubscribeUpdate.decode(
+		new Reader(undefined, await encodeMessage(version, update), version),
+		version,
+	);
 	expect(side.apply(got)).toEqual({ retired: [], added: [], retuned: [[0n, live(100, 2000)]] });
 	expect(side.entries()).toEqual(sent.entries());
 

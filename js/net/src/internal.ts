@@ -20,11 +20,11 @@ import * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type {
-	Live,
 	Demand,
 	Groups,
 	Info,
 	InfoInit,
+	Live,
 	Position,
 	Producer,
 	Request,

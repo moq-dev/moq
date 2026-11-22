@@ -95,15 +95,14 @@ test("the observer shares playback demand and closes without ending playback", a
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		// The player's reach: the delay plus the estimator's 2 s ceiling.
-		expect(track.subscription.peek()).toMatchObject({
-			priority: Catalog.PRIORITY.audio,
-			delay: { max: Duration.millis(2250) },
-		});
+		// The player's live join: its delay behind the live edge, and a reach of the delay plus the
+		// estimator's 2 s ceiling.
+		const join = { ranges: [{ start: { live: { min: Duration.millis(250), max: Duration.millis(2250) } } }] };
+		expect(track.subscription.peek()).toMatchObject({ priority: Catalog.PRIORITY.audio, ...join });
 		const player = published
 			.consume()
 			.track("audio")
-			.subscribe({ priority: Catalog.PRIORITY.audio, delay: { max: Duration.millis(2250) } });
+			.subscribe({ priority: Catalog.PRIORITY.audio, ...join });
 		await capture.close();
 		expect(player.closed.peek()).toBeUndefined();
 		player.close();

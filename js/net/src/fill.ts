@@ -493,7 +493,13 @@ export interface Lookup {
  * answers only `[start, end)`, for now. Mirrors the Rust `Inner::reject`.
  * @internal
  */
-export let rejectGroups: (fill: FillGroups, start: bigint, end: bigint, error: Error, bound: number | undefined) => void;
+export let rejectGroups: (
+	fill: FillGroups,
+	start: bigint,
+	end: bigint,
+	error: Error,
+	bound: number | undefined,
+) => void;
 
 // Constructs the public handles from within this module; assigned in their static blocks.
 let makeGroups: (state: FillState, pending: Pending) => FillGroups;

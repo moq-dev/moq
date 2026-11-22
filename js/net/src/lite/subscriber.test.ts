@@ -27,6 +27,7 @@ import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale } from "../time.ts";
 import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
@@ -63,7 +64,6 @@ import {
 import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, Version, versionName } from "./version.ts";
-import { withMax } from "../subscription.test-util.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;
@@ -1512,7 +1512,10 @@ test("a group that beats its track info waits for it", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	// History, which places without waiting on the publisher to answer a live join.
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe({ ranges: [{}] });
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await (await opened(1)).writing;
@@ -1834,7 +1837,10 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		// SUBSCRIBE_FINISH starts the end's grace, and the update then widens the live join's max.
 		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 		await drainReactions();
-		track.update({ priority: 0, ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(60_000) } } }] });
+		track.update({
+			priority: 0,
+			ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(60_000) } } }],
+		});
 		await drainReactions();
 
 		await clock.advance(GRACE.mul(3));

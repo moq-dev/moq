@@ -50,7 +50,8 @@ export function subscription(delay: Delay, subscription: Moq.Track.Subscription 
 	return {
 		...subscription,
 		ranges: (subscription.ranges ?? [{}]).map((range): Moq.Track.Range => {
-			if (typeof range.start === "object") return { ...range, start: { live: { min: range.start.live.min, max } } };
+			if (typeof range.start === "object")
+				return { ...range, start: { live: { min: range.start.live.min, max } } };
 			if (range.start === undefined && lag !== null) return { ...range, start: { live: { min: lag, max } } };
 			return { ...range };
 		}),
