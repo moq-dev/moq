@@ -1007,8 +1007,8 @@ let timeAnchors: (producer: Producer) => {
 	 * lite-07 copy, whose ranges carry each join, until its end is declared. See `hooks.answersJoins`.
 	 */
 	answersJoins: boolean;
-	/** Whether the copy's declared end is settled, so its live edge is final. */
-	ended: boolean;
+	/** Whether the copy is final or its declared end settled, so its live edge is final. Walks the cache. */
+	ended: () => boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
 };
@@ -1621,7 +1621,9 @@ export class Producer {
 				producer.#answersJoins &&
 				producer.#state.end.peek() === undefined &&
 				producer.#state.outcome.peek() === undefined,
-			ended: producer.#state.outcome.peek() !== undefined,
+			// Judged now rather than by the outcome latch, which a group's close callback sets later.
+			// Mirrors the Rust `is_final() || is_settled()`.
+			ended: () => producer.#state.outcome.peek() !== undefined || producer.#settled(),
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -3979,7 +3981,12 @@ export class Subscriber {
 	// (`ended`) gets no more groups to prove it by, so it leaves an unproven join to a time start,
 	// which asks its upstream.
 	// Mirrors the Rust `TrackState::join`.
-	#join(min: Duration, containing: (time: bigint) => Containing, wire: boolean, ended: boolean): Join | undefined {
+	#join(
+		min: Duration,
+		containing: (time: bigint) => Containing,
+		wire: boolean,
+		ended: () => boolean,
+	): Join | undefined {
 		const timeline = this.#state.timeline;
 		// The newest group held for which `f` holds, failed ones aside.
 		const newest = (f: (group: GroupConsumer) => boolean) =>
@@ -4024,7 +4031,7 @@ export class Subscriber {
 			const holder = newest((group) => group.start <= target);
 			const through = reach(holder);
 			if (holder && through !== undefined && through >= target) return { group: holder.start };
-			return ended ? { time: target } : undefined;
+			return ended() ? { time: target } : undefined;
 		}
 		if (edge === undefined) return undefined;
 		const target = edge > back ? edge - back : 0n;
