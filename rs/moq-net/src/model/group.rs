@@ -3846,6 +3846,9 @@ struct Carry {
 	// The copy an end check waits on past the frames this reader prefetched, with the frame
 	// it reads that copy from: held between polls so the copy keeps this reader's demand.
 	finishing: Option<(usize, Consumer)>,
+	// What ended the read once a copy closed the group below the frames already read: no
+	// route change after undoes it.
+	failed: Option<Error>,
 }
 
 impl Clone for Carry {
@@ -3858,6 +3861,7 @@ impl Clone for Carry {
 				..*ride
 			}),
 			finishing: None,
+			failed: self.failed.clone(),
 		}
 	}
 }
@@ -4151,6 +4155,9 @@ impl Consumer {
 		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<Option<T>>>,
 	) -> Poll<Result<Option<T>>> {
 		loop {
+			if let Some(err) = self.carry.as_ref().and_then(|carry| carry.failed.clone()) {
+				return Poll::Ready(Err(err));
+			}
 			let res = read(self, waiter);
 			// The reader's own budget gave up on it: that is no route's doing.
 			if self.expired {
@@ -4199,11 +4206,10 @@ impl Consumer {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
 					// The copy being read still serves and holds no more than was read, so
-					// nothing continues the group. The recovery stays, so a later read, such as
-					// the next one of a batch that swallowed this error, fails the same way.
+					// nothing continues the group.
 					Cause::Closed if past => {
 						recover.failed(index, &Error::NotFound);
-						return Poll::Ready(Err(Error::NotFound));
+						return Poll::Ready(Err(self.fail(Error::NotFound)));
 					}
 					// The copy being read still serves, so its close is the group's end.
 					Cause::Closed => self.let_go(),
@@ -4225,6 +4231,9 @@ impl Consumer {
 						self.let_go();
 						return res;
 					}
+					if past {
+						return Poll::Ready(Err(self.fail(err)));
+					}
 					return Poll::Ready(Err(err));
 				}
 				// The reader's budget bounds the wait for the rest, as it does a stall, and
@@ -4237,7 +4246,7 @@ impl Consumer {
 							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
 				{
 					if !closed {
-						return Poll::Ready(Err(Error::Old));
+						return Poll::Ready(Err(self.fail(Error::Old)));
 					}
 					self.let_go();
 					return res;
@@ -4772,6 +4781,12 @@ impl Consumer {
 			)
 	}
 
+	/// End every later read with `err`, which a route change no longer undoes, and return it.
+	fn fail(&mut self, err: Error) -> Error {
+		self.carry.get_or_insert_default().failed = Some(err.clone());
+		err
+	}
+
 	/// Whether the copy read closed the group short below the frame this reader reads next.
 	fn closed_past(&self) -> bool {
 		self.cursor
@@ -4798,6 +4813,7 @@ impl Consumer {
 					recover: None,
 					ride: Some(ride),
 					finishing: None,
+					failed: None,
 				}))
 			}
 			(None, None) => {}

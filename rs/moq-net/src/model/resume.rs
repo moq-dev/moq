@@ -9192,8 +9192,7 @@ mod test {
 		second.write_frame(ts(1), b"a".as_ref()).unwrap();
 		a.clone().abort(Error::Dropped).unwrap();
 		second.finish().unwrap();
-		// Every read fails, so a batch that swallowed the first error still sees it.
-		for _ in 0..2 {
+		let fails = |reading: &mut group::Consumer| {
 			let Poll::Ready(res) = reading.poll_read_frame(&kio::Waiter::noop()) else {
 				panic!("the group ends");
 			};
@@ -9202,7 +9201,19 @@ mod test {
 				"ended {:?}",
 				res.map(|frame| frame.map(|frame| frame.payload))
 			);
+		};
+		// Every later read fails too, so a batch that swallowed the first error still sees it,
+		// even once a route holding the whole group serves.
+		fails(&mut reading);
+		let c = copy();
+		routes.serve(c.consume());
+		let mut whole = c.create_group(group::Info { start: 1 }).unwrap();
+		for (ms, frame) in [(1, b"a"), (2, b"b"), (3, b"c")] {
+			whole.write_frame(ts(ms), frame.as_ref()).unwrap();
 		}
+		whole.finish().unwrap();
+		fails(&mut reading);
+		fails(&mut reading);
 		drop(first);
 	}
 
