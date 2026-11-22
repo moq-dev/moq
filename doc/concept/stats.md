@@ -158,6 +158,28 @@ An aggregating reader pins each node's subscription to its instance.
 Every bucket shares the node's broadcast, so a token scoped to the stats prefix
 reads every bucket's tracks; scope by bucket with an aggregating reader instead.
 
+### Root broadcasts
+
+A relay with [`roots`](/bin/relay/config#stats) on also gives each root its own
+stats, readable with a grant on that root alone. A session scoped to a root reads
+them at the same `<prefix>/node/<node>` paths, relative to its root, carrying the
+same tracks:
+
+- traffic on the broadcast paths at or under the root, named relative to it, and
+- the sessions and HTTP requests scoped to the root or to a root beneath it.
+
+Nothing of another root's sessions or paths appears, and reading them counts as
+no root's traffic. Traffic another root's session causes on the root's paths,
+such as reading them through a grant's mount, counts on those paths; what the
+root's own sessions read through a mount counts on the mount's target instead.
+Each node announces a root's broadcast while it serves a session scoped to
+exactly that root, plus the linger, so a returning root is a new instance.
+
+The relay publishes each root's broadcast at
+`<prefix>/root/<root>/node/<node>`, with the root escaped into one segment, and
+mounts `<prefix>/root/<root>` read-only at `<root>/<prefix>`: no session can
+publish there, and the top-level node broadcast is the empty root's.
+
 ## Tracks
 
 Traffic is split by **tier**, an arbitrary label (a billing class, a region)
