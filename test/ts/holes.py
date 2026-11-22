@@ -34,9 +34,10 @@ Under `--program N` the source is a multiplex and the capture one export of its 
 that program's streams are graded, and the capture's PAT must list that program alone, its PMT
 naming the source's PCR PID and elementary streams. `--join S` is how far into the source that
 export started, which it may start later by. Each track joins at its own latest group then, so
-no stream may start more than one of the source's video groups before the join, which would be
-a replay from before the export started, or after the capture's first video keyframe, which
-would leave that stream missing what the program carries from there.
+no stream may start more than two of the source's video groups before the join (its group, and
+one more for the publisher starting late on the wall clock the join is counted on), which would
+be a replay from before the export started, or more than one after the capture's first video
+keyframe, which would leave that stream missing what the program carries from there.
 
 Exit status is 0 when every source stream is in the capture without a hole (or, under
 `--shed`, losing only whole groups) or a cut, 1 otherwise.
@@ -226,7 +227,7 @@ def probe(path: str) -> dict[str, Stream]:
 
 def starts(source: dict[str, Stream], capture: dict[str, Stream], join: Fraction) -> dict[str, list[str]]:
     """Where each of a program's streams starts against its source's video groups, by PID: under a
-    `join`, no earlier than one group before it, and in any case no later than one group after
+    `join`, no earlier than two groups before it, and in any case no later than one group after
     the capture's first video keyframe."""
     videos = [pid for pid, src in source.items() if src.info.get("codec_type") == "video"]
     if not videos:
@@ -250,9 +251,9 @@ def starts(source: dict[str, Stream], capture: dict[str, Stream], join: Fraction
             continue
         first = capture[pid].span[0]
         reasons = found.setdefault(pid, [])
-        if join and first - src.span[0] < join - group:
+        if join and first - src.span[0] < join - 2 * group:
             reasons.append(
-                f"starts {float(first - src.span[0]):.3f}s into its source, over a {float(group)}s group "
+                f"starts {float(first - src.span[0]):.3f}s into its source, over two {float(group)}s groups "
                 f"before the {float(join)}s join"
             )
         if opened is not None and first - opened > group:

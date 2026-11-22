@@ -293,12 +293,14 @@ class Starts(unittest.TestCase):
     def test_a_join_starts_on_the_group_before_it(self):
         # Video from its keyframe at 6.4 s, audio from 6.83 s, joined 8 s in.
         self.assertEqual(self.grade(160, 320, 8), {})
+        # A group earlier, on the keyframe at 4.8 s, for a publisher that started late.
+        self.assertEqual(self.grade(120, 240, 8), {})
 
     def test_a_replay_from_before_the_join_fails(self):
         # Both from the start, with no group before 8 s reaching that far back.
         self.assertEqual(set(self.grade(0, 0, 8)), {"0x102", "0x103"})
-        # One group further back than allowed, on the keyframe at 4.8 s.
-        self.assertEqual(set(self.grade(120, 240, 8)), {"0x102", "0x103"})
+        # One group further back than allowed, on the keyframe at 3.2 s.
+        self.assertEqual(set(self.grade(80, 160, 8)), {"0x102", "0x103"})
 
     def test_audio_missing_after_the_first_keyframe_fails(self):
         # Video from 6.4 s, audio only from 8.53 s: over a group late, though inside the join.
