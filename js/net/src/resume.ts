@@ -472,7 +472,7 @@ class Reader implements ResumeSource {
 	 * The skipped run from the start of each key run the cursor keeps out of a gap under the serving
 	 * copy's resume point, recorded as the copies declare it, so it outlives the copy and the cache
 	 * that held it. Only that run, at most two a gap however many routes come and go: the rest is
-	 * asked of the serving route again; see {@link #owed}.
+	 * asked of the serving route again; see {@link #asking}.
 	 */
 	#skipped = new Delivered();
 	/**
@@ -1773,7 +1773,7 @@ class Reader implements ResumeSource {
 	 * ended and it holds nothing left to read. Whether a group the reader lacks may still land on
 	 * a replaced one, which a clean end waits for.
 	 *
-	 * A copy of the serving route asked for a key {@link #owed} names stays too: it is the ask
+	 * A copy of the serving route asked for a key {@link #asking} names stays too: it is the ask
 	 * {@link #accounts} makes, waiting on that route's answer or holding what the record does not,
 	 * and letting it go would only ask again.
 	 */
@@ -1784,7 +1784,7 @@ class Reader implements ResumeSource {
 		const last = this.#copies.at(-1);
 		const edge = last && hooks.latestKey(last.sub);
 		const cursor = this.#shell.cursor.peek();
-		const owed = this.#owed(delivered);
+		const asking = this.#asking(delivered);
 		let waits = false;
 		this.#copies = this.#copies.filter((copy) => {
 			if (!copy.replaced) {
@@ -1796,7 +1796,7 @@ class Reader implements ResumeSource {
 			} else {
 				const retains = this.#retains(copy, delivered, edge);
 				if (retains === "wait") waits = true;
-				if (retains || (last && copyAsked(copy, last, owed))) return true;
+				if (retains || (last && copyAsked(copy, last, asking))) return true;
 			}
 			this.#drop(copy);
 			return false;
@@ -1808,12 +1808,12 @@ class Reader implements ResumeSource {
 	/**
 	 * The keys of a bounded window under the serving copy's resume point that `delivered` lacks and
 	 * the cursor keeps out, past the skipped run {@link #skipped} records from the start of each: what
-	 * {@link #accounts} may ask the serving route for. Records that run first, from what every copy
+	 * {@link #accounts} asks the serving route for. Records that run first, from what every copy
 	 * held now declares, so an answer is kept before the cache that holds it forgets it. A reader
 	 * whose cursor keeps nothing out, or that follows one route, pays nothing. Mirrors the Rust
-	 * `Reader::owed`.
+	 * `Reader::asking`.
 	 */
-	#owed(delivered: Delivered): Run[] {
+	#asking(delivered: Delivered): Run[] {
 		const serving = this.#copies.at(-1);
 		const cursor = this.#shell.cursor.peek();
 		const window = this.#window();
@@ -1827,19 +1827,19 @@ class Reader implements ResumeSource {
 			return [];
 		}
 		const kept = new Delivered();
-		const owed: Run[] = [];
+		const asking: Run[] = [];
 		for (const run of window.runs(window.floor() ?? 0n, resumed)) {
 			for (const gap of delivered.gaps(run.start, run.end)) {
 				for (const out of this.#keptOut(gap, resumed)) {
 					const first = this.skippedIn(out.start, out.end)[0];
 					const start = first?.start === out.start ? first.end : out.start;
 					if (start > out.start) kept.addRun(out.start, start);
-					if (start < out.end) owed.push({ start, end: out.end });
+					if (start < out.end) asking.push({ start, end: out.end });
 				}
 			}
 		}
 		this.#skipped = kept;
-		return owed;
+		return asking;
 	}
 
 	/**
@@ -3319,16 +3319,17 @@ function runsIn(held: Delivered, start: bigint, end: bigint): Run[] {
 }
 
 /**
- * Whether replaced `copy` is of `serving`'s route, did not fail, and was asked for a key of `owed`:
- * what the reader would ask that route for again were it let go. Mirrors the Rust `Copy::asked`.
+ * Whether replaced `copy` is of `serving`'s route, did not fail, and was asked for a key of
+ * `asking`: what the reader would ask that route for again were it let go. Mirrors the Rust
+ * `Copy::asked`.
  */
-function copyAsked(copy: Copy, serving: Copy, owed: readonly Run[]): boolean {
+function copyAsked(copy: Copy, serving: Copy, asking: readonly Run[]): boolean {
 	const start = copy.floor ?? 0n;
 	const end = copyEnd(copy) ?? UNBOUNDED;
 	return (
 		!(copy.done instanceof Error) &&
 		copy.source.from.closed === serving.source.from.closed &&
-		owed.some((run) => run.start < end && start < run.end)
+		asking.some((run) => run.start < end && start < run.end)
 	);
 }
 

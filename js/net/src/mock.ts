@@ -158,6 +158,19 @@ function newStream(
 	return { readable, writable };
 }
 
+/** Deliver what `held` stalled, in the order it was written, and stop holding. */
+function deliver(held: Held): void {
+	const queue = held.queue ?? [];
+	held.queue = undefined;
+	for (const write of queue) {
+		try {
+			write();
+		} catch {
+			// The stream ended meanwhile.
+		}
+	}
+}
+
 /** A fake {@link WebTransport} backed by in-memory streams, paired with a peer. */
 export class MockTransport implements WebTransport {
 	readonly protocol: string;
@@ -199,6 +212,9 @@ export class MockTransport implements WebTransport {
 
 	// The stream data this side wrote while held.
 	#held: Held = {};
+
+	// While set, each uni stream this side opens holds its own data, oldest first.
+	#heldUnis?: Held[];
 
 	constructor(
 		protocol: string,
@@ -302,15 +318,33 @@ export class MockTransport implements WebTransport {
 
 	/** Deliver what {@link hold} stalled, in the order it was written, and stop holding. */
 	release(): void {
-		const queue = this.#held.queue ?? [];
-		this.#held.queue = undefined;
-		for (const deliver of queue) {
-			try {
-				deliver();
-			} catch {
-				// The stream ended meanwhile.
-			}
-		}
+		deliver(this.#held);
+	}
+
+	/**
+	 * Stall each uni stream this side opens from now on, as Rust's `MockSession::hold_unis`:
+	 * the peer reads nothing from one until {@link releaseOldestUni} or {@link releaseNewestUni}
+	 * picks it.
+	 */
+	holdUnis(): void {
+		this.#heldUnis ??= [];
+	}
+
+	/** How many uni streams {@link holdUnis} still stalls. */
+	heldUnis(): number {
+		return this.#heldUnis?.length ?? 0;
+	}
+
+	/** Deliver the oldest stalled uni stream, and let it flow from now on. */
+	releaseOldestUni(): void {
+		const held = this.#heldUnis?.shift();
+		if (held) deliver(held);
+	}
+
+	/** Deliver the newest stalled uni stream, and let it flow from now on. */
+	releaseNewestUni(): void {
+		const held = this.#heldUnis?.pop();
+		if (held) deliver(held);
 	}
 
 	setPeer(peer: MockTransport) {
@@ -351,7 +385,12 @@ export class MockTransport implements WebTransport {
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
-		const c2s = newStream(this.#streams, this.#held);
+		let held = this.#held;
+		if (this.#heldUnis) {
+			held = { queue: [] };
+			this.#heldUnis.push(held);
+		}
+		const c2s = newStream(this.#streams, held);
 
 		// Record before handing the peer its end, so a peer that waits for the stream to arrive
 		// always finds it here.
