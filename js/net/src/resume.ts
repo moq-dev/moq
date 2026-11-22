@@ -1670,6 +1670,7 @@ class Reader implements ResumeSource {
 		const cursor = this.#shell.cursor.peek();
 		let waits = false;
 		const lacking = this.#lacking(delivered);
+		let dropped = false;
 		this.#copies = this.#copies.filter((copy) => {
 			if (!copy.replaced) {
 				if (!this.#ended || copy.lease > 0) return true;
@@ -1685,8 +1686,12 @@ class Reader implements ResumeSource {
 			// Before the drop, which closes a front's copy along with its own copies.
 			this.#keepSkips(copy, lacking);
 			this.#drop(copy);
+			dropped = true;
 			return false;
 		});
+		// A start or end may be skipped in parts no one copy knows whole: merge what the held copies
+		// skipped before pruning.
+		if (dropped) for (const copy of this.#copies) this.#keepSkips(copy, lacking);
 		// Only what still starts or ends a gap the reader lacks: a range edit, a hand-out, or a later
 		// switch leaves the rest unneeded.
 		if (this.#skipped.runs > 0) {

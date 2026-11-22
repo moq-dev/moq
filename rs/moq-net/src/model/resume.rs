@@ -2301,8 +2301,12 @@ impl Reader {
 			}
 		});
 		// A skip is final, and only that copy may know it: keep what it skipped of each gap
-		// under its bound, merged with what earlier copies skipped.
+		// under its bound. Merged with what every held copy and earlier copies skipped, since
+		// a start or end may be skipped in parts no one copy knows whole.
 		let lacking = self.lacking(delivered);
+		if !gone.is_empty() {
+			gone.extend(self.copies.iter().map(|copy| (copy.track.clone(), copy.end())));
+		}
 		for (track, end) in gone {
 			let end = end.unwrap_or(u64::MAX);
 			for gap in &lacking {
@@ -12758,6 +12762,46 @@ mod test {
 			"the replaced copy may still deliver 2"
 		);
 		// Past the grace a late group is waited for, the replaced copy has nothing more and goes.
+		kio::clock::sleep(HOUR).await;
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// As above, with the kept-out start of the gap skipped in parts: the replaced copy knows
+	/// one, the serving copy the other, and neither knows it whole.
+	#[kio::test]
+	async fn a_skip_split_between_a_replaced_and_the_serving_copy_ends_the_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		a.skip_groups(2..3);
+		a.drop_groups(3..4, StreamError::NotFound);
+		write(&a, 4);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Some(0),
+				end: Some(5),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 4]);
+		let b = copy();
+		b.skip_groups(1..2);
+		write(&b, 5);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(3..6);
+		assert_eq!(drain(&mut sub, false), [5]);
+		assert!(
+			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
+			"the replaced copy may still deliver 3"
+		);
 		kio::clock::sleep(HOUR).await;
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
