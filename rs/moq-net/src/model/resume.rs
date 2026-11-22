@@ -2320,10 +2320,20 @@ impl Reader {
 		if !self.skipped.is_empty() {
 			let mut kept = RangeSet::new();
 			for gap in &lacking {
-				if let Some(first) = self.skipped.overlapping(gap).next().filter(|run| run.start <= gap.start) {
+				if let Some(first) = self
+					.skipped
+					.overlapping(gap)
+					.next()
+					.filter(|run| run.start <= gap.start)
+				{
 					kept.insert(gap.start..first.end.min(gap.end));
 				}
-				if let Some(last) = self.skipped.overlapping(gap).next_back().filter(|run| run.end >= gap.end) {
+				if let Some(last) = self
+					.skipped
+					.overlapping(gap)
+					.next_back()
+					.filter(|run| run.end >= gap.end)
+				{
 					kept.insert(last.start.max(gap.start)..gap.end);
 				}
 			}
@@ -12747,7 +12757,10 @@ mod test {
 		routes.serve(b.consume());
 		let mut sub = sub.with_range(2..5);
 		assert_eq!(drain(&mut sub, false), [4]);
-		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending(), "the replaced copy may still deliver 2");
+		assert!(
+			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
+			"the replaced copy may still deliver 2"
+		);
 		// Past the grace a late group is waited for, the replaced copy has nothing more and goes.
 		kio::clock::sleep(HOUR).await;
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
