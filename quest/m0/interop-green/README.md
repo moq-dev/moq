@@ -56,12 +56,12 @@ Scheduled runs 2026-11-15 to 2026-11-21 (every one red) failed three causes, non
 
 - Harness regressions: `open-gop.browser.ts` since
   [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) made the player join
-  live. [moq-dev/moq#9306](https://github.com/moq-dev/moq/pull/9306) fixes the fixture
-  and is open and approved.
+  live. [moq-dev/moq#9306](https://github.com/moq-dev/moq/pull/9306) fixed the fixture
+  (merged 2026-11-22).
 - Interop (moq-transport): `datagram rust -> js-native-node` and `-bun` on moq-transport-18
   fail every run, since [moq-dev/moq#8918](https://github.com/moq-dev/moq/pull/8918) gave
   every JS datagram a timestamp. [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)
-  fixes the assertion and is open, approved, and conflicting with `main`.
+  fixed the assertion (merged 2026-11-22).
 - Interop (full matrix and moq-transport): `js -> js`, `js -> js-native-*`, and `go -> js`
   timed out waiting for the catalog on moq-transport 18, 20, and 22, one to three cells per
   pass, so a fresh retry always hid it. Root cause: a relay holding a group with its
@@ -73,6 +73,14 @@ Scheduled runs 2026-11-15 to 2026-11-21 (every one red) failed three causes, non
   its answer with the last data object. It first showed in the 2026-11-15 run; the culprit
   PR is not pinned, since bisecting a race that fails 0 to 2 of 6 cells locally found no
   clean split.
+
+The 2026-11-22 scheduled run
+[45041226494](https://github.com/moq-dev/moq/actions/runs/45041226494), at 040a566d40 with
+both of those merged and before the catalog fix, passed the matrix and failed two other
+steps. `Relay fills`: `relay_fill::relay_fill_range_table` took over 30 s on the runner and
+failed with `publish error ... remote error: 1`; it passes here in 22 s on the same code, so
+the cause is not found. `Media output and lifecycle`: the chromium `replacement` case, which
+stays with the epic's replacement child.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
