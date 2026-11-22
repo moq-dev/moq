@@ -362,7 +362,8 @@ for (const mode of ["direct", "cold", "warm", "late", "switch"] as const) {
 		(known ? test.skip : test)(`range table ${mode}: ${c.name}`, async () => {
 			const ended = await run(c, mode);
 			// A switch never leaves a read open that ends direct from the origin.
-			if (mode === "switch" && !ended && (await run(c, "direct"))) throw new Error("never ended, as it does direct");
+			if (mode === "switch" && !ended && (await run(c, "direct")))
+				throw new Error("never ended, as it does direct");
 		});
 	}
 }

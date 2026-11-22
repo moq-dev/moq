@@ -213,7 +213,9 @@ impl Source {
 				false => self.track.create_group(moq_net::group::Info { start }).unwrap(),
 			};
 			for frame in 0..case.frames.div_ceil(2) {
-				group.write_frame(Timestamp::from_millis(start + frame).unwrap(), &b"x"[..]).unwrap();
+				group
+					.write_frame(Timestamp::from_millis(start + frame).unwrap(), &b"x"[..])
+					.unwrap();
 			}
 			last = Some((start, group));
 		}
@@ -222,7 +224,9 @@ impl Source {
 
 	fn write_tail(case: &Case, (start, mut group): (u64, moq_net::group::Producer)) {
 		for frame in case.frames.div_ceil(2)..case.frames {
-			group.write_frame(Timestamp::from_millis(start + frame).unwrap(), &b"x"[..]).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(start + frame).unwrap(), &b"x"[..])
+				.unwrap();
 		}
 		group.finish().unwrap();
 	}
