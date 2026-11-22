@@ -723,6 +723,10 @@ struct Copy {
 	/// holding that time, which may lie under it, is read. A backfill of gaps alone owes
 	/// nothing under its floor.
 	backfill: bool,
+	/// Asked only for groups under the serving copy's resume point. They come as fills under
+	/// where the track's live feed starts, which [`track::Consumer::may_land`] never waits
+	/// for, so it is waited for until it runs out, fails, or the reader's budget passes.
+	fills: bool,
 	/// The frames of the group at `floor` the reader already held when this copy was asked,
 	/// so it asks for that group from the next frame; see [`Reader::resume_at`].
 	resume: Option<Position>,
@@ -1022,7 +1026,8 @@ impl Copy {
 			let floor = self.floor;
 			let from = self.start(start);
 			// A group still to land is waited for, as a gap is.
-			if reader
+			if self.fills
+				|| reader
 				.window
 				.runs(from)
 				.take_while(|run| *run.start() < end)
@@ -2255,6 +2260,7 @@ impl Reader {
 			track,
 			floor,
 			backfill: false,
+			fills: false,
 			resume,
 			resolved,
 			replaced: false,
@@ -3104,6 +3110,7 @@ impl Reader {
 			copy.since = Some(copy.track.now());
 			copy.done = None;
 			copy.backfill |= raised;
+			copy.fills = true;
 			copy.resolved = resolved;
 			copy.send(&self.mirrored, self.mirrored.ranges.keys().copied());
 			return;
@@ -3119,6 +3126,7 @@ impl Reader {
 			sub: Copy::subscribe(&track, &self.mirrored, span, &resolved),
 			floor,
 			backfill: raised,
+			fills: true,
 			// Below every group handed out, so the reader holds none of the first.
 			resume: None,
 			resolved,
