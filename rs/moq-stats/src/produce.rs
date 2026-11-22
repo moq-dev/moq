@@ -68,6 +68,18 @@ pub struct Config {
 	/// keeps apart for its grace, so a short linger on a flapping bucket
 	/// multiplies that reader's state.
 	pub linger: Duration,
+	/// Also publish each root's own view at
+	/// [`root_prefix`](crate::root_prefix)`(prefix, root)/node/<node>`, for every
+	/// non-empty root a session is scoped to (see
+	/// [`SessionInfo::root`](moq_net::stats::SessionInfo::root)). Default off.
+	///
+	/// A root's view carries the traffic on paths at or under the root, named
+	/// relative to it, and the sessions scoped to the root or beneath it, in the
+	/// same tracks as the node's broadcast. It is announced while a session scoped
+	/// to exactly that root is counted, plus the [`Self::linger`], and a root
+	/// returning after that is a new broadcast. The registry also stops counting
+	/// `<prefix>` under each session's own root, where a relay mounts the view.
+	pub roots: bool,
 }
 
 impl Config {
@@ -82,6 +94,7 @@ impl Config {
 			interval: Duration::from_secs(1),
 			depth: 0,
 			linger: DEFAULT_LINGER,
+			roots: false,
 		}
 	}
 
@@ -120,6 +133,13 @@ impl Config {
 	/// See [`Self::linger`].
 	pub fn with_linger(mut self, linger: Duration) -> Self {
 		self.linger = linger;
+		self
+	}
+
+	/// Set whether each root's view is published too (default off). See
+	/// [`Self::roots`].
+	pub fn with_roots(mut self, roots: bool) -> Self {
+		self.roots = roots;
 		self
 	}
 }
@@ -168,6 +188,7 @@ impl Producer {
 			interval,
 			depth,
 			linger,
+			roots,
 		} = config;
 		// An empty node is indistinguishable from "no node set"; collapse it so
 		// downstream code only sees a single representation. We do this here
@@ -184,7 +205,12 @@ impl Producer {
 
 		// The prefix is a literal path, so its subtree claim cannot fail.
 		let exclude = moq_net::Pattern::subtree(prefix.as_str()).expect("the stats prefix is a literal path");
-		let registry = Registry::new(moq_net::stats::Config::new().with_exclude(exclude));
+		let mut registry = moq_net::stats::Config::new().with_exclude(exclude.clone());
+		if roots {
+			// Where a relay mounts each root's view: a read there counts as no root's traffic.
+			registry = registry.with_exclude_rooted(exclude);
+		}
+		let registry = Registry::new(registry);
 		let keepalive = Arc::new(Keepalive);
 		let task = Task {
 			registry: registry.clone(),
@@ -194,6 +220,7 @@ impl Producer {
 			depth,
 			linger,
 			interval,
+			roots,
 		};
 		let publisher = Publisher(Run::Idle(
 			Box::new(task),
@@ -317,6 +344,7 @@ struct Task {
 	depth: usize,
 	linger: Duration,
 	interval: Duration,
+	roots: bool,
 }
 
 /// The publish task's state, kept across drains so a steady-state drain
@@ -324,6 +352,8 @@ struct Task {
 struct Drain {
 	task: Task,
 	node: NodePublisher,
+	/// Each root's view, keyed by root, when [`Config::roots`] is on.
+	roots: HashMap<String, RootView>,
 	/// Refilled by every drain.
 	report: Report,
 	/// Drain counter, stamped on the change-detection state an entry touches
@@ -365,11 +395,15 @@ impl Drain {
 	/// Announce the node's broadcast, which lives for the producer's life;
 	/// `None` if the origin refused it.
 	fn new(task: Task) -> Option<Self> {
-		let node = NodePublisher::create(&task)?;
+		let advertised = advertised_path(&task.prefix, task.node.as_ref())
+			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
+			.ok()?;
+		let node = NodePublisher::create(&task, &advertised)?;
 		let now = kio::clock::now();
 		Some(Self {
 			task,
 			node,
+			roots: HashMap::new(),
 			report: Report::default(),
 			tick: 0,
 			base: (now, since_epoch(now)),
@@ -396,6 +430,55 @@ impl Drain {
 			.report(&mut self.report, moq_net::time::Instant::now());
 		self.tick += 1;
 		self.node.collect(&self.report, self.tick, self.task.depth);
+		if self.task.roots {
+			self.collect_roots();
+		}
+	}
+
+	/// Sort this drain's rows into each root's view, creating a view for every root
+	/// a session row names and running each through its own publisher.
+	///
+	/// A row reaches every view at or above it, so the cost is rows times path depth.
+	fn collect_roots(&mut self) {
+		for view in self.roots.values_mut() {
+			view.reset();
+		}
+		for entry in &self.report.sessions {
+			// The node's own broadcast is the empty root's view.
+			if entry.root.is_empty() {
+				continue;
+			}
+			if !self.roots.contains_key(entry.root.as_str()) {
+				let view = RootView::create(&self.task, &entry.root);
+				self.roots.insert(entry.root.as_str().to_string(), view);
+			}
+			self.roots.get_mut(entry.root.as_str()).expect("just ensured").live = true;
+		}
+		if self.roots.is_empty() {
+			return;
+		}
+		for entry in &self.report.sessions {
+			for (root, _) in ancestors(entry.root.as_str()) {
+				if let Some(view) = self.roots.get_mut(root) {
+					view.report.sessions.push(entry.clone());
+				}
+			}
+		}
+		for entry in &self.report.traffic {
+			for (root, _) in ancestors(entry.path.as_str()) {
+				let Some(view) = self.roots.get_mut(root) else {
+					continue;
+				};
+				let mut entry = entry.clone();
+				entry.path = entry.path.strip_prefix(&view.root).expect("an ancestor prefixes its path");
+				view.report.traffic.push(entry);
+			}
+		}
+		for view in self.roots.values_mut() {
+			if let Some(node) = &mut view.node {
+				node.collect(&view.report, self.tick, self.task.depth);
+			}
+		}
 	}
 
 	/// Write every pending frame, end bucket tracks that have lingered empty,
@@ -406,6 +489,15 @@ impl Drain {
 		// A label's presence track and a prefix's track exist only while
 		// requested. See `serve_requests`.
 		self.node.serve_requests(&self.report, self.tick, stamp);
+		let Task { depth, linger, .. } = self.task;
+		// Dropping a view's publisher ends its broadcast.
+		self.roots.retain(|_, view| !view.lingered(stamp.at, linger));
+		for view in self.roots.values_mut() {
+			if let Some(node) = &mut view.node {
+				node.flush(self.tick, stamp, depth, linger);
+				node.serve_requests(&view.report, self.tick, stamp);
+			}
+		}
 	}
 
 	/// The largest bucket snapshot still held, and the largest bucket frame this
@@ -679,6 +771,56 @@ impl<V: Serialize> Output<V> {
 }
 
 /// The node's stats broadcast and its change-detection state.
+/// One root's view of the node's counters: its rows, named relative to the root,
+/// and the publisher of its broadcast.
+struct RootView {
+	root: Path,
+	/// `None` when the root's broadcast could not be announced, held anyway so the
+	/// refusal is logged once per run of the root rather than every drain.
+	node: Option<NodePublisher>,
+	/// This drain's rows at or under the root, refilled every drain.
+	report: Report,
+	/// Whether this drain carried a session scoped to exactly this root.
+	live: bool,
+	/// When the root's last session left; `None` while it has one.
+	empty_since: Option<Instant>,
+}
+
+impl RootView {
+	/// Announce `root`'s view at `<root prefix>/node/<node>`.
+	fn create(task: &Task, root: &Path) -> Self {
+		let node = crate::root_prefix(&task.prefix, root)
+			.and_then(|prefix| advertised_path(&prefix, task.node.as_ref()))
+			.inspect_err(|err| tracing::warn!(%err, %root, "stats: root path too long"))
+			.ok()
+			.and_then(|advertised| NodePublisher::create(task, &advertised));
+		Self {
+			root: root.clone(),
+			node,
+			report: Report::default(),
+			live: false,
+			empty_since: None,
+		}
+	}
+
+	/// Start a drain with no rows.
+	fn reset(&mut self) {
+		self.live = false;
+		self.report.traffic.clear();
+		self.report.sessions.clear();
+	}
+
+	/// Whether this drain left the root without a session for at least `linger`.
+	fn lingered(&mut self, now: Instant, linger: Duration) -> bool {
+		if self.live {
+			self.empty_since = None;
+			return false;
+		}
+		let since = *self.empty_since.get_or_insert(now);
+		now.saturating_duration_since(since) >= linger
+	}
+}
+
 struct NodePublisher {
 	/// The node's route, which owns its broadcast.
 	route: origin::Route,
@@ -1035,6 +1177,14 @@ impl BucketTrack {
 		for (_, tier) in tiers.iter_mut() {
 			tier.paths.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 			tier.labels.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+			// Sessions under one label in several roots are separate rows.
+			tier.labels.entries.dedup_by(|row, kept| {
+				let same = row.0 == kept.0;
+				if same {
+					kept.1.add(row.1);
+				}
+				same
+			});
 		}
 		if let Err(err) = self.snapshot.update(&self.body, stamp) {
 			tracing::warn!(?err, name = self.name, "stats: failed to write bucket frame");
@@ -1069,15 +1219,12 @@ fn ancestors(path: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
 }
 
 impl NodePublisher {
-	/// Announce the node's broadcast with its totals track and, at depth 0, the
-	/// one bucket's track, which both live for the producer's life.
-	fn create(task: &Task) -> Option<Self> {
-		let advertised = advertised_path(&task.prefix, task.node.as_ref())
-			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
-			.ok()?;
+	/// Announce a broadcast at `advertised` with its totals track and, at depth 0,
+	/// the one bucket's track, which both live for the publisher's life.
+	fn create(task: &Task, advertised: &Path) -> Option<Self> {
 		// A fresh instance per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
-		let route = match task.origin.route(&advertised, origin::RouteOptions::default()) {
+		let route = match task.origin.route(advertised, origin::RouteOptions::default()) {
 			Ok(route) => route,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");

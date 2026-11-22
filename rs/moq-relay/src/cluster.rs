@@ -1403,10 +1403,18 @@ pub struct Cluster {
 	/// serving and publishing end together.
 	pub(crate) stats_producer: moq_stats::Producer,
 
-	/// The prefix the relay's own stats publisher writes under, when enabled.
-	/// Only cluster peers may publish there; client sessions cannot, whatever
-	/// their grant, since the registry leaves that subtree unmetered.
-	stats_prefix: Option<Path>,
+	/// Where the relay's own stats publisher writes, when enabled.
+	stats_paths: Option<StatsPaths>,
+}
+
+/// Where a relay's stats live on its origin.
+#[derive(Clone, Debug)]
+pub(crate) struct StatsPaths {
+	/// The top-level prefix. Only cluster peers may publish there; client sessions
+	/// cannot, whatever their grant, since the registry leaves that subtree unmetered.
+	pub prefix: Path,
+	/// Whether each root's view is mounted read-only at `<root>/<prefix>`.
+	pub roots: bool,
 }
 
 /// A gateway or network session admitted with its lease, scoped origins, and stats.
@@ -1520,7 +1528,7 @@ impl Cluster {
 			moq_net::time::run(driver).await;
 		}));
 		// Publish through the same origin cluster peers read from.
-		let stats_prefix = stats.reserved()?;
+		let stats_paths = stats.reserved()?;
 		let (stats_producer, publisher) = stats.build(origin.clone())?;
 		work.push(Child::new("stats publisher", async move {
 			if let Some(hold) = stats_hold {
@@ -1554,7 +1562,7 @@ impl Cluster {
 			critical: Default::default(),
 			origin,
 			stats,
-			stats_prefix,
+			stats_paths,
 			stats_producer,
 		};
 		Ok((cluster, Driver { work }))
@@ -1645,7 +1653,7 @@ impl Cluster {
 		let stats = self
 			.stats
 			.tier(token.tier.clone())
-			.session(moq_net::stats::SessionInfo::new(&token.label));
+			.session(moq_net::stats::SessionInfo::new(&token.label).with_root(token.root.clone()));
 		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = ?token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
@@ -1735,8 +1743,8 @@ impl Cluster {
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
 		let mut origin = self.mounted(token)?;
-		if let Some(prefix) = self.stats_prefix.as_ref().filter(|_| token.link.is_none()) {
-			origin = origin.exclude(prefix).ok()?;
+		if let Some(stats) = self.stats_paths.as_ref().filter(|_| token.link.is_none()) {
+			origin = origin.exclude(&stats.prefix).ok()?;
 		}
 		origin.scope(&token.root, &token.publish.path).ok()
 	}
@@ -1760,7 +1768,30 @@ impl Cluster {
 				}
 			};
 		}
+		if let Some(stats) = self.stats_paths.as_ref().filter(|stats| stats.roots)
+			&& !token.root.is_empty()
+		{
+			origin = Self::mount_stats(origin, &token.root, &stats.prefix)?;
+		}
 		Some(origin)
+	}
+
+	/// Present `root`'s own stats at `<root>/<prefix>`, read-only, so nothing a session
+	/// under the root publishes there is mistaken for them or read unmetered. When the
+	/// mount is refused, such as when a grant's mount overlaps it or the root is too
+	/// long to nest, the subtree is excluded instead. `None` if that fails too.
+	fn mount_stats(origin: origin::Producer, root: &Path, prefix: &Path) -> Option<origin::Producer> {
+		let at = root.join(prefix).ok()?;
+		let mounted = moq_stats::root_prefix(prefix, root)
+			.map_err(moq_net::Error::from)
+			.and_then(|target| origin.mount(&at, target));
+		match mounted {
+			Ok(origin) => Some(origin),
+			Err(err) => {
+				tracing::debug!(?root, ?err, "root stats mount refused, excluding it");
+				origin.exclude(at).ok()
+			}
+		}
 	}
 
 	/// Whether `--cluster-lan` asked this relay to discover peers over mDNS.

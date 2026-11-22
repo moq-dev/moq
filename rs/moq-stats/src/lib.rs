@@ -279,6 +279,22 @@ fn parse_keyed_track(name: &str, kind: &str) -> Option<Path> {
 	Path::new(key).ok()
 }
 
+/// The prefix a root's own stats publish under: `<prefix>/root/<root>`, with `root`
+/// escaped into one segment so no two roots share a prefix.
+///
+/// A [`Producer`] with [`produce::Config::roots`] publishes each root's view at
+/// `<this>/node/<node>`, and a relay mounts this prefix at `<root>/<prefix>`, so a
+/// session scoped to the root reads its stats at `<prefix>/node/<node>` like the
+/// top-level ones. Fails if the result is not a valid path, such as a root too
+/// long to nest.
+pub fn root_prefix(prefix: &Path, root: &Path) -> std::result::Result<Path, moq_net::path::Error> {
+	let segment = Path::new(&moq_net::path::escape(root.as_str()))?;
+	prefix.join(&Path::from_static(ROOT))?.join(&segment)
+}
+
+/// The category segment root views publish under, beside `node`.
+const ROOT: &str = "root";
+
 /// The node a stats broadcast path names: `<prefix>/node/<node>` yields
 /// `<node>`, and `<prefix>/node` the empty node.
 ///
