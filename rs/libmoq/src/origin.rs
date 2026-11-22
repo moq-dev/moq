@@ -235,7 +235,8 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the event; release it before the callback.
-			if let Some(announced_id) = State::lock().origin.announced_insert(event)? {
+			let announced_id = State::lock().origin.announced_insert(event)?;
+			if let Some(announced_id) = announced_id {
 				callback.call(announced_id);
 			}
 		}
