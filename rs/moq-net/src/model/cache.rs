@@ -285,6 +285,14 @@ impl Pool {
 		self.used().checked_sub(self.target()).filter(|excess| *excess > 0)
 	}
 
+	/// The part of the excess that ending readers would give back to other content: no more
+	/// than the room the capacity leaves beside the pinned bytes. None in a pool held past its
+	/// capacity by what it pins, where the room a reader frees is room nothing may use.
+	pub(super) fn contested(&self) -> u64 {
+		let room = self.inner.capacity.load(Ordering::Relaxed).saturating_sub(self.pinned());
+		self.excess().map_or(0, |excess| excess.min(room))
+	}
+
 	/// Change the capacity. `None` makes the pool unbounded.
 	///
 	/// Takes effect as tracks write: a shrink leaves the pool over budget, which every
@@ -1872,16 +1880,16 @@ impl Reader {
 		}
 	}
 
-	/// The debt the track's readers owe, forgiven once the pool is back within its target:
-	/// nothing needs the room any more, as the track forgives its own debt. A pool held past
-	/// its capacity by pinned bytes alone owes nothing, since no reader ending would free them.
+	/// The debt the track's readers owe, up to [`Pool::contested`]: forgiven once nothing
+	/// needs the room any more, as the track forgives its own debt.
 	pub(crate) fn debt(&self) -> u64 {
 		let readers = &self.track.readers;
-		if self.track.pool.excess().is_none() {
+		let contested = self.track.pool.contested();
+		if contested == 0 {
 			readers.debt.store(0, Ordering::Relaxed);
 			return 0;
 		}
-		readers.debt.load(Ordering::Relaxed)
+		readers.debt.load(Ordering::Relaxed).min(contested)
 	}
 
 	/// Whether this record is one to end when folding leaves a debt: it bills more than a
