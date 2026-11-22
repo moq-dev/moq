@@ -2831,11 +2831,15 @@ impl Handle {
 		}
 	}
 
-	/// Shed the frames this copy's fastest reader took: see [`GroupState::shed_taken`].
+	/// Shed the frames this copy's fastest reader took, see [`GroupState::shed_taken`], or
+	/// every committed frame while no reader holds the copy, which no reader is owed.
 	pub(super) fn shed_taken(&self) {
-		if let Ok(mut state) = self.state.write() {
-			let read = self.alive.pace.read();
-			state.shed_taken(read);
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		match self.state.wanted() {
+			true => state.shed_taken(self.alive.pace.read()),
+			false => state.shed_all(),
 		}
 	}
 
