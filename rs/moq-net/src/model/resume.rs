@@ -1681,11 +1681,7 @@ impl Mirrored {
 	/// The widest budget any group gets: none while a history range is asked for, else the
 	/// widest live join's `max`.
 	fn widest(&self) -> Duration {
-		(self.ranges.values())
-			.filter(|range| !range.is_empty())
-			.map(track::Range::budget)
-			.max()
-			.unwrap_or(Duration::ZERO)
+		super::subscription::widest(self.ranges.values())
 	}
 
 	/// These preferences with `ranges` instead.

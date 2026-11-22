@@ -80,6 +80,16 @@ impl JoinAsk {
 	}
 }
 
+/// The widest staleness budget `ranges` give a group: none while a history range is asked
+/// for, and otherwise the largest live join's `max`.
+pub(super) fn widest<'a>(ranges: impl IntoIterator<Item = &'a Range>) -> Duration {
+	(ranges.into_iter())
+		.filter(|range| !range.is_empty())
+		.map(Range::budget)
+		.max()
+		.unwrap_or(Duration::ZERO)
+}
+
 /// A [`Start::Live`] `max` as a budget: `None` waits as long as anything could.
 pub(crate) fn budget(max: Option<Duration>) -> Duration {
 	max.unwrap_or(Duration::MAX)
@@ -412,11 +422,7 @@ impl Subscription {
 	/// The widest staleness budget any range gives a group: none while a history range is
 	/// asked for, and otherwise the largest live join's `max`.
 	pub(crate) fn widest(&self) -> Duration {
-		(self.ranges.iter())
-			.filter(|range| !range.is_empty())
-			.map(Range::budget)
-			.max()
-			.unwrap_or(Duration::ZERO)
+		widest(&self.ranges)
 	}
 
 	/// Replace [`Self::ranges`], returning `self` for chaining.
