@@ -2423,7 +2423,12 @@ mod tests {
 	fn presence_credit_counters_stay_off_the_wire_while_zero() {
 		let mut presence = Presence::default();
 		let output = serde_json::to_value(presence).unwrap();
-		for key in ["credit_stalls", "credit_stalled_us", "credit_held_readers_us", "credit_held_evicted_us"] {
+		for key in [
+			"credit_stalls",
+			"credit_stalled_us",
+			"credit_held_readers_us",
+			"credit_held_evicted_us",
+		] {
 			assert!(output.get(key).is_none(), "{output}");
 		}
 		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
