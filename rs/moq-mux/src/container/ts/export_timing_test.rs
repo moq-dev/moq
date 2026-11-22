@@ -140,7 +140,7 @@ impl Live {
 		cfg.description =
 			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -157,7 +157,7 @@ impl Live {
 		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.audio
 			.renditions
@@ -207,7 +207,7 @@ impl Live {
 	/// Declare that video decodes up to `jitter` before it is presented, as a deep B-pyramid's
 	/// catalog would, so a receiver holds that much of it for its DTS.
 	fn declare_video_jitter(&mut self, jitter: Duration) {
-		let mut catalog = self.catalog.modify().unwrap();
+		let mut catalog = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		for config in catalog.video.renditions.values_mut() {
 			config.jitter = Some(jitter);
 		}
@@ -222,7 +222,7 @@ impl Live {
 		let description =
 			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_PYRAMID)], &[Bytes::from_static(PYRAMID_PPS)])
 				.unwrap();
-		let mut catalog = self.catalog.modify().unwrap();
+		let mut catalog = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		for config in catalog.video.renditions.values_mut() {
 			config.description = Some(description.clone());
 			config.reorder = Some(2);

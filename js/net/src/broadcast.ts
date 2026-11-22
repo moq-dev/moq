@@ -86,7 +86,7 @@ function createDatagrams(
 	name: string,
 	info: Partial<datagram.Info>,
 	listed = true,
-): datagram.Producer {
+): datagram.Producer | undefined {
 	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
 	// A request its readers closed waits for async cleanup; serve the name fresh instead.
 	const queued = state.datagramRequested
@@ -98,7 +98,7 @@ function createDatagrams(
 		producer = queued.accept(info);
 	} else {
 		const existing = state.datagrams.get(name);
-		if (existing?.closed.peek() === undefined && existing) throw new Error(`duplicate datagram track: ${name}`);
+		if (existing?.closed.peek() === undefined && existing) return undefined;
 		producer = new datagram.Producer(name).accept(info);
 		state.datagrams.set(name, producer);
 		void producer.closed.then(() => {
@@ -320,7 +320,7 @@ async function fetchGroup(
 	const subscriber = subscribe(state, name, {
 		...track.Subscription.default(),
 		priority: options.priority,
-		ranges: [{ start: { time: key }, end: { time: key } }],
+		ranges: [{ start: key, end: key }],
 	});
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
 	hooks.fetchBudget(subscriber, options.maxDelay, (options as FetchFrom).frameStart);
@@ -479,17 +479,18 @@ export class Producer {
 	}
 
 	/**
-	 * Create a track, insert it into the broadcast, and return its producer.
+	 * Create a track, insert it into the broadcast, and return its producer, or `undefined` while
+	 * an open track or a live request holds the name.
 	 *
 	 * A request still queued for the name is answered with this track, so its subscribers read
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a key an earlier track of the name
-	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name, or if the name holds a lone surrogate,
-	 * which UTF-8 cannot carry. `info` resolves as {@link track.Producer.accept} does, so an
-	 * omitted `maxAge` is zero, the live edge only.
+	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if the
+	 * broadcast is closed, or if the name holds a lone surrogate, which UTF-8 cannot carry. `info`
+	 * resolves as {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live
+	 * edge only.
 	 */
-	createTrack(name: string, info: track.InfoInit = {}): track.Producer {
+	createTrack(name: string, info: track.InfoInit = {}): track.Producer | undefined {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
@@ -507,7 +508,7 @@ export class Producer {
 		// A request a handler already pulled stays duplicate, as in Rust.
 		const live = [this.#state.tracks.get(name), this.#state.requests.get(name)];
 		if (live.some((existing) => existing && hooks.trackReleased(existing).peek() === undefined)) {
-			throw new Error(`duplicate track: ${name}`);
+			return undefined;
 		}
 
 		const producer = createProducer(this.#state, name).accept(info);
@@ -515,8 +516,11 @@ export class Producer {
 		return producer;
 	}
 
-	/** Create a live datagram track in a namespace separate from stream tracks. */
-	createDatagrams(name: string, info: Partial<datagram.Info> = {}): datagram.Producer {
+	/**
+	 * Create a live datagram track in a namespace separate from stream tracks, or `undefined`
+	 * while a live datagram track holds the name.
+	 */
+	createDatagrams(name: string, info: Partial<datagram.Info> = {}): datagram.Producer | undefined {
 		return createDatagrams(this.#state, name, info);
 	}
 

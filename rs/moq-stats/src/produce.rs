@@ -631,7 +631,9 @@ fn config() -> moq_json::snapshot::Config {
 
 impl<V: Serialize> Output<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
-		Ok(Self::new(broadcast.create_track(name, info())?))
+		Ok(Self::new(
+			broadcast.create_track(name, info()).ok_or(moq_net::Error::Duplicate)?,
+		))
 	}
 
 	/// Publish on the track `request` asked for, or create `name` without one.
@@ -778,16 +780,26 @@ struct PresenceTrack {
 	sums: Cumulative<Presence>,
 	/// Wire collection starts at the current reading on every hold. Other presence
 	/// fields keep their existing live-session seeding behavior.
-	wire_start: HashMap<Path, (u64, u64)>,
+	wire_start: HashMap<Path, [u64; WIRE.len()]>,
 }
+
+/// The presence fields read from connections' wire counters.
+const WIRE: [fn(&mut Presence) -> &mut u64; 4] = [
+	|presence| &mut presence.wire_tx,
+	|presence| &mut presence.wire_rx,
+	|presence| &mut presence.credit_stalls,
+	|presence| &mut presence.credit_stalled_us,
+];
 
 impl PresenceTrack {
 	fn publish(&mut self, stamp: Stamp) {
 		self.sums.fill(&mut self.output.frame);
 		for (tier, presence) in &mut self.output.frame.entries {
-			if let Some(&(tx, rx)) = self.wire_start.get(tier) {
-				presence.wire_tx = presence.wire_tx.saturating_sub(tx);
-				presence.wire_rx = presence.wire_rx.saturating_sub(rx);
+			if let Some(start) = self.wire_start.get(tier) {
+				for (field, start) in WIRE.iter().zip(start) {
+					let value = field(presence);
+					*value = value.saturating_sub(*start);
+				}
 			}
 		}
 		self.output.publish(&self.name, stamp);
@@ -931,7 +943,9 @@ impl BucketTrack {
 		// an earlier epoch's, and its first MoQ group is where they start.
 		let epoch = Epoch::mint();
 		let name = crate::bucket_track(bucket, &epoch);
-		let track = broadcast.create_track(name.as_str(), info())?;
+		let track = broadcast
+			.create_track(name.as_str(), info())
+			.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Self {
 			name,
 			snapshot: Snapshot::new(track, config()).fresh(),
@@ -1315,8 +1329,10 @@ impl NodePublisher {
 		for entry in report.sessions.iter().filter(|entry| entry.label == label) {
 			track.sums.add(&entry.tier, entry.closed, |sum| sum.add(entry.presence));
 			let start = track.wire_start.entry(entry.tier.label().clone()).or_default();
-			start.0 += entry.presence.wire_tx;
-			start.1 += entry.presence.wire_rx;
+			let mut presence = entry.presence;
+			for (start, field) in start.iter_mut().zip(WIRE) {
+				*start += *field(&mut presence);
+			}
 		}
 		track.publish(stamp);
 		self.presence.insert(label, track);
@@ -1695,13 +1711,8 @@ mod tests {
 				.await
 				.unwrap()
 				.ordered();
-			let mut reading = loop {
-				match ordered.next_group().await.unwrap().unwrap() {
-					track::Item::Group(group) => break group,
-					// Keys below where the subscription began were never this reader's.
-					track::Item::Gap { .. } => continue,
-				}
-			};
+			// Keys below where the subscription began were never this reader's.
+			let mut reading = ordered.next_group().await.unwrap().unwrap();
 			assert_eq!(reading.read_frame().await.unwrap().unwrap().payload, b"{}".as_slice());
 			first.write_frame(at(2), b"{\"a\":1}".to_vec()).unwrap();
 			assert_eq!(
@@ -1719,9 +1730,9 @@ mod tests {
 				reading.read_frame().await.unwrap().is_none(),
 				"{version}: the group ends cleanly"
 			);
-			match ordered.next_group().await.unwrap().unwrap() {
+			match ordered.next_item().await.unwrap().unwrap() {
 				track::Item::Group(group) => assert_eq!(group.start, second.start, "{version}"),
-				track::Item::Gap { range, error } => panic!("{version}: groups {range:?} given up: {error}"),
+				track::Item::Gap { range, error, .. } => panic!("{version}: groups {range:?} given up: {error}"),
 			}
 		}
 	}
@@ -2000,7 +2011,7 @@ mod tests {
 	/// The same, without blocking: `None` once nothing more is buffered.
 	fn try_next_frame(track: &mut track::Ordered) -> Option<moq_net::frame::Frame> {
 		use futures::FutureExt;
-		let mut group = track.next_group().now_or_never()?.expect("ok")?.group()?;
+		let mut group = track.next_group().now_or_never()?.expect("ok")?;
 		group.read_frame().now_or_never()?.expect("ok")
 	}
 
@@ -3285,7 +3296,7 @@ mod tests {
 			let mut track = subscribe(broadcast, &name).await;
 			let mut first = None;
 			while let Some(group) = futures::FutureExt::now_or_never(track.next_group()) {
-				let start = group.unwrap().unwrap().group().expect("a group").start;
+				let start = group.unwrap().unwrap().start;
 				first = Some(first.map_or(start, |first: u64| first.min(start)));
 			}
 			let first = first.expect("a run's first group is listed");

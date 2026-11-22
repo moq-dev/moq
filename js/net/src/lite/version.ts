@@ -234,10 +234,10 @@ export function hasRouteCost(version: Version): boolean {
 	}
 }
 
-/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, and FETCH carry frame indices alongside
- * their group keys, so a subscription or fetch can start and end partway through a
- * group. Added in lite-06. Older versions only address whole groups, so a route change
- * has to wait for the next group before it can resume.
+/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices alongside
+ * their group keys, so a subscription or fetch can start partway through a group. Added in
+ * lite-06; lite-07 bounds only a range's start. Older versions only address whole groups, so a
+ * route change has to wait for the next group before it can resume.
  *
  * SUBSCRIBE_OK is deliberately not in that list: the resolved start frame follows from
  * its group plus the subscriber's own request, so it needs no frame field. */
@@ -253,12 +253,6 @@ export function hasFrameBounds(version: Version): boolean {
 		default:
 			return true;
 	}
-}
-
-/** Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
- * earlier versions have no frame bounds, and a lite-07 subscription reads whole groups. */
-export function hasGroupFrameStart(version: Version): boolean {
-	return version === Version.DRAFT_06;
 }
 
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`. Added in
@@ -489,9 +483,9 @@ export function hasRefresh(version: Version): boolean {
 	}
 }
 
-/** Whether received frame timestamps are the publisher's media time. Lite-05/06 stamp an untimed
- * track's payloads with their send time, which a receiver cannot tell from it, so it passes them
- * through as the track's time without checking them for a rewind. */
+/** Whether received frame timestamps are the publisher's media time. A released lite-05/06
+ * publisher may stamp an untimed track's payloads with their send time, which a receiver cannot
+ * tell from it, so it passes them through as the track's time without checking them for a rewind. */
 export function hasMediaTime(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
@@ -643,7 +637,7 @@ export function hasEndError(version: Version): boolean {
 /**
  * The timescale the wire carries for a track with `timescale`, or `undefined` when its frames
  * and datagrams carry no timestamp. Lite-05 and lite-06 always carry one, so an untimed track
- * declares milliseconds there and its payloads carry their send times instead.
+ * declares milliseconds there and its payloads carry their group's start, or their sequence.
  */
 export function wireTimescale(version: Version, timescale: Timescale | null | undefined): Timescale | undefined {
 	switch (version) {
@@ -729,9 +723,9 @@ export function hasLengthFirst(version: Version): boolean {
 }
 
 /**
- * Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream ends a
- * finished group with GROUP_END and a closed one with a bare FIN. Added in lite-07; earlier
- * versions end every group with a bare FIN.
+ * Whether a Group or Fetch Stream ends a finished group with GROUP_END and a closed one with a bare
+ * FIN, and counts its first FRAME's timestamp delta from the group's start. Added in lite-07;
+ * earlier versions end every group with a bare FIN and count the first delta from 0.
  */
 export function hasGroupEnd(version: Version): boolean {
 	switch (version) {

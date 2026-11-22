@@ -280,6 +280,38 @@ async fn close_times_out_waiting_for_announcement_acknowledgements() {
 	}
 }
 
+/// A subscriber that announced nothing has nothing to withdraw, so its close never waits
+/// on an acknowledgement, however late the peer sends it.
+#[kio::test]
+async fn close_without_announcements_waits_on_no_acknowledgement() {
+	for version in [
+		"moq-lite-01",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+	] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		broadcast.announce().unwrap();
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		let pair = connect_mock(options).await;
+		crate::support::announced(&subscriber.consume(), "bcast").await;
+		pair.client_transport.hold_fin_acknowledgements();
+		let started = kio::clock::now();
+		pair.client
+			.close()
+			.await
+			.unwrap_or_else(|err| panic!("{version}: {err}"));
+		assert_eq!(kio::clock::now(), started, "{version}");
+	}
+}
+
 /// The versions whose SUBSCRIBE_FINISH lets a subscriber settle its tail, and FIN, at once.
 const SETTLED_TAIL: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 

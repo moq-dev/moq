@@ -146,16 +146,24 @@ impl<O: Output> Video<O> {
 	}
 
 	/// Play `track` through `decoder`.
-	pub async fn run<D: Decoder>(self, mut track: Track, mut decoder: D) -> anyhow::Result<()> {
+	#[cfg(test)]
+	pub async fn run<D: Decoder>(self, track: Track, decoder: D) -> anyhow::Result<()> {
+		self.resume(None, track, decoder).await
+	}
+
+	/// Play `track` through `decoder`, starting with `first`, already read from it.
+	pub async fn resume<D: Decoder>(
+		self,
+		mut first: Option<Read>,
+		mut track: Track,
+		mut decoder: D,
+	) -> anyhow::Result<()> {
 		let closed = std::sync::atomic::AtomicBool::new(false);
 		// One segment per encoder between declared ends, oldest first.
 		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
 		// Signalled when a segment behind the front becomes the front.
 		let advanced = tokio::sync::Notify::new();
 		let role = self.presentation.track(moq_mux::container::Kind::Video);
-		// A missing group stops being waited for once the clock reaches the group after it,
-		// whose pictures would replace any late one it held.
-		track.set_playhead(self.presentation.consume());
 		let receive = async {
 			// Video has no jitter estimate, so its target is the encoder delay alone,
 			// which holds audio back with it.
@@ -210,7 +218,10 @@ impl<O: Output> Video<O> {
 						}
 					}
 				}
-				let read = tokio::select! {
+				let read = if let Some(read) = first.take() {
+					Some(read)
+				} else {
+					tokio::select! {
 					read = track.read() => read?,
 					Ok(()) = encoder.changed() => {
 						target(*encoder.borrow_and_update());
@@ -220,6 +231,7 @@ impl<O: Output> Video<O> {
 						shared = delay;
 						follow(&mut track, &mut held, shared);
 						continue;
+					}
 					}
 				};
 				let mut buffers = buffers.lock().unwrap();
@@ -522,6 +534,7 @@ mod tests {
 			playhead: Default::default(),
 			drained: Default::default(),
 			output: Recorder::default(),
+			viewport: tokio::sync::watch::channel(None).1,
 		}
 	}
 

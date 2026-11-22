@@ -13,7 +13,7 @@ payload stalls is never recovered
 ## Plan
 
 Decided 2026-11-15 (maintainer, /quest-plan): ✅ planned again, in m3, as the
-secondary route of [cache-aware multicast](/quest/m2/multicast/README.md)
+secondary route of [cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md)
 (requirement 13: "don't rely on QUIC keep-alives for fast failovers"). The
 first epic was deleted 2026-11-09 for want of a consumer
 ([moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)); read it with

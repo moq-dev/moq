@@ -29,17 +29,33 @@ pub struct Client {
 		setting = "limits.client.announces"
 	)]
 	pub announces: usize,
+	/// Bytes the newest group of every track a client publishes may hold in all; 0 for no
+	/// bound.
+	///
+	/// The cache keeps each live track's newest group past its capacity, so this is what
+	/// bounds a client holding many quiet tracks. Past it, the frames of the client's own
+	/// live edges are shed, the one that moved longest ago first, never another session's.
+	#[usage(
+		long = "limits-client-live-edges",
+		env = "MOQ_LIMITS_CLIENT_LIVE_EDGES",
+		default = "268435456",
+		setting = "limits.client.live_edges"
+	)]
+	pub live_edges: u64,
 }
 
 impl Default for Client {
 	fn default() -> Self {
-		Self { announces: 1000 }
+		Self {
+			announces: 1000,
+			live_edges: 256 << 20,
+		}
 	}
 }
 
 impl Client {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces)
+		resolve(self.announces, self.live_edges)
 	}
 }
 
@@ -56,6 +72,18 @@ pub struct Peer {
 		setting = "limits.peer.announces"
 	)]
 	pub announces: usize,
+	/// Bytes the newest group of every track a peer relays to us may hold in all; 0 (the
+	/// default) for no bound.
+	///
+	/// A peer link carries every publisher behind it, so a bound here would let one of them
+	/// shed another's live edges: each publisher is bounded where it connects instead.
+	#[usage(
+		long = "limits-peer-live-edges",
+		env = "MOQ_LIMITS_PEER_LIVE_EDGES",
+		default = "0",
+		setting = "limits.peer.live_edges"
+	)]
+	pub live_edges: u64,
 	/// QUIC limits a peer session widens to (`[limits.peer.quic]`).
 	#[usage(flatten)]
 	pub quic: Quic,
@@ -65,6 +93,7 @@ impl Default for Peer {
 	fn default() -> Self {
 		Self {
 			announces: 100000,
+			live_edges: 0,
 			quic: Quic::default(),
 		}
 	}
@@ -72,7 +101,7 @@ impl Default for Peer {
 
 impl Peer {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces)
+		resolve(self.announces, self.live_edges)
 	}
 }
 
@@ -93,7 +122,7 @@ pub struct Quic {
 	#[usage(
 		long = "limits-peer-quic-receive-window",
 		env = "MOQ_LIMITS_PEER_QUIC_RECEIVE_WINDOW",
-		default = "16777216",
+		default = "67108864",
 		setting = "limits.peer.quic.receive_window"
 	)]
 	pub receive_window: std::num::NonZeroU64,
@@ -101,7 +130,7 @@ pub struct Quic {
 	#[usage(
 		long = "limits-peer-quic-send-window",
 		env = "MOQ_LIMITS_PEER_QUIC_SEND_WINDOW",
-		default = "16777216",
+		default = "67108864",
 		setting = "limits.peer.quic.send_window"
 	)]
 	pub send_window: std::num::NonZeroU64,
@@ -110,9 +139,10 @@ pub struct Quic {
 impl Default for Quic {
 	fn default() -> Self {
 		// Above the `[quic]` defaults, which are sized for one viewer rather than a link
-		// carrying a whole cluster's traffic: about 450 Mbps at a 250 ms RTT, and a paused
-		// stream budget of half of it for the groups slow readers hold back.
-		let window = std::num::NonZeroU64::new(16 << 20).expect("non-zero");
+		// carrying a whole cluster's traffic: about 2 Gbps at a 250 ms RTT, and a paused
+		// stream budget of half of it for the groups slow readers hold back. It matches
+		// the release line's connection window, so an upgraded relay's links carry as much.
+		let window = std::num::NonZeroU64::new(64 << 20).expect("non-zero");
 		Self {
 			max_streams: std::num::NonZeroU64::new(10 * moq_tokio::quic::DEFAULT_MAX_STREAMS).expect("non-zero"),
 			receive_window: window,
@@ -152,8 +182,9 @@ impl Quic {
 	}
 }
 
-fn resolve(announces: usize) -> moq_net::session::Limits {
+fn resolve(announces: usize, live_edges: u64) -> moq_net::session::Limits {
 	let mut limits = moq_net::session::Limits::default();
 	limits.announces = announces;
+	limits.live_edges = (live_edges > 0).then_some(live_edges);
 	limits
 }

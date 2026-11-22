@@ -10,6 +10,11 @@ use futures::FutureExt;
 use moq_net::cache;
 use serde::{Deserialize, Serialize};
 
+/// The headroom a relay targets when `headroom` is unset, so an authenticated
+/// publisher opening tracks is held toward a memory target instead of growing the
+/// cache freely. Only a target: see [`governor`].
+const DEFAULT_HEADROOM: &str = "10%";
+
 /// How often the headroom governor re-samples system memory.
 const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -18,8 +23,9 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 /// Non-latest groups stay cached until they sit unaccessed past the wall-clock
 /// LRU window (`duration`, 30s by default) or the pool runs out of room,
 /// whichever comes first (the latest group of every track is always retained).
-/// With none of the knobs set the pool is unbounded in bytes and only the
-/// default LRU window bounds memory.
+/// With none of the knobs set the pool targets 10% of system memory free
+/// (`DEFAULT_HEADROOM`); `headroom = "0"` with no `capacity` leaves it unbounded in
+/// bytes, so only the LRU window bounds memory.
 #[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -27,20 +33,25 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 pub struct Config {
 	/// Target bytes of cached group payload, e.g. "8GiB", "512MB", or a
 	/// percentage of memory like "75%" (respecting the cgroup limit when set).
-	/// Unbounded when unset.
+	/// Unbounded when unset, apart from what `headroom` frees.
 	///
 	/// A target that usage converges toward as tracks write, not a hard limit, and it
 	/// counts cached group bytes (payload plus a fixed cost per group), not process
-	/// RSS; leave some slack below physical memory or combine with `headroom`.
+	/// RSS; leave some slack below physical memory. `headroom` still applies on top.
 	#[usage(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY", setting = "cache.capacity")]
 	pub capacity: Option<String>,
 
-	/// Keep at least this much system memory available, e.g. "2GiB" or "10%".
+	/// Target at least this much system memory available, e.g. "2GiB" or "10%".
+	/// Defaults to "10%" (respecting the cgroup limit when set); "0" disables it.
 	///
-	/// Enables a background governor that re-sizes the cache every few seconds
+	/// Runs a background governor that re-sizes the cache every few seconds
 	/// so the cache soaks up idle memory but is the first thing reclaimed when
-	/// the rest of the system needs it. Combine with `capacity` to also cap the
-	/// absolute size.
+	/// the rest of the system needs it. It is a target, not a guarantee: writes
+	/// between checks can overshoot it, and the newest group of every live track
+	/// is kept past it, bounded per session by `limits.*.live_edges` instead.
+	/// `capacity` caps that target.
+	/// "0" removes the governor, leaving the cache unbounded unless `capacity`
+	/// is set: an authenticated publisher can then grow the relay without limit.
 	#[usage(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM", setting = "cache.headroom")]
 	pub headroom: Option<String>,
 
@@ -107,14 +118,15 @@ impl Config {
 			.with_expiry(duration.unwrap_or(cache::DEFAULT_EXPIRY));
 		let pool = cache::Pool::new(config);
 
+		let headroom = parse_limit(self.headroom.as_deref().unwrap_or(DEFAULT_HEADROOM))?;
 		let mut governed = None;
-		if let Some(headroom) = self.headroom.as_deref() {
-			let headroom = parse_limit(headroom)?;
-			anyhow::ensure!(headroom > 0, "cache headroom must be non-zero");
+		if headroom > 0 {
 			tracing::info!(?capacity, headroom, "cache governor enabled");
 			governed = Some(governor(system()?, pool.downgrade(), capacity, headroom).boxed());
 		} else if let Some(capacity) = capacity {
 			tracing::info!(capacity, "cache capacity set");
+		} else {
+			tracing::warn!("cache headroom is 0 and no capacity is set: the cache is unbounded");
 		}
 
 		if let Some(duration) = duration {
@@ -131,13 +143,14 @@ impl Config {
 
 /// Parse a size limit: either absolute bytes ("8GiB", "512MB", "1073741824") or
 /// a percentage of total memory ("75%"), honoring the cgroup limit when set.
+/// Zero is a valid limit, which `headroom` reads as no governor.
 fn parse_limit(value: &str) -> anyhow::Result<u64> {
 	let value = value.trim();
 	if let Some(percent) = value.strip_suffix('%') {
 		let percent: f64 = percent.trim().parse()?;
 		anyhow::ensure!(
-			percent > 0.0 && percent <= 100.0,
-			"memory percentage must be within (0, 100], got {percent}"
+			(0.0..=100.0).contains(&percent),
+			"memory percentage must be within [0, 100], got {percent}"
 		);
 		return Ok((total_memory()? as f64 * percent / 100.0) as u64);
 	}
@@ -152,19 +165,36 @@ fn parse_limit(value: &str) -> anyhow::Result<u64> {
 fn total_memory() -> anyhow::Result<u64> {
 	let mut sys = system()?;
 	sys.refresh_memory();
-	Ok(match sys.cgroup_limits() {
+	Ok(match cgroup_limits(&mut sys) {
 		Some(limits) => limits.total_memory,
 		None => sys.total_memory(),
 	})
+}
+
+/// The memory limits of this process's own cgroup, such as a systemd unit's `MemoryMax`.
+///
+/// Not [`sysinfo::System::cgroup_limits`], which reads the cgroup root this process can
+/// see: that is the container's own only under a private cgroup namespace, so a service
+/// limited by its parent cgroup would be sized against the whole host.
+fn cgroup_limits(sys: &mut sysinfo::System) -> Option<sysinfo::CGroupLimits> {
+	let pid = sysinfo::get_current_pid().ok()?;
+	sys.refresh_processes_specifics(
+		sysinfo::ProcessesToUpdate::Some(&[pid]),
+		false,
+		sysinfo::ProcessRefreshKind::nothing(),
+	);
+	sys.process(pid)?.cgroup_limits()
 }
 
 fn system() -> anyhow::Result<sysinfo::System> {
 	sysinfo::System::new().map_err(|err| anyhow::anyhow!("failed to read system memory: {err}"))
 }
 
-/// Re-size the pool periodically so at least `headroom` bytes of system memory
-/// stay available: the cache grows into idle memory and shrinks (tracks evict
-/// their stalest groups as they write) when the rest of the system needs it.
+/// Re-size the pool periodically, aiming to leave at least `headroom` bytes of
+/// system memory available. A target sampled every [`GOVERNOR_INTERVAL`], not a
+/// guarantee: a burst between ticks can overshoot it, and the live edge of every
+/// track is kept past it. The cache grows into idle memory and shrinks (tracks
+/// evict their stalest groups as they write) when the rest of the system needs it.
 ///
 /// Weak on purpose. The pool is the one handle that reaches everything charging
 /// into the budget, so tying the task to it means the task ends when the last
@@ -184,8 +214,9 @@ async fn governor(mut sys: sysinfo::System, pool: cache::PoolWeak, capacity: Opt
 
 		sys.refresh_memory();
 
-		let available = match sys.cgroup_limits() {
-			Some(limits) => limits.free_memory,
+		let available = match cgroup_limits(&mut sys) {
+			// The cgroup's room, unless the host as a whole has less.
+			Some(limits) => limits.free_memory.min(sys.available_memory()),
 			None => sys.available_memory(),
 		};
 
@@ -218,6 +249,29 @@ mod tests {
 		assert_eq!(cache.duration, None);
 	}
 
+	/// A stock relay is governed; only an explicit zero headroom leaves the pool unbounded.
+	#[test]
+	fn headroom_defaults_to_a_governor_and_zero_disables_it() {
+		assert!(Config::default().init().unwrap().governor.is_some());
+
+		for zero in ["0", "0%", "0GiB"] {
+			let config = Config {
+				headroom: Some(zero.to_string()),
+				..Default::default()
+			};
+			assert!(config.init().unwrap().governor.is_none(), "headroom {zero:?}");
+		}
+
+		let capped = Config {
+			capacity: Some("1GiB".to_string()),
+			..Default::default()
+		};
+		assert!(
+			capped.init().unwrap().governor.is_some(),
+			"an explicit capacity keeps the default headroom"
+		);
+	}
+
 	#[test]
 	fn explicit_duration_configures_both_bounds() {
 		let duration = Duration::from_secs(5);
@@ -239,6 +293,7 @@ mod tests {
 
 	#[test]
 	fn parse_limit_percent() {
+		assert_eq!(parse_limit("0%").unwrap(), 0);
 		let half = parse_limit("50%").unwrap();
 		let full = parse_limit("100%").unwrap();
 		assert!(half > 0);
@@ -249,7 +304,7 @@ mod tests {
 	#[test]
 	fn parse_limit_rejects_garbage() {
 		assert!(parse_limit("lots").is_err());
-		assert!(parse_limit("0%").is_err());
+		assert!(parse_limit("-1%").is_err());
 		assert!(parse_limit("150%").is_err());
 	}
 

@@ -827,6 +827,16 @@ impl Scrape {
 				"Transport bytes received, including framing, excluding IP, UDP, and TCP headers.",
 				|p| p.wire_rx,
 			),
+			(
+				"moq_relay_credit_stalls",
+				"Times a connection's write blocked with all the peer's connection-level credit (MAX_DATA) spent.",
+				|p| p.credit_stalls,
+			),
+			(
+				"moq_relay_credit_stalled_microseconds",
+				"Time connections spent with a write blocked on the peer's connection-level credit (MAX_DATA).",
+				|p| p.credit_stalled_us,
+			),
 			("moq_relay_requests", "Admitted request/response exchanges.", |p| {
 				p.requests
 			}),
@@ -2135,6 +2145,8 @@ mod tests {
 # TYPE moq_relay_control_rx_messages_total counter
 # TYPE moq_relay_control_tx_bytes_total counter
 # TYPE moq_relay_control_tx_messages_total counter
+# TYPE moq_relay_credit_stalled_microseconds_total counter
+# TYPE moq_relay_credit_stalls_total counter
 # TYPE moq_relay_datagrams_total counter
 # TYPE moq_relay_draining_sessions gauge
 # TYPE moq_relay_fetches_total counter
@@ -2171,6 +2183,8 @@ counter moq_relay_announces_started_total{role="publisher",tier="edge"} 0
 counter moq_relay_announces_started_total{role="subscriber",tier="edge"} 1
 counter moq_relay_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_bytes_total{role="subscriber",tier="edge"} 0
+counter moq_relay_credit_stalled_microseconds_total{tier="edge"} 0
+counter moq_relay_credit_stalls_total{tier="edge"} 0
 counter moq_relay_datagrams_total{role="publisher",tier="edge"} 0
 counter moq_relay_datagrams_total{role="subscriber",tier="edge"} 0
 counter moq_relay_fetches_total{role="publisher",tier="edge"} 0

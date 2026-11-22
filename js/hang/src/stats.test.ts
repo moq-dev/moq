@@ -94,3 +94,13 @@ test("feedback discovery agrees with the Rust fixed track and final path suffix"
 	expect(Echo.isEcho(Path.from("room.echo/alice"))).toBe(false);
 	expect(Echo.isEcho(Path.from("room/alice.echoes"))).toBe(false);
 });
+
+test("a rendition's version field is an unknown field, not a catalog entry version", () => {
+	// A catalog map would skip the first entry and refuse the second; Rust ignores both versions.
+	const input = { renditions: { hd: { version: 99, frames: 3 }, sd: { version: "x", frames: 1 } } };
+	for (const schema of [Stats.SnapshotSchema, Echo.SnapshotSchema])
+		expect(JSON.parse(JSON.stringify(schema.parse(input).renditions))).toEqual({
+			hd: { frames: 3 },
+			sd: { frames: 1 },
+		});
+});

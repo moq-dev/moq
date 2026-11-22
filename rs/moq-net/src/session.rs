@@ -139,6 +139,16 @@ pub struct Stats {
 	/// A count above zero means the receive window is too small for what the peer sends.
 	pub streams_evicted: Option<u64>,
 
+	/// Total times the sender blocked with all the peer's connection-level credit (`MAX_DATA`)
+	/// spent: an episode starts when a write blocks with every credited byte sent, and ends when
+	/// the peer grants more. A count rising while [`Self::credit_stalled`] grows means the peer
+	/// is not granting credit, rather than loss or congestion slowing the session.
+	pub credit_stalls: Option<u64>,
+
+	/// Total time the sender spent blocked on the peer's connection-level credit, across
+	/// [`Self::credit_stalls`]. A wait in progress counts up to the transport's latest step.
+	pub credit_stalled: Option<Duration>,
+
 	/// Total datagrams received for a subscription with no datagram track: one this session
 	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version without
 	/// datagrams: moq-transport and moq-lite before 05.
@@ -459,7 +469,9 @@ impl Session {
 	/// Ready at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
-	pub(crate) fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// A session that sent a GOAWAY can then close without cutting any reader off.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
 	}
 
@@ -1017,6 +1029,8 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 		packets_received: metrics.packets_received(),
 		packets_lost: metrics.packets_lost(),
 		streams_evicted: metrics.streams_evicted(),
+		credit_stalls: wire.as_ref().map(crate::transport::Wire::credit_stalls),
+		credit_stalled: wire.as_ref().map(crate::transport::Wire::credit_stalled),
 		// Counted by the protocol, not the transport: filled in by `Session::stats`.
 		datagrams_unrouted: None,
 	}
@@ -1112,6 +1126,7 @@ impl Drop for Working {
 /// ```
 /// let mut limits = moq_net::session::Limits::default();
 /// limits.announces = 1_000;
+/// limits.live_edges = Some(256 << 20);
 /// let client = moq_net::Client::new().with_limits(limits);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1119,12 +1134,23 @@ impl Drop for Working {
 pub struct Limits {
 	/// Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us.
 	pub announces: usize,
+
+	/// Bytes the newest group of every track we receive from the peer may hold in all.
+	///
+	/// The cache never evicts a live track's newest group, so a peer holding many quiet
+	/// tracks would otherwise hold one group each past any cache capacity. Past this, the
+	/// session sheds the frames of its own live edges, the one that moved longest ago first,
+	/// and then the older frames of the one being written. `None` leaves them unbounded.
+	pub live_edges: Option<u64>,
 }
 
 impl Default for Limits {
 	/// Generous enough for a relay mesh carrying a large origin; lower it for untrusted peers.
 	fn default() -> Self {
-		Self { announces: 100_000 }
+		Self {
+			announces: 100_000,
+			live_edges: None,
+		}
 	}
 }
 

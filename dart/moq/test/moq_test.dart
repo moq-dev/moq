@@ -273,12 +273,12 @@ void main() {
 
   test('a default subscription skips superseded groups at once', () {
     for (final subscription in [defaultSubscription(), Subscription()]) {
-      expect(subscription.delay.min, Duration.zero);
+      expect(subscription.delay.min, isNull);
       expect(subscription.delay.max, Duration.zero);
     }
-    final unset = Delay(min: null, max: null);
-    expect(unset.min, isNull);
-    expect(unset.max, isNull);
+    final stated = Delay(min: Duration.zero, max: null);
+    expect(stated.min, Duration.zero);
+    expect(stated.max, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -319,7 +319,7 @@ void main() {
       final consumer = track.consume(
         subscription: Subscription(
           delay: Delay(max: const Duration(seconds: 10)),
-          ranges: [Range(start: RelativeMoqAnchor(2))],
+          ranges: [Range(start: Timestamp.unscaled(0))],
           order: Order.ascending,
         ),
       );
@@ -363,8 +363,8 @@ void main() {
 
     // Generated records compare by identity, so compare the fields.
     void expectEverything(Grant? grant) {
-      expect(grant?.publish, ['**']);
-      expect(grant?.subscribe, ['**']);
+      expect(grant?.publish, ['']);
+      expect(grant?.subscribe, ['']);
       expect(grant?.expires, isNull);
     }
 
@@ -818,6 +818,16 @@ void main() {
     expect(
       () => const Duration(microseconds: -1).toTimestamp(),
       throwsArgumentError,
+    );
+    expect(
+      () => Timestamp(value: 3, scale: 0).toDuration(),
+      throwsArgumentError,
+    );
+    // A u64 past 2^63 reads as a negative int, and still converts as unsigned.
+    expect(() => Timestamp(value: -1, scale: 1).toDuration(), throwsRangeError);
+    expect(
+      Timestamp(value: 1 << 62, scale: -1).toDuration(),
+      const Duration(microseconds: 250000),
     );
     // A scale-less track's key is no time.
     final unscaled = Timestamp.unscaled(3);

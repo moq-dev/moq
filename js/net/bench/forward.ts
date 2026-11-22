@@ -36,7 +36,7 @@ class FakeSession {
 			consume: () => new BroadcastProducer().consume(),
 			exclusive: false,
 			leave: () => {},
-			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
+			auth: new AuthSession({ peerGrant: { publish: new Path.Prefixes(), subscribe: new Path.Prefixes() } }),
 		});
 		this.closed = new Promise((resolve) => {
 			this.die = () => resolve(null);
@@ -61,10 +61,7 @@ for (const touched of ["covering", "single"] as const) {
 		for (const routeCount of routeCounts) {
 			const origin = new Producer();
 			const heads = Array.from({ length: headCount }, (_, index) => Path.from(`h${index}`));
-			const scoped = origin.scope(
-				Path.empty(),
-				new Path.Patterns(heads.map((head) => Path.Pattern.subtree(head))),
-			);
+			const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(heads));
 			const session = new FakeSession();
 			forwardAnnounced(session as unknown as Session, scoped);
 

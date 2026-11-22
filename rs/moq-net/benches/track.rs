@@ -161,15 +161,15 @@ fn at(key: u64) -> Timestamp {
 /// The groups from the one containing `start` through the one containing `end`.
 fn span(start: u64, end: u64) -> track::Range {
 	track::Range {
-		start: track::Anchor::Time(start),
-		end: Some(track::Anchor::Time(end)),
+		start: Some(start),
+		end: Some(end),
 	}
 }
 
 /// The groups from the one containing `start` onward.
 fn from(start: u64) -> track::Range {
 	track::Range {
-		start: track::Anchor::Time(start),
+		start: Some(start),
 		end: None,
 	}
 }
@@ -2051,9 +2051,9 @@ impl Fills {
 
 	/// Every reader reads what is cached and asks for its misses, then raises its priority,
 	/// which reaches every fill it waits on. A run past the first starts at a time below the
-	/// feed's start, which each reader looks up first: the handler can't resolve times, so it
-	/// drops each lookup, and the readers then ask that run as a miss. The handler drops each
-	/// fill they share, and every reader settles the drops.
+	/// feed's start, whose group each reader asks a fill of its own for first: the handler
+	/// can't resolve times, so it refuses each, and the readers then ask that run as a miss.
+	/// The handler drops each fill they share, and every reader settles the drops.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for reader in &mut self.readers {
@@ -2066,16 +2066,16 @@ impl Fills {
 			assert!(reader.poll_recv_group(&waiter).is_pending());
 		}
 		let (mut lookups, mut fills) = (0, 0);
-		// The lookups go out first, and the misses they leave behind them.
+		// The time starts go out first, and the misses they leave behind them.
 		for _ in 0..2 {
 			while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-				match fill {
-					track::Fill::Lookup(lookup) => {
-						assert_eq!(lookup.priority(), 1, "the update reached the lookup");
+				assert_eq!(fill.priority(), 1, "the update reached the fill");
+				match fill.floor() < fill.start().group {
+					true => {
+						fill.refuse_groups(fill.start().group..fill.end(), moq_net::Error::NotFound);
 						lookups += 1;
 					}
-					track::Fill::Groups(fill) => {
-						assert_eq!(fill.priority(), 1, "the update reached the fill");
+					false => {
 						fill.drop_groups(fill.start().group..fill.end());
 						fills += 1;
 					}
@@ -2160,23 +2160,23 @@ impl RangeFills {
 
 	/// The readers ask for their misses, the handler accepts every group of every fill once,
 	/// and each reader drains what they filled. Each range starts at a time below the feed's
-	/// start, which each reader looks up first: the handler can't resolve times, so it drops
-	/// each lookup, and the readers then ask that range as a miss.
+	/// start, whose group each reader asks a fill of its own for first: the handler can't
+	/// resolve times, so it refuses each, and the readers then ask that range as a miss.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for reader in &mut self.readers {
 			assert!(reader.poll_recv_group(&waiter).is_pending(), "everything is a miss");
 		}
 		let mut filled = vec![0; self.readers.len()];
-		// The lookups go out first, and the misses they leave behind them.
+		// The time starts go out first, and the misses they leave behind them.
 		for _ in 0..2 {
 			while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-				// A lookup is dropped unanswered.
-				let track::Fill::Groups(fill) = fill else {
+				if fill.floor() < fill.start().group {
+					fill.refuse_groups(fill.start().group..fill.end(), moq_net::Error::NotFound);
 					continue;
-				};
+				}
 				while let Some(key) = fill.wanted() {
-					let mut group = fill.accept(key, None).unwrap();
+					let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 					group
 						.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
 						.unwrap();
@@ -2265,7 +2265,7 @@ impl RefusedFill {
 				reader
 			})
 			.collect();
-		let Poll::Ready(Ok(track::Fill::Groups(fill))) = dynamic.poll_requested_fill(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the miss below the start is asked");
 		};
 		assert!(

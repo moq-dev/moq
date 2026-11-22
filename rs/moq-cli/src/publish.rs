@@ -451,7 +451,7 @@ impl Publish {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let decoder = match format {
 			PublishFormat::H264 => {
-				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
+				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
 				PublishDecoder::H264 {
@@ -639,19 +639,23 @@ impl Publish {
 	pub fn with_echo(mut self, echo: hang::catalog::Echo) -> anyhow::Result<Self> {
 		match &mut self.source {
 			Source::Stream { decoder, catalog } => match (decoder, catalog) {
-				(_, PublishCatalog::Media(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
-				(_, PublishCatalog::Passthrough(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+				(_, PublishCatalog::Media(catalog)) => {
+					catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?
+				}
+				(_, PublishCatalog::Passthrough(catalog)) => {
+					catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?
+				}
 				(PublishDecoder::Ts(republish), _) => {
 					self.sections.echo = Some(echo.clone());
-					republish
-						.catalog()
-						.clone()
-						.mutate(|catalog| catalog.echo = Some(echo))?;
+					republish.catalog().clone().mutate(
+						|catalog| catalog.echo = Some(echo),
+						republish.catalog().next_timestamp(),
+					)?;
 				}
 				_ => anyhow::bail!("`import ts --program all` builds a catalog per program"),
 			},
 			#[cfg(feature = "capture")]
-			Source::Capture { catalog, .. } => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+			Source::Capture { catalog, .. } => catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?,
 		}
 		Ok(self)
 	}
@@ -913,10 +917,10 @@ impl Sections {
 	/// they ride its first catalog, returning its report.
 	fn apply(&self, republish: &ts::Republish) -> anyhow::Result<Option<crate::report::Stats>> {
 		if let Some(echo) = &self.echo {
-			republish
-				.catalog()
-				.clone()
-				.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
+			republish.catalog().clone().mutate(
+				|catalog| catalog.echo = Some(echo.clone()),
+				republish.catalog().next_timestamp(),
+			)?;
 		}
 		self.report
 			.as_ref()
@@ -1636,12 +1640,11 @@ pub(crate) mod tests {
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
 			.broadcast()
-			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text))
-			.unwrap();
+			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text));
 		let mut section_track = tscat::Track::new(SECTION_PID);
 		section_track.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.ext
 			.mpegts
@@ -1665,12 +1668,11 @@ pub(crate) mod tests {
 		// Whole-PES stream (undecoded private data, stream_type 0x06).
 		let pes = broadcast
 			.broadcast()
-			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text))
-			.unwrap();
+			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text));
 		let mut pes_track = tscat::Track::new(PES_PID);
 		pes_track.pes_packet = Some(tscat::PesPacket::new(0x06));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.ext
 			.mpegts

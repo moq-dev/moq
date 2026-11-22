@@ -366,7 +366,8 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
-    "wire_tx": 2048, "wire_rx": 1024, "routes_refused": 0,
+    "wire_tx": 2048, "wire_rx": 1024, "credit_stalls": 2, "credit_stalled_us": 350000,
+    "routes_refused": 0,
     "routes": {
       "changed": 4, "rewritten": 120,
       "sent": { "dead": 1, "drain": 0 }, "received": { "dead": 0, "drain": 1 },
@@ -405,6 +406,17 @@ Unsupported transports, including browsers and the current WebSocket/qmux
 adapter, contribute zero. WebSocket wire accounting requires the separate
 qmux counter source; unavailable counters are never estimated from payload.
 Readers default missing wire fields to zero for older relays.
+
+`credit_stalls` and `credit_stalled_us` count how often, and for how many
+microseconds, a connection had a write blocked with all of the peer's
+connection-level flow-control credit (QUIC `MAX_DATA`) spent. An episode starts
+when a write blocks with every credited byte sent and ends when the peer grants
+more, the writer gives up, or the connection closes; a write held only by this
+node's own send buffer is not one. A rising count means the peer is not reading
+or not granting credit, as opposed to loss or congestion. Native QUIC,
+WebTransport, and Rust qmux sessions report them through the same wire counters
+as `wire_tx`; other transports contribute zero. A wait in progress counts up to
+the transport's latest step, at most a keep-alive behind.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
 They never start a session. `expired` counts a verified credential that expired
@@ -448,7 +460,8 @@ release costs only that route.
 
 `routes` counts what the label's moq-lite-07 sessions did on the route layer,
 each under the label of the session whose peer caused it. Its size never
-depends on how many broadcasts or relays the mesh has. When rolling a mesh onto
+depends on how many broadcasts or relays the mesh has, and a label with nothing
+counted leaves it out, which readers read as zeros. When rolling a mesh onto
 a new release one relay at a time, compare a canary's rates with its
 neighbours':
 

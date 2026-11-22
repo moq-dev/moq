@@ -359,6 +359,7 @@ impl Producer {
 		if let Ok(mut current) = self.state.write() {
 			current.renditions.clear();
 			current.audio.clear();
+			current.waiting.clear();
 		}
 	}
 
@@ -381,6 +382,8 @@ impl Producer {
 			});
 		}
 		state.finished = Some(result);
+		// No catalog follows to declare an interval, so nothing measures one from the held media.
+		state.waiting.clear();
 		drop(state);
 		self.close();
 	}
@@ -394,6 +397,7 @@ impl Producer {
 	pub fn cut(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.finished.get_or_insert(Ok(()));
+			state.waiting.clear();
 		}
 		self.close();
 		self.fanout.cut();
@@ -955,6 +959,29 @@ mod tests {
 		let mut cursor = producer.subscribe();
 		drop(producer);
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+	}
+
+	/// The tracks held subscribed while a catalog has no join interval are released once the set
+	/// ends, however it ends, rather than staying subscribed while a consumer holds the set.
+	#[tokio::test(start_paused = true)]
+	async fn an_ended_set_releases_its_held_tracks() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let mut catalog = Catalog::default();
+		let video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let ends: [fn(&Producer); 3] = [|set| set.finish(Ok(())), |set| set.cut(), |set| set.clear()];
+		for end in ends {
+			let producer = Producer::spawned(Duration::from_secs(30));
+			let _cursor = producer.subscribe();
+			producer.sync(&source, &catalog);
+			assert_eq!(producer.state.read().waiting.len(), 1, "the track was not held");
+			end(&producer);
+			assert!(producer.state.read().waiting.is_empty(), "the hold outlived the set");
+		}
 	}
 
 	#[test]

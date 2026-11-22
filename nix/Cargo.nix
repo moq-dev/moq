@@ -21752,6 +21752,11 @@ rec {
         ];
         devDependencies = [
           {
+            name = "hang";
+            packageId = "hang";
+            features = [ "async" ];
+          }
+          {
             name = "kio";
             packageId = "kio";
             features = [ "runtime" ];
@@ -22189,6 +22194,10 @@ rec {
             packageId = "rind-rustls";
           }
           {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
             name = "socket2";
             packageId = "socket2 0.6.5";
             features = [ "all" ];
@@ -22196,6 +22205,10 @@ rec {
           {
             name = "tempfile";
             packageId = "tempfile";
+          }
+          {
+            name = "test-env";
+            packageId = "test-env";
           }
           {
             name = "tokio";

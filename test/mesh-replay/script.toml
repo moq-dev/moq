@@ -44,20 +44,3 @@ check = "unfed"
 kind = "stuck"
 event = "roll"
 quest = "/quest/m3/release/cut.md"
-
-# Mid-roll, a new relay accepts an old neighbour's subscribe that arrives as the neighbour
-# withdraws its echo of the broadcast, then forwards nothing. `half-roll.toml` reproduces it
-# and lists nothing known.
-[[known]]
-check = "unfed"
-kind = "starved"
-event = "roll"
-quest = "/quest/m2/multicast/roll-echo-stall.md"
-
-# On lite-07 alone, a reader behind a reopened link or a crashed relay starves when its relay
-# asked a neighbour whose own route had not returned yet. After the roll entry, so a roll's
-# starved reader stays with roll-echo-stall. `reopen.toml` reproduces it and lists nothing known.
-[[known]]
-check = "unfed"
-kind = "starved"
-quest = "/quest/m2/multicast/reopen-starve.md"

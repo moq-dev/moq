@@ -938,7 +938,7 @@ impl MoqSession {
 		self.publisher
 			.inner()
 			.driver
-			.watch(self.consumer.driver.watch(future))
+			.watch(self.consumer.driver.supervise(future))
 			.await
 	}
 

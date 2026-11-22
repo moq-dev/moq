@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
+import { defined } from "../defined.test-util.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -80,6 +81,21 @@ test("two handles on one URL share a connection and an origin", async () => {
 	await advance(linger);
 	expect(second.status.peek()).toBe("connected");
 
+	second.close();
+});
+
+test("urlAuth: false is the default carrier, so it shares; true needs a private loop", async () => {
+	const dials = stubTransports();
+
+	const first = new Connection({ url, urlAuth: false });
+	const second = new Connection({ url, share: true, urlAuth: false });
+	await advance();
+	expect(dials.count()).toBe(1);
+	expect(second.origin.peek()).toBe(first.origin.peek());
+
+	expect(() => new Connection({ url, share: true, urlAuth: true })).toThrow("urlAuth cannot be shared");
+
+	first.close();
 	second.close();
 });
 
@@ -269,7 +285,7 @@ test("a publish through one handle resolves locally for another", async () => {
 	const origin = publisher.origin.peek();
 	if (!origin) throw new Error("expected an origin");
 	const broadcast = publish(origin, Path.from("mine"));
-	broadcast.createTrack("chat", { timescale: Time.Timescale.MILLI });
+	defined(broadcast.createTrack("chat", { timescale: Time.Timescale.MILLI }));
 
 	// Loopback: the shared origin serves the page's own publish with no round trip, so the
 	// request resolves synchronously instead of waiting on the relay to announce it back.

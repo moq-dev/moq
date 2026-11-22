@@ -544,7 +544,7 @@ fn at(group: &group::Producer) -> Timestamp {
 /// The groups from the one starting at `key` onward.
 fn from(key: u64) -> track::Range {
 	track::Range {
-		start: track::Anchor::Time(key),
+		start: Some(key),
 		end: None,
 	}
 }
@@ -807,7 +807,7 @@ impl Viewer {
 		let mut announced = self
 			.origin
 			.consume()
-			.scope(path, &moq_net::Patterns::from(moq_net::Pattern::all()))
+			.scope(path, &moq_net::Prefixes::all())
 			.unwrap()
 			.routes();
 		let event = announced.next().await.expect("announced");

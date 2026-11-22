@@ -3,6 +3,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { hooks } from "../src/internal.ts";
 import { ALPN_07_WIP } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
@@ -22,7 +23,7 @@ for (const retained of [1, 64, 1024])
 			const broadcastRoute = source.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
 			const producers = Array.from({ length: tracks }, (_, i) =>
-				broadcast.createTrack(`data${i}`, { refresh: { ratio: 1 } }),
+				defined(broadcast.createTrack(`data${i}`, { refresh: { ratio: 1 } })),
 			);
 			const pair = createMockTransportPair(ALPN_07_WIP);
 			const url = new URL("https://localhost/refresh");

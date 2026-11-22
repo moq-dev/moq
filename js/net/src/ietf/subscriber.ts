@@ -10,6 +10,7 @@ import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
 	closeError,
+	closeReason,
 	error,
 	NotFound,
 	ProtocolViolation,
@@ -498,7 +499,7 @@ export class Subscriber {
 	// the connection does for its own violations.
 	#fail(code: SessionCode, reason: string) {
 		try {
-			this.#quic?.close({ closeCode: code, reason });
+			this.#quic?.close({ closeCode: code, reason: closeReason(reason) });
 		} catch {
 			// Already closed.
 		}
@@ -1032,10 +1033,8 @@ export class Subscriber {
 		if (hooks.trackFinished(producer) || !hooks.subscribing(producer).peek()) return false;
 		const ranges = hooks.requested(producer).peek()?.ranges ?? [];
 		if (!bounded(ranges)) return true;
-		const end = wireSpan(ranges).end;
-		// A relative end resolves against Largest, or against the first group when none exists yet,
-		// which only the live feed delivers.
-		return end === undefined ? edge === 0n : end > edge;
+		// Every range ends, at a time, so the end is known.
+		return (wireSpan(ranges).end ?? 0n) > edge;
 	}
 
 	async #historyOnly(producer: track.Producer, edge: bigint): Promise<void> {
@@ -1159,11 +1158,6 @@ export class Subscriber {
 			for (;;) {
 				const fill = await untilAborted(requests.requestedFill(), signal);
 				if (!fill) break;
-				// FETCH asks by group alone, so a lookup goes unanswered and its reader falls back.
-				if (fill.kind === "lookup") {
-					fill.close();
-					continue;
-				}
 				const run = async () => {
 					try {
 						// The join may already bring a miss in this run. Let it answer first instead
@@ -1643,7 +1637,6 @@ export class Subscriber {
 					priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 					// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
 					maxAge: maxCacheDuration === undefined ? null : Duration.millis(Number(maxCacheDuration)),
-					// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 					ietf: version,
 				});
 		const producer = known ?? staged?.producer;
@@ -1917,7 +1910,8 @@ export class Subscriber {
 						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
 					);
 				}
-				producer = track.createGroup(group.groupId);
+				// A group the copy already holds arrived twice, which the received path refuses.
+				producer = hooks.receiveGroup(track, { start: group.groupId, offset: 0 });
 			}
 			return producer;
 		};
@@ -2184,7 +2178,7 @@ export class Subscriber {
 
 				const timestamp = objectTime(timescale, join.key);
 				if (first) {
-					producer = join.open(() => track.createGroup(join.key));
+					producer = join.open(() => hooks.receiveGroup(track, { start: join.key, offset: 0 }));
 					if (!producer) {
 						discarding = true;
 						if (!object.payload) await skipPayload(stream, object.size);
@@ -2329,7 +2323,7 @@ export class Subscriber {
 	#bindDatagrams(source: broadcast.Consumer, track: track.Producer, info: Partial<datagram.Info>) {
 		const pending = this.#datagramRequests.get(source);
 		const entry = pending?.get(track.name);
-		let producer: datagram.Producer;
+		let producer: datagram.Producer | undefined;
 		try {
 			producer = entry ? entry.request.accept(info) : wireOf(source).createDatagrams(track.name, info, false);
 		} catch (err) {
@@ -2337,6 +2331,8 @@ export class Subscriber {
 			console.debug(`serving the stream track without datagrams: ${reason(err)}`);
 			return;
 		}
+		// A live datagram track already holds the name.
+		if (!producer) return;
 		pending?.delete(track.name);
 		entry?.accepted.set(true);
 		let held: track.Subscriber | undefined;

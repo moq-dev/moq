@@ -1110,13 +1110,8 @@ mod test {
 		));
 
 		let waiter = kio::Waiter::noop();
-		let mut group = loop {
-			let Poll::Ready(Ok(Some(item))) = subscriber.poll_next_group(&waiter) else {
-				panic!("the group was published, so a subscriber sees it");
-			};
-			if let Some(group) = item.group() {
-				break group;
-			}
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the group was published, so a subscriber sees it");
 		};
 		assert!(
 			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),

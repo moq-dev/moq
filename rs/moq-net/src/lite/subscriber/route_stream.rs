@@ -155,9 +155,28 @@ impl RouteStream {
 
 	/// Ready only with the error that ends the session.
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		match self.poll_run(waiter) {
+		let res = self.poll_run(waiter);
+		if self.withdrawing.is_some() && !self.owes(waiter) {
+			self.withdrawing = None;
+		}
+		match res {
 			Poll::Ready(Err(err)) => Poll::Ready(lite::error::control(&mut self.subscriber.session.clone(), err)),
 			Poll::Ready(Ok(())) | Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Whether a draining close still waits on this stream: until its FIN is acknowledged,
+	/// unless the peer was never sent a route or claim for the FIN to end.
+	fn owes(&self, waiter: &kio::Waiter) -> bool {
+		match &self.state {
+			State::Running(running) => match running.sending {
+				Sending::Open => true,
+				Sending::Ending | Sending::Closing => running.answer.announced(),
+				Sending::Closed => false,
+			},
+			// Nothing is announced before the route layer runs, and a leaving session never
+			// starts it announcing.
+			State::Opening | State::Setup(_) => self.publish.withdrawal.poll(waiter).is_pending(),
 		}
 	}
 
@@ -178,11 +197,7 @@ impl RouteStream {
 					self.state = State::Running(Box::new(running));
 				}
 				State::Running(running) => {
-					let res = running.poll(&self.subscriber, &self.publish, waiter);
-					if matches!(running.sending, Sending::Closed) {
-						self.withdrawing = None;
-					}
-					return res;
+					return running.poll(&self.subscriber, &self.publish, waiter);
 				}
 			}
 		}
@@ -356,7 +371,7 @@ impl Running {
 					}
 					// A grant change applies before the next batch, so a claim it no longer
 					// covers is ended rather than sent.
-					self.answer.poll_permit(&mut self.writer, waiter)?;
+					self.answer.poll_permit(waiter)?;
 				}
 				Sending::Closing => {
 					if let Poll::Ready(closed) = self.writer.poll_closed(waiter) {
@@ -367,10 +382,17 @@ impl Running {
 				Sending::Closed => {}
 			}
 
-			let ready = self.streams.iter().find_map(|stream| match stream.poll_wire(waiter) {
-				Poll::Ready(msg) => Some(msg),
-				Poll::Pending => None,
-			});
+			// The session's key waits while a grant change's mounts send their initial sets,
+			// which the peer's next ANNOUNCE_OK follows.
+			let holding = self.answer.holding();
+			let main = self.streams.len() - 1;
+			let streams = self.streams.iter().enumerate().filter(|(i, _)| !holding || *i != main);
+			let ready = streams
+				.map(|(_, stream)| stream)
+				.find_map(|stream| match stream.poll_wire(waiter) {
+					Poll::Ready(msg) => Some(msg),
+					Poll::Pending => None,
+				});
 			if let Some(msg) = ready {
 				match msg {
 					node::Msg::Ask(edit) => {

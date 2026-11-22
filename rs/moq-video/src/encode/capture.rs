@@ -596,8 +596,8 @@ fn capture_tracks<E: CatalogExt>(
 	for name in names.chain(std::iter::once(None)) {
 		let info = catalog.track_info(priority).with_refresh(refresh);
 		let created = match name {
-			Some(name) => broadcast.create_track(name, info),
-			None => broadcast.unique_track(suffix(options.codec), info),
+			Some(name) => broadcast.create_track(name, info).ok_or(moq_net::Error::Duplicate),
+			None => Ok(broadcast.unique_track(suffix(options.codec), info)),
 		};
 		match created {
 			Ok(track) => tracks.push(track),

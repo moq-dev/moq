@@ -162,7 +162,7 @@ mod tests {
 		first.track = Some("a".into());
 		moving
 			.catalog
-			.modify()
+			.modify(moving.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -183,7 +183,7 @@ mod tests {
 		assert_ne!(first_prefix, second_prefix);
 		moving
 			.catalog
-			.modify()
+			.modify(moving.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -274,16 +274,26 @@ mod tests {
 		config.container = hang::catalog::Container::Legacy;
 		let sibling_config = config.clone();
 		let mut live = Live::new(".hev1", |catalog, name| {
-			catalog.modify().unwrap().video.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.insert(name, config);
 		});
 		let primary = live.track.name().to_string();
 		let mut sibling = live.add_track(".sibling", |catalog, name| {
-			catalog.modify().unwrap().video.renditions.insert(name, sibling_config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.insert(name, sibling_config);
 		});
 		assert!(primary.as_str() < sibling.name(), "the primary is first by name");
 		let set_enabled = |live: &mut Live, enabled: bool| {
 			live.catalog
-				.modify()
+				.modify(live.catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions

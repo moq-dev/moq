@@ -185,7 +185,7 @@ impl Source {
 		video.bitrate = Some(1_000_000);
 		video.framerate = Some(30.0);
 
-		let mut guard = self.catalog.modify().unwrap();
+		let mut guard = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		guard.video = hang::catalog::Video::default();
 		guard.video.insert("video", video).unwrap();
 	}

@@ -33,7 +33,7 @@ use super::passthrough::PCR_HZ;
 use super::psi::{Pat, PesStart};
 
 /// A forward step beyond this is another timeline: ffmpeg's `dts_delta_threshold`.
-const LEAP: Duration = Duration::from_secs(10);
+pub(super) const LEAP: Duration = Duration::from_secs(10);
 const PTS_HZ: u64 = 90_000;
 const PTS_WRAP: u64 = 1 << 33;
 
@@ -238,7 +238,7 @@ impl Headers {
 				return (Some(chain), None);
 			}
 		}
-		// The import refuses a malformed adaptation field and cannot read a scrambled payload.
+		// The import ends on a malformed adaptation field and cannot read a scrambled payload.
 		if !adaptation_valid(pkt) || pkt[3] & 0xc0 != 0 {
 			chain.begun = None;
 			return (Some(chain), None);
@@ -246,7 +246,7 @@ impl Headers {
 		let Payload::Bytes(payload) = payload(pkt) else {
 			return (Some(chain), None);
 		};
-		// A PES start abandons whatever header was begun before it, as the import's does.
+		// A PES start abandons whatever header was begun before it, where the import ends.
 		let begun = chain.begun.take();
 		let header = if pkt[1] & 0x40 != 0 {
 			payload.to_vec()

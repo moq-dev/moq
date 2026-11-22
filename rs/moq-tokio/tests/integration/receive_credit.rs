@@ -626,8 +626,7 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	let mut header = Vec::new();
 	varint(&mut header, subscribe);
 	varint(&mut header, sequence);
-	// No previous start: 0 says unknown, since the field carries it plus one. A lite-07
-	// GROUP has no Frame Start: every Group Stream starts at frame 0.
+	// Frame Start: the stream carries the group from its first frame.
 	varint(&mut header, 0);
 
 	// GROUP, then its size-prefixed header.
@@ -635,9 +634,9 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	varint(&mut bytes, header.len() as u64);
 	bytes.extend_from_slice(&header);
 	// The frame's size plus one, the zigzag timestamp delta, then the payload. The first
-	// frame's delta is absolute, and it starts its group, so it is the group's key.
+	// frame's delta counts from the group's start, and it starts its group, so it is 0.
 	varint(&mut bytes, size as u64 + 1);
-	varint(&mut bytes, sequence * 2);
+	varint(&mut bytes, 0);
 	bytes.resize(bytes.len() + size, 5);
 	bytes
 }
@@ -670,7 +669,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	let every = Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
 		.with_ranges([moq_net::track::Range {
-			start: moq_net::track::Anchor::Time(0),
+			start: Some(0),
 			end: None,
 		}])
 		.with_delay(Delay::default().with_max(Duration::from_secs(60)));

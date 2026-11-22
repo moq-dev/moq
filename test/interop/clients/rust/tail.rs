@@ -118,7 +118,9 @@ async fn main() -> anyhow::Result<()> {
 			if datagram {
 				// Untimed: each datagram's timestamp is unscaled at its sequence, which the
 				// OBJECT_DATAGRAM carries as its group ID. Stay open until each one is acknowledged.
-				let mut track = broadcast.create_datagrams("tail", moq_net::datagram::Info::default())?;
+				let mut track = broadcast
+					.create_datagrams("tail", moq_net::datagram::Info::default())
+					.context("the track already exists")?;
 				route.announce()?;
 				let session = client
 					.clone()
@@ -143,18 +145,20 @@ async fn main() -> anyhow::Result<()> {
 				session.close().await?;
 				eprintln!("tail acknowledged");
 			} else {
-				let mut track = broadcast.create_track(
-					"tail",
-					moq_net::track::Info::default()
-						.with_timescale(moq_net::Timescale::MILLI)
-						.with_compression(match compress {
-							true => moq_net::track::Compression::Deflate,
-							false => moq_net::track::Compression::None,
-						})
-						// `cached` and `late` read groups a newer one supersedes, which the default
-						// zero max age would leave stale.
-						.with_max_age(None),
-				)?;
+				let mut track = broadcast
+					.create_track(
+						"tail",
+						moq_net::track::Info::default()
+							.with_timescale(moq_net::Timescale::MILLI)
+							.with_compression(match compress {
+								true => moq_net::track::Compression::Deflate,
+								false => moq_net::track::Compression::None,
+							})
+							// `cached` and `late` read groups a newer one supersedes, which the default
+							// zero max age would leave stale.
+							.with_max_age(None),
+					)
+					.context("the track already exists")?;
 				route.announce()?;
 				if cached {
 					write(&mut track, mode)?;
@@ -280,7 +284,7 @@ async fn main() -> anyhow::Result<()> {
 			let options = moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(0),
+					start: Some(0),
 					end: None,
 				}]);
 			let mut track = remote.subscribe(Some(options)).await?;

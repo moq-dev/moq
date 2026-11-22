@@ -159,6 +159,55 @@ async fn reading_returns_flow_control_credit() {
 	}
 }
 
+/// A writer the peer gives no more credit counts one stall, timed while the peer holds it back,
+/// with nothing else on the wire but pings, and ended by the credit reading returns. The
+/// reader, which never ran out of credit, counts none.
+#[tokio::test(start_paused = true)]
+async fn a_writer_out_of_credit_counts_one_stall() {
+	for &version in Version::ALL {
+		let window = moq_net::transport::MIN_RECEIVE_WINDOW;
+		let mut small = config(version);
+		small.limits.receive_window = std::num::NonZeroU64::new(window);
+		small.limits.stream_receive_window = std::num::NonZeroU64::new(window);
+		let (client, server) = pair(config(version), small).await;
+		let (sent, received) = (client.wire().unwrap(), server.wire().unwrap());
+
+		// One byte past the credit.
+		let data = payload(window as usize + 1, 7);
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		let writer = tokio::spawn(async move {
+			write_all(&mut send, data).await;
+			send
+		});
+		let mut recv = server.accept_uni().await.unwrap();
+		kio::clock::sleep(Duration::from_secs(5)).await;
+		assert_eq!(sent.credit_stalls(), 1, "{version:?}");
+		// Draft-00 has no pings, so nothing steps its connection until the credit arrives.
+		if version.uses_records() {
+			let held = sent.credit_stalled();
+			assert!(
+				held >= Duration::from_secs(4),
+				"{version:?}: accrued {held:?} by the pings"
+			);
+		}
+
+		read_exact(&mut recv, window as usize).await.unwrap();
+		read_exact(&mut recv, 1).await.unwrap();
+		let _send = writer.await.unwrap();
+		kio::clock::sleep(Duration::from_secs(5)).await;
+		assert_eq!(sent.credit_stalls(), 1, "{version:?}");
+		let stalled = sent.credit_stalled();
+		assert!(
+			(Duration::from_secs(5)..Duration::from_secs(6)).contains(&stalled),
+			"{version:?}: stalled {stalled:?}, until the read at 5s"
+		);
+		assert_eq!(
+			(received.credit_stalls(), received.credit_stalled()),
+			(0, Duration::ZERO)
+		);
+	}
+}
+
 /// Lease `want` bytes, returning how many were leased and handing them back unread, so they
 /// keep their credit.
 async fn lease(recv: &mut RecvStream, want: usize) -> Result<usize, Error> {
@@ -178,7 +227,7 @@ async fn read_exact(recv: &mut RecvStream, want: usize) -> Result<Bytes, Error> 
 }
 
 /// What `send` answers about the bytes below `offset`, without waiting.
-fn acked(send: &SendStream, offset: &moq_quic::send::Offset) -> Poll<Result<poll::Acked, Error>> {
+fn acked(send: &SendStream, offset: &moq_quic::send::Offset) -> Poll<Result<(), Error>> {
 	send.poll_acked(&kio::Waiter::noop(), offset)
 }
 
@@ -198,7 +247,7 @@ async fn bytes_count_as_sent_once_the_link_takes_them() {
 		assert_eq!(read_exact(&mut recv, first.len()).await.unwrap(), first, "{version:?}");
 		let went_out = send.offset();
 		assert!(
-			matches!(acked(&send, &went_out), Poll::Ready(Ok(poll::Acked::Sent))),
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(()))),
 			"{version:?}: the link took it"
 		);
 
@@ -210,7 +259,7 @@ async fn bytes_count_as_sent_once_the_link_takes_them() {
 
 		send.reset(1);
 		assert!(
-			matches!(acked(&send, &went_out), Poll::Ready(Ok(poll::Acked::Sent))),
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(()))),
 			"{version:?}: what went out stays sent"
 		);
 		assert!(

@@ -59,14 +59,11 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it. Only lite-06
-	/// bounds a range partway through a group. Lite-07 has no such type: a group's start is its
-	/// time, so it goes out as a [`Anchor::Time`], an end as the time just before it, and
-	/// decodes as one.
+	/// A position: a start delivers from it, and an end stops just before it. Lite-06 bounds
+	/// either end partway through a group. A group's start is its time, so lite-07 sends one
+	/// at a group's first frame as an [`Anchor::Time`], an end as the time just before it, and
+	/// a start partway through a group as its Position type, which only a start may be.
 	Absolute(crate::track::Position),
-	/// The group this many before the latest, included as an end. Lite07+ only, except a
-	/// start of 0 (see [`Range`]).
-	Relative(u64),
 	/// The group containing this time in the track's timescale (the highest start at or
 	/// below it), included as an end. Lite07+ only.
 	Time(u64),
@@ -77,19 +74,20 @@ pub enum Anchor {
 /// Before lite-07 a subscription carries exactly one, in `Group Start` and `Group End` and
 /// their frame bounds. An absent `Group Start` decodes as no start, and so does a lite-06
 /// `Group Start` of 0 with a `Frame Start` of 0, the same absence of a floor there. No start
-/// and a [`Anchor::Relative`] start of 0 both encode as an absent `Group Start`, which a
-/// pre-06 publisher reads as the latest group and a lite-06 one as no floor.
+/// encodes as an absent `Group Start`, which a pre-06 publisher reads as the latest group and
+/// a lite-06 one as no floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Range {
-	/// Where delivery starts, or `None` for the oldest group the max age allows.
+	/// Where delivery starts, or `None` for no start, which the Min Age places, or else the
+	/// max age.
 	pub start: Option<Anchor>,
 	/// Where delivery stops, or `None` to follow the live edge.
 	pub end: Option<Anchor>,
 }
 
 impl Range {
-	/// Everything from the oldest group the max age allows, onward.
-	pub const OLDEST: Self = Self { start: None, end: None };
+	/// Everything from where the Min Age, or else the max age, places it, onward.
+	pub const OPEN: Self = Self { start: None, end: None };
 
 	/// The span an older wire's four fields name: `end_group` and `end_frame` inclusive, as
 	/// they go out.
@@ -132,7 +130,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		let priority = super::priority::from_wire(r.u8()?);
 
 		let (order, max_delay, min_delay, ranges) = match version {
-			Version::Lite01 | Version::Lite02 => (Order::Descending, None, None, vec![Range::OLDEST]),
+			Version::Lite01 | Version::Lite02 => (Order::Descending, None, None, vec![Range::OPEN]),
 			_ => {
 				let order = decode_order(r, version)?;
 				let max_delay = decode_max_delay(r, version)?;
@@ -284,9 +282,9 @@ fn encode_ranges(w: &mut Encoder<'_>, version: Version, ranges: &[Range]) -> Res
 		return Err(EncodeError::Version);
 	};
 	let (start_group, start_frame) = match range.start {
-		None | Some(Anchor::Relative(0)) => (None, 0),
+		None => (None, 0),
 		Some(Anchor::Absolute(start)) => (Some(start.group), start.frame),
-		Some(Anchor::Relative(_) | Anchor::Time(_)) => return Err(EncodeError::Version),
+		Some(Anchor::Time(_)) => return Err(EncodeError::Version),
 	};
 	let (end_group, end_frame) = match range.end {
 		None => (None, None),
@@ -296,7 +294,7 @@ fn encode_ranges(w: &mut Encoder<'_>, version: Version, ranges: &[Range]) -> Res
 			Some(frame) => (Some(end.group), Some(frame)),
 			None => (Some(end.group.checked_sub(1).ok_or(EncodeError::InvalidState)?), None),
 		},
-		Some(Anchor::Relative(_) | Anchor::Time(_)) => return Err(EncodeError::Version),
+		Some(Anchor::Time(_)) => return Err(EncodeError::Version),
 	};
 	encode_start_group(w, version, start_group)?;
 	w.varint_opt(end_group)?;
@@ -310,8 +308,8 @@ fn decode_range_list(r: &mut Decoder<'_>) -> Result<Vec<Range>, DecodeError> {
 	// count the bytes can't back runs out before it costs anything.
 	let mut ranges = Vec::new();
 	for _ in 0..count {
-		let start = decode_anchor(r)?;
-		let end = decode_anchor(r)?;
+		let start = decode_anchor(r, false)?;
+		let end = decode_anchor(r, true)?;
 		ranges.push(Range { start, end });
 	}
 	Ok(ranges)
@@ -322,10 +320,10 @@ fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), Encode
 	w.varint(ranges.len() as u64)?;
 	for range in ranges {
 		for (anchor, end) in [(range.start, false), (range.end, true)] {
-			let (kind, value) = wire_anchor(anchor, end)?;
+			let (kind, values) = wire_anchor(anchor, end)?;
 			w.varint(kind)?;
-			if let Some(value) = value {
-				w.varint(value)?;
+			for value in values.iter().flatten() {
+				w.varint(*value)?;
 			}
 		}
 	}
@@ -336,39 +334,55 @@ fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), Encode
 pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 	let size = |value| varint::size(value, form).ok();
 	let anchor = |anchor, end| -> Option<usize> {
-		let (kind, value) = wire_anchor(anchor, end).ok()?;
-		Some(size(kind)? + value.map_or(Some(0), size)?)
+		let (kind, values) = wire_anchor(anchor, end).ok()?;
+		values
+			.iter()
+			.flatten()
+			.try_fold(size(kind)?, |total, value| Some(total + size(*value)?))
 	};
 	Some(anchor(range.start, false)? + anchor(range.end, true)?)
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
-/// anchor, the oldest group as a start and the live edge as an end.
-fn decode_anchor(r: &mut Decoder<'_>) -> Result<Option<Anchor>, DecodeError> {
+/// anchor, a start the Min Age or max age places and the live edge as an end. Type 2, a
+/// position partway through a group, is a start only, so `end` refuses it, and so is one at
+/// frame 0, which type 1 says.
+fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
 		1 => Some(Anchor::Time(r.varint()?)),
-		2 => Some(Anchor::Relative(r.varint()?)),
+		2 if !end => {
+			let group = r.varint()?;
+			let frame = r.varint()?;
+			if frame == 0 {
+				return Err(DecodeError::InvalidValue);
+			}
+			Some(Anchor::Absolute(crate::track::Position { group, frame }))
+		}
 		_ => return Err(DecodeError::InvalidValue),
 	})
 }
 
-/// The lite-07 type and value of a range's start or `end`, the inverse of [`decode_anchor`].
+/// The lite-07 type and values of a range's start or `end`, the inverse of [`decode_anchor`].
 ///
-/// An absolute position goes out as its group's time: a start as is, and an exclusive end as
-/// the inclusive time just before it, an end at group 0 holding nothing a time can say. A
-/// range covers whole groups, so a position partway through one is refused: FETCH reads a
-/// slice of a group.
-fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, Option<u64>), EncodeError> {
+/// An absolute position at a group's first frame goes out as its group's time: a start as
+/// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
+/// nothing a time can say. A start partway through a group goes out as a position, its
+/// group's start then the frame; an end there is refused, since FETCH reads a slice of a group.
+fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 2]), EncodeError> {
 	Ok(match anchor {
-		None => (0, None),
-		Some(Anchor::Time(time)) => (1, Some(time)),
-		Some(Anchor::Relative(back)) => (2, Some(back)),
-		Some(Anchor::Absolute(position)) if position.frame != 0 => return Err(EncodeError::Version),
-		Some(Anchor::Absolute(position)) if end => {
-			(1, Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?))
-		}
-		Some(Anchor::Absolute(position)) => (1, Some(position.group)),
+		None => (0, [None, None]),
+		Some(Anchor::Time(time)) => (1, [Some(time), None]),
+		Some(Anchor::Absolute(position)) if position.frame != 0 && end => return Err(EncodeError::Version),
+		Some(Anchor::Absolute(position)) if position.frame != 0 => (2, [Some(position.group), Some(position.frame)]),
+		Some(Anchor::Absolute(position)) if end => (
+			1,
+			[
+				Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?),
+				None,
+			],
+		),
+		Some(Anchor::Absolute(position)) => (1, [Some(position.group), None]),
 	})
 }
 
@@ -1692,7 +1706,7 @@ mod test {
 
 		// No floor and a floor of 0 are the same absence of a constraint on lite-06:
 		// byte-identical on the wire, and decoded as no start.
-		msg.ranges = vec![Range::OLDEST];
+		msg.ranges = vec![Range::OPEN];
 		let absent = encode(&msg, Version::Lite06).unwrap();
 		msg.ranges[0].start = absolute(0, 0);
 		let zero = encode(&msg, Version::Lite06).unwrap();
@@ -1701,22 +1715,17 @@ mod test {
 			Subscribe::decode_msg(r, v)
 		})
 		.unwrap();
-		assert_eq!(got.ranges, [Range::OLDEST]);
+		assert_eq!(got.ranges, [Range::OPEN]);
 
 		// On the pre-06 wire an explicit group 0 is key + 1, distinct from an
 		// absent start (the latest group).
 		let explicit = encode(&msg, Version::Lite05).unwrap();
 		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, msg.ranges);
-		msg.ranges = vec![Range::OLDEST];
+		msg.ranges = vec![Range::OPEN];
 		let latest = encode(&msg, Version::Lite05).unwrap();
 		assert_ne!(explicit, latest);
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, [Range::OLDEST]);
-
-		// A live start is the same absent `Group Start` on both.
-		let mut live = msg.clone();
-		live.ranges[0].start = Some(Anchor::Relative(0));
-		assert_eq!(encode(&live, Version::Lite05).unwrap(), latest);
-		assert_eq!(encode(&live, Version::Lite06).unwrap(), absent);
+		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, [Range::OPEN]);
+		assert_eq!(encode(&msg, Version::Lite06).unwrap(), absent);
 	}
 
 	/// A subscription can resume partway through group 0 (a catalog never leaves it), so
@@ -1756,15 +1765,15 @@ mod test {
 		));
 	}
 
-	/// Lite-07 carries every range, each end relative, at a time, or open.
+	/// Lite-07 carries every range, each end at a time or open.
 	#[test]
 	fn ranges_roundtrip_on_lite07() {
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![
-			Range::OLDEST,
+			Range::OPEN,
 			Range {
-				start: Some(Anchor::Relative(2)),
-				end: Some(Anchor::Relative(0)),
+				start: None,
+				end: Some(Anchor::Time(2)),
 			},
 			Range {
 				start: Some(Anchor::Time(1_500)),
@@ -1778,7 +1787,7 @@ mod test {
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 
 		// An update from the oldest group to the same ranges adds every one of them.
-		let mut sent = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let mut sent = LiveRanges::new(Version::Lite07, &[Range::OPEN]);
 		let update = SubscribeUpdate {
 			wanted_group: None,
 			priority: 3,
@@ -1790,7 +1799,7 @@ mod test {
 		let buf = update.encode_bytes(Version::Lite07).unwrap();
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
 			.unwrap();
-		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let mut live = LiveRanges::new(Version::Lite07, &[Range::OPEN]);
 		live.apply(got.ranges).unwrap();
 		let resolved: Vec<_> = live.iter().map(|(_, range)| *range).collect();
 		assert_eq!(resolved, msg.ranges);
@@ -1820,30 +1829,36 @@ mod test {
 		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::InvalidState)));
 	}
 
-	/// A lite-07 range covers whole groups: an absolute anchor is its type and group alone,
-	/// and one partway through a group is refused, since FETCH reads a slice of a group.
+	/// A lite-07 start may fall partway through a group, as its Position type: the group's
+	/// start, then the frame. An end there is refused, since FETCH reads a slice of a group,
+	/// and so is a Position at frame 0, which a Time says.
 	#[test]
-	fn lite07_ranges_cover_whole_groups() {
+	fn lite07_starts_partway_through_a_group() {
 		let mut msg = framed_sample();
 		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
 		msg.ranges = vec![Range {
 			start: absolute(7, 4),
 			end: None,
 		}];
-		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		let position = encode(&msg, Version::Lite07).unwrap();
+		// Type 2, start 7, frame 4, then no end.
+		assert!(position.ends_with(&[1, 2, 7, 4, 0]), "{position:?}");
+		assert_eq!(
+			range_size(&msg.ranges[0], Version::Lite07.into()),
+			Some(4),
+			"the size a range takes counts both fields"
+		);
 
-		msg.ranges = vec![Range {
-			start: absolute(7, 0),
-			end: absolute(9, 0),
-		}];
-		let whole = encode(&msg, Version::Lite07).unwrap();
-		msg.ranges = vec![Range {
-			start: Some(Anchor::Relative(7)),
-			end: Some(Anchor::Relative(9)),
-		}];
-		// The same bytes but the two types: no frame follows either group.
-		let relative = encode(&msg, Version::Lite07).unwrap();
-		assert_eq!(whole.len(), relative.len());
+		let decode = |tail: &[u8]| {
+			let mut wire = position.clone();
+			wire.truncate(position.len() - 5);
+			wire.extend_from_slice(tail);
+			crate::coding::decode_from(&mut wire.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
+		};
+		assert!(decode(&[1, 2, 7, 4, 0]).is_ok());
+		assert!(matches!(decode(&[1, 2, 7, 0, 0]), Err(DecodeError::InvalidValue)));
+		assert!(matches!(decode(&[1, 1, 7, 2, 9, 4]), Err(DecodeError::InvalidValue)));
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,
@@ -1857,7 +1872,7 @@ mod test {
 				end: Some(Anchor::Time(4)),
 			},
 			Range {
-				start: Some(Anchor::Relative(3)),
+				start: Some(Anchor::Time(3)),
 				end: None,
 			},
 			Range {
@@ -1906,18 +1921,18 @@ mod test {
 	fn lite07_refuses_edits_it_cannot_apply() {
 		let version = Version::Lite07;
 		let edit = |remove: Vec<u64>, add: Vec<Range>| RangeEdit::Edit { remove, add };
-		let fresh = || LiveRanges::new(version, &[Range::OLDEST]);
+		let fresh = || LiveRanges::new(version, &[Range::OPEN]);
 		assert!(
-			fresh().apply(edit(vec![1], vec![Range::OLDEST])).is_err(),
+			fresh().apply(edit(vec![1], vec![Range::OPEN])).is_err(),
 			"never assigned"
 		);
 		assert!(
-			fresh().apply(edit(vec![0, 0], vec![Range::OLDEST])).is_err(),
+			fresh().apply(edit(vec![0, 0], vec![Range::OPEN])).is_err(),
 			"retired twice"
 		);
 		assert!(fresh().apply(edit(vec![0], vec![])).is_err(), "nothing left");
 		assert!(
-			fresh().apply(RangeEdit::Replace(vec![Range::OLDEST])).is_err(),
+			fresh().apply(RangeEdit::Replace(vec![Range::OPEN])).is_err(),
 			"not on lite-07"
 		);
 
@@ -1941,7 +1956,7 @@ mod test {
 	/// that names what stayed retired or added.
 	#[test]
 	fn lite07_an_edit_names_its_range_ids() {
-		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let mut live = LiveRanges::new(Version::Lite07, &[Range::OPEN]);
 		let range = |group| Range {
 			start: absolute(group, 0),
 			end: None,
@@ -1978,7 +1993,7 @@ mod test {
 	/// live ranges stay those last sent and the next edit is made against them.
 	#[test]
 	fn lite07_a_refused_edit_leaves_the_ranges_as_sent() {
-		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let mut live = LiveRanges::new(Version::Lite07, &[Range::OPEN]);
 		let wide: Vec<Range> = (0..super::super::message::MAX_MESSAGE_SIZE as u64 / 4)
 			.map(|group| Range {
 				start: absolute(group << 20, 0),
@@ -1986,7 +2001,7 @@ mod test {
 			})
 			.collect();
 		assert!(matches!(live.edit(&wide), Err(EncodeError::TooLarge)));
-		assert_eq!(live.numbered(), [(0, Range::OLDEST)]);
+		assert_eq!(live.numbered(), [(0, Range::OPEN)]);
 		assert_eq!(live.next(), 1);
 		assert_eq!(
 			live.edit(&wide[..2]).unwrap(),
@@ -2037,7 +2052,7 @@ mod test {
 		msg.ranges.clear();
 		assert!(matches!(encode(&msg, version), Err(EncodeError::InvalidState)));
 
-		msg.ranges = vec![Range::OLDEST];
+		msg.ranges = vec![Range::OPEN];
 		let mut buf = encode(&msg, version).unwrap();
 		// The list is last: a count of one, then two anchors of type 0.
 		let at = buf.len() - 3;
@@ -2049,15 +2064,19 @@ mod test {
 			Err(DecodeError::InvalidSubscribeLocation)
 		));
 
-		// Type 3 was a second time anchor before lite-07 settled on one.
-		for kind in [3, 4] {
+		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a
+		// start only; type 3 is assigned to nothing, as a start or an end. Each closes the
+		// session with a PROTOCOL_VIOLATION.
+		let starts = [3, 4].map(|kind| (2, kind));
+		let ends = [2, 3, 4].map(|kind| (1, kind));
+		for (back, kind) in starts.into_iter().chain(ends) {
 			let mut buf = encode(&msg, version).unwrap();
-			let last = buf.len() - 1;
-			buf[last] = kind;
-			assert!(matches!(
-				crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
-				Err(DecodeError::InvalidValue)
-			));
+			let at = buf.len() - back;
+			buf[at] = kind;
+			let err = crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg).unwrap_err();
+			assert!(matches!(err, DecodeError::InvalidValue), "{back} {kind}");
+			let session = crate::SessionError::from(&crate::Error::Decode(err));
+			assert!(matches!(session, crate::SessionError::ProtocolViolation));
 		}
 	}
 
@@ -2066,18 +2085,14 @@ mod test {
 	#[test]
 	fn older_wires_refuse_what_one_span_cannot_carry() {
 		let refused = [
-			vec![Range::OLDEST, Range::OLDEST],
-			vec![Range {
-				start: Some(Anchor::Relative(2)),
-				end: None,
-			}],
+			vec![Range::OPEN, Range::OPEN],
 			vec![Range {
 				start: Some(Anchor::Time(1_500)),
 				end: None,
 			}],
 			vec![Range {
 				start: None,
-				end: Some(Anchor::Relative(1)),
+				end: Some(Anchor::Time(1)),
 			}],
 		];
 		for version in [Version::Lite03, Version::Lite05, Version::Lite06] {
@@ -2117,7 +2132,7 @@ mod test {
 					priority: 0,
 					max_delay: Some(std::time::Duration::ZERO),
 					min_delay: None,
-					ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
+					ranges: LiveRanges::new(version, &[Range::OPEN]).unchanged(),
 					order: crate::track::Order::Descending,
 				};
 				let buf = update.encode_bytes(version).unwrap();
@@ -2174,7 +2189,7 @@ mod test {
 				let expected = if version.has_min_delay() { min_delay } else { None };
 				let mut msg = subscribe_sample();
 				msg.min_delay = min_delay;
-				msg.ranges = vec![Range::OLDEST];
+				msg.ranges = vec![Range::OPEN];
 				assert_eq!(roundtrip(&msg, version).min_delay, expected, "{version:?}");
 
 				let update = SubscribeUpdate {
@@ -2182,7 +2197,7 @@ mod test {
 					priority: 0,
 					max_delay: Some(std::time::Duration::ZERO),
 					min_delay,
-					ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
+					ranges: LiveRanges::new(version, &[Range::OPEN]).unchanged(),
 					order: crate::track::Order::Descending,
 				};
 				let buf = update.encode_bytes(version).unwrap();
@@ -2210,7 +2225,7 @@ mod test {
 				priority: 3,
 				max_delay: Some(std::time::Duration::from_millis(250)),
 				min_delay: None,
-				ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
+				ranges: LiveRanges::new(version, &[Range::OPEN]).unchanged(),
 				order,
 			};
 			let mut buf = Vec::new();

@@ -1,7 +1,7 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
 use std::{
-	collections::{BTreeMap, HashMap, hash_map::Entry},
+	collections::{HashMap, hash_map::Entry},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -587,12 +587,8 @@ impl RangeWriter {
 				fill.drop_groups(key..key + 1);
 				None
 			}
-			false => match fill.accept(key, None) {
-				Ok(producer) => Some(crate::recv::Group::new(producer)),
-				// Delivered since it was asked: this fetch's copy is a duplicate.
-				Err(Error::Duplicate) => None,
-				Err(err) => return Err(err),
-			},
+			// None once delivered since it was asked: this fetch's copy is a duplicate.
+			false => fill.accept(key, None)?.map(crate::recv::Group::new),
 		};
 		if let Some(producer) = &producer {
 			let handle = producer.handle().clone();
@@ -861,7 +857,7 @@ fn wants_feed(subscription: &track::Subscription, edge: Option<u64>) -> bool {
 	let one_key = subscription.ranges.iter().all(|range| {
 		matches!(
 			(range.start, range.end),
-			(track::Anchor::Time(start), Some(track::Anchor::Time(end))) if end <= start
+			(Some(start), Some(end)) if end <= start
 		)
 	});
 	subscription.feed || !history || !one_key
@@ -1247,8 +1243,7 @@ impl Subscriber {
 		Self {
 			runtime,
 			session,
-			// Its own frame budget, so a peer's declared sizes crowd out no other session.
-			origin: origin.with_own_frames(),
+			origin,
 			control,
 			session_origin: peer_node.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
@@ -3190,7 +3185,7 @@ impl Subscriber {
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
-		let mut once = SubscribeOnce::new(self, broadcast_path, track_name, target, gate)?;
+		let mut once = SubscribeOnce::new(self, broadcast_path, track_name, target, gate);
 		kio::wait(|waiter| once.poll(waiter, self, broadcast_path, track_name, group_fetches)).await
 	}
 }
@@ -3591,16 +3586,13 @@ impl kio::Task for RunSubscribe {
 						_ => {
 							// `SubscribeOnce` counts the subscription itself.
 							self.setup = None;
-							match SubscribeOnce::new(
+							RunStep::Subscribe(SubscribeOnce::new(
 								&self.this,
 								&self.broadcast_path,
 								&self.track_name,
 								Target::Request(request),
 								&self.gate,
-							) {
-								Some(once) => RunStep::Subscribe(once),
-								None => return Poll::Ready(()),
-							}
+							))
 						}
 					};
 				}
@@ -3631,16 +3623,13 @@ impl kio::Task for RunSubscribe {
 					};
 					// `SubscribeOnce` counts the subscription itself.
 					self.setup = None;
-					let Some(once) = SubscribeOnce::new(
+					self.step = RunStep::Subscribe(SubscribeOnce::new(
 						&self.this,
 						&self.broadcast_path,
 						&self.track_name,
 						Target::Resume(next),
 						&self.gate,
-					) else {
-						return Poll::Ready(());
-					};
-					self.step = RunStep::Subscribe(once);
+					));
 				}
 				RunStep::Subscribe(once) => {
 					once.source = self.source.clone();
@@ -3705,18 +3694,14 @@ struct SubscribeOnce {
 	gate: crate::auth::Gate,
 	_working: crate::session::Working,
 	validity: crate::model::broadcast::RequestValidity,
-	resolved: ResolvedRanges,
 	plan: Plan,
 	step: OnceStep,
 }
 
 /// What a subscription asks for, resolved against the copy as it starts.
 struct Plan {
-	/// The aggregate asked for, resolved against the copy.
+	/// The aggregate asked for.
 	subscription: Option<track::Subscription>,
-	/// A relative anchor the copy cannot settle yet counts back from the Largest Object, so
-	/// the live join that names it goes first and the answer resolves the anchor.
-	deferred: bool,
 	start: Option<u64>,
 	join: Join,
 	/// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest; the
@@ -3726,34 +3711,17 @@ struct Plan {
 }
 
 impl Plan {
-	/// Resolve what `target` asks for, or why it cannot be asked.
-	fn new(resolved: &mut ResolvedRanges, target: &Target, version: Version) -> Result<Self, Error> {
-		let subscription = target
-			.subscription()
-			.map(|subscription| match target.producer() {
-				Some(track) => resolved.resolve(track, &subscription),
-				None if needs_resolution(&subscription) => Err(Error::Unsupported),
-				None => Ok(subscription),
-			})
-			.transpose();
-		// A relative anchor the copy cannot settle yet counts back from the Largest Object, so
-		// the live join that names it goes first and the answer resolves the anchor. No Group
-		// ID arithmetic spells it upstream.
-		let deferred = matches!(subscription, Err(Error::Unsupported));
-		let subscription = match subscription {
-			Ok(subscription) => subscription,
-			Err(_) if deferred => None,
-			Err(err) => return Err(err),
-		};
+	/// What `target` asks for.
+	fn new(target: &Target, version: Version) -> Self {
+		let subscription = target.subscription();
 		let start = subscription.as_ref().and_then(|s| s.start());
 		let join = subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), version);
-		Ok(Self {
+		Self {
 			live: !matches!(join.filter, Filter::Absolute { .. }),
 			subscription,
-			deferred,
 			start,
 			join,
-		})
+		}
 	}
 }
 
@@ -3916,12 +3884,10 @@ struct Established {
 	sent_priority: i8,
 	priority: i8,
 	sent_bounds: WireBounds,
-	wanted_bounds: Result<WireBounds, Error>,
-	/// A deferred relative anchor, until the copy learns the live edge it counts back from:
-	/// an answer with no Largest leaves it to the first group. The bounds it then resolves
-	/// to go upstream as an update, absolute like any other.
-	unsettled: Option<track::Subscription>,
-	edge: track::Consumer,
+	wanted_bounds: WireBounds,
+	/// The group a live join started at: the Largest its SUBSCRIBE_OK named. `None` for a
+	/// SUBSCRIBE with a start, or one answered with no Largest.
+	joined: Option<u64>,
 	/// REQUEST_UPDATEs sent and not yet answered.
 	unanswered: u64,
 	demand: track::Demand,
@@ -3931,22 +3897,14 @@ struct Established {
 }
 
 impl SubscribeOnce {
-	/// `None` once the target failed at once, for asking what no request can spell.
 	fn new(
 		this: &Subscriber,
 		broadcast_path: &Path,
 		track_name: &str,
 		target: Target,
 		gate: &crate::auth::Gate,
-	) -> Option<Self> {
-		let mut resolved = ResolvedRanges::default();
-		let plan = match Plan::new(&mut resolved, &target, this.version) {
-			Ok(plan) => plan,
-			Err(err) => {
-				target.fail(err);
-				return None;
-			}
-		};
+	) -> Self {
+		let plan = Plan::new(&target, this.version);
 		let key = (broadcast_path.clone(), track_name.into());
 		// A listed track's paused subscription is already this track's upstream copy, so
 		// resume it rather than open a second one.
@@ -3957,16 +3915,15 @@ impl SubscribeOnce {
 				open: Default::default(),
 			},
 		};
-		Some(Self {
+		Self {
 			source: None,
 			key,
 			gate: gate.unnamed(),
 			_working: this.session.work().start(),
 			validity: this.validity.start(),
-			resolved,
 			plan,
 			step,
-		})
+		}
 	}
 
 	fn poll(
@@ -4619,7 +4576,7 @@ impl SubscribeOnce {
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
 			track.report_object(largest.group, largest.object);
-			// A live join's Largest is where its feed is, which a relative anchor counts back
+			// A live join's Largest is where its feed is, which a reader's live join measures
 			// from even when a newer group lands before the joined one.
 			if plan.live {
 				track.report_edge(largest.group);
@@ -4639,14 +4596,6 @@ impl SubscribeOnce {
 		if let Some(staged) = staged {
 			staged.commit();
 		}
-		// Resolved while the answer's Largest is still the live edge: no data stream reaches
-		// the copy before its alias is bound below.
-		let settled = match plan.deferred {
-			true => track
-				.subscription()
-				.map(|subscription| (settle_bounds(&mut self.resolved, &track, &subscription), subscription)),
-			false => None,
-		};
 		{
 			let mut state = this.state.lock();
 			if let Some(held) = state.subscribes.get_mut(&request_id) {
@@ -4694,18 +4643,13 @@ impl SubscribeOnce {
 			false => None,
 		};
 
+		let joined = largest
+			.filter(|_| plan.live && plan.start.is_none())
+			.map(|largest| largest.group);
 		let sent_bounds = (
 			plan.start,
 			plan.subscription.as_ref().and_then(|subscription| subscription.end()),
 		);
-		let mut wanted_bounds = Ok(sent_bounds);
-		let mut unsettled = None;
-		match settled {
-			Some((Ok(Some(bounds)), _)) => wanted_bounds = Ok(bounds),
-			Some((Ok(None), subscription)) => unsettled = Some(subscription),
-			Some((Err(err), _)) => wanted_bounds = Err(err),
-			None => {}
-		}
 		let live = Established {
 			alias,
 			properties,
@@ -4720,9 +4664,8 @@ impl SubscribeOnce {
 			sent_priority: sent.priority,
 			priority: sent.priority,
 			sent_bounds,
-			wanted_bounds,
-			unsettled,
-			edge: track.consume(),
+			wanted_bounds: sent_bounds,
+			joined,
 			unanswered: 0,
 			demand: track.demand(),
 			subscribed: track
@@ -4759,7 +4702,7 @@ impl SubscribeOnce {
 		}
 		live.poll_joining(waiter);
 		// An error is the track closing, which the arms below report.
-		if let Poll::Ready(Ok(requested)) = live.dynamic.poll_requested_groups(waiter) {
+		if let Poll::Ready(Ok(requested)) = live.dynamic.poll_requested_fill(waiter) {
 			return Poll::Ready(ServeEnd::Fill(requested));
 		}
 		let _ = group_fetches.poll(waiter);
@@ -4777,9 +4720,10 @@ impl SubscribeOnce {
 				// A feed ending before the answer's Largest never shows it, so the
 				// answer alone makes the copy current. A live join's feed is open.
 				Some(largest) if !self.plan.live && live.sent_bounds.1.is_some_and(|end| end <= largest.group) => {
-					track.set_live_ahead(largest, from)
+					track.set_live_ahead(largest, None, from)
 				}
-				largest => track.set_live(largest, from),
+				// An Object ID is no frame ordinal, so the cache does not record it.
+				largest => track.set_live(largest, None, from),
 			};
 			live.resuming = None;
 			// An answer behind the copy's cache fails it.
@@ -4794,25 +4738,9 @@ impl SubscribeOnce {
 			live.subscribed = subscription
 				.as_ref()
 				.is_some_and(|subscription| !subscription.ranges.is_empty());
-			live.unsettled = None;
 			if let Some(subscription) = subscription {
 				live.priority = subscription.priority;
-				match settle_bounds(&mut self.resolved, &live.track, &subscription) {
-					Ok(Some(bounds)) => live.wanted_bounds = Ok(bounds),
-					Ok(None) => live.unsettled = Some(subscription.clone()),
-					Err(err) => live.wanted_bounds = Err(err),
-				}
-			}
-		}
-		if let Some(subscription) = &live.unsettled {
-			while let Poll::Ready(Some(_)) = live.edge.poll_largest(waiter) {}
-			match settle_bounds(&mut self.resolved, &live.track, subscription) {
-				Ok(Some(bounds)) => {
-					live.wanted_bounds = Ok(bounds);
-					live.unsettled = None;
-				}
-				Ok(None) => {}
-				Err(err) => return Poll::Ready(ServeEnd::Invalid(err)),
+				live.wanted_bounds = wire_bounds(&subscription, live.joined);
 			}
 		}
 		loop {
@@ -4859,10 +4787,7 @@ impl SubscribeOnce {
 				&& largest_group(&live.track, live.largest).is_some_and(|largest| value > largest)
 				&& live.requested.is_none_or(|requested| value > requested)
 		});
-		let bounds = match &live.wanted_bounds {
-			Ok(bounds) => *bounds,
-			Err(err) => return Poll::Ready(ServeEnd::Invalid(err.clone())),
-		};
+		let bounds = live.wanted_bounds;
 		let sent_bounds = live.sent_bounds;
 		let widened = match (bounds.0, sent_bounds.0) {
 			(None, Some(_)) => true,
@@ -5307,7 +5232,7 @@ impl Linger {
 				LingerStep::Closed
 			} else if gate.poll_denied(waiter).is_ready() {
 				LingerStep::Revoked
-			} else if let Poll::Ready(Ok(fill)) = idle.dynamic.poll_requested_groups(waiter) {
+			} else if let Poll::Ready(Ok(fill)) = idle.dynamic.poll_requested_fill(waiter) {
 				LingerStep::Fill(fill)
 			} else {
 				let _ = group_fetches.poll(waiter);
@@ -5935,7 +5860,7 @@ impl LearnTrackStatus {
 						Some(SetupResponse::Cancelled(this.version.transport_error(err)))
 					} else {
 						// A fetch needs nothing from the status to go out, only to read its objects.
-						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_groups(waiter) {
+						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_fill(waiter) {
 							group_fetches.push(ServeFill::new(
 								this.clone(),
 								broadcast_path.clone(),
@@ -6478,8 +6403,10 @@ impl OpenGroup {
 	) -> Poll<Result<Opened, Error>> {
 		let key = header.group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
-		// through the tagged `track::Producer`.
-		let create = |track: &mut track::Producer| track.create_group(group::Info { start: key });
+		// through the tagged `track::Producer`. A group the copy already holds arrived twice,
+		// and the model has one producer per group, so the second stream is refused.
+		let create =
+			|track: &mut track::Producer| track.claim_group(group::Info { start: key })?.ok_or(Error::Duplicate);
 
 		loop {
 			match self.step {
@@ -7095,12 +7022,13 @@ impl RunFill {
 			}
 			self.skipped = None;
 			let key = group.ok_or(Error::ProtocolViolation)?;
-			match open_fill_group(track, &mut self.head, key) {
-				Ok(()) => {}
+			if !open_fill_group(track, &mut self.head, key)? {
 				// Widening a range can fill groups the copy already owns. Drain their
 				// objects without replacing their producer or cutting the rest of the fill.
-				Err(Error::Duplicate) if self.multiple => self.skipped = Some((key, 0)),
-				Err(err) => return Err(err),
+				if !self.multiple {
+					return Err(Error::Duplicate);
+				}
+				self.skipped = Some((key, 0));
 			}
 		}
 		if self.skipped.is_some() {
@@ -8194,12 +8122,15 @@ fn resolve_fetch_group(prior: Option<u64>, wire: Option<u64>) -> Result<Option<u
 	Ok(Some(group))
 }
 
+/// Open the fill's group at `key` as the head, or return false when the copy already holds it.
 fn open_fill_group(
 	track: &mut track::Producer,
 	head: &mut Option<(u64, u64, crate::recv::Group)>,
 	key: u64,
-) -> Result<(), Error> {
-	let producer = track.create_group(group::Info { start: key })?;
+) -> Result<bool, Error> {
+	let Some(producer) = track.claim_group(group::Info { start: key })? else {
+		return Ok(false);
+	};
 	producer.set_wire(group::Wire {
 		sparse: false,
 		first_object: true,
@@ -8210,7 +8141,7 @@ fn open_fill_group(
 		last: None,
 	})?;
 	*head = Some((key, 0, crate::recv::Group::new(producer)));
-	Ok(())
+	Ok(true)
 }
 
 /// Ready once a finished subscription's data streams are accounted for: Stream Count of
@@ -8745,7 +8676,7 @@ mod tests {
 	#[kio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
+		let scope = crate::Prefixes::from(crate::Prefix::try_from("cam").unwrap());
 		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
 		let gate = kio::Producer::new(true);
@@ -8770,7 +8701,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let mut namespaces = crate::model::interest_prefixes(&subscriber.origin.allowed());
+		let mut namespaces = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>();
 		assert_eq!(
 			namespaces,
 			vec![crate::Path::from_static("cam")],
@@ -8886,7 +8819,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
-		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
+		let scope = crate::Prefixes::from(crate::Prefix::try_from("cam").unwrap());
 		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "x.hang").await);
@@ -8909,7 +8842,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+		let prefix = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>()
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
@@ -9008,7 +8943,9 @@ mod tests {
 		);
 		subscriber.announces = crate::session::Slots::new(1);
 
-		let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+		let prefix = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>()
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
@@ -10092,7 +10029,7 @@ mod tests {
 				let dynamic = track.requests();
 				let mut pending = Box::pin(track.consume().fetch_group(0, None));
 				assert!(futures::poll!(pending.as_mut()).is_pending());
-				let request = dynamic.requested_groups().await.expect("group request");
+				let request = dynamic.requested_fill().await.expect("group request");
 				group = Some(pending);
 				accepted = Some(track);
 				Box::pin(subscriber.clone().run_group_fetch(
@@ -12652,15 +12589,15 @@ mod tests {
 		auth.grant(
 			0,
 			crate::auth::Grant {
-				publish: crate::Patterns::new(),
-				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				publish: crate::Prefixes::new(),
+				subscribe: crate::Prefix::try_from("other").unwrap().into(),
 				expires: None,
 			},
 		);
 		// We let the peer announce only "other".
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Pattern::subtree("other").unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from("other").unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		});
 		assert!(
@@ -12691,8 +12628,8 @@ mod tests {
 	/// what an announcing peer's token must carry.
 	fn publish_grant_expiring(runtime: &crate::time::Deadlines, secs: Option<u64>) -> crate::auth::Grant {
 		crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: secs.map(|s| runtime.now().checked_add(std::time::Duration::from_secs(s)).unwrap()),
 		}
 	}
@@ -12973,8 +12910,8 @@ mod tests {
 	async fn a_covering_limit_still_verifies_the_token() {
 		const VERSION: Version = Version::Draft18;
 		let limit = |subtree: &str| crate::auth::Grant {
-			publish: crate::Pattern::subtree(subtree).unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from(subtree).unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		let auth = crate::auth::Link::new(false);
@@ -13065,8 +13002,8 @@ mod tests {
 		assert!(routed, "the token admits the announce outside the limit");
 
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Pattern::subtree("other").unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from("other").unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		});
 		for _ in 0..50 {
@@ -13621,8 +13558,8 @@ mod tests {
 
 			// Nothing was held for the limit to bring back.
 			auth.handle().authorize(&crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
+				publish: crate::Prefix::try_from("other").unwrap().into(),
+				subscribe: crate::Prefixes::new(),
 				expires: None,
 			});
 			settle().await;
@@ -14415,13 +14352,13 @@ mod tests {
 	async fn an_announce_token_needs_a_publish_grant() {
 		const VERSION: Version = Version::Draft18;
 		let read_only = crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: None,
 		};
 		let write_only = crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
@@ -14528,78 +14465,31 @@ struct Update {
 	new_group: Option<u64>,
 }
 
-/// Anchor resolutions live only as long as the ranges in the current aggregate. Cache
-/// eviction must not resolve an unchanged time end again at a different group.
-#[derive(Default)]
-struct ResolvedRanges(BTreeMap<track::Range, track::Range>);
-
-impl ResolvedRanges {
-	fn resolve(
-		&mut self,
-		track: &track::Producer,
-		subscription: &track::Subscription,
-	) -> Result<track::Subscription, Error> {
-		let mut next = BTreeMap::new();
-		let mut pending = Vec::new();
-		for range in &subscription.ranges {
-			match self.0.get(range) {
-				Some(resolved) => {
-					next.insert(*range, *resolved);
-				}
-				None => pending.push(*range),
-			}
-		}
-		let resolved = track.resolve_subscription(&track::Subscription {
-			ranges: pending.clone(),
-			..subscription.clone()
-		})?;
-		next.extend(pending.into_iter().zip(resolved.ranges));
-		let mut subscription = subscription.clone();
-		for range in &mut subscription.ranges {
-			*range = next[range];
-		}
-		self.0 = next;
-		Ok(subscription)
-	}
-}
-
-/// The wire bounds `subscription` resolves to, `None` while a relative anchor still waits
-/// for the live edge it counts back from.
-fn settle_bounds(
-	resolved: &mut ResolvedRanges,
-	track: &track::Producer,
-	subscription: &track::Subscription,
-) -> Result<Option<WireBounds>, Error> {
-	match resolved.resolve(track, subscription) {
-		Ok(subscription) => Ok(Some(wire_bounds(&subscription))),
-		Err(Error::Unsupported) => Ok(None),
-		Err(err) => Err(err),
-	}
-}
-
-fn needs_resolution(subscription: &track::Subscription) -> bool {
-	subscription.ranges.iter().any(|range| {
-		let start = match range.start {
-			track::Anchor::Oldest | track::Anchor::Time(_) | track::Anchor::Relative(0) => false,
-			track::Anchor::Relative(_) => true,
-		};
-		start || matches!(range.end, Some(track::Anchor::Relative(_)))
-	})
-}
-
 /// A subscription's single wire span: its start and exclusive end group, each open when `None`.
 type WireBounds = (Option<u64>, Option<u64>);
 
-/// The single wire span covers mixed absolute/live starts from group zero.
-fn wire_bounds(subscription: &track::Subscription) -> WireBounds {
-	let start = subscription.start().or_else(|| {
-		subscription
-			.ranges
-			.iter()
-			.any(|range| matches!(range.start, track::Anchor::Time(_)))
-			.then_some(0)
-	});
-	(start, subscription.end())
+/// The single wire span covering `subscription`'s ranges: mixed starts and ranges without one
+/// from group zero. A range with no start and a stated Min Age is the live join, which started
+/// at the group it `joined`: one that holds every start keeps the live join, so a reader
+/// adding a range the join already delivers widens nothing.
+fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireBounds {
+	let end = subscription.end();
+	if let Some(start) = subscription.start() {
+		return (Some(start), end);
+	}
+	let first = subscription
+		.ranges
+		.iter()
+		.filter(|range| !range.is_empty())
+		.filter_map(|range| range.start)
+		.min();
+	let covered =
+		subscription.delay.min.is_some() && joined.is_some_and(|joined| first.is_none_or(|first| first >= joined));
+	let start = match covered {
+		true => None,
+		false => first.map(|_| 0),
+	};
+	(start, end)
 }
 
 /// What a SUBSCRIBE asks for: the range it delivers, and the backfill covering a head that
@@ -14719,6 +14609,30 @@ mod object_id_tests {
 #[cfg(test)]
 mod filter_tests {
 	use super::*;
+
+	/// A live join with a range starting at or after the group it joined keeps its bounds, so
+	/// the copy sends no update widening it from group zero; a range below that group, or one
+	/// beside a range reaching back to the oldest group, widens the span to group zero.
+	#[test]
+	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
+		let live = |min: Option<Duration>, start: u64| {
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_min(min))
+				.with_ranges([
+					track::Range::default(),
+					track::Range {
+						start: Some(start),
+						end: None,
+					},
+				])
+		};
+		let joined = Some(10);
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 10), joined), (None, None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), joined), (None, None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 9), joined), (Some(0), None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), None), (Some(0), None));
+		assert_eq!(wire_bounds(&live(None, 19), joined), (Some(0), None));
+	}
 
 	/// The live join is the draft's own: the subscription starts after the live edge and a
 	/// `StartGroup=1` fill covers the current group's head, so every object arrives exactly
@@ -16627,13 +16541,12 @@ mod stitch_tests {
 		let mut next = h.stream().await;
 		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
 		// The refused group comes back as a gap, then the next group.
-		let Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) = ordered.poll_next_group(&kio::Waiter::noop())
-		else {
+		let Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) = ordered.poll_next_item(&kio::Waiter::noop()) else {
 			panic!("the refused group is not reported");
 		};
 		assert!(range.contains(&KEY), "{range:?}");
 		let group = match ordered.poll_next_group(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(Some(track::Item::Group(group)))) => group,
+			Poll::Ready(Ok(Some(group))) => group,
 			Poll::Ready(_) => panic!("no next group"),
 			Poll::Pending => panic!("the ordered reader still waits on the refused group"),
 		};
@@ -16917,10 +16830,10 @@ mod stitch_tests {
 		assert!(h.session.log.closes().is_empty());
 	}
 
-	/// A received group whose first object rewinds past the group before it is accepted: a
-	/// moq-transport peer may stamp arrival times, so its timed tracks are unchecked.
+	/// A received group whose first object rewinds past the group before it is refused: a
+	/// moq-transport frame's time is its Group ID, so its timed tracks are checked like any.
 	#[kio::test]
-	async fn a_received_rewind_is_accepted() {
+	async fn a_received_rewind_is_refused() {
 		use futures::FutureExt;
 
 		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(KEY, true, 0, &[b"rewound"])]);
@@ -16935,7 +16848,6 @@ mod stitch_tests {
 
 		let mut stream = read_draft18(&h.session).await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		// The stream was read to its end, so the group is already delivered.
 		let mut group = consumer
 			.recv_group()
 			.now_or_never()
@@ -16943,8 +16855,11 @@ mod stitch_tests {
 			.unwrap()
 			.unwrap();
 		assert_eq!(group.start, KEY);
-		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload.as_ref(), b"rewound");
+		// The group fails, but the track stays open for the groups after it.
+		assert!(matches!(
+			group.read_frame().now_or_never().unwrap(),
+			Err(Error::TimestampMismatch)
+		));
 		assert!(h.track.closed().now_or_never().is_none());
 	}
 
@@ -17306,7 +17221,7 @@ mod stitch_tests {
 					.await
 					.unwrap();
 				assert!(futures::FutureExt::now_or_never(reading.recv_group()).is_none());
-				let fill = dynamic.requested_groups().await.unwrap();
+				let fill = dynamic.requested_fill().await.unwrap();
 				let bounded = consumer.fetch_group(last, None);
 				let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 					fill: std::sync::Arc::new(fill),
@@ -17403,7 +17318,7 @@ mod stitch_tests {
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_drop(&waiter).is_pending());
 			assert!(reader.poll_recv_group(&waiter).is_pending());
-			let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 				panic!("{version}: missing history was not requested");
 			};
 			assert_eq!((fill.start().group, fill.end()), (0, 3));
@@ -17454,7 +17369,7 @@ mod stitch_tests {
 				.await
 				.unwrap();
 			assert!(futures::FutureExt::now_or_never(reading.recv_group()).is_none());
-			let fill = dynamic.requested_groups().await.unwrap();
+			let fill = dynamic.requested_fill().await.unwrap();
 			assert_eq!(
 				(fill.start().group, fill.end()),
 				(0, 7),
@@ -17654,7 +17569,7 @@ mod stitch_tests {
 			let dynamic = self.track.requests();
 			let mut fetch = Box::pin(self.track.consume().fetch_group(KEY, None));
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
-			let fill = dynamic.requested_groups().await.expect("group request");
+			let fill = dynamic.requested_fill().await.expect("group request");
 			let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 				fill: std::sync::Arc::new(fill),
 				timescale,
@@ -18383,7 +18298,7 @@ mod joining_fetch_tests {
 			(held.producer.clone().unwrap(), held.fill.clone())
 		};
 		let mut head = None;
-		open_fill_group(&mut track, &mut head, 4).unwrap();
+		assert!(open_fill_group(&mut track, &mut head, 4).unwrap());
 		let (key, next, producer) = head.unwrap();
 		*fill.write().ok().unwrap() = Fill::Ready {
 			key,
@@ -18779,7 +18694,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = Box::pin(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("group request");
+		let request = dynamic.requested_fill().await.expect("group request");
 		let outcome = request.joined();
 		let mut run = Box::pin(subscriber.clone().run_group_fetch(
 			Path::from_static("broadcast"),
@@ -19026,7 +18941,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("no group requested");
+		let request = dynamic.requested_fill().await.expect("no group requested");
 
 		subscriber
 			.clone()
@@ -19096,7 +19011,7 @@ mod joining_fetch_tests {
 					}
 				));
 				assert!(futures::poll!(fetch.as_mut()).is_pending());
-				let request = dynamic.requested_groups().await.expect("no group requested");
+				let request = dynamic.requested_fill().await.expect("no group requested");
 
 				subscriber
 					.clone()
@@ -19222,7 +19137,7 @@ mod joining_fetch_tests {
 			}
 		));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("no group requested");
+		let request = dynamic.requested_fill().await.expect("no group requested");
 
 		let serving = kio::clock::sim::spawn(subscriber.clone().run_group_fetch(
 			Path::from_static("broadcast"),

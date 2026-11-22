@@ -6,7 +6,7 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqGroupConsumer;
 use crate::consumer::MoqTrackConsumer;
-use crate::consumer::{MoqAnchor, MoqDelay, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
+use crate::consumer::{MoqDelay, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
 use crate::datagram::*;
 use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
 use crate::instance::MoqInstance;
@@ -1245,7 +1245,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 				max: Some(Duration::from_millis(25)),
 			},
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0 },
+				start: Some(MoqTimestamp::unscaled(0)),
 				end: None,
 			}]),
 			order: None,
@@ -1623,6 +1623,33 @@ async fn json_window_roundtrip() {
 	assert_eq!(next_window(&consumer).await, None);
 }
 
+/// A finished window outlives its handles: the broadcast keeps it, so a late subscriber still
+/// reads it until the broadcast closes.
+#[tokio::test]
+async fn json_window_finish_serves_a_late_subscriber() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	producer.push(r#"{"n":0}"#.into(), us(0)).unwrap();
+	producer.finish().unwrap();
+	// A binding's garbage collector may release both handles before the broadcast closes.
+	drop(producer);
+	drop(track);
+
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await).unwrap();
+	assert_eq!(
+		next_window(&consumer).await,
+		Some(MoqJsonWindowTimed {
+			event: window_push(0, 0),
+			timestamp: us(0),
+		})
+	);
+	assert_eq!(next_window(&consumer).await, None);
+}
+
 /// A cut closes the open group, so the next push opens a new group whose header restates the
 /// retained window, while a live reader sees only the new record.
 #[tokio::test]
@@ -1774,7 +1801,8 @@ fn json_window_refuses_an_untimed_track() {
 	assert!(track.demand().is_ok(), "a refused track stays open");
 }
 
-/// The window producer reports subscriber demand, and drops it once finished.
+/// The window producer reports subscriber demand. Its finish hands the track to the broadcast,
+/// so the demand ends when the broadcast does.
 #[tokio::test]
 async fn json_window_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -1800,7 +1828,11 @@ async fn json_window_demand() {
 
 	producer.finish().unwrap();
 	assert!(matches!(producer.demand(), Err(MoqError::Closed)));
-	assert!(matches!(demand.until_wanted().await, Err(MoqError::Closed)));
+	broadcast.close().unwrap();
+	let ended = kio::clock::timeout(TIMEOUT, demand.until_wanted())
+		.await
+		.expect("timed out waiting for the finished window");
+	assert!(matches!(ended, Err(MoqError::Closed)), "{ended:?}");
 }
 
 /// A demand handle waits without the producer, and fails once the track is gone.
@@ -5445,7 +5477,7 @@ async fn a_track_is_adopted_by_one_writer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("json".into(), Some(timed_info())).unwrap();
 	let config = || MoqJsonSnapshotConfig { deltas: false };
-	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_| {
+	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_, _| {
 		assert!(matches!(
 			MoqJsonSnapshotProducer::new(&broadcast, &track, config()),
 			Err(MoqError::Closed)
@@ -7118,7 +7150,7 @@ async fn server_new_validates_the_config() {
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
-	assert_eq!(defaults.delay.min, Some(Duration::ZERO));
+	assert_eq!(defaults.delay.min, None);
 	assert_eq!(defaults.delay.max, Some(Duration::ZERO));
 }
 
@@ -7516,6 +7548,49 @@ async fn server_cancel_during_listen_releases_the_port() {
 	server.cancel();
 	std::net::UdpSocket::bind(addr).expect("cancel should release the socket before it returns");
 	drop(listen);
+}
+
+/// A listen dropped before it reports its address leaves the server idle, not stranded listening:
+/// the next listen waits out the dropped one's socket and binds the same address.
+#[tokio::test]
+async fn server_listen_dropped_mid_start_rolls_back() {
+	let addr = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some(addr.to_string()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+
+	// Hold the FFI runtime's one background driver, so the accept loop cannot report its address
+	// before the listen is dropped.
+	let (entered, held) = std::sync::mpsc::channel();
+	let (release, released) = std::sync::mpsc::channel::<()>();
+	let _blocker = crate::ffi::spawn(async move {
+		entered.send(()).unwrap();
+		let _ = released.recv();
+	});
+	held.recv().unwrap();
+
+	let waker = std::task::Waker::noop();
+	let mut listen = Box::pin(server.listen());
+	assert!(
+		listen
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(waker))
+			.is_pending()
+	);
+	drop(listen);
+	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Bind { .. })));
+	drop(release);
+
+	let rebound = kio::clock::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("the dropped listen should leave the server idle");
+	assert_eq!(rebound, addr.to_string());
+	server.cancel();
+	std::net::UdpSocket::bind(addr).expect("cancel should release the socket before it returns");
 }
 
 /// A cancelled server lets go of its configured origins, though its handle lives on.
@@ -9303,7 +9378,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 			max: Some(Duration::from_secs(10)),
 		},
 		ranges: Some(vec![MoqRange {
-			start: MoqAnchor::Relative { groups: 2 },
+			start: Some(MoqTimestamp::unscaled(0)),
 			end: None,
 		}]),
 		order: Some(MoqOrder::Ascending),
@@ -9313,7 +9388,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	assert_eq!(
 		converted.ranges,
 		vec![moq_net::track::Range {
-			start: moq_net::track::Anchor::Relative(2),
+			start: Some(0),
 			end: None,
 		}]
 	);
@@ -9329,6 +9404,45 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 		starts.push(group.start());
 	}
 	assert_eq!(starts, vec![0, 1_000, 2_000]);
+}
+
+/// A range with no start is placed by the delay: a stated zero `min` joins at the latest group,
+/// and an unstated one reaches back as far as `max` allows.
+#[tokio::test]
+async fn delay_min_places_a_range_with_no_start() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
+	for timestamp_us in [0, 1_000, 2_000] {
+		let group = track.append_group(us(timestamp_us)).unwrap();
+		group
+			.write_frame(MoqFrame {
+				payload: b"x".to_vec(),
+				timestamp: us(timestamp_us),
+			})
+			.unwrap();
+		group.finish().unwrap();
+	}
+
+	let first = async |min| {
+		let consumer = track
+			.consume(Some(MoqSubscription {
+				delay: MoqDelay { min, max: None },
+				ranges: Some(vec![MoqRange { start: None, end: None }]),
+				order: Some(MoqOrder::Ascending),
+				..moq_subscription_defaults()
+			}))
+			.unwrap();
+		kio::clock::timeout(TIMEOUT, consumer.recv_group())
+			.await
+			.expect("timed out waiting for a cached group")
+			.unwrap()
+			.expect("expected a group")
+			.start()
+	};
+	assert_eq!(first(Some(Duration::ZERO)).await, 2_000, "a live join");
+	assert_eq!(first(None).await, 0, "everything still fresh");
 }
 
 /// Wait until `session` grants `want`, following its changes.
@@ -9371,8 +9485,8 @@ async fn auth_reads_the_peer_grant() {
 		.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
-	await_grant(&client, grant(&["**"], &["**"])).await;
-	await_grant(&accepted, grant(&["**"], &["**"])).await;
+	await_grant(&client, grant(&[""], &[""])).await;
+	await_grant(&accepted, grant(&[""], &[""])).await;
 	assert!(accepted.tokens().is_none(), "an accepted session presents no tokens");
 
 	// The live session was dialed without a credential, so this one rides AUTH.
@@ -9384,7 +9498,7 @@ async fn auth_reads_the_peer_grant() {
 	assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
 	assert_eq!(
 		client.grants().grant(),
-		Some(grant(&["**"], &["**"])),
+		Some(grant(&[""], &[""])),
 		"a refusal leaves the union"
 	);
 
@@ -9423,9 +9537,9 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 	let addr = listener.tcp_local_addr().unwrap();
 
-	let publish = |pattern: &str| {
+	let publish = |prefix: &str| {
 		let mut grant = moq_net::auth::Grant::default();
-		grant.publish = pattern.parse::<moq_net::Pattern>().unwrap().into();
+		grant.publish = prefix.parse::<moq_net::Prefix>().unwrap().into();
 		grant
 	};
 	let serving = tokio::spawn(async move {
@@ -9435,8 +9549,8 @@ async fn auth_tokens_join_and_leave_the_union() {
 		let mut issued = Vec::new();
 		while let Some(request) = requests.next().await {
 			match request.token().as_ref() {
-				b"" => issued.push(request.accept(publish("setup/**"))),
-				b"extra" => issued.push(request.accept(publish("extra/**"))),
+				b"" => issued.push(request.accept(publish("setup"))),
+				b"extra" => issued.push(request.accept(publish("extra"))),
 				_ => request.reject(moq_net::SessionError::Unauthorized, "unknown token"),
 			}
 		}
@@ -9454,7 +9568,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.await
 		.expect("connect timed out")
 		.unwrap();
-	await_grant(&session, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup"], &[])).await;
 	// A second consumer watches on its own and starts from the grant it was made with.
 	let watcher = session.grants();
 	// The session was dialed without a credential, so the empty set is already answered.
@@ -9463,13 +9577,13 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let tokens = session.tokens().unwrap();
 	tokens.set(vec!["extra".into()]).unwrap();
 	answered(&session).await.expect("the extra token was refused");
-	// Patterns are kept sorted.
-	await_grant(&session, grant(&["extra/**", "setup/**"], &[])).await;
+	// Prefixes are kept sorted.
+	await_grant(&session, grant(&["extra", "setup"], &[])).await;
 	let seen = kio::clock::timeout(TIMEOUT, watcher.changed())
 		.await
 		.expect("the second consumer sees the change")
 		.unwrap();
-	assert_eq!(seen, Some(grant(&["extra/**", "setup/**"], &[])));
+	assert_eq!(seen, Some(grant(&["extra", "setup"], &[])));
 
 	// A refused replacement still withdraws the token it replaces.
 	tokens.set(vec!["bogus".into()]).unwrap();
@@ -9479,7 +9593,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		crate::error::MoqErrorScope::Session,
 		MoqProtocolKind::Unauthorized,
 	);
-	await_grant(&session, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup"], &[])).await;
 
 	session.cancel(0);
 	kio::clock::timeout(TIMEOUT, serving)
@@ -9693,16 +9807,17 @@ async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
 		.unwrap();
 }
 
-/// A time anchor starts at the group containing it, and a scale-less track compares it with
-/// bare starts. Its time is unscaled, in the track's timescale: a scaled one is refused rather
-/// than read in units the subscription can't check.
+/// A time start is the group containing it and a time end includes the groups starting at or
+/// before it, so a former exclusive end at `t` is `Time(t - 1)`. A scale-less track
+/// compares a time with bare starts. Its time is unscaled, in the track's timescale: a scaled
+/// one is refused rather than read in units the subscription can't check.
 #[tokio::test]
-async fn time_anchors_start_at_the_containing_group() {
+async fn range_times_select_the_containing_groups() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast
 		.publish_track("events".into(), Some(unlimited_info()))
 		.unwrap();
-	for timestamp_us in [0, 1_000, 2_000] {
+	for timestamp_us in [0, 1_000, 2_000, 3_000] {
 		// Each group starts at its frame's time, in the track's microseconds.
 		let group = track.create_group(timestamp_us).unwrap();
 		group
@@ -9714,39 +9829,78 @@ async fn time_anchors_start_at_the_containing_group() {
 		group.finish().unwrap();
 	}
 
-	let since = |timestamp_us| MoqSubscription {
+	let time = |timestamp_us| Some(MoqTimestamp::unscaled(timestamp_us));
+	let subscription = |ranges| MoqSubscription {
 		priority: 0,
 		delay: MoqDelay {
 			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(10)),
 		},
-		ranges: Some(vec![MoqRange {
-			start: MoqAnchor::Time {
-				timestamp: MoqTimestamp::unscaled(timestamp_us),
-			},
-			end: None,
-		}]),
+		ranges,
 		order: Some(MoqOrder::Ascending),
 	};
+	let between = |start, end: Option<u64>| {
+		subscription(Some(vec![MoqRange {
+			start: time(start),
+			end: end.and_then(time),
+		}]))
+	};
 	let scaled = MoqRange {
-		start: MoqAnchor::Time { timestamp: us(1_500) },
+		start: Some(us(1_500)),
 		end: None,
 	};
 	assert!(matches!(
 		scaled.resolve(),
 		Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch
 	));
-	let consumer = track.consume(Some(since(1_500))).unwrap();
-	let mut starts = Vec::new();
-	for _ in 0..2 {
-		let group = kio::clock::timeout(TIMEOUT, consumer.recv_group())
+	let scaled_end = MoqRange {
+		start: None,
+		end: Some(us(1_500)),
+	};
+	assert!(matches!(
+		scaled_end.resolve(),
+		Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch
+	));
+	// No start is the range a subscription's delay places.
+	let joined = MoqRange { start: None, end: None };
+	assert_eq!(joined.resolve().unwrap(), moq_net::track::Range::default());
+
+	// Every group a read hands out before it ends, by start. Start order ends at the first
+	// group past the range, where arrival order waits for a straggler until it ages out.
+	let starts = async |subscription| {
+		let consumer = track.consume(Some(subscription)).unwrap();
+		let mut starts = Vec::new();
+		while let Some(group) = kio::clock::timeout(TIMEOUT, consumer.next_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()
-			.expect("expected a group");
-		starts.push(group.start());
-	}
-	assert_eq!(starts, vec![1_000, 2_000]);
+		{
+			starts.push(group.start());
+		}
+		starts
+	};
+	assert_eq!(starts(between(1_500, Some(2_000))).await, vec![1_000, 2_000]);
+	// What a former exclusive end at 2000 becomes: every group starting before 2000.
+	let migrated = MoqRange {
+		start: time(1_500),
+		end: time(1_999),
+	};
+	assert_eq!(
+		migrated.resolve().unwrap(),
+		moq_net::track::Range {
+			start: Some(1_500),
+			end: Some(1_999),
+		}
+	);
+	// An exclusive end at 0 asked for nothing: an empty list, unlike the omitted default.
+	assert_eq!(starts(subscription(Some(Vec::new()))).await, Vec::<u64>::new());
+
+	let open = track.consume(Some(subscription(None))).unwrap();
+	kio::clock::timeout(TIMEOUT, open.next_group())
+		.await
+		.expect("timed out waiting for a cached group")
+		.unwrap()
+		.expect("omitted ranges read the track");
 
 	let untimed = broadcast
 		.publish_track(
@@ -9758,7 +9912,7 @@ async fn time_anchors_start_at_the_containing_group() {
 		)
 		.unwrap();
 	let consumer = untimed.consume(None).unwrap();
-	consumer.update(since(0)).unwrap();
+	consumer.update(between(0, None)).unwrap();
 }
 
 // Frame-only controls keep checking payloads independently of the breaks between frames.
@@ -9938,10 +10092,7 @@ async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 		.unwrap();
 	let consumer = track
 		.consume(Some(MoqSubscription {
-			delay: MoqDelay {
-				min: Some(Duration::ZERO),
-				max: None,
-			},
+			delay: MoqDelay { min: None, max: None },
 			..moq_subscription_defaults()
 		}))
 		.unwrap();
@@ -10010,10 +10161,7 @@ async fn raw_next_group_wakes_read_frame_after_unlocking() {
 	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
 	let consumer = track
 		.consume(Some(MoqSubscription {
-			delay: MoqDelay {
-				min: Some(Duration::ZERO),
-				max: None,
-			},
+			delay: MoqDelay { min: None, max: None },
 			..moq_subscription_defaults()
 		}))
 		.unwrap();
@@ -10052,10 +10200,7 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 	// No age limit, so a group nobody has read yet is never skipped for a newer one.
 	let consumer = track
 		.consume(Some(MoqSubscription {
-			delay: MoqDelay {
-				min: Some(Duration::ZERO),
-				max: None,
-			},
+			delay: MoqDelay { min: None, max: None },
 			..moq_subscription_defaults()
 		}))
 		.unwrap();

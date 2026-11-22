@@ -833,13 +833,14 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				let subscribe = Self::subscribe(&broadcast, &name, subscription.clone());
+				// Subscribed with the raw preferences from the start: an update that only
+				// states the minimum delay doesn't place a range that already resolved.
+				let subscribe = Self::subscribe(&broadcast, &name, Self::raw_subscription(subscription));
 				let Some(track) = Self::until_closed(&mut close, subscribe).await? else {
 					return Ok(());
 				};
 				let track = track.ordered();
 				let control = track.control();
-				Self::update_raw(&control, Self::raw_subscription(subscription))?;
 				// Go live under the lock, so no later update lands before the pending one.
 				if let Some(entry) = State::lock().consume.raw_task.get_mut(id) {
 					let pending = std::mem::replace(&mut entry.control, RawControl::Live(control.clone()));
@@ -862,15 +863,12 @@ impl Consume {
 		Ok(id)
 	}
 
-	/// A raw reader's preferences, which join at the latest group unless a range names
-	/// a floor of its own.
+	/// A raw reader's preferences, which join live unless a range names a start of its own:
+	/// at the stated minimum delay, or the latest group without one. Only a range with no
+	/// start reads the minimum, so stating it changes nothing else.
 	fn raw_subscription(subscription: Option<moq_net::track::Subscription>) -> moq_net::track::Subscription {
 		let mut subscription = subscription.unwrap_or_default();
-		for range in &mut subscription.ranges {
-			if range.start == moq_net::track::Range::oldest().start {
-				range.start = moq_net::track::Range::live().start;
-			}
-		}
+		subscription.delay.min.get_or_insert(std::time::Duration::ZERO);
 		subscription
 	}
 
@@ -899,14 +897,11 @@ impl Consume {
 				if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
 					return Poll::Ready(Ok(RawStep::Stop));
 				}
-				loop {
-					match ready!(track.poll_next_group(waiter))? {
-						Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(RawStep::Item(group))),
-						// The C API reports no gaps.
-						Some(moq_net::track::Item::Gap { .. }) => continue,
-						None => return Poll::Ready(Ok(RawStep::End)),
-					}
-				}
+				// The C API reports no gaps.
+				Poll::Ready(Ok(match ready!(track.poll_next_group(waiter))? {
+					Some(group) => RawStep::Item(group),
+					None => RawStep::End,
+				}))
 			})
 			.await?
 			{
@@ -1660,8 +1655,8 @@ mod tests {
 			}
 		}
 
-		fn write(&mut self, start: u64, micros: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { start }).unwrap();
+		fn write(&mut self, micros: u64) {
+			let mut group = self.track.create_group(moq_net::group::Info { start: micros }).unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),
@@ -1671,18 +1666,21 @@ mod tests {
 			group.finish().unwrap();
 		}
 
+		/// The next frame's timestamp, past any gap between groups.
 		async fn frame(&self) -> Option<u128> {
-			let code = self.reads.pop().await.unwrap();
-			assert!(code >= 0, "media consumer failed: {code}");
-			if code == 0 {
-				return None;
+			loop {
+				let code = self.reads.pop().await.unwrap();
+				assert!(code >= 0, "media consumer failed: {code}");
+				if code == 0 {
+					return None;
+				}
+				let mut state = State::lock();
+				match state.consume.reads.remove(Id::try_from(code).unwrap()).unwrap() {
+					Read::Frame(frame) => return Some(frame.item.timestamp.as_micros().unwrap()),
+					Read::Gap(_) => continue,
+					Read::End(_) => panic!("expected a frame"),
+				}
 			}
-			let mut state = State::lock();
-			let read = state.consume.reads.remove(Id::try_from(code).unwrap()).unwrap();
-			let Read::Frame(frame) = read else {
-				panic!("expected a frame");
-			};
-			Some(frame.item.timestamp.as_micros().unwrap())
 		}
 
 		async fn cancel(self) {
@@ -1721,7 +1719,9 @@ mod tests {
 		}
 	}
 
-	/// Newest-first delivery must leave time for history covering min plus warmup.
+	/// A newest-first backlog delivered before the first read starts where min plus warmup reach
+	/// back to: the warmup keeps the history it needs. A local track owes nothing, so the reader
+	/// waits for no group that has not landed (a received copy's owed groups are moq-mux's tests).
 	#[tokio::test(start_paused = true)]
 	async fn media_warmup_reaches_history() {
 		for warmup in [None, Some(Duration::ZERO), Some(Duration::from_millis(300))] {
@@ -1730,14 +1730,12 @@ mod tests {
 				max: Some(Duration::from_millis(200)),
 			};
 			let mut consumer = MediaConsumer::new(warmup, delay).await;
-			consumer.write(5, 5_000_000);
-			consumer.write(4, 4_700_000);
-			let first = kio::clock::timeout(Duration::from_millis(50), consumer.frame()).await;
-			let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
-			assert_eq!(first.is_err(), warming, "warmup={warmup:?}");
-			consumer.write(3, 4_400_000);
+			consumer.write(5_000_000);
+			consumer.write(4_700_000);
+			consumer.write(4_400_000);
 			drop(consumer.track.clone().finish().unwrap());
-			let mut stamps: Vec<_> = first.ok().flatten().into_iter().collect();
+			let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
+			let mut stamps = Vec::new();
 			while let Some(stamp) = consumer.frame().await {
 				stamps.push(stamp);
 			}

@@ -7,6 +7,7 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { statsOf } from "../connection/stats.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
+import { Counts } from "../cover.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
@@ -39,9 +40,8 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
-import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
-import { floorAt, type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
@@ -49,7 +49,7 @@ import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
 import { max, min } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
-import type { Resolved } from "../window.ts";
+import { isEmpty, type Resolved, rangeKey } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
@@ -57,12 +57,16 @@ import { Answer } from "./answer.ts";
 import { Datagram as DatagramMessage, type Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
-import { Group as GroupMessage, passedOver } from "./group.ts";
+import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
+	type Applied,
 	encodeSubscribeResponse,
 	LiveRanges,
+	positionFrames,
+	rangeBounds,
 	rangesOf,
+	requestedRange,
 	requestedRanges,
 	type Subscribe,
 	SubscribeDrop,
@@ -73,7 +77,7 @@ import {
 	SubscribeStart,
 	SubscribeStarted,
 	SubscribeUpdate,
-	spanOf,
+	spanBetween,
 	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
@@ -135,52 +139,47 @@ export function frameHeader(
 
 /**
  * Lite-07 GROUP_END, after a finished group's last frame: a zero `Payload Length`, where a frame
- * would start, then the group's exclusive `end` in the track's timescale.
+ * would start, then the group's exclusive `end` as a delta from `base`: the highest timestamp the
+ * stream carried, or the group's start when it carried none. A finished group's end is at or
+ * above both, so the delta is never negative.
  */
-function groupEnd(version: StreamVersion, end: bigint): Uint8Array {
-	return concat([encodeVarint(0, version), encodeVarint(end, version)]);
+function groupEnd(version: StreamVersion, end: bigint, base: bigint): Uint8Array {
+	return concat([encodeVarint(0, version), encodeVarint(end - base, version)]);
 }
 
 /** How a lite hop stamps a track's frames and datagrams. */
 interface Stamp {
 	/**
-	 * The wire timescale TRACK_INFO declared (see `wireTimescale`), or undefined on a scale-less
-	 * lite-07 track, whose timestamps go out as bare numbers: a frame's its group's start.
+	 * The wire timescale TRACK_INFO declared (see `wireTimescale`), or undefined for a datagram on a
+	 * scale-less lite-07 track, whose timestamp goes out as a bare number.
 	 */
 	timescale?: Timescale;
-	/**
-	 * The timed track whose frames' own timestamps go out, at its timescale, which the wire's
-	 * equals. Lite-05/06 cannot encode a scale-less track, so a scale-less one carries its send
-	 * time instead.
-	 */
-	timed?: { timescale?: Timescale | null };
 }
 
 /**
- * How `version` stamps a track with `info`, or undefined when it carries no timestamps: before
- * lite-05. Lite-05/06 declare milliseconds for a scale-less track, and lite-07 stamps it bare.
+ * How `version` stamps a track with `info`, or undefined when its frames carry no timestamps:
+ * before lite-05, and on a scale-less lite-07 track, whose frame's time is its group's start (its
+ * datagrams go out bare). Lite-05/06 declare milliseconds for a scale-less track, whose frames
+ * carry their group's start.
  */
 function stamping(version: Version, info: { timescale?: Timescale | null }): Stamp | undefined {
-	const timescale = info.timescale ?? undefined;
-	const wire = wireTimescale(version, timescale);
-	if (wire === undefined) return hasLengthFirst(version) ? {} : undefined;
-	return timescale === undefined ? { timescale: wire } : { timescale: wire, timed: info };
+	const wire = wireTimescale(version, info.timescale);
+	if (wire === undefined) return undefined;
+	return { timescale: wire };
 }
 
 /**
- * A frame or datagram's `timestamp` as its raw wire value: bare on a scale-less lite-07 track, or
- * its send time when a lite-05/06 track goes out scale-less.
+ * A frame or datagram's `timestamp` as its raw wire value. A scale-less track's is its group's
+ * start, or its datagram's sequence, which goes out verbatim on every version: nothing is stamped
+ * with a clock, so a frame carries the same timestamp through every hop and fetch. Mirrors the
+ * Rust `Stamp::wire`.
  */
 function wireTime(timestamp: Timestamp, stamp: Stamp): bigint {
-	if (stamp.timescale === undefined) return bareTime(timestamp);
-	return BigInt(stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale));
-}
-
-/** A scale-less lite-07 datagram's timestamp as it goes out: the bare value its producer gave. */
-function bareTime(timestamp: Timestamp): bigint {
 	const key = timestamp.key;
-	if (key === undefined) throw new TimestampMismatch();
-	return key;
+	if (key !== undefined) return key;
+	// A timed timestamp on a track declared scale-less: the model never writes one.
+	if (stamp.timescale === undefined) throw new TimestampMismatch();
+	return BigInt(floorAt(timestamp, stamp.timescale));
 }
 
 /**
@@ -253,8 +252,11 @@ interface RunGroup {
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
 	end?: number;
 
-	/** Lite-07: the previous group's start the GROUP names, undefined when unknown. */
-	previous?: bigint;
+	/**
+	 * Lite-07: called as the stream buffers GROUP_END with the group's end, so the starts inside
+	 * the group's span are accounted for.
+	 */
+	ended?: (end: bigint) => void;
 }
 
 /**
@@ -273,6 +275,10 @@ type FrameBounds = {
 	endGroup?: bigint;
 	/** Last frame (inclusive) to send within {@link endGroup}; every other group runs to its end. */
 	endFrame?: number;
+	/** Lite-07: the first frame of each group a range starts partway through (see {@link positionFrames}). */
+	starts: ReadonlyMap<bigint, number>;
+	/** Lite-07: {@link starts} as each decoded update leaves them, until the run applies that update. */
+	startsAfter: WeakMap<SubscribeUpdate, ReadonlyMap<bigint, number>>;
 };
 
 /**
@@ -288,7 +294,7 @@ type FrameBounds = {
  */
 function frameRange(bounds: FrameBounds, key: bigint): { start: number; end?: number } {
 	return {
-		start: bounds.startGroup === key ? bounds.startFrame : 0,
+		start: bounds.starts.get(key) ?? (bounds.startGroup === key ? bounds.startFrame : 0),
 		end: bounds.endGroup === key ? bounds.endFrame : undefined,
 	};
 }
@@ -317,9 +323,9 @@ type ServeFetch = Omit<ServeGroup, "sub"> & {
 type Control =
 	/**
 	 * The peer re-stated the subscription: priority, ordering, latency, and its ranges, with the
-	 * Range ID of each on lite-07.
+	 * Range IDs it retired and added on lite-07.
 	 */
-	| { kind: "update"; update: SubscribeUpdate; ids: bigint[] }
+	| { kind: "update"; update: SubscribeUpdate; applied: Applied }
 	/** The peer FIN'd, or our own half went away. Either way there is nobody left to serve. */
 	| { kind: "done" }
 	/** The stream failed; the subscription goes down with it. */
@@ -332,11 +338,8 @@ type SubscriptionControlOptions = {
 	version: Version;
 	/** The SUBSCRIBE's ranges, which each lite-07 update edits. */
 	live: LiveRanges;
-	/**
-	 * Apply an update, with every live range by Range ID on lite-07: the same array as the last
-	 * update's while it left every range live.
-	 */
-	apply: (update: SubscribeUpdate, live: readonly { id: bigint; range: WireRange }[]) => void;
+	/** Apply an update, with the ranges it retired and added by Range ID on lite-07. */
+	apply: (update: SubscribeUpdate, applied: Applied) => void;
 };
 
 /**
@@ -355,10 +358,9 @@ type SubscriptionControlOptions = {
 class SubscriptionControls {
 	#writer: Writer;
 	#live: LiveRanges;
-	#update?: { update: SubscribeUpdate; ids: bigint[] };
-	// The live ranges last applied and their Range IDs, so an update leaving every range live hands
-	// the serving loop the same ids.
-	#applied?: { live: readonly { id: bigint; range: WireRange }[]; ids: bigint[] };
+	// The latest update the loop has yet to take, with every edit since the last one it took: a
+	// range added then retired before then was never live, so it is in neither.
+	#update?: { update: SubscribeUpdate; retired: bigint[]; added: Map<bigint, WireRange> };
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
 	#ended: Promise<Error | null>;
@@ -389,18 +391,28 @@ class SubscriptionControls {
 		const update = this.#update;
 		this.#update = undefined;
 		// An update decoded before the stream ended still applies before the sticky end.
-		if (update) return { kind: "update", ...update };
+		if (update)
+			return {
+				kind: "update",
+				update: update.update,
+				applied: { retired: update.retired, added: [...update.added] },
+			};
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
 	}
 
 	/**
-	 * Where each live Range ID sits among the track model's ranges. The decoder applies each
-	 * update to the model as it decodes it, ahead of {@link take}, so this rather than the
-	 * last control taken is what indexes the model.
+	 * Where each live Range ID sits among the track model's ranges, which hold them in Range ID
+	 * order. The decoder applies each update to the model as it decodes it, ahead of {@link take},
+	 * so this rather than the last control taken is what indexes the model. Costs every range.
 	 */
 	positions(): Map<bigint, number> {
 		return new Map(this.#live.ids().map((id, index) => [id, index]));
+	}
+
+	/** Whether the track model holds Range ID `id`, as {@link positions} would index it. */
+	holds(id: bigint): boolean {
+		return this.#live.get(id) !== undefined;
 	}
 
 	/** Whether {@link take} has a control to answer with now. */
@@ -455,11 +467,18 @@ class SubscriptionControls {
 				const update = await SubscribeUpdate.decodeMaybe(reader, version);
 				if (!update) break;
 				// Each lite-07 update edits the live ranges, which only the stream's history names.
-				const ranges = live.apply(update);
-				apply(update, ranges);
-				if (this.#applied?.live !== ranges) this.#applied = { live: ranges, ids: ranges.map(({ id }) => id) };
-				// Resolved in full, so the latest one replaces any the loop has yet to take.
-				this.#update = { update, ids: this.#applied.ids };
+				const edit = live.apply(update);
+				apply(update, edit);
+				// The latest one replaces any the loop has yet to take, its edit folded in.
+				const pending = this.#update ?? {
+					update,
+					retired: [] as bigint[],
+					added: new Map<bigint, WireRange>(),
+				};
+				pending.update = update;
+				for (const id of edit.retired) if (!pending.added.delete(id)) pending.retired.push(id);
+				for (const [id, range] of edit.added) pending.added.set(id, range);
+				this.#update = pending;
 				this.#changed.update((value) => value + 1);
 			}
 		} catch (err: unknown) {
@@ -471,19 +490,132 @@ class SubscriptionControls {
 	}
 }
 
+/**
+ * A subscription's requested ranges by Range ID, as the model holds them, with the bounds the read
+ * cursor takes from them counted, so an edit moves them in what it costs. Mirrors the Rust
+ * `Requested`.
+ */
+class Requested {
+	#ranges = new Map<bigint, WireRange>();
+	// The groups the ranges start at, and how many count back from the latest group instead.
+	#starts = new Counts<bigint>();
+	#unnamed = 0;
+	// The exclusive groups the ranges end before, and how many have no such end.
+	#ends = new Counts<bigint>();
+	#unbounded = 0;
+
+	/** The ranges a SUBSCRIBE carried, by position. */
+	constructor(ranges: readonly WireRange[]) {
+		for (const [id, range] of ranges.entries()) this.insert(BigInt(id), range);
+	}
+
+	get(id: bigint): WireRange | undefined {
+		return this.#ranges.get(id);
+	}
+
+	/** Every live range. */
+	values(): IterableIterator<WireRange> {
+		return this.#ranges.values();
+	}
+
+	/** Hold `range` as Range ID `id`, replacing any it held. */
+	insert(id: bigint, range: WireRange): void {
+		this.remove(id);
+		this.#count(range, true);
+		this.#ranges.set(id, range);
+	}
+
+	remove(id: bigint): void {
+		const range = this.#ranges.get(id);
+		if (range === undefined) return;
+		this.#count(range, false);
+		this.#ranges.delete(id);
+	}
+
+	#count(range: WireRange, add: boolean): void {
+		const [from, to] = rangeBounds(range);
+		if (from === undefined) this.#unnamed += add ? 1 : -1;
+		else if (add) this.#starts.add(from);
+		else this.#starts.remove(from);
+		if (to === undefined) this.#unbounded += add ? 1 : -1;
+		else if (add) this.#ends.add(to);
+		else this.#ends.remove(to);
+	}
+
+	/** The lowest group the ranges start at, undefined unless each names its start; see {@link spanOf}. */
+	start(): bigint | undefined {
+		return this.#unnamed > 0 ? undefined : this.#starts.first();
+	}
+
+	/** The exclusive end past every range, undefined when one has no such end; see {@link spanOf}. */
+	end(): bigint | undefined {
+		return this.#unbounded > 0 ? undefined : this.#ends.last();
+	}
+}
+
+/**
+ * Lite-07 ranges whose time starts, live joins, or time ends may still resolve, by Range ID, each
+ * due once the latest group reaches the lowest start that could resolve it. Mirrors the Rust
+ * `Unpinned`.
+ */
+class Unpinned {
+	#due = new Map<bigint, bigint>();
+	#byDue = new Map<bigint, Set<bigint>>();
+	#dues = new Counts<bigint>();
+
+	/** Hold range `id` until `due`, or let it go for undefined. */
+	insert(id: bigint, due: bigint | undefined): void {
+		this.remove(id);
+		if (due === undefined) return;
+		this.#due.set(id, due);
+		let ids = this.#byDue.get(due);
+		if (!ids) {
+			ids = new Set();
+			this.#byDue.set(due, ids);
+			this.#dues.add(due);
+		}
+		ids.add(id);
+	}
+
+	remove(id: bigint): void {
+		const due = this.#due.get(id);
+		if (due === undefined) return;
+		this.#due.delete(id);
+		const ids = this.#byDue.get(due);
+		ids?.delete(id);
+		if (ids?.size === 0) {
+			this.#byDue.delete(due);
+			this.#dues.remove(due);
+		}
+	}
+
+	/** The ranges due once the latest group starts at `latest`. */
+	due(latest: bigint): bigint[] {
+		return this.#dues.through(latest).flatMap((due) => [...(this.#byDue.get(due) ?? [])]);
+	}
+}
+
+/**
+ * The lowest latest group start that could resolve `range`'s start, a time or a live join, unless
+ * `started`, then its time end. Undefined once neither can move. Mirrors the Rust `due`.
+ */
+function due(range: WireRange, started: boolean): bigint | undefined {
+	if (isEmpty(requestedRange(range))) return undefined;
+	if (!started && range.start?.absolute === undefined) return 0n;
+	if (range.end?.time !== undefined) return range.end.time + 1n;
+	return undefined;
+}
+
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
-// an update that leaves it live never counts its relative anchors back from a newer latest group,
-// nor looks a time start up again in newer holdings. A start reaching back to the oldest group
-// held stays as it was, since an absolute start would turn it into a floor the subscriber never
-// named.
+// an update that leaves it live never looks a time start up again in newer holdings, nor places a
+// live join again under a newer Min Age. A start reaching back to the oldest group held stays as
+// it was, since an absolute start would turn it into a floor the subscriber never named.
 function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	if (!resolved) return asked;
 	const range = { ...asked };
-	if (resolved.floored && (range.start?.relative !== undefined || range.start?.time !== undefined))
-		range.start = { absolute: resolved.start };
+	if (resolved.floored && range.start?.absolute === undefined) range.start = { absolute: resolved.start };
 	// An end resolves once it settles; until then it is reported open.
-	if ((range.end?.relative !== undefined || range.end?.time !== undefined) && resolved.end !== undefined)
-		range.end = { absolute: resolved.end };
+	if (range.end?.time !== undefined && resolved.end !== undefined) range.end = { absolute: resolved.end };
 	return range;
 }
 
@@ -997,7 +1129,11 @@ export class Publisher {
 			startFrame: msg.startFrame,
 			endGroup: msg.endGroup,
 			endFrame: msg.endFrame,
+			starts: hasRanges(this.version) ? positionFrames(msg.ranges ?? []) : new Map(),
+			startsAfter: new WeakMap(),
 		};
+		// A group is served whole from the frame asked: the reader fetches what its copy lacks.
+		hooks.wholeGroups(track, (key) => frameRange(bounds, key).start);
 		let legacy: datagram.Consumer | undefined;
 		const legacyPriority = new Signal(msg.priority);
 		let controls: SubscriptionControls | undefined;
@@ -1084,27 +1220,59 @@ export class Publisher {
 				}
 			}
 
-			// The SUBSCRIBE's ranges, and the Range ID of each range the model holds, in its order.
+			// The SUBSCRIBE's ranges, whose positions are their Range IDs, which key them in the model.
 			const asked = rangesOf(msg);
-			// Where each Range ID sits among the model's ranges, as of the last update applied.
-			let positions = new Map(asked.map((_, index) => [BigInt(index), index]));
-			// The live ranges the last update applied, what they resolved to, and the terms beside
-			// them, so an update leaving every range live costs nothing for them.
-			let applied:
-				| {
-						live: readonly { id: bigint; range: WireRange }[];
-						span: ReturnType<typeof spanOf>;
-						model: track.Subscription;
-						terms: Pick<SubscribeUpdate, "priority" | "order" | "maxDelay" | "minDelay">;
-				  }
-				| undefined;
+			// The ranges as the model holds them, pinned, by Range ID, with the read cursor's bounds.
+			const requested = new Requested(asked);
+			// Lite-07: the Range IDs of the live ranges that start partway through a group, so an
+			// edit recomputes the frame starts only while one is live.
+			const positions = new Set<bigint>();
+			for (const [id, range] of asked.entries())
+				if (range.start?.absolute !== undefined && range.start.frame) positions.add(BigInt(id));
+			// Lite-07: the ranges whose starts or time ends may still resolve.
+			const unpinned = new Unpinned();
+			if (hasRanges(this.version))
+				for (const [id, range] of asked.entries()) unpinned.insert(BigInt(id), due(range, false));
+			// Each live range due once the latest group reached where it may resolve, with its start and
+			// end replaced by the groups they resolved to: a range resolves once, so an update that
+			// leaves it live never places a live join again under a newer Min Age, nor looks a time
+			// start up again in newer holdings, here or on a relay's copies. Only the ranges still
+			// waiting are asked, and each is let go once its anchors settle, so this costs those ranges
+			// rather than every range. Mirrors the Rust `TrackRun::pin`.
+			const pinDue = (): [bigint, WireRange][] => {
+				const latest = hooks.latestKey(track);
+				if (latest === undefined) return [];
+				const pins: [bigint, WireRange][] = [];
+				const asking: [bigint, WireRange][] = [];
+				for (const id of unpinned.due(latest)) {
+					const range = requested.get(id);
+					if (range === undefined) unpinned.remove(id);
+					else asking.push([id, range]);
+				}
+				const resolution = hooks.servingResolvedKeys(
+					track,
+					asking.map(([id]) => id),
+				);
+				for (const [index, [id, range]] of asking.entries()) {
+					const resolved = resolution[index];
+					if (!resolved) continue;
+					const pinned = pin(range, resolved);
+					// The start settled; the end is due again once it may settle.
+					unpinned.insert(id, resolved.end === undefined ? due(pinned, true) : undefined);
+					// One pinned to the groups it already names holds the same model range.
+					if (rangeKey(requestedRange(pinned)) === rangeKey(requestedRange(range)))
+						requested.insert(id, pinned);
+					else pins.push([id, pinned]);
+				}
+				return pins;
+			};
 			controls = new SubscriptionControls({
 				quic: this.#quic,
 				reader: stream.reader,
 				writer: stream.writer,
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
-				apply: (update, live) => {
+				apply: (update, { retired, added }) => {
 					legacyPriority.set(update.priority);
 					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					// Every update restates the wanted group. Past our largest it is a refresh, which
@@ -1112,52 +1280,44 @@ export class Publisher {
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
 						hooks.askSubscriber(track, "refresh");
-					const terms = {
-						priority: update.priority,
-						order: update.order,
-						maxDelay: update.maxDelay,
-						minDelay: update.minDelay,
-					};
 					const delay = {
 						max: servingMaxDelay(update.maxDelay),
 						min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
 					};
-					// Every range still live as last applied: the model's ranges stand, and only the
-					// terms beside them may move.
-					if (applied?.live === live) {
-						Object.assign(update, applied.span);
-						const was = applied.terms;
-						if (
-							was.priority === terms.priority &&
-							was.order === terms.order &&
-							was.maxDelay === terms.maxDelay &&
-							was.minDelay === terms.minDelay
-						)
-							return;
-						applied.model = { ...applied.model, priority: update.priority, order: update.order, delay };
-						applied.terms = terms;
-						track.update(applied.model);
+					if (!hasRanges(this.version)) {
+						// An older update restates its one span, replacing every range.
+						track.update({
+							priority: update.priority,
+							order: update.order,
+							delay,
+							ranges: requestedRanges(update),
+						});
 						return;
 					}
-					let span: ReturnType<typeof spanOf> | undefined;
-					if (hasRanges(this.version)) {
-						const resolved = hooks.servingResolved(track);
-						const ranges = live.map(({ id, range }) => {
-							const index = positions.get(id);
-							return index === undefined ? range : pin(range, resolved[index]);
-						});
-						span = spanOf(this.version, ranges);
-						Object.assign(update, span);
-						positions = new Map(live.map(({ id }, index) => [id, index]));
-					}
-					const model: track.Subscription = {
+					// Lite-07 hands the model the edit by Range ID, so it costs the ranges it names
+					// whatever else is live. A pinned range is replaced in place, keeping its Range ID.
+					for (const id of retired) unpinned.remove(id);
+					const pins = pinDue();
+					for (const id of retired) requested.remove(id);
+					for (const [id, range] of [...pins, ...added]) requested.insert(id, range);
+					for (const [id, range] of added) unpinned.insert(id, due(range, false));
+					for (const id of retired) positions.delete(id);
+					for (const [id, range] of added)
+						if (range.start?.absolute !== undefined && range.start.frame) positions.add(id);
+					bounds.startsAfter.set(
+						update,
+						positions.size > 0 ? positionFrames([...requested.values()]) : new Map(),
+					);
+					// Refused before the model moves, as one SUBSCRIBE asking for nothing is.
+					Object.assign(update, spanBetween(this.version, requested.start(), requested.end()));
+					const add = [...pins, ...added].map(([id, range]) => [id, requestedRange(range)] as const);
+					hooks.editSubscriber(track, {
+						retire: [...retired, ...pins.map(([id]) => id)],
+						add,
 						priority: update.priority,
 						order: update.order,
 						delay,
-						ranges: requestedRanges(update),
-					};
-					track.update(model);
-					if (span) applied = { live, span, model, terms };
+					});
 				},
 			});
 			const finished = await this.#runTrack(track, stream.writer, controls, {
@@ -1387,10 +1547,8 @@ export class Publisher {
 		const answered = (position: track.Position | undefined) =>
 			position && { position, ended: hooks.largestFinished(track, position) };
 		let endSent = false;
-		// The Range IDs of the last update taken, and those an update added whose start no
-		// SUBSCRIBE_STARTED reported yet. Lite-07 only.
-		let ids = Array.from({ length: Number(initial) }, (_, index) => BigInt(index));
-		let unstarted: bigint[] = [];
+		// Lite-07: the Range IDs an update added whose start no SUBSCRIBE_STARTED reported yet.
+		const unstarted = new Set<bigint>();
 
 		// Where each of the SUBSCRIBE's ranges starts once delivery starts at `from`, by Range ID,
 		// undefined for one with no group there or an update retired: SUBSCRIBE_STARTED answers
@@ -1408,22 +1566,15 @@ export class Publisher {
 		// Report where each range an update added starts, once it resolves, or with no start once
 		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
-			if (startKey === undefined || unstarted.length === 0) return true;
-			const resolved = hooks.servingResolved(track);
-			const positions = controls.positions();
-			const waiting: bigint[] = [];
-			for (const id of unstarted) {
-				const index = positions.get(id);
-				// An update not taken yet retired it, and taking that update forgets it.
-				if (index === undefined) {
-					waiting.push(id);
-					continue;
-				}
-				const range = resolved[index];
-				if (!range && !finished) {
-					waiting.push(id);
-					continue;
-				}
+			if (startKey === undefined || unstarted.size === 0) return true;
+			// An update not taken yet retired one, and taking that update forgets it.
+			const held = [...unstarted].filter((id) => controls.holds(id));
+			const resolution = hooks.servingResolvedKeys(track, held);
+			for (const [index, id] of held.entries()) {
+				// Or one taken while an earlier start went out.
+				if (!controls.holds(id)) continue;
+				const range = resolution[index];
+				if (!range && !finished) continue;
 				let start: bigint | undefined;
 				if (range) {
 					start = max(range.start, startKey);
@@ -1432,8 +1583,8 @@ export class Publisher {
 				const started = new SubscribeStarted(id, start);
 				if (!(await controls.response(encodeSubscribeResponse(stream, { started }, this.version))))
 					return false;
+				unstarted.delete(id);
 			}
-			unstarted = waiting;
 			return true;
 		};
 
@@ -1451,48 +1602,30 @@ export class Publisher {
 			return { kind: hole.skip ? "skip" : "dropped" };
 		};
 
-		// Lite-07: the skipped runs not sent as SUBSCRIBE_SKIP, each by the start of the cached group
-		// just above it, whose GROUP's Previous Start passes over the run instead. Each waits for that
-		// group to be served, when its stream carries the run, or given up, when the run goes out
-		// ahead of the drop. At most one per cached group. Mirrors the Rust `TrackRun::elided`.
-		const elided = new Map<bigint, bigint>();
-		// Whether the cached group `key` is still owed a stream or a drop on this subscription.
-		const owesGroup = (key: bigint): boolean =>
-			hooks.holdsGroup(track, key) && !record?.told(key) && hooks.servingRuns(track, key, key + 1n).length > 0;
-		// Whether the skipped `[start, end)` goes unsent, since the GROUP of the cached group just
-		// above it passes over it: that group is still owed, and its previous start is below the run.
-		const elides = (start: bigint, end: bigint): boolean => {
-			if (!hasGroupEnd(this.version) || !owesGroup(end)) return false;
-			const previous = hooks.previousStart(track, end);
-			return previous !== undefined && previous < start;
-		};
-		const skip = (start: bigint, end: bigint) =>
-			controls.response(
-				encodeSubscribeResponse(stream, { skip: new SubscribeSkip({ start, end }) }, this.version),
-			);
-		// Send as SUBSCRIBE_SKIP each run elided for a group in `[start, end)`, which is given up,
-		// or, with no range, for each group no longer owed, after an update moved the ranges.
-		const sendElided = async (start?: bigint, end?: bigint): Promise<boolean> => {
-			for (const [above, from] of [...elided]) {
-				const given =
-					start === undefined || end === undefined ? !owesGroup(above) : above >= start && above < end;
-				if (!given) continue;
-				elided.delete(above);
-				if (!(await skip(from, above))) return false;
-			}
-			return true;
-		};
+		// A drop of a group held whole names its span, `[start, max(End, start + 1))`, so the
+		// subscriber accounts for the starts inside it too: no other group starts there. The
+		// group is the highest one below `end`, starting at `end - 1n` or holding it in its span,
+		// as the Rust `TrackState::span_end` takes it.
+		const reach = (end: bigint): bigint =>
+			max(end, hooks.wholeEnd(track, end - 1n) ?? hooks.wholeAround(track, end - 1n)?.end ?? end);
+
+		// The starts of the groups whose stream is still serving, which may yet send GROUP_END.
+		const streaming = new Set<bigint>();
 
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
 		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record) return true;
-			// A run elided for a group given up goes out ahead of its drop.
-			if (!(await sendElided(start, end))) return false;
 			const report = reportOf(hole);
 			for (const gap of record.untold(start, end)) {
-				record.tell(gap.start, gap.end, report);
-				const msg = holeMessage(gap.start, gap.end, hole);
+				// The starts inside a whole group whose stream is still serving are its GROUP_END's to
+				// account for, which may still be on its way, or its drop's, which names its span. A
+				// stream that already ended without one left them untold, so they are named here.
+				const around = hooks.wholeAround(track, gap.start);
+				const from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
+				if (from >= gap.end) continue;
+				record.tell(from, gap.end, report);
+				const msg = holeMessage(from, gap.end, hole);
 				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
 			}
 			return true;
@@ -1500,26 +1633,12 @@ export class Publisher {
 
 		// Forward a verdict the reader reached on `[start, end)`, which its record already took in,
 		// replacing what it goes out over: on lite-07, a skip any drop already sent. A reader the
-		// earlier drop ended stays ended. A run elided for a group in the range goes out ahead of a
-		// drop, or joins a skip, since no GROUP passes over it now.
+		// earlier drop ended stays ended. A drop of a group held whole names its span.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record || start >= end) return true;
+			if (!hole.skip) end = reach(end);
 			record.tell(start, end, reportOf(hole));
-			if (!hole.skip) {
-				if (!(await sendElided(start, end))) return false;
-				return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
-			}
-			let from = start;
-			for (const [above, below] of [...elided]) {
-				if (above < start || above >= end) continue;
-				elided.delete(above);
-				from = min(from, below);
-			}
-			if (elides(from, end)) {
-				elided.set(end, min(elided.get(end) ?? from, from));
-				return true;
-			}
-			return controls.response(encodeSubscribeResponse(stream, holeMessage(from, end, hole), this.version));
+			return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
 		};
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_FINISH
@@ -1569,10 +1688,9 @@ export class Publisher {
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
 		const drops = new Signal(0);
-		// Groups whose stream failed, with why, for the control stream to name, as runs, each with the
-		// skipped starts its GROUP passed over, which go out first since that GROUP may never have
-		// arrived.
-		const pendingDrops: { start: bigint; end: bigint; error: Error; passed: { start: bigint; end: bigint } }[] = [];
+		// Groups whose stream failed, with why, for the control stream to name, as runs: a group held
+		// whole names its span.
+		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1599,9 +1717,10 @@ export class Publisher {
 					skipped.length = 0;
 				}
 				if (pendingDrops.length > 0) {
-					for (const { start, end, error, passed } of pendingDrops.splice(0)) {
-						if (passed.start < passed.end && !(await skip(passed.start, passed.end))) return false;
-						record?.tell(start, end, reportOf({ error }));
+					for (const { start, end, error } of pendingDrops.splice(0)) {
+						// The rest of the span is told with it; the served start keeps its record.
+						for (const gap of record?.untold(start, end) ?? [])
+							record?.tell(gap.start, gap.end, reportOf({ error }));
 						const msg = SubscribeDrop.given(start, end, error, this.version);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 							return false;
@@ -1627,14 +1746,10 @@ export class Publisher {
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
-							// The same ids as last applied leave every range live, which owes nothing new.
-							if (hasRanges(this.version) && control.ids !== ids) {
+							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
-								const live = new Set(control.ids);
-								unstarted = unstarted.filter((id) => live.has(id));
-								const held = new Set(ids);
-								for (const id of control.ids) if (id >= initial && !held.has(id)) unstarted.push(id);
-								ids = control.ids;
+								for (const id of control.applied.retired) unstarted.delete(id);
+								for (const [id] of control.applied.added) if (id >= initial) unstarted.add(id);
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
@@ -1664,9 +1779,8 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							bounds.starts = bounds.startsAfter.get(update) ?? new Map();
 							moveCursor();
-							// A run elided for a group the ranges no longer name goes out after all.
-							if (!(await sendElided())) return false;
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
 							// task boundary usually lets the decoder finish whatever the transport
@@ -1874,16 +1988,7 @@ export class Publisher {
 						return false;
 				}
 				record?.tell(group.start, group.start + 1n, { kind: "settled" });
-				// Its GROUP passes over the run elided below it, and a drop of it sends the run first.
-				// The run is taken as it was elided, since the cache may have forgotten the skip since.
-				const from = elided.get(group.start);
-				elided.delete(group.start);
-				let previous: bigint | undefined;
-				if (hasGroupEnd(this.version)) {
-					const cached = hooks.previousStart(track, group.start);
-					const run = from !== undefined && from > 0n ? from - 1n : undefined;
-					previous = cached === undefined || run === undefined ? (cached ?? run) : min(cached, run);
-				}
+				streaming.add(group.start);
 
 				const options: RunGroup = {
 					sub,
@@ -1895,7 +2000,11 @@ export class Publisher {
 					unsubscribed,
 					start: range.start,
 					end: range.end,
-					previous,
+					// The starts inside a group sent whole are accounted for by its GROUP_END, so the
+					// end-of-track scan never drops them.
+					ended: (end) => {
+						if (end > group.start + 1n) record?.tell(group.start + 1n, end, { kind: "settled" });
+					},
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
 				// A stream reset to make room fails the group like any other reset, so it is dropped.
@@ -1906,14 +2015,11 @@ export class Publisher {
 						failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					} finally {
 						options.givenUp.close();
+						streaming.delete(group.start);
 					}
 					if (failed && emitRange) {
-						pendingDrops.push({
-							start: group.start,
-							end: group.start + 1n,
-							error: failed,
-							passed: passedOver(options.previous, group.start),
-						});
+						const end = max(group.end ?? group.start, group.start + 1n);
+						pendingDrops.push({ start: group.start, end, error: failed });
 						drops.update((revision) => revision + 1);
 					}
 				})();
@@ -2271,15 +2377,7 @@ export class Publisher {
 				end = max(end, datagram.sequence + 1n);
 				// An old subscription uses its stream track's timescale for both kinds. Without one
 				// the track is a scale-less lite-07 one, whose timestamp goes out bare.
-				const timescale = options.stamp?.timescale;
-				const timestamp =
-					timescale === undefined
-						? bareTime(datagram.timestamp)
-						: BigInt(
-								datagram.timestamp.scale === undefined
-									? floorAt(Timestamp.now(), timescale)
-									: floorAt(datagram.timestamp, timescale),
-							);
+				const timestamp = wireTime(datagram.timestamp, options.stamp ?? {});
 				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
 					this.version,
 				);
@@ -2329,7 +2427,9 @@ export class Publisher {
 			}
 		}
 
-		let prevTs = 0n;
+		// Lite-07 counts the first delta from the group's start, and GROUP_END from the highest.
+		let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
+		let highest: bigint | undefined;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
 			const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 			if (!read) break;
@@ -2340,6 +2440,7 @@ export class Publisher {
 				const ts = wireTime(frame.timestamp, stamp);
 				delta = ts - prevTs;
 				prevTs = ts;
+				highest = max(highest ?? ts, ts);
 			}
 
 			const header = frameHeader(
@@ -2360,7 +2461,7 @@ export class Publisher {
 		// Lite-07: a response that reached a finished group's end says so before the FIN.
 		const end = group.end;
 		if (hasGroupEnd(this.version) && end !== undefined && hooks.groupIndex(group) >= group.frameCount)
-			await write(() => stream.write(groupEnd(stream.version, end)));
+			await write(() => stream.write(groupEnd(stream.version, end, highest ?? group.start)));
 	}
 
 	/**
@@ -2416,9 +2517,9 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, givenUp, stamp, compress, priority, previous, start: startFrame, end: endFrame } = options;
+		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame } = options;
 		// The header names the requested position, so a copy missing it must be refused.
-		const msg = new GroupMessage({ subscribe: sub, key: group.start, previous, frameStart: startFrame });
+		const msg = new GroupMessage({ subscribe: sub, key: group.start, frameStart: startFrame });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const write = async (op: () => Promise<unknown>) => {
@@ -2438,7 +2539,10 @@ export class Publisher {
 				await msg.encode(stream, this.version);
 			});
 
-			let prevTs = 0n;
+			// Lite-07 counts the first delta from the group's start, whatever frame the stream starts
+			// at, and GROUP_END from the highest timestamp sent, since B-frames go backwards.
+			let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
+			let highest: bigint | undefined;
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below. A received tail may already begin there.
 			let reached = hooks.groupIndex(group) === startFrame;
@@ -2470,6 +2574,7 @@ export class Publisher {
 					const ts = wireTime(read.frame.timestamp, stamp);
 					delta = ts - prevTs;
 					prevTs = ts;
+					highest = max(highest ?? ts, ts);
 				}
 
 				const header = frameHeader(
@@ -2491,7 +2596,10 @@ export class Publisher {
 
 			// Lite-07 ends a finished group with GROUP_END.
 			const end = hasGroupEnd(this.version) && whole ? group.end : undefined;
-			if (end !== undefined) await write(() => stream.write(groupEnd(stream.version, end)));
+			if (end !== undefined) {
+				options.ended?.(end);
+				await write(() => stream.write(groupEnd(stream.version, end, highest ?? group.start)));
+			}
 			stream.close();
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.

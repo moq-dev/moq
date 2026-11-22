@@ -54,6 +54,23 @@ impl Budget {
 		Some(lite::range_size(range, self.form)? + self.id)
 	}
 
+	/// As many of `ranges`, in order, as fit beside the `spent` ones, at least the first: one
+	/// range past them still fits the message, since the budget is half of it.
+	pub fn fit_after<'a>(&self, spent: impl IntoIterator<Item = &'a Range>, ranges: Vec<Range>) -> Vec<Range> {
+		let mut used = (spent.into_iter())
+			.map(|range| self.cost(range).unwrap_or(usize::MAX))
+			.fold(0, usize::saturating_add);
+		let mut taken = Vec::with_capacity(ranges.len());
+		for range in ranges {
+			used = used.saturating_add(self.cost(&range).unwrap_or(usize::MAX));
+			if used > self.bytes && !taken.is_empty() {
+				break;
+			}
+			taken.push(range);
+		}
+		taken
+	}
+
 	fn span(&self, start: Position, end: Option<Position>) -> usize {
 		self.cost(&span(start, end)).unwrap_or(usize::MAX)
 	}
@@ -113,7 +130,7 @@ pub(super) fn fit(
 	let spans = Spans::new(spans, budget, |_| false);
 	let fills = Spans::new(fills.iter().map(fill).collect(), budget, |gap| avoid.overlaps(&gap));
 
-	// The other ranges count back from the latest group or start at the oldest, so no gap
+	// The other ranges start at a time or where the Min Age or max age places them, so no gap
 	// between them is measured: when even one span per list leaves them no room, each kind
 	// collapses to the one range covering it.
 	let cost = |ranges: &[Range]| -> usize {
@@ -253,9 +270,8 @@ impl Spans {
 fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 	let kind = |range: &Range| match range.start {
 		None => 0,
-		Some(Anchor::Relative(_)) => 1,
-		Some(Anchor::Time(_)) => 2,
-		Some(Anchor::Absolute(_)) => 3,
+		Some(Anchor::Time(_)) => 1,
+		Some(Anchor::Absolute(_)) => 2,
 	};
 	let mut kinds: Vec<Range> = Vec::new();
 	for range in ranges {
@@ -264,7 +280,6 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 			continue;
 		};
 		cover.start = match (cover.start, range.start) {
-			(Some(Anchor::Relative(a)), Some(Anchor::Relative(b))) => Some(Anchor::Relative(a.max(b))),
 			(Some(Anchor::Time(a)), Some(Anchor::Time(b))) => Some(Anchor::Time(a.min(b))),
 			(Some(Anchor::Absolute(a)), Some(Anchor::Absolute(b))) => Some(Anchor::Absolute(a.min(b))),
 			(start, _) => start,
@@ -306,7 +321,6 @@ mod tests {
 	fn covers(outer: &Range, inner: &Range) -> bool {
 		let start = match (outer.start, inner.start) {
 			(None, _) => true,
-			(Some(Anchor::Relative(outer)), Some(Anchor::Relative(inner))) => outer >= inner,
 			(Some(Anchor::Absolute(outer)), Some(Anchor::Absolute(inner))) => outer <= inner,
 			(Some(Anchor::Time(outer)), Some(Anchor::Time(inner))) => outer <= inner,
 			_ => false,
@@ -315,7 +329,6 @@ mod tests {
 			(None, _) => true,
 			(Some(Anchor::Absolute(outer)), Some(Anchor::Absolute(inner))) => outer >= inner,
 			(Some(Anchor::Time(outer)), Some(Anchor::Time(inner))) => outer >= inner,
-			(Some(Anchor::Relative(outer)), Some(Anchor::Relative(inner))) => outer <= inner,
 			_ => false,
 		};
 		start && end
@@ -329,7 +342,7 @@ mod tests {
 			let end = (rng.random_bool(0.9)).then(|| Position::group(start + rng.random_range(1..50)));
 			demand.push(match rng.random_range(0..10) {
 				0 => Range {
-					start: Some(Anchor::Relative(rng.random_range(0..20))),
+					start: Some(Anchor::Time(rng.random_range(0..20))),
 					end: end.map(Anchor::Absolute),
 				},
 				1 => Range {
@@ -426,22 +439,22 @@ mod tests {
 	/// Each kind of start collapses to the one range covering it once nothing else fits.
 	#[test]
 	fn collapses_ranges_with_no_gap_to_close() {
-		let relative: Vec<Range> = (0..200)
+		let times: Vec<Range> = (0..200)
 			.map(|back| Range {
-				start: Some(Anchor::Relative(back)),
+				start: Some(Anchor::Time(1_000 - back)),
 				end: Some(Anchor::Absolute(Position::group(1_000 + back))),
 			})
 			.collect();
-		let (ranges, _) = fit(relative.clone(), &RangeSet::new(), &RangeSet::new(), budget(100)).unwrap();
+		let (ranges, _) = fit(times.clone(), &RangeSet::new(), &RangeSet::new(), budget(100)).unwrap();
 		assert_eq!(
 			ranges,
 			[Range {
-				start: Some(Anchor::Relative(199)),
+				start: Some(Anchor::Time(801)),
 				end: Some(Anchor::Absolute(Position::group(1_199))),
 			}]
 		);
 		assert!(matches!(
-			fit(relative, &RangeSet::new(), &RangeSet::new(), budget(4)),
+			fit(times, &RangeSet::new(), &RangeSet::new(), budget(4)),
 			Err(EncodeError::TooLarge)
 		));
 	}

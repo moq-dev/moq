@@ -10,7 +10,7 @@ cluster with two uplinks, partition, and healing. No bespoke federation router.
 ## Plan
 
 Reopened 2026-11-15 (maintainer, /quest-plan on
-[cache-aware multicast](/quest/m2/multicast/README.md), item 3): claims, not
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md), item 3): claims, not
 routes, cross a trust boundary. The CDN relay scopes the local relay's
 connection to a path prefix, so the session carries claims alone (the
 lite-07 draft's Routing: a peer confined to part of the tree exchanges no
@@ -73,19 +73,33 @@ Decided 2026-11-06 (maintainer; the agent picked the children): require
 only the route children federation builds on, session integration (landed
 in [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023) and
 [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)) and
-[acceptance](/quest/m2/cluster-routes/acceptance.md), not the whole
-[route epic](/quest/m2/cluster-routes/README.md). Federation is
+acceptance (finished in [moq-dev/moq#9202](https://github.com/moq-dev/moq/pull/9202)), not the whole
+route epic. Federation is
 relay-to-relay: its consumer, Kixel's mesh relay node (downstream, in
 kixel-ai/kixel.ai), is a Rust relay too. Rejected: session integration
 alone, which drops the proven contract the wire rule below relies on.
 
+Found 2026-11-21 by the main → release routing audit (maintainer: add to
+this Plan rather than new quests):
+
+- moq-relay cannot set `priority` at all: `origin::Producer::with_priority`
+  (`rs/moq-net/src/model/origin.rs`, about line 2449) has no knob on
+  `cluster::Peer`, `cluster.lan`, or the grant, so the one-copy-per-broadcast
+  recipe above is not expressible yet. Map a per-peer and per-LAN priority
+  to it.
+- An outbound dial (`run_remote_session`, `rs/moq-relay/src/cluster.rs`,
+  about line 2302) wires the whole local origin with `with_hidden(true)`, and
+  nothing scopes or mounts it. The CDN's grant bounds what crosses into the
+  CDN, but the local relay has no export policy of its own, and with a CDN
+  token rooted at `tenant-a`, CDN paths land at the local root. Add an
+  optional root, mounts, and export and import prefixes per outbound peer.
+- A scoped peer at the root was closed Unauthorized on lite-07; that bug is
+  [its own quest](/quest/m1/lite07-routing/scoped-peer-node-id.md), which
+  lands first.
+
 Public API: report any peer configuration or admission change. Wire: the
 lite-07 draft's Claims and Routing as they ship; any change requires draft
 and Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts check`.
-
-## Required
-
-- [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
 
 ## Related
 

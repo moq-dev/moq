@@ -239,6 +239,17 @@ impl Server {
 	}
 }
 
+/// Whether a request's `Content-Type` is `application/sdp`, ignoring any parameters
+/// such as `charset`.
+#[cfg(feature = "server")]
+pub(crate) fn is_sdp(headers: &axum::http::HeaderMap) -> bool {
+	headers
+		.get(axum::http::header::CONTENT_TYPE)
+		.and_then(|v| v.to_str().ok())
+		.and_then(|v| v.split(';').next())
+		.is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/sdp"))
+}
+
 /// Shared `DELETE` handler for both bundled routers: parse the resource id from
 /// the trailing path segment and terminate the matching session.
 #[cfg(feature = "server")]
@@ -258,6 +269,23 @@ mod tests {
 
 	async fn server() -> Server {
 		Server::bind(LOOPBACK, Config::default()).await.unwrap()
+	}
+
+	/// A Content-Type with parameters is still SDP; another type is not.
+	#[cfg(feature = "server")]
+	#[test]
+	fn sdp_content_type_ignores_parameters() {
+		let sdp = |value: &str| {
+			let mut headers = axum::http::HeaderMap::new();
+			headers.insert(axum::http::header::CONTENT_TYPE, value.parse().unwrap());
+			is_sdp(&headers)
+		};
+		assert!(sdp("application/sdp"));
+		assert!(sdp("Application/SDP; charset=utf-8"));
+		assert!(sdp(" application/sdp ;charset=utf-8"));
+		assert!(!sdp("application/sdpx"));
+		assert!(!sdp("text/plain; application/sdp"));
+		assert!(!is_sdp(&axum::http::HeaderMap::new()));
 	}
 
 	/// A port something else holds fails the constructor, before anything reports

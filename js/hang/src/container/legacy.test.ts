@@ -64,10 +64,107 @@ test("Legacy Producer keys groups in a nanosecond track's timescale", async () =
 
 	expect(await groups(subscriber)).toEqual([
 		{ start: 1_000_000n, end: 2_000_000n, frames: [1_000, 2_000] },
-		// Its end marker at 3ms, then whole at the marker one nanosecond before it.
-		{ start: 2_000_000n, end: 2_999_999n, frames: [2_000, 3_000] },
-		{ start: 2_999_999n, end: undefined, frames: [2_999] },
+		// A group never ends below a frame of its own, here its end marker at 3ms, so the marker
+		// group starts there rather than a nanosecond before, and this group ends whole at it.
+		{ start: 2_000_000n, end: 3_000_000n, frames: [2_000, 3_000] },
+		{ start: 3_000_000n, end: undefined, frames: [3_000] },
 	]);
+});
+
+test("Legacy Producer ends an audio group whole at its discontinuity marker", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
+	producer.discontinuity(Duration.micros(40_000));
+	// Resumed right where the content stopped.
+	producer.encode(new Uint8Array([1]), Duration.micros(40_000), true);
+	producer.finish();
+
+	const published = await groups(subscriber);
+	expect(published).toEqual([
+		// Audio writes no end marker, so the marker group starts a unit before the end, and this
+		// group ends whole there.
+		{ start: 0n, end: 39_999n, frames: [0, 20_000] },
+		{ start: 39_999n, end: undefined, frames: [39_999] },
+		{ start: 40_000n, end: undefined, frames: [40_000] },
+	]);
+});
+
+test("Legacy Producer starts video resuming at a discontinuity's end past its marker", async () => {
+	for (const [scale, at] of [
+		[Time.Timescale.MICRO, 33_001],
+		[Time.Timescale.MILLI, 34_000],
+	] as const) {
+		const media = track(scale);
+		const subscriber = media.subscribe({ delay: { max: Duration.millis(30_000) } });
+		const producer = new Producer(media, new Format("video"));
+		producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+		producer.discontinuity(Duration.micros(33_000));
+		// Resumed right where the content stopped, which the marker starts at.
+		producer.encode(new Uint8Array([1]), Duration.micros(33_000), true);
+		producer.finish();
+
+		const key = (micros: number) => BigInt(Time.floorAt(Time.Timestamp.fromMicros(micros), scale));
+		expect(await groups(subscriber)).toEqual([
+			{ start: 0n, end: key(33_000), frames: [0, 33_000] },
+			{ start: key(33_000), end: undefined, frames: [33_000] },
+			// Stamped at the first start past the marker, on the wire too.
+			{ start: key(at), end: undefined, frames: [at] },
+		]);
+	}
+});
+
+test("Legacy Producer moves a picture with the parameter sets a marker moved", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const producer = new Producer(media, new Format("video"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.discontinuity(Duration.micros(33_000));
+	// The parameter sets, then their picture, both at the marker.
+	producer.encode(new Uint8Array([1]), Duration.micros(33_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(33_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(66_000), false);
+	producer.finish();
+
+	// Its End follows the source's 33ms cadence past the last frame, not the moved start's.
+	expect((await groups(subscriber))[2]).toEqual({
+		start: 33_001n,
+		end: 99_000n,
+		frames: [33_001, 33_001, 66_000, 99_000],
+	});
+});
+
+test("Legacy Producer reorders a group whose frame is written below its moved keyframe", async () => {
+	const media = track(Time.Timescale.MILLI);
+	const subscriber = media.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const producer = new Producer(media, new Format("video"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.discontinuity(Duration.micros(33_000));
+	// Moved to the next millisecond past the marker, while the frame after it stays below.
+	producer.encode(new Uint8Array([1]), Duration.micros(33_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(33_500), false);
+	producer.finish();
+
+	// Its presentation end no longer bounds its decode-order tail, so no end marker says so.
+	expect((await groups(subscriber))[2]).toEqual({ start: 34n, end: undefined, frames: [34_000, 33_500] });
+});
+
+test("Legacy Producer refuses an end below a frame of the open group, for every kind", () => {
+	for (const kind of ["audio", "video", "data"] as const) {
+		const media = track(Time.Timescale.MICRO);
+		const producer = new Producer(media, new Format(kind));
+		producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+		producer.encode(new Uint8Array([1]), Duration.micros(40_000), false);
+		// Reordered: the newest frame presents before the last one decoded.
+		producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
+		expect(() => producer.discontinuity(Duration.micros(30_000))).toThrow();
+		// Refused before anything changed: the group is still open and takes the next frame.
+		producer.encode(new Uint8Array([1]), Duration.micros(60_000), false);
+		producer.discontinuity(Duration.micros(80_000));
+		producer.finish();
+	}
 });
 
 test("Legacy Producer skips the keys below a non-microsecond track's first group", async () => {

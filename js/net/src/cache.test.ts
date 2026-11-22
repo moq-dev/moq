@@ -4,7 +4,6 @@ import { Manual } from "@moq/clock/test";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
-import { groupsOf } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
@@ -176,7 +175,7 @@ test("a forgotten stale run is asked of a fill", async () => {
 		await clock.advance(2_000);
 
 		const reader = producer.subscribe({
-			ranges: [{ start: { time: 1n } }],
+			ranges: [{ start: 1n }],
 			delay: { max: Duration.millis(60_000) },
 			order: "ascending",
 		});
@@ -185,7 +184,7 @@ test("a forgotten stale run is asked of a fill", async () => {
 		const next = reader.recvGroup();
 		const asked: bigint[][] = [];
 		for (;;) {
-			const fill = groupsOf(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]));
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
 			if (!fill) break;
 			asked.push([fill.start, fill.end]);
 		}

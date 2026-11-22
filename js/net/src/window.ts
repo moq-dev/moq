@@ -10,8 +10,11 @@
  */
 
 import type { Duration } from "@moq/clock";
-import type { Anchor, Range } from "./track.ts";
+import { Counts, Cover } from "./cover.ts";
+import { NO_MAX_DELAY } from "./internal.ts";
+import type { Range } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
+import { Sorted } from "./util/sorted.ts";
 
 /** A run of group starts `[start, end)`; an open run ends at {@link UNBOUNDED}. */
 export type Run = { start: bigint; end: bigint };
@@ -22,16 +25,11 @@ export type Run = { start: bigint; end: bigint };
  */
 export type Resolved = { start: bigint; end?: bigint; floored: boolean };
 
-/** Everything from the latest group onward. */
-export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0n }) });
-
-/** Check one anchor's shape, naming `field` in the error. */
-function anchorOf(field: string, anchor: Anchor): Anchor {
-	const keys = typeof anchor === "object" && anchor !== null ? Object.keys(anchor) : [];
-	const value = keys.length === 1 ? (anchor as Record<string, unknown>)[keys[0]] : undefined;
-	if (keys[0] === "time" && typeof value === "bigint" && value >= 0n) return { time: value };
-	if (keys[0] === "relative" && typeof value === "bigint" && value >= 0n) return { relative: value };
-	throw new TypeError(`${field} must be {relative} or {time}, a non-negative bigint`);
+/** Check one end's shape, naming `field` in the error. */
+function timeOf(field: string, value: unknown): bigint | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "bigint" && value >= 0n) return value;
+	throw new TypeError(`${field} must be a time, a non-negative bigint`);
 }
 
 /** Check and copy a caller's ranges, refusing a malformed one rather than serving it widened. */
@@ -40,20 +38,12 @@ export function rangesOf(ranges: readonly Range[]): Range[] {
 	return ranges.map((range) => {
 		if (typeof range !== "object" || range === null) throw new TypeError("a range must be an object");
 		const out: Range = {};
-		if (range.start !== undefined) out.start = anchorOf("range start", range.start);
-		if (range.end !== undefined) out.end = anchorOf("range end", range.end);
+		const start = timeOf("range start", range.start);
+		const end = timeOf("range end", range.end);
+		if (start !== undefined) out.start = start;
+		if (end !== undefined) out.end = end;
 		return out;
 	});
-}
-
-/** The group start a time anchor names, or undefined for any other anchor. */
-function time(anchor: Anchor | undefined): bigint | undefined {
-	return anchor?.time;
-}
-
-/** How many groups back a relative anchor counts, or undefined for any other anchor. */
-function relative(anchor: Anchor | undefined): bigint | undefined {
-	return anchor?.relative;
 }
 
 /**
@@ -64,36 +54,21 @@ function relative(anchor: Anchor | undefined): bigint | undefined {
 export function span(start: bigint | undefined, end: bigint | undefined): Range | undefined {
 	if (end === 0n) return undefined;
 	const range: Range = {};
-	if (start !== undefined) range.start = { time: start };
-	if (end !== undefined) range.end = { time: end - 1n };
+	if (start !== undefined) range.start = start;
+	if (end !== undefined) range.end = end - 1n;
 	return isEmpty(range) ? undefined : range;
 }
 
-/** Whether `range` certainly delivers nothing, wherever the latest group lands. */
+/** Whether `range` certainly delivers nothing: it ends before it starts. */
 export function isEmpty(range: Range): boolean {
-	const start = time(range.start);
-	const end = time(range.end);
-	return start !== undefined && end !== undefined && end < start;
+	return range.start !== undefined && range.end !== undefined && range.end < range.start;
 }
 
-/** An anchor as a sort key: relative, then `none` for an omitted one, then time. */
-function anchorKey(anchor: Anchor | undefined, none: [number, bigint]): [number, bigint] {
-	if (anchor === undefined) return none;
-	if (anchor.relative !== undefined) return [0, anchor.relative];
-	return [2, anchor.time];
+/** A canonical order, as the Rust `Range` sorts: by start, no start first, then by end, open first. */
+export function compare(a: Range, b: Range): number {
+	return order(a.start ?? -1n, b.start ?? -1n) || order(a.end ?? -1n, b.end ?? -1n);
 }
 
-/**
- * A canonical order, as the Rust `Range` sorts: by start, relative ones first, then the oldest,
- * then time ones; then by end, open first.
- */
-function compare(a: Range, b: Range): number {
-	const [x, y] = [anchorKey(a.start, [1, 0n]), anchorKey(b.start, [1, 0n])];
-	const [p, q] = [anchorKey(a.end, [-1, 0n]), anchorKey(b.end, [-1, 0n])];
-	return x[0] - y[0] || order(x[1], y[1]) || p[0] - q[0] || order(p[1], q[1]);
-}
-
-// Compare a group start or a count, which only ever meet their own kind.
 function order(a: bigint, b: bigint): number {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -103,38 +78,30 @@ export function sameRanges(a: readonly Range[], b: readonly Range[]): boolean {
 	return a.length === b.length && a.every((range, index) => rangeKey(range) === rangeKey(b[index]));
 }
 
-// A range as a string, equal exactly when the ranges are; JSON can't hold a bigint.
-function rangeKey(range: Range): string {
-	return `${anchorText(range.start)}..${anchorText(range.end)}`;
-}
-
-function anchorText(anchor: Anchor | undefined): string {
-	if (anchor === undefined) return "";
-	if (anchor.time !== undefined) return `t${anchor.time}`;
-	return `r${anchor.relative}`;
+/** A range as a string, equal exactly when the ranges are; JSON can't hold a bigint. */
+export function rangeKey(range: Range): string {
+	return `${range.start ?? ""}..${range.end ?? ""}`;
 }
 
 /**
- * The union of `ranges` in a canonical order, without empty or redundant ranges.
+ * The union of `ranges` in a canonical order, without empty or redundant ranges, `joins` saying
+ * whether the ranges with no start are live joins (an aggregate Min Age is stated) rather than
+ * reaching back to the oldest group.
  *
- * Time spans merge where they overlap or touch, as the group starts they cover. The rest can't be
- * placed without the latest group, so only an open range drops what it certainly covers: the open
- * time span drops ranges starting inside it, and the farthest open relative range drops relative
- * ranges starting no farther back. The oldest start covers everything. Mirrors the Rust `union`.
+ * Time spans merge where they overlap or touch, as the group starts they cover. Reaching back to
+ * the oldest group, an open range with no start covers everything. A live join reaches back to no
+ * span of history, so it covers only the other ranges with no start, which start where it does.
+ * Mirrors the Rust `union`.
  */
-export function union(ranges: readonly Range[]): Range[] {
+export function union(ranges: readonly Range[], joins = false): Range[] {
 	const kept = ranges.filter((range) => !isEmpty(range));
-	if (kept.some((range) => range.start === undefined && range.end === undefined)) return [{}];
+	const open = kept.some((range) => range.start === undefined && range.end === undefined);
+	if (open && !joins) return [{}];
 
 	const spans: Run[] = [];
 	for (const range of kept) {
-		const start = time(range.start);
-		if (start === undefined) continue;
-		if (range.end === undefined) spans.push({ start, end: UNBOUNDED });
-		else {
-			const end = time(range.end);
-			if (end !== undefined) spans.push({ start, end: end + 1n });
-		}
+		if (range.start === undefined) continue;
+		spans.push({ start: range.start, end: range.end === undefined ? UNBOUNDED : range.end + 1n });
 	}
 	spans.sort((a, b) => order(a.start, b.start) || order(a.end, b.end));
 	const runs: Run[] = [];
@@ -143,95 +110,48 @@ export function union(ranges: readonly Range[]): Range[] {
 		if (last && span.start <= last.end) last.end = max(last.end, span.end);
 		else runs.push({ ...span });
 	}
-	const tail = runs.at(-1)?.end === UNBOUNDED ? runs.at(-1)?.start : undefined;
-	let farthest: bigint | undefined;
-	for (const range of kept) {
-		const back = relative(range.start);
-		if (back !== undefined && range.end === undefined) farthest = max(farthest ?? back, back);
-	}
 
 	const out: Range[] = runs.map((run) =>
-		run.end === UNBOUNDED
-			? { start: { time: run.start } }
-			: { start: { time: run.start }, end: { time: run.end - 1n } },
+		run.end === UNBOUNDED ? { start: run.start } : { start: run.start, end: run.end - 1n },
 	);
-	for (const range of kept) {
-		const start = time(range.start);
-		const back = relative(range.start);
-		if (start !== undefined) {
-			// Merged above unless it ends relative to the latest group.
-			if (range.end === undefined || time(range.end) !== undefined) continue;
-			if (tail === undefined || start < tail) out.push(range);
-		} else if (back !== undefined) {
-			if (range.end === undefined) continue;
-			if (farthest === undefined || back > farthest) out.push(range);
-		} else out.push(range);
-	}
-	if (farthest !== undefined) out.push({ start: { relative: farthest } });
+	if (open) out.push({});
+	else for (const range of kept) if (range.start === undefined) out.push(range);
 
 	out.sort(compare);
 	return out.filter((range, index) => index === 0 || rangeKey(range) !== rangeKey(out[index - 1]));
 }
 
 /**
- * The lowest group any range names by time, or undefined when one counts back from the latest
- * group or reaches back to the oldest one: the floor a wire without ranges carries. Mirrors the
- * Rust `Subscription::start`.
+ * The lowest group any range starts at, or undefined when one has no start: the floor a wire
+ * without ranges carries. Mirrors the Rust `Subscription::start`.
  */
 export function rangesStart(ranges: readonly Range[]): bigint | undefined {
 	let floor: bigint | undefined;
 	for (const range of ranges) {
 		if (isEmpty(range)) continue;
-		const start = time(range.start);
-		if (start === undefined) return undefined;
-		floor = min(floor ?? start, start);
+		if (range.start === undefined) return undefined;
+		floor = min(floor ?? range.start, range.start);
 	}
 	return floor;
 }
 
 /**
- * The exclusive end past every range, or undefined when one is open or ends relative to the
- * latest group: the cap a wire without ranges carries. No range at all ends at group 0. Mirrors
- * the Rust `Subscription::end`.
+ * The exclusive end past every range, or undefined when one is open: the cap a wire without
+ * ranges carries. No range at all ends at group 0. Mirrors the Rust `Subscription::end`.
  */
 export function rangesEnd(ranges: readonly Range[]): bigint | undefined {
 	let end = 0n;
 	for (const range of ranges) {
 		if (isEmpty(range)) continue;
-		const last = time(range.end);
-		if (last === undefined) return undefined;
-		end = max(end, last + 1n);
+		if (range.end === undefined) return undefined;
+		end = max(end, range.end + 1n);
 	}
 	return end;
 }
 
-/**
- * Whether a wire without ranges carries `range` upstream: time anchors, as group IDs, and the
- * live and oldest starts it spells with no floor. Mirrors the Rust `Range::is_wire`.
- */
-export function isWire(range: Range): boolean {
-	const back = relative(range.start);
-	return (back === undefined || back === 0n) && relative(range.end) === undefined;
-}
-
-/**
- * The ranges a SUBSCRIBE carries for `ranges`, without the empty ones. Mirrors the Rust
- * `wire_ranges`.
- *
- * The copy resolves a relative end itself, against the groups it receives past it, so it asks
- * through the live edge: SUBSCRIBE_START names a resolved start, but nothing names a resolved
- * end, so one resolved upstream would leave the copy short.
- */
+/** The ranges a SUBSCRIBE carries for `ranges`: all but the empty ones. Mirrors the Rust `wire_ranges`. */
 export function wireRanges(ranges: readonly Range[]): Range[] {
-	return ranges
-		.filter((range) => !isEmpty(range))
-		.map((range) =>
-			range.end === undefined || time(range.end) !== undefined
-				? range
-				: range.start
-					? { start: range.start }
-					: {},
-		);
+	return ranges.filter((range) => !isEmpty(range));
 }
 
 /** Whether every range has an end, so a lite-07 publisher ends the subscription once it covers them. */
@@ -240,41 +160,40 @@ export function bounded(ranges: readonly Range[]): boolean {
 }
 
 /**
- * Whether a subscriber joins at the live edge: a range counting back from the latest group (or
- * reaching back to the oldest) and following it. A fixed start resumes a known group instead,
- * such as a route switch picking up where the reader stopped. Mirrors the Rust
- * `Subscription::joins_live`.
+ * Whether a subscriber joins at the live edge: an open range with no start, joining live or
+ * reaching back to the oldest group. A fixed start resumes a known group instead, such as a route
+ * switch picking up where the reader stopped. Mirrors the Rust `Subscription::joins_live`.
  */
 export function joinsLive(ranges: readonly Range[] | undefined): boolean {
-	return (ranges ?? [{}]).some((range) => time(range.start) === undefined && range.end === undefined);
+	return (ranges ?? [{}]).some((range) => range.start === undefined && range.end === undefined);
 }
 
 /**
  * The one span a wire without ranges carries for `ranges`, which the subscribers' own reads
  * narrow again: from the lowest time start up to {@link rangesEnd}.
  *
- * A subscription counting only back from the latest group asks with no start, which a pre-06
- * publisher reads as the latest group and a lite-06 one as no floor. One mixing the two asks
- * from group 0, since no single start covers both: the latest group may sit below the time
- * start. Mirrors the Rust `wire_span`.
+ * A subscription whose ranges all lack a start asks with no start, which a pre-06 publisher reads
+ * as the latest group and a lite-06 one as no floor. One mixing the two asks from group 0, since
+ * no single start covers both: the latest group may sit below the time start. Mirrors the Rust
+ * `wire_span`.
  */
 export function wireSpan(ranges: readonly Range[]): { start?: bigint; end?: bigint } {
 	let start = rangesStart(ranges);
-	if (start === undefined && ranges.some((range) => !isEmpty(range) && time(range.start) !== undefined)) start = 0n;
+	if (start === undefined && ranges.some((range) => !isEmpty(range) && range.start !== undefined)) start = 0n;
 	return { start, end: rangesEnd(ranges) };
 }
 
 /** A range holding nothing: nothing sorts below group 0. Mirrors the Rust `Range::EMPTY`. */
-export const EMPTY: Range = Object.freeze({ start: Object.freeze({ time: 1n }), end: Object.freeze({ time: 0n }) });
+export const EMPTY: Range = Object.freeze({ start: 1n, end: 0n });
 
 /**
  * `ranges` with every range raised to start no earlier than `floor` and stop before the exclusive
  * `end`, without ever widening one. Mirrors the Rust `Subscription::clamped`.
  *
- * `resolved` names where each range resolved, by index, so a relative or time anchor becomes its
- * own group, raised to `floor` or capped at `end`. A start not resolved keeps its anchor, since the
- * floor may lie before it, so the caller drops what it resolves to below `floor`. An end not
- * resolved becomes the cap.
+ * `resolved` names where each range resolved, by index, so its start becomes its own group,
+ * raised to `floor` or capped at `end`. A start not resolved keeps its time, since the floor may
+ * lie before it, so the caller drops what it resolves to below `floor`. An end not resolved
+ * becomes the cap.
  */
 export function clamped(
 	ranges: readonly Range[],
@@ -285,18 +204,16 @@ export function clamped(
 	if (floor === undefined && end === undefined) return [...ranges];
 	return ranges.map((range, index) => {
 		const at = resolved[index];
-		let start = at ? { time: at.start } : range.start;
-		const named = time(start);
-		if (floor !== undefined && named !== undefined) start = { time: max(named, floor) };
+		let start = at ? at.start : range.start;
+		if (floor !== undefined && start !== undefined) start = max(start, floor);
 		let requested = range.end;
 		if (requested !== undefined && at?.end !== undefined) {
 			if (at.end === 0n) return EMPTY;
-			requested = { time: at.end - 1n };
+			requested = at.end - 1n;
 		}
 		if (end !== undefined) {
 			if (end === 0n) return EMPTY;
-			const capped = time(requested);
-			requested = { time: capped === undefined ? end - 1n : min(capped, end - 1n) };
+			requested = requested === undefined ? end - 1n : min(requested, end - 1n);
 		}
 		const out: Range = {};
 		if (start !== undefined) out.start = start;
@@ -315,7 +232,7 @@ export type Containing =
 	| "unknown";
 
 /**
- * The groups a serving hop holds, by start, for resolving relative and time anchors. Mirrors the
+ * The groups a serving hop holds, by start, for resolving time starts and live joins. Mirrors the
  * Rust `Holdings`.
  */
 export interface Holdings {
@@ -324,22 +241,20 @@ export interface Holdings {
 	 * reader following route copies, leaves its ranges to the copies.
 	 */
 	resolves(): boolean;
-	/** Where `time` falls among the groups held. */
-	containing(time: bigint): Containing;
+	/**
+	 * Whether this hop leaves a live join to the copies it follows, holding it as before any group
+	 * until one places it. Absent for one whose ranges were placed already, where a live join left
+	 * with no start reached back. Mirrors the Rust `Holdings::defers`.
+	 */
+	defers?(): boolean;
+	/**
+	 * Where `time` falls among the groups held, for a reader whose max delay is `budget` in
+	 * milliseconds ({@link NO_MAX_DELAY} for none): a received copy proves some placements only for a
+	 * reader within the budget its upstream answered under. Mirrors the Rust `Holdings::containing`.
+	 */
+	containing(time: bigint, budget: number): Containing;
 	/** The lowest group held starting at or after `from`. */
 	nextStart(from: bigint): bigint | undefined;
-	/**
-	 * The group `back` groups before `latest`, which counts as the first, among the groups held:
-	 * undefined once fewer are held than that.
-	 */
-	back(latest: bigint, back: bigint): bigint | undefined;
-	/**
-	 * Where the publisher reported starting a range counting `back` groups before `latest`, which a
-	 * relative start, but never an end, takes over {@link back}: a delivery start may sit past the
-	 * group counted, such as above groups too stale for the budget. Absent for none. Mirrors the
-	 * Rust `Holdings::reported_start`.
-	 */
-	reportedStart?(latest: bigint, back: bigint): bigint | undefined;
 	/** Whether nothing more can arrive here, so a time start nothing contains reaches back to the oldest group rather than wait. */
 	complete(): boolean;
 	/**
@@ -348,12 +263,12 @@ export interface Holdings {
 	 */
 	looksUp?(): boolean;
 	/**
-	 * Where a live join holding `min` behind the live edge starts, `latest` being the latest group:
-	 * a group held, never a raw time a copy would ask its upstream to fill. Undefined while nothing
-	 * held can measure it, so the join waits for a group as a relative start does. Absent where the
-	 * hop leaves its ranges to the copies it follows. Mirrors the Rust `Holdings::reach_back`.
+	 * Where a live join holding `min` behind the live edge starts, for a reader within `budget` (see
+	 * {@link containing}). Undefined while it can't tell yet: nothing held measures the live edge, or
+	 * a relay copy waits on upstream to answer for it. Absent where the hop leaves its ranges to the
+	 * copies it follows. Mirrors the Rust `Holdings::join`.
 	 */
-	reachBack?(latest: bigint, min: Duration): { anchor?: Anchor } | undefined;
+	join?(min: Duration, budget: number): Join | undefined;
 	/**
 	 * Whether the producer declared every start in `[start, end)` skipped, so no group starts there
 	 * even in the history a handler serves. Absent for none.
@@ -368,6 +283,20 @@ export interface Holdings {
 }
 
 /**
+ * Where a live join starts: at a group (`group`), or as a time start at the live edge minus its
+ * Min Age (`time`), which resolves, looks up, and waits as any time start does.
+ */
+/**
+ * Where a live join starts: the group containing a time, a group, or, as `past`, a group starting
+ * at or past a key, which an upstream answering a bounded join empty proved. Mirrors the Rust
+ * `Join`.
+ */
+export type Join =
+	| { group: bigint; time?: never; past?: never }
+	| { time: bigint; group?: never; past?: never }
+	| { past: bigint; group?: never; time?: never };
+
+/**
  * The times a {@link Holdings} can't place: sorted, disjoint runs, apart from the times a placement
  * that the groups and drops held don't decide places. `mark` changes whenever such a placement may
  * have, so a window that sees it unchanged tries only the times outside `runs` again.
@@ -377,159 +306,243 @@ export type Unplaced = { runs: readonly Run[]; mark: number };
 /** A hop that holds no groups of its own, such as a reader following route copies that resolve its ranges for it. */
 export const UNHELD: Holdings = Object.freeze({
 	resolves: () => false,
+	defers: () => true,
 	containing: () => "unknown" as const,
 	nextStart: () => undefined,
-	back: (latest: bigint, back: bigint) => (back === 0n ? latest : undefined),
 	complete: () => true,
 });
 
 /**
  * A hop that holds no groups of its own but knows every time it is asked starts a group, such as
- * a publisher's reported start: a time anchor names the group starting there.
+ * a publisher's reported start: a time start names the group starting there.
  */
 export const AT_KEYS: Holdings = Object.freeze({
 	...UNHELD,
+	defers: () => false,
 	containing: (time: bigint) => ({ group: time }),
 });
 
 /** One non-empty range, resolved. */
 type Span = {
-	/** Which of the ranges it came from. */
-	index: number;
-	/** Where it starts: its range's start, or where a live join's Min Age reached it back to. */
-	anchor: Anchor | undefined;
+	/** The time it starts from: its range's start, or a live join's; undefined for the oldest group or a join's group. */
+	at: bigint | undefined;
 	start: bigint;
 	/** The exclusive end, {@link UNBOUNDED} past every group. */
 	end: bigint;
 	/** Whether the start names a group, rather than reaching back to the oldest one. */
 	floored: boolean;
 	/**
-	 * A time start the groups held can't place, looked up from the track's history: the span reads
-	 * nothing until the lookup answers.
+	 * A time start the groups held can't place, whose group a fill asks the track's history for: the
+	 * span reads nothing until it answers.
 	 */
 	looking?: Lookup;
 	/** A time start the groups held can't place yet: the span reads only the groups from that time until it can. */
 	waiting: boolean;
-	/**
-	 * A relative start counting back past every group held asks no miss below this: the oldest group
-	 * held when it was placed, since which of the older ones it reaches is unknown.
-	 */
-	reach?: bigint;
+	/** What it counts in the window's groups and missable groups, so taking it out uncounts exactly that. */
+	reads?: Run;
+	asks?: Run;
 };
 
 /**
- * A time start being looked up: its time, and the exclusive end of the run below every group
- * held, which holds the group containing it if the track's history does. Mirrors the Rust
- * `Looking`.
+ * A time start being looked up: its time, and the oldest key the group containing it may start at,
+ * past every group held below it. Mirrors the Rust `Looking`.
  */
 export interface Lookup {
 	time: bigint;
-	below: bigint;
+	floor: bigint;
 }
 
 /**
- * A subscriber's ranges resolved to the group starts it reads. Mirrors the Rust `Window`.
+ * What the track's history answered a time start's lookup with: the group containing the time, no
+ * group from `floor`, the oldest key it asked from, through the time, or nothing, with no handler
+ * left to. Mirrors the Rust `window::Found`.
+ */
+export type Found = { kind: "group"; group: bigint } | { kind: "dropped"; floor: bigint } | { kind: "unanswered" };
+
+/**
+ * A subscriber's ranges resolved to the group starts it reads, each by the key its caller gave
+ * it, so an edit resolves only the ranges it adds and leaves every other where it resolved.
+ * Mirrors the Rust `Window`.
  *
- * A relative or time anchor resolves when the window is built, and again only when the ranges
- * are replaced. Before any group exists a relative anchor waits, reading everything, until
- * {@link settle} names the first one. A time start the groups held can't place yet waits too,
- * reading only the groups from its time meanwhile, since whichever group contains it starts at or
- * before it.
+ * A start resolves when its range is placed, and again only when it is replaced. A live join
+ * waits, reading everything, until {@link settle} names a first group. A time start the groups
+ * held can't place yet waits too, reading only the groups from its time meanwhile, since whichever
+ * group contains it starts at or before it.
  */
 export class Window {
-	/** What these were resolved from, so only replacing the ranges resolves again. */
-	readonly ranges: readonly Range[];
-	#spans: Span[] = [];
-	/** The groups the spans cover: merged, sorted, and disjoint. */
-	#runs: Run[] = [];
-	/** The part of {@link #runs} a miss may ask for: see {@link missable}. */
-	#missable: Run[] = [];
-	/** A relative anchor waits on a first group, so nothing is filtered yet. */
-	#pending = false;
+	// What these were resolved from, by key, in key order.
+	#ranges = new Map<bigint, Range>();
+	// Each non-empty range placed, by key.
+	#spans = new Map<bigint, Span>();
+	// The groups the spans cover, counted so an edit moves only its own runs.
+	#groups = new Cover();
+	// The part of {@link #groups} a miss may ask for: see {@link missable}.
+	#missable = new Cover();
+	// The ranges whose live join waits on a first group, by key: everything is in range meanwhile.
+	#pending = new Set<bigint>();
 	/**
-	 * The spans, by position, whose time start waits on a group arriving, by that time: a change to
-	 * the groups held tries only those its {@link Holdings.unplaced} leaves out.
+	 * The spans, by key, whose time start waits on a group arriving, by that time: a change to the
+	 * groups held tries only those its {@link Holdings.unplaced} leaves out.
 	 */
 	#waiting = new ByTime();
 	/** The {@link Unplaced.mark} every waiting span was last tried under. */
 	#waited: number | undefined;
 	/**
-	 * The spans, by position, still looking up their time start, which read nothing meanwhile, by
-	 * that time: kept apart so an answer finds them without visiting every span.
+	 * The spans, by key, still looking up their time start, which read nothing meanwhile, by that
+	 * time: kept apart so an answer finds them without visiting every span.
 	 */
 	#looking = new ByTime();
 	/**
-	 * The ranges, by index, of a live join whose reach back waits on the groups held to measure the
-	 * live edge, so they read nothing yet: a group held is no reason to start at it.
+	 * The ranges, by key, of a live join that can't tell where it starts while groups are held, such
+	 * as a relay copy waiting on upstream to answer for it, so they read nothing yet: a group held is
+	 * no reason to start at it.
 	 */
-	#reaching: number[] = [];
-	/** Nothing is left to resolve as groups arrive. */
-	#settled = false;
-	/**
-	 * How many spans name each start, lowest first, and how many name none: see {@link start}.
-	 * Counted so a read, and a span starting, costs no walk of the spans.
-	 */
-	#named: { start: bigint; count: number }[] = [];
+	#reaching = new Set<bigint>();
+	// How many spans name each start, and how many name none: see {@link start}.
+	#named = new Counts<bigint>();
 	#unnamed = 0;
 	/**
-	 * The subscriber's Min Age, which reaches a live join back from the live edge. Only a pending
-	 * window reads it, when it places its ranges, so a join already started stays where it started.
+	 * The subscriber's Min Age, which makes a range with no start a live join that far behind the
+	 * live edge; undefined when not stated, so such a range reaches back to the oldest group. Only a
+	 * range placed reads it, so a join already started stays where it started.
 	 */
 	min: Duration | undefined;
+	/**
+	 * The subscriber's max delay in milliseconds, {@link NO_MAX_DELAY} for none: a received copy
+	 * places some time starts only for a reader within the budget its upstream answered under. Only
+	 * a range still to place reads it, so one already started stays where it started.
+	 */
+	get budget(): number {
+		return this.#budget;
+	}
+
+	set budget(budget: number) {
+		// An answer may place a waiting time start under the new budget with no change to the groups
+		// held, so each is tried again.
+		if (budget !== this.#budget) this.#waited = undefined;
+		this.#budget = budget;
+	}
+
+	#budget: number;
 
 	/**
-	 * Resolve `ranges`, counting relative anchors back from `latest` and time anchors from
-	 * `holdings`, and reaching a live join back by `min` (see {@link joins}).
+	 * Resolve `ranges`, keyed by position, time starts from `holdings` within `budget` (see
+	 * {@link budget}), and a range with no start by `min` (see {@link min}), `latest` being the
+	 * latest group.
 	 */
-	constructor(ranges: readonly Range[], latest: bigint | undefined, holdings: Holdings = UNHELD, min?: Duration) {
-		this.ranges = ranges;
+	constructor(
+		ranges: readonly Range[],
+		latest: bigint | undefined,
+		holdings: Holdings = UNHELD,
+		min?: Duration,
+		budget = NO_MAX_DELAY,
+	) {
 		this.min = min;
+		this.#budget = budget;
+		for (const [index, range] of ranges.entries()) this.#ranges.set(BigInt(index), range);
 		this.#place(latest, holdings);
 	}
 
-	/** Whether a relative anchor still waits on a first group. */
+	/** {@link Window} for ranges the caller keys itself, in key order. */
+	static keyed(
+		ranges: Iterable<readonly [bigint, Range]>,
+		latest: bigint | undefined,
+		holdings: Holdings = UNHELD,
+		min?: Duration,
+		budget = NO_MAX_DELAY,
+	): Window {
+		const window = new Window([], undefined, holdings, min, budget);
+		for (const [key, range] of ranges) window.#ranges.set(key, range);
+		window.#place(latest, holdings);
+		return window;
+	}
+
+	/** What these were resolved from, in key order. Costs every range. */
+	get ranges(): Range[] {
+		return [...this.#ranges.values()];
+	}
+
+	/**
+	 * Retire the ranges keyed `retire`, then resolve `add`, leaving every other range where it
+	 * resolved. A key added again replaces its range in place; any other key added is past every
+	 * key held. Costs the ranges edited, never the rest. Mirrors the Rust `Window::edit`.
+	 */
+	edit(
+		retire: Iterable<bigint>,
+		add: readonly (readonly [bigint, Range])[],
+		latest: bigint | undefined,
+		holdings: Holdings = UNHELD,
+	): void {
+		const readded = new Set(add.map(([key]) => key));
+		for (const key of retire) {
+			this.#retire(key);
+			// One added again is replaced in place below, keeping its order.
+			if (!readded.has(key)) this.#ranges.delete(key);
+		}
+		for (const [key, range] of add) {
+			this.#retire(key);
+			this.#ranges.set(key, range);
+			if (!isEmpty(range)) this.#placeRange(key, latest, holdings);
+		}
+	}
+
+	// Take out what the range keyed `key` placed, leaving the range itself.
+	#retire(key: bigint): void {
+		this.#pending.delete(key);
+		this.#reaching.delete(key);
+		const span = this.#spans.get(key);
+		if (span) this.#uncount(key, span);
+	}
+
+	/** Whether a live join still waits on a first group. */
 	get pending(): boolean {
-		return this.#pending;
+		return this.#pending.size > 0;
+	}
+
+	/**
+	 * The keys of the ranges still waiting on a live join or a time start. Mirrors the Rust
+	 * `Window::unsettled`.
+	 */
+	unsettled(): Set<bigint> {
+		const keys = new Set([...this.#pending, ...this.#reaching]);
+		for (const entry of this.#waiting.all()) for (const key of entry.keys) keys.add(key);
+		for (const entry of this.#looking.all()) for (const key of entry.keys) keys.add(key);
+		return keys;
 	}
 
 	/** Whether nothing is left to resolve as groups arrive. */
 	get settled(): boolean {
-		return this.#settled;
+		return this.#pending.size === 0 && !this.#unplaced() && this.#looking.size === 0;
 	}
 
 	/**
-	 * Resolve what the groups now held settle: relative anchors once `latest` exists, and time
-	 * starts once a group arrives. Returns whether the groups in range moved.
+	 * Resolve what the groups now held settle: live joins once `latest` exists or the holdings can
+	 * tell where they start, and time starts once a group arrives. Returns whether the groups in
+	 * range moved.
 	 */
 	settle(latest: bigint | undefined, holdings: Holdings = UNHELD): boolean {
-		if (this.#pending) {
+		if (this.pending) {
 			if (latest === undefined) return false;
+			// Every range places again, as when first resolved: the first group arrives once per track.
 			this.#place(latest, holdings);
-			return !this.#pending;
+			return !this.pending;
 		}
-		// The spans placed or started here, each reading at least what it did before, unless one now
-		// looks up its start and reads nothing meanwhile.
-		const moved: number[] = [];
-		if (this.#reaching.length > 0) {
-			const placed = this.#spans.length;
-			const reaching = this.#reaching;
-			this.#reaching = [];
-			for (const index of reaching) this.#placeRange(index, latest, holdings);
-			for (let position = placed; position < this.#spans.length; position++) moved.push(position);
+		let moved = false;
+		if (this.#reaching.size > 0) {
+			const placed = this.#spans.size;
+			const reaching = [...this.#reaching];
+			this.#reaching.clear();
+			for (const key of reaching) this.#placeRange(key, latest, holdings);
+			moved = this.#spans.size > placed;
 		}
-		const shrank = this.#waiting.size > 0 && this.#startWaiting(holdings, moved);
-		if (shrank) this.#rebuild();
-		else if (moved.length === 0) return false;
-		else this.#grow(moved);
-		return true;
+		if (this.#waiting.size > 0 && this.#startWaiting(holdings)) moved = true;
+		return moved;
 	}
 
 	// Start the spans whose time start waits on a group, once one arrived, or once nothing can
-	// arrive any more, adding each one started to `started`. Only the times the holdings may now
-	// place are tried, so a change placing one of them costs that one, not every span still
-	// waiting. Returns whether one started reads less than before: it looks up its start, reading
-	// nothing meanwhile.
-	#startWaiting(holdings: Holdings, started: number[]): boolean {
+	// arrive any more. Only the times the holdings may now place are tried, so a change placing one
+	// of them costs that one, not every span still waiting. Returns whether any started.
+	#startWaiting(holdings: Holdings): boolean {
 		const complete = holdings.complete();
 		const unplaced = complete ? undefined : holdings.unplaced?.();
 		let tried: Timed[];
@@ -542,9 +555,9 @@ export class Window {
 			tried = this.#waiting.takeAll();
 			this.#waited = unplaced?.mark;
 		}
-		let shrank = false;
+		let started = false;
 		for (const entry of tried) {
-			const containing = holdings.containing(entry.time);
+			const containing = holdings.containing(entry.time, this.budget);
 			let start: bigint;
 			let floored: boolean;
 			if (typeof containing === "object") [start, floored] = [containing.group, true];
@@ -554,110 +567,127 @@ export class Window {
 				this.#waiting.put(entry);
 				continue;
 			}
-			for (const position of entry.positions) {
-				if (this.#startSpan(position, entry.time, start, floored, holdings)) shrank = true;
-				started.push(position);
-			}
+			started = true;
+			for (const key of entry.keys) this.#startSpan(key, entry.time, start, floored, holdings);
 		}
-		return shrank;
+		return started;
 	}
 
-	// Start the span at `position`, whose time start `at` waited, at `start`: looked up where the
-	// groups held can't place it, as when first resolved, and otherwise reading its groups. Returns
-	// whether it looks its start up.
-	#startSpan(position: number, at: bigint, start: bigint, floored: boolean, holdings: Holdings): boolean {
-		const span = this.#spans[position];
-		const asked = time(this.ranges[span.index].start) !== undefined;
-		this.#unname(position);
+	// Start the span keyed `key`, whose time start `at` waited, at `start`: looked up where the
+	// groups held can't place it, as when first resolved, and otherwise reading its groups.
+	#startSpan(key: bigint, at: bigint, start: bigint, floored: boolean, holdings: Holdings): void {
+		const span = this.#spans.get(key);
+		if (!span) return;
+		this.#uncount(key, span);
 		span.start = start;
 		span.floored = floored;
 		span.waiting = false;
-		const below = asked ? unresolved(at, start, floored, holdings) : undefined;
-		if (below !== undefined) {
-			span.looking = { time: at, below };
-			this.#looking.add(at, position);
-		}
-		this.#name(position);
-		return below !== undefined;
-	}
-
-	/** Whether group `key` is in range. Everything is while a relative anchor waits. */
-	contains(key: bigint): boolean {
-		if (this.#pending) return true;
-		const run = this.#runAt(key);
-		return run !== undefined && key >= run.start;
-	}
-
-	/** The lowest group in range at or above `from`, undefined when none is. `from` itself while a relative anchor waits. */
-	next(from: bigint): bigint | undefined {
-		if (this.#pending) return from;
-		const run = this.#runAt(from);
-		return run === undefined ? undefined : max(run.start, from);
-	}
-
-	/** The lowest group in range, undefined while an anchor waits. Nothing in range floors at group 0. */
-	floor(): bigint | undefined {
-		if (this.#pending || this.#unplaced()) return undefined;
-		return this.#runs[0]?.start ?? 0n;
+		const floor = unresolved(at, start, floored, holdings);
+		if (floor !== undefined) span.looking = { time: at, floor };
+		this.#count(key, span);
 	}
 
 	/**
-	 * The lowest group the ranges name, undefined while one reaches back to the oldest group or an
-	 * anchor waits.
+	 * The time starts still waiting on the groups held, lowest first, which wait under
+	 * {@link budget}: what a received copy asks its upstream to place. Mirrors the Rust
+	 * `Window::asks`.
 	 */
-	start(): bigint | undefined {
-		if (this.#pending || this.#reaching.length > 0 || this.#unnamed > 0) return undefined;
-		return this.#named[0]?.start;
+	asks(): bigint[] {
+		const times: bigint[] = [];
+		for (const entry of this.#waiting.all()) times.push(entry.time);
+		return times;
 	}
 
-	/** The exclusive end past every group in range, undefined when one stays open or an anchor waits. Nothing in range ends at 0. */
+	/**
+	 * The times in `[start, end)` of the time starts still waiting on the groups held. The group
+	 * containing each starts at or before its time, so one at or past a read's floor and below a
+	 * group may still land between them. Mirrors the Rust `Window::waiting_in`.
+	 */
+	waitingIn(start: bigint, end: bigint): bigint[] {
+		const times: bigint[] = [];
+		for (const entry of this.#waiting.in(start, end)) times.push(entry.time);
+		return times;
+	}
+
+	/** Whether group `key` is in range. Everything is while a live join waits on a first group. */
+	contains(key: bigint): boolean {
+		return this.pending || this.#groups.contains(key);
+	}
+
+	/**
+	 * Whether a range placed so far holds group `key`: unlike {@link contains}, not every group while a
+	 * live join waits on a first group. Mirrors the Rust `Window::holds`.
+	 */
+	holds(key: bigint): boolean {
+		return this.#groups.contains(key);
+	}
+
+	/** The lowest group in range at or above `from`, undefined when none is. `from` itself while a live join waits on a first group. */
+	next(from: bigint): bigint | undefined {
+		return this.pending ? from : this.#groups.next(from);
+	}
+
+	/** The lowest group in range, undefined while a start waits. Nothing in range floors at group 0. */
+	floor(): bigint | undefined {
+		if (this.pending || this.#unplaced()) return undefined;
+		return this.#groups.lowest() ?? 0n;
+	}
+
+	/**
+	 * The lowest group the ranges name, undefined while one reaches back to the oldest group or a
+	 * start waits.
+	 */
+	start(): bigint | undefined {
+		if (this.pending || this.#reaching.size > 0 || this.#unnamed > 0) return undefined;
+		return this.#named.first();
+	}
+
+	/** The exclusive end past every group in range, undefined when one stays open or a start waits. Nothing in range ends at 0. */
 	end(): bigint | undefined {
-		if (!this.#settled) return undefined;
-		const end = this.#runs.at(-1)?.end ?? 0n;
+		if (!this.settled) return undefined;
+		const end = this.#groups.end();
 		return end === UNBOUNDED ? undefined : end;
 	}
 
 	/** The runs in range from `from` up to the exclusive `end`, lowest first. */
 	runs(from = 0n, end = UNBOUNDED): Run[] {
 		if (from >= end) return [];
-		if (this.#pending) return [{ start: from, end }];
-		return intersect(this.#runs, from, end);
+		if (this.pending) return [{ start: from, end }];
+		return this.#groups.runs(from, end);
 	}
 
 	/**
 	 * The part of {@link runs} a miss may ask a fill for: all of it but what starts before a time
-	 * start that fell before every group held, or below the oldest group held when a relative start
-	 * counting back past them all was placed. Mirrors the Rust `Window::missable`.
+	 * start that fell before every group held. Mirrors the Rust `Window::missable`.
 	 */
 	missable(from = 0n, end = UNBOUNDED): Run[] {
 		if (from >= end) return [];
-		if (this.#pending) return [{ start: from, end }];
-		return intersect(this.#missable, from, end);
+		if (this.pending) return [{ start: from, end }];
+		return this.#missable.runs(from, end);
 	}
 
 	/**
-	 * Each range resolved, in the order given: undefined for one whose start still waits, or is
-	 * still looked up. One empty as given ends at its start. Mirrors the Rust `Window::resolved`.
+	 * The range keyed `key` resolved: undefined for one whose start still waits, or is still looked
+	 * up, or that isn't held. One empty as given ends at its start. Mirrors the Rust
+	 * `Window::resolved_key`.
 	 */
+	resolvedKey(key: bigint): Resolved | undefined {
+		const range = this.#ranges.get(key);
+		if (range === undefined) return undefined;
+		if (range.start !== undefined && isEmpty(range)) return { start: range.start, end: range.start, floored: true };
+		const span = this.#spans.get(key);
+		if (!span || span.looking || span.waiting) return undefined;
+		return { start: span.start, end: span.end === UNBOUNDED ? undefined : span.end, floored: span.floored };
+	}
+
+	/** Each range resolved, in key order, as {@link resolvedKey} reads it. Mirrors the Rust `Window::resolved`. */
 	resolved(): (Resolved | undefined)[] {
-		const resolved: (Resolved | undefined)[] = this.ranges.map((range) => {
-			const start = time(range.start);
-			return start !== undefined && isEmpty(range) ? { start, end: start, floored: true } : undefined;
-		});
-		for (const span of this.#spans) {
-			if (span.looking || span.waiting) continue;
-			resolved[span.index] = {
-				start: span.start,
-				end: span.end === UNBOUNDED ? undefined : span.end,
-				floored: span.floored,
-			};
-		}
-		return resolved;
+		return [...this.#ranges.keys()].map((key) => this.resolvedKey(key));
 	}
 
 	/**
-	 * Where each range starts once delivery starts at `from`, in the order given: undefined for
-	 * one with no group there, or whose start still waits. Mirrors the Rust `Window::starts`.
+	 * Where each range starts once delivery starts at `from`, in key order: undefined for one with
+	 * no group there, or whose start still waits. Mirrors the Rust `Window::starts`.
 	 */
 	starts(from: bigint): (bigint | undefined)[] {
 		return this.resolved().map((range) => {
@@ -670,9 +700,9 @@ export class Window {
 	/** The time starts still looked up, by time. Mirrors the Rust `Window::lookups`. */
 	lookups(): Lookup[] {
 		const lookups: Lookup[] = [];
-		for (const { positions } of this.#looking.all) {
-			for (const position of positions) {
-				const looking = this.#spans[position].looking;
+		for (const { keys } of this.#looking.all()) {
+			for (const key of keys) {
+				const looking = this.#spans.get(key)?.looking;
 				if (looking) lookups.push(looking);
 			}
 		}
@@ -680,40 +710,58 @@ export class Window {
 	}
 
 	/**
-	 * The lookup of time start `time` answered with `group`, the group containing it or the oldest
-	 * group of the history when `time` is older than all of it: its spans start there, once that
-	 * group is held. Undefined, or an answer not held, means the history couldn't tell, so they
-	 * start where the groups held say. Returns whether the groups in range moved. Mirrors the Rust
-	 * `Window::found`.
+	 * The lookup of time start `at` answered: its spans start where the answer says, never where the
+	 * groups held happen to. Left unanswered because no handler is left, they start where the groups
+	 * held say, as with no handler at all, unless the cache since evicted the group their floor was
+	 * past and a handler is back: then they look it up again from lower down. Returns whether the
+	 * groups in range moved. Mirrors the Rust `Window::found`.
 	 */
-	found(at: bigint, group: bigint | undefined, holdings: Holdings = UNHELD): boolean {
-		const found = this.#looking.take(at);
-		if (found === undefined) return false;
-		const held = group !== undefined && holdings.nextStart(group) === group ? group : undefined;
-		const containing = holdings.containing(at);
-		const start = held ?? (typeof containing === "object" ? containing.group : undefined);
-		// A span looking up its start read nothing, so each one found only reads more.
-		for (const position of found) {
-			this.#unname(position);
-			const span = this.#spans[position];
+	found(at: bigint, found: Found, holdings: Holdings = UNHELD): boolean {
+		const keys = this.#looking.take(at);
+		if (keys === undefined) return false;
+		for (const key of keys) {
+			const span = this.#spans.get(key);
+			if (!span) continue;
+			this.#uncount(key, span);
+			const asked = span.looking?.floor;
 			span.looking = undefined;
-			span.start = start ?? 0n;
-			span.floored = start !== undefined;
-			this.#name(position);
+			if (found.kind === "group") {
+				span.start = found.group;
+				span.floored = true;
+			} else if (found.kind === "dropped") {
+				// A floor is one past the group held below the time, which then holds it; from 0, no
+				// group starts at or before it, so the span reads from the time on.
+				span.start = found.floor > 0n ? found.floor - 1n : at;
+				span.floored = true;
+			} else {
+				const containing = holdings.containing(at, this.budget);
+				span.start = typeof containing === "object" ? containing.group : 0n;
+				span.floored = typeof containing === "object";
+				if (asked !== undefined) {
+					// Nothing held at or before the time any more, maybe nothing at all: the group containing
+					// it may start anywhere below the floor asked.
+					const floor = span.floored
+						? unresolved(at, span.start, true, holdings)
+						: holdings.looksUp?.()
+							? 0n
+							: undefined;
+					if (floor !== undefined && floor < asked) span.looking = { time: at, floor };
+				}
+			}
+			this.#count(key, span);
 		}
-		this.#grow(found);
 		return true;
 	}
 
 	/**
 	 * What rebuilding from the spans would read, may ask a miss for, and name as its start, for a test
-	 * to check the runs grown span by span against.
+	 * to check the counted runs against.
 	 */
 	fresh(): { runs: Run[]; missable: Run[]; named: bigint | undefined } {
 		const groups: Run[] = [];
 		const missable: Run[] = [];
 		let named: bigint | undefined;
-		for (const span of this.#spans) {
+		for (const span of this.#spans.values()) {
 			const [reads, asks] = spanReads(span);
 			if (reads) groups.push(reads);
 			if (asks) missable.push(asks);
@@ -724,202 +772,187 @@ export class Window {
 
 	/** The lowest start the spans name, counted. */
 	named(): bigint | undefined {
-		return this.#named[0]?.start;
+		return this.#named.first();
 	}
 
-	// Whether a time start or a join's reach back waits on the groups held to place it.
+	// Whether a time start or a live join waits on the groups held to place it.
 	#unplaced(): boolean {
-		return this.#waiting.size > 0 || this.#reaching.length > 0;
+		return this.#waiting.size > 0 || this.#reaching.size > 0;
 	}
 
-	// The first run ending past `key`.
-	#runAt(key: bigint): Run | undefined {
-		return this.#runs[above(this.#runs, key)];
-	}
-
+	// Resolve every range again from scratch.
 	#place(latest: bigint | undefined, holdings: Holdings): void {
-		this.#spans = [];
-		this.#pending = false;
+		this.#spans.clear();
+		this.#pending.clear();
 		this.#waiting = new ByTime();
 		this.#looking = new ByTime();
-		this.#reaching = [];
-		this.#named = [];
+		this.#reaching.clear();
+		this.#groups = new Cover();
+		this.#missable = new Cover();
+		this.#named = new Counts();
 		this.#unnamed = 0;
-		for (let index = 0; index < this.ranges.length; index++) {
-			if (!isEmpty(this.ranges[index])) this.#placeRange(index, latest, holdings);
+		for (const [key, range] of this.#ranges) {
+			if (!isEmpty(range)) this.#placeRange(key, latest, holdings);
 		}
 		// Each span waiting was just tried against these holdings.
 		this.#waited = holdings.unplaced?.()?.mark;
-		this.#rebuild();
 	}
 
-	// Resolve the non-empty range at `index` into a span, or note what it waits on.
-	#placeRange(index: number, latest: bigint | undefined, holdings: Holdings): void {
-		const range = this.ranges[index];
-		const until = endOf(range.end, latest, holdings);
-		if (until === undefined) {
-			this.#pending = true;
+	// Resolve the non-empty range keyed `key` into a span, or note what it waits on.
+	#placeRange(key: bigint, latest: bigint | undefined, holdings: Holdings): void {
+		const range = this.#ranges.get(key);
+		if (range === undefined) return;
+		const end = range.end === undefined ? UNBOUNDED : range.end + 1n;
+		let at = range.start;
+		// A hop whose copies place the join waits on them, as one with no group yet does.
+		if (at === undefined && this.min !== undefined && holdings.defers?.()) {
+			this.#pending.add(key);
 			return;
 		}
-		let anchor = range.start;
-		const min = joins(range, this.min, holdings);
-		if (min !== undefined) {
-			const reached = latest === undefined ? undefined : holdings.reachBack?.(latest, min);
-			if (!reached) {
-				// Nothing to measure the live edge by yet: with groups held, read none of them until one
-				// measures it; with none, wait as a relative start does.
-				if (latest === undefined) this.#pending = true;
-				else this.#reaching.push(index);
+		// Placed already, where a copy resolved it: one left with no start reached back.
+		if (at === undefined && this.min !== undefined && holdings.resolves()) {
+			const join = this.#join(this.min, latest, holdings);
+			if (join === "pending" || join === "reaching") {
+				(join === "pending" ? this.#pending : this.#reaching).add(key);
 				return;
 			}
-			anchor = reached.anchor;
+			if (join.past !== undefined) {
+				// Starting past its end, the range holds nothing; any other waits for an answer.
+				if (range.end !== undefined && range.end < join.past) {
+					this.#count(key, { at: undefined, start: join.past, end, floored: true, waiting: false });
+				} else {
+					this.#reaching.add(key);
+				}
+				return;
+			}
+			if (join.group !== undefined) {
+				this.#count(key, { at: undefined, start: join.group, end, floored: true, waiting: false });
+				return;
+			}
+			at = join.time;
 		}
-		const start = startOf(anchor, latest, holdings);
+		const start = startOf(at, latest, this.budget, holdings);
 		if (start === "pending") {
-			this.#pending = true;
+			this.#pending.add(key);
 			return;
 		}
 		if (start === "waiting") {
 			// Reads only the groups from its time until the groups held place it; see #startWaiting.
-			this.#waiting.add(time(anchor) ?? 0n, this.#spans.length);
-			this.#push({ index, anchor, start: 0n, end: until, floored: false, waiting: true });
+			this.#count(key, { at, start: 0n, end, floored: false, waiting: true });
 			return;
 		}
-		// A time start the groups held can't place reads nothing until its lookup answers. A join's
-		// reach back never looks one up: it starts from what this hop holds.
-		const at = time(anchor);
-		const asked = time(range.start) !== undefined && at === time(range.start);
-		const below = at === undefined || !asked ? undefined : unresolved(at, start.group, start.floored, holdings);
-		const looking = at !== undefined && below !== undefined ? { time: at, below } : undefined;
-		if (looking) this.#looking.add(looking.time, this.#spans.length);
-		const counted = !start.floored && relative(anchor) !== undefined;
-		this.#push({
-			index,
-			anchor,
-			start: start.group,
-			end: until,
-			floored: start.floored,
-			looking,
-			waiting: false,
-			reach: counted ? (holdings.nextStart(0n) ?? start.group) : undefined,
-		});
+		// A time start the groups held can't place reads nothing until its lookup answers.
+		const floor = at === undefined ? undefined : unresolved(at, start.group, start.floored, holdings);
+		const looking = at !== undefined && floor !== undefined ? { time: at, floor } : undefined;
+		this.#count(key, { at, start: start.group, end, floored: start.floored, looking, waiting: false });
 	}
 
-	#push(span: Span): void {
-		this.#spans.push(span);
-		this.#name(this.#spans.length - 1);
+	// Where a live join holding `age` behind the live edge starts: `"pending"` before any group,
+	// reading everything meanwhile, and `"reaching"` while the holdings can't tell, reading nothing.
+	// The latest group holds the live edge, so a zero Min Age starts there.
+	#join(age: Duration, latest: bigint | undefined, holdings: Holdings): Join | "pending" | "reaching" {
+		if (latest === undefined) return "pending";
+		if (age.asNanos() === 0) return { group: latest };
+		return holdings.join?.(age, this.budget) ?? "reaching";
 	}
 
-	// Count where the span at `position` starts in {@link start}.
-	#name(position: number): void {
-		const span = this.#spans[position];
-		if (!span.floored) {
-			this.#unnamed++;
-			return;
-		}
-		const named = this.#named;
-		const at = lowerBound(named.length, (i) => named[i].start >= span.start);
-		if (named[at]?.start === span.start) named[at].count++;
-		else named.splice(at, 0, { start: span.start, count: 1 });
+	// Hold `span` under `key`, counting the groups it reads and where it starts.
+	#count(key: bigint, span: Span): void {
+		[span.reads, span.asks] = spanReads(span);
+		if (span.reads) this.#groups.add(span.reads.start, span.reads.end, 1);
+		if (span.asks) this.#missable.add(span.asks.start, span.asks.end, 1);
+		if (span.floored) this.#named.add(span.start);
+		else this.#unnamed++;
+		if (span.looking) this.#looking.add(span.looking.time, key);
+		if (span.waiting) this.#waiting.add(span.at ?? 0n, key);
+		this.#spans.set(key, span);
 	}
 
-	// Stop counting where the span at `position` starts, before it moves.
-	#unname(position: number): void {
-		const span = this.#spans[position];
-		if (!span.floored) {
-			this.#unnamed--;
-			return;
-		}
-		const named = this.#named;
-		const at = lowerBound(named.length, (i) => named[i].start >= span.start);
-		if (named[at]?.start !== span.start) return;
-		if (--named[at].count === 0) named.splice(at, 1);
-	}
-
-	#updateSettled(): void {
-		this.#settled = !this.#pending && !this.#unplaced() && this.#looking.size === 0;
-	}
-
-	// The groups in range: every span that knows where it starts, through its end, and every span
-	// waiting on a time start from that time.
-	#rebuild(): void {
-		this.#updateSettled();
-		const groups: Run[] = [];
-		const missable: Run[] = [];
-		for (const span of this.#spans) {
-			const [reads, asks] = spanReads(span);
-			if (reads) groups.push(reads);
-			if (asks) missable.push(asks);
-		}
-		this.#runs = merge(groups);
-		this.#missable = merge(missable);
-	}
-
-	// Take in the spans at `positions`, each now reading at least what it did before: their runs
-	// are inserted into the sorted runs, so a change to a few spans costs them, not every range.
-	#grow(positions: readonly number[]): void {
-		this.#updateSettled();
-		for (const position of positions) {
-			const [reads, asks] = spanReads(this.#spans[position]);
-			if (reads) insert(this.#runs, reads);
-			if (asks) insert(this.#missable, asks);
-		}
+	// Take back what {@link #count} counted for `span`, and take it out of the spans.
+	#uncount(key: bigint, span: Span): void {
+		if (span.reads) this.#groups.add(span.reads.start, span.reads.end, -1);
+		if (span.asks) this.#missable.add(span.asks.start, span.asks.end, -1);
+		if (span.floored) this.#named.remove(span.start);
+		else this.#unnamed--;
+		if (span.looking) this.#looking.remove(span.looking.time, key);
+		if (span.waiting) this.#waiting.remove(span.at ?? 0n, key);
+		this.#spans.delete(key);
 	}
 }
 
-/** Spans by position, keyed by the time each waits on or looks up, lowest first. */
-type Timed = { time: bigint; positions: number[] };
+/** Spans by key, keyed by the time each waits on or looks up, lowest first. */
+type Timed = { time: bigint; keys: Set<bigint> };
 
-/** {@link Timed} entries kept sorted by time, so the times in a run are found without a walk. */
+const compareTimes = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * {@link Timed} entries ordered by time, so the times in a run are found without a walk, and a
+ * span joins or leaves its time without shifting every other.
+ */
 class ByTime {
-	#entries: Timed[] = [];
+	#entries = new Sorted<bigint, Timed>((entry) => entry.time, compareTimes);
 
 	get size(): number {
-		return this.#entries.length;
+		return this.#entries.size;
 	}
 
-	get all(): readonly Timed[] {
-		return this.#entries;
+	/** Every entry, lowest first. */
+	*all(): Generator<Timed> {
+		const first = this.#entries.first();
+		if (first) yield* this.#entries.from(first.time);
 	}
 
-	// The index of the first entry at or after `time`.
-	#at(time: bigint): number {
-		const entries = this.#entries;
-		return lowerBound(entries.length, (i) => entries[i].time >= time);
+	/** Every entry whose time is in `[start, end)`, lowest first. */
+	*in(start: bigint, end: bigint): Generator<Timed> {
+		for (const entry of this.#entries.from(start)) {
+			if (entry.time >= end) return;
+			yield entry;
+		}
 	}
 
-	/** Add the span at `position` under `time`. */
-	add(time: bigint, position: number): void {
-		const at = this.#at(time);
-		const entry = this.#entries[at];
-		if (entry?.time === time) entry.positions.push(position);
-		else this.#entries.splice(at, 0, { time, positions: [position] });
+	/** Add the span keyed `key` under `time`. */
+	add(time: bigint, key: bigint): void {
+		const entry = this.#entries.ceil(time);
+		if (entry?.time === time) entry.keys.add(key);
+		else this.#entries.insert({ time, keys: new Set([key]) });
+	}
+
+	/** Take the span keyed `key` out from under `time`, if it is there. */
+	remove(time: bigint, key: bigint): void {
+		const entry = this.#entries.ceil(time);
+		if (entry?.time !== time || !entry.keys.delete(key)) return;
+		if (entry.keys.size === 0) this.#entries.delete(time);
 	}
 
 	/** Put back an entry taken out, whose time no entry holds. */
 	put(entry: Timed): void {
-		this.#entries.splice(this.#at(entry.time), 0, entry);
+		this.#entries.insert(entry);
 	}
 
 	/** Take out the spans under `time`, if any. */
-	take(time: bigint): number[] | undefined {
-		const at = this.#at(time);
-		if (this.#entries[at]?.time !== time) return undefined;
-		return this.#entries.splice(at, 1)[0].positions;
+	take(time: bigint): Set<bigint> | undefined {
+		const entry = this.#entries.ceil(time);
+		if (entry?.time !== time) return undefined;
+		this.#entries.delete(time);
+		return entry.keys;
 	}
 
 	/** Take out every entry whose time is in `[start, end)`, lowest first. */
 	takeIn(start: bigint, end: bigint): Timed[] {
-		const from = this.#at(start);
-		const to = end >= UNBOUNDED ? this.#entries.length : this.#at(end);
-		return to > from ? this.#entries.splice(from, to - from) : [];
+		const taken: Timed[] = [];
+		for (const entry of this.#entries.from(start)) {
+			if (end < UNBOUNDED && entry.time >= end) break;
+			taken.push(entry);
+		}
+		for (const entry of taken) this.#entries.delete(entry.time);
+		return taken;
 	}
 
 	/** Take out every entry, lowest first. */
 	takeAll(): Timed[] {
-		const entries = this.#entries;
-		this.#entries = [];
-		return entries;
+		const taken = [...this.all()];
+		this.#entries = new Sorted<bigint, Timed>((entry) => entry.time, compareTimes);
+		return taken;
 	}
 }
 
@@ -931,7 +964,7 @@ function spanReads(span: Span): [Run | undefined, Run | undefined] {
 	// one reaching back past every group held does: whichever group contains it starts at or before
 	// it, so every group from there on is in range.
 	if (span.waiting) {
-		const at = time(span.anchor) ?? 0n;
+		const at = span.at ?? 0n;
 		if (at >= span.end) return [undefined, undefined];
 		return [
 			{ start: at, end: span.end },
@@ -941,44 +974,9 @@ function spanReads(span: Span): [Run | undefined, Run | undefined] {
 	if (span.start >= span.end) return [undefined, undefined];
 	// A time start before every group held reaches back to the group containing it, which is unknown
 	// here, so it asks no miss below its time: every key from there on is in range, the key at the
-	// time itself being the containing group if it exists. A relative one counting back past every
-	// group held asks none below its reach.
-	let reach = span.start;
-	if (!span.floored && span.anchor !== undefined) {
-		reach = time(span.anchor) ?? span.reach ?? span.start;
-	}
+	// time itself being the containing group if it exists.
+	const reach = !span.floored && span.at !== undefined ? span.at : span.start;
 	return [{ start: span.start, end: span.end }, reach < span.end ? { start: reach, end: span.end } : undefined];
-}
-
-// The first index in `[0, length)` for which `past` holds, `past` being false then true.
-function lowerBound(length: number, past: (index: number) => boolean): number {
-	let lo = 0;
-	let hi = length;
-	while (lo < hi) {
-		const mid = (lo + hi) >>> 1;
-		if (past(mid)) hi = mid;
-		else lo = mid + 1;
-	}
-	return lo;
-}
-
-// The index of the first of sorted, disjoint `runs` ending past `key`.
-function above(runs: readonly Run[], key: bigint): number {
-	return lowerBound(runs.length, (i) => runs[i].end > key);
-}
-
-// Insert `run` into sorted, disjoint `runs`, merging what it overlaps or touches. An empty one
-// changes nothing.
-function insert(runs: Run[], run: Run): void {
-	if (run.end <= run.start) return;
-	const from = lowerBound(runs.length, (i) => runs[i].end >= run.start);
-	const to = lowerBound(runs.length, (i) => runs[i].start > run.end);
-	if (from === to) {
-		runs.splice(from, 0, { ...run });
-		return;
-	}
-	const merged = { start: min(runs[from].start, run.start), end: max(runs[to - 1].end, run.end) };
-	runs.splice(from, to - from, merged);
 }
 
 // The times outside sorted, disjoint `runs`, as runs lowest first.
@@ -1005,53 +1003,28 @@ function merge(runs: Run[]): Run[] {
 	return merged;
 }
 
-// The parts of sorted, disjoint `runs` inside `[from, end)`.
-function intersect(runs: readonly Run[], from: bigint, end: bigint): Run[] {
-	const out: Run[] = [];
-	for (const run of runs) {
-		if (run.end <= from) continue;
-		if (run.start >= end) break;
-		out.push({ start: max(run.start, from), end: min(run.end, end) });
-	}
-	return out;
-}
-
 /**
- * The Min Age a live join reaches back by: `min`, for {@link LIVE}, where the hop resolves its own
- * ranges. Any other start names where it starts, the oldest one included, which asks for everything
- * the budget keeps. A zero minimum starts at the latest group anyway. Mirrors the Rust `joins`.
- */
-function joins(range: Range, min: Duration | undefined, holdings: Holdings): Duration | undefined {
-	const live = relative(range.start) === 0n && range.end === undefined;
-	return live && min !== undefined && !min.isZero() && holdings.reachBack && holdings.resolves() ? min : undefined;
-}
-
-/**
- * The first group a range starts at, and whether it names that group rather than reaching back to
- * the oldest one. `"pending"` while it waits on a latest group, reading everything meanwhile, and
- * `"waiting"` for a time start the groups held can't place yet. Mirrors the Rust `start`.
+ * The first group a range starting from time `at` starts at (undefined for the oldest group), and
+ * whether it names that group rather than reaching back to the oldest one. `"pending"` while a hop
+ * that holds no groups waits on a latest group, reading everything meanwhile, and `"waiting"` for
+ * a time start the groups held can't place yet. Mirrors the Rust `start`.
  */
 function startOf(
-	anchor: Anchor | undefined,
+	at: bigint | undefined,
 	latest: bigint | undefined,
+	budget: number,
 	holdings: Holdings,
 ): { group: bigint; floored: boolean } | "waiting" | "pending" {
 	// Nothing sits below group 0, so the oldest start needs no latest group.
-	if (anchor === undefined) return { group: 0n, floored: false };
-	if (anchor.relative !== undefined) {
-		if (latest === undefined) return "pending";
-		const group = holdings.reportedStart?.(latest, anchor.relative) ?? holdings.back(latest, anchor.relative);
-		// Fewer groups are held than it counts back, so reach back to the oldest.
-		return group === undefined ? { group: 0n, floored: false } : { group, floored: true };
-	}
+	if (at === undefined) return { group: 0n, floored: false };
 	// No group starts before 0, so time 0 names group 0 whatever is held.
-	if (anchor.time === 0n) return { group: 0n, floored: true };
-	const containing = holdings.containing(anchor.time);
+	if (at === 0n) return { group: 0n, floored: true };
+	const containing = holdings.containing(at, budget);
 	if (typeof containing === "object") return { group: containing.group, floored: true };
 	// The group holding it is older than any held, so reach back to the oldest.
 	if (containing === "before") return { group: 0n, floored: false };
-	// Before any group, as for a relative anchor, which a hop that holds none (such as a reader
-	// following route copies) leaves to the copies to resolve.
+	// Before any group, which a hop that holds none (such as a reader following route copies)
+	// leaves to the copies to resolve.
 	if (latest === undefined && !holdings.resolves()) return "pending";
 	// Nothing can arrive any more, so nothing held reaches past it.
 	if (holdings.complete()) return { group: 0n, floored: false };
@@ -1061,30 +1034,18 @@ function startOf(
 }
 
 /**
- * The exclusive end of the run a lookup of time start `at`, resolved to `start`, searches, when
- * the groups held can't tell which group contains it and a handler may: it is before every group
- * held, or a group the cache evicted may start after `start`, the newest held at or before it, and
- * still at or before `at`. Starts the producer skipped hold none. Mirrors the Rust `unresolved`.
+ * The oldest key a fill of the group containing time start `at`, resolved to `start`, asks from,
+ * when the groups held can't tell which group contains it and a handler may: it is before every
+ * group held, or a group the cache evicted may start after `start`, the newest held at or before
+ * it, and still at or before `at`. Starts the producer skipped hold none. Mirrors the Rust
+ * `unresolved`.
  */
 function unresolved(at: bigint, start: bigint, floored: boolean, holdings: Holdings): bigint | undefined {
 	if (!holdings.looksUp?.()) return undefined;
-	if (!floored) return holdings.nextStart(0n);
+	if (!floored) return holdings.nextStart(0n) === undefined ? undefined : 0n;
 	const next = start + 1n;
 	const after = holdings.nextStart(next);
 	if (after === undefined) return undefined;
 	const gap = min(after, at + 1n);
-	return holdings.neverProduced?.(next, gap) || next >= gap ? undefined : after;
-}
-
-/**
- * Where a range stops, exclusive ({@link UNBOUNDED} past every group), or undefined while it waits
- * on a latest group. Every end includes its group. Mirrors the Rust `end`.
- */
-function endOf(anchor: Anchor | undefined, latest: bigint | undefined, holdings: Holdings): bigint | undefined {
-	if (anchor === undefined) return UNBOUNDED;
-	if (anchor.time !== undefined) return anchor.time + 1n;
-	if (latest === undefined) return undefined;
-	const group = holdings.back(latest, anchor.relative);
-	// It counts back past every group held, so it ends before them all.
-	return group === undefined ? 0n : group + 1n;
+	return holdings.neverProduced?.(next, gap) || next >= gap ? undefined : next;
 }

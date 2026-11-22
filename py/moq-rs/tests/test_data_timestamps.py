@@ -55,6 +55,9 @@ def test_timedelta_conversions():
     assert moq.Timestamp.unscaled(3) == moq.Timestamp(3, None)
     with pytest.raises(ValueError):
         moq.Timestamp.unscaled(3).to_timedelta()
+    # A zero scale has no time either, rather than dividing by zero.
+    with pytest.raises(ValueError):
+        moq.Timestamp(3, 0).to_timedelta()
 
 
 @pytest.mark.parametrize("mode", ["snapshot", "stream"])

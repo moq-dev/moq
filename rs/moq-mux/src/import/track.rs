@@ -1258,11 +1258,12 @@ mod tests {
 		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
 		let mut import: Track = import.into();
 
-		for ts in [0, 10_000, 20_000] {
+		// Each `a` packet holds 20ms of Opus, so these play back to back.
+		for ts in [0, 20_000, 40_000] {
 			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
 		}
 		import.cut(None).unwrap();
-		for ts in [30_000, 40_000] {
+		for ts in [60_000, 80_000] {
 			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
 		}
 		let _finished = import.finish().unwrap();
@@ -1299,7 +1300,7 @@ mod tests {
 		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
 		let mut import: Track = import.into();
 
-		for ts in [0, 10_000, 20_000] {
+		for ts in [0, 20_000, 40_000] {
 			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
 			import.cut(None).unwrap();
 		}

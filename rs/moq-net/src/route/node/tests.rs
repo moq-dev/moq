@@ -113,13 +113,22 @@ struct Left(Arc<AtomicU8>);
 
 impl Left {
 	const HELD: u8 = 0;
-	const RELEASED: u8 = 1;
-	const ENDED: u8 = 2;
+	/// Another session serves the claim.
+	const MOVED: u8 = 1;
+	/// The node let go of the claim, and every copy with it.
+	const LOST: u8 = 2;
+	const ENDED: u8 = 3;
+	const WITHDRAWN: u8 = 4;
 }
 
 impl Orphan for Left {
-	fn release(self: Box<Self>, ended: bool) {
-		let how = if ended { Self::ENDED } else { Self::RELEASED };
+	fn release(self: Box<Self>, gone: Gone) {
+		let how = match gone {
+			Gone::Moved => Self::MOVED,
+			Gone::Lost => Self::LOST,
+			Gone::Ended => Self::ENDED,
+			Gone::Withdrawn => Self::WITHDRAWN,
+		};
 		self.0.store(how, Ordering::SeqCst);
 	}
 }
@@ -211,7 +220,7 @@ fn only_the_closest_newest_copy_is_served() {
 		assert_eq!(confirm(&second), 1);
 		let serves = serves(&first);
 		assert!(
-			matches!(serves.as_slice(), [Output::Unserve { ended: false, .. }]),
+			matches!(serves.as_slice(), [Output::Unserve { gone: Gone::Moved, .. }]),
 			"{serves:?}"
 		);
 	}
@@ -376,7 +385,8 @@ fn an_unavailable_routed_claim_takes_no_request() {
 }
 
 /// A session that closes leaves what it served as an orphan, which the node holds while
-/// the reader still shows the claim and releases, not ended, once the debounce runs out.
+/// the reader still shows the claim and releases as lost, every copy with it, once the
+/// debounce runs out.
 #[test]
 fn an_orphan_is_released_when_the_reader_lets_go() {
 	let (node, clock) = node();
@@ -394,7 +404,32 @@ fn an_orphan_is_released_when_the_reader_lets_go() {
 	);
 
 	expire(&node, &clock);
-	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
+}
+
+/// Once nothing owns the origin, the node releases each orphan as lost, and a session
+/// still open keeps serving its claims.
+#[test]
+fn releasing_orphans_keeps_the_open_sessions_claims() {
+	let (node, _clock) = node();
+	let (room, other) = (cast("room"), cast("other"));
+	let first = publisher(&node, 1);
+	let second = publisher(&node, 2);
+	let _viewer = viewer(&node, 3);
+	announce(&first, &room, live(0));
+	announce(&second, &other, live(0));
+	confirm(&first);
+	confirm(&second);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	first.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(first);
+
+	node.release_orphans();
+	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
+	assert_eq!(
+		node.poll_forward(3, None, &other, &kio::Waiter::noop()),
+		Poll::Ready(Some(Via::Route { node: node.me() }))
+	);
 }
 
 /// A session that returns before the debounce runs out takes the claim over: the orphan
@@ -414,7 +449,52 @@ fn an_orphan_is_released_once_another_session_serves_the_claim() {
 	announce(&second, &room, live(0));
 	assert_eq!(left.load(Ordering::SeqCst), Left::HELD, "nothing serves the claim yet");
 	assert_eq!(confirm(&second), 1);
-	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+	assert_eq!(left.load(Ordering::SeqCst), Left::MOVED);
+}
+
+/// A claim another session takes over keeps its showing, and one shown again after the
+/// node let go of it gets a new one, so the origin never retires the new copies with the
+/// old.
+#[test]
+fn a_claim_shown_again_is_a_new_showing() {
+	let lifecycle = |stream: &Stream| {
+		let serves = serves(stream);
+		let [
+			Output::Serve {
+				origin,
+				path,
+				instance,
+				served,
+			},
+		] = serves.as_slice()
+		else {
+			panic!("one claim to serve: {serves:?}");
+		};
+		stream.serving(*origin, &(path.clone(), instance.clone()), true);
+		served.lifecycle
+	};
+	let (node, clock) = node();
+	let room = cast("room");
+	let first = publisher(&node, 1);
+	announce(&first, &room, live(0));
+	let shown = lifecycle(&first);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	first.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(first);
+
+	let second = publisher(&node, 2);
+	announce(&second, &room, live(0));
+	assert_eq!(lifecycle(&second), shown, "taken over, not shown again");
+	assert_eq!(left.load(Ordering::SeqCst), Left::MOVED);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	second.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(second);
+	expire(&node, &clock);
+	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
+
+	let third = publisher(&node, 3);
+	announce(&third, &room, live(0));
+	assert_ne!(lifecycle(&third), shown, "shown again after the node let go");
 }
 
 /// The origin's own copy of a claim never waits to be served, so a session refusing the
@@ -435,7 +515,7 @@ fn an_orphan_is_released_once_every_session_refuses_the_claim() {
 	announce(&second, &room, live(0));
 	assert_eq!(left.load(Ordering::SeqCst), Left::HELD);
 	second.serving(node.me(), &room, false);
-	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+	assert_eq!(left.load(Ordering::SeqCst), Left::MOVED);
 }
 
 /// A claim its publisher withdraws stops being served as ended, so the origin withdraws
@@ -450,7 +530,7 @@ fn a_withdrawn_claim_is_unserved_as_ended() {
 	announce(&publisher, &room, Change::Ended);
 	let serves = serves(&publisher);
 	assert!(
-		matches!(serves.as_slice(), [Output::Unserve { ended: true, .. }]),
+		matches!(serves.as_slice(), [Output::Unserve { gone: Gone::Ended, .. }]),
 		"{serves:?}"
 	);
 }
@@ -578,4 +658,265 @@ fn a_waiting_request_wakes_when_its_claim_moves() {
 	announce(&publisher, &hall, Change::Ended);
 	assert!(flag.woken(), "the claim went");
 	assert_eq!(node.poll_forward(2, None, &hall, &waiter), Poll::Ready(None));
+}
+
+/// A neighbour that routes to a node before its claims arrive serves none of them, and is
+/// handed each once its own copy holds it, though nothing changed of the claim here.
+#[test]
+fn a_neighbour_serves_a_claim_once_its_copy_holds_it() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let claims = Msg::Claims {
+		origin: far,
+		changes: vec![(room.clone(), live(0))],
+		floor: 1,
+	};
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead.recv(claims.clone()).unwrap();
+	ahead.flush();
+	assert!(serves(&lagging).is_empty(), "its copy lacks the claim");
+	assert_eq!(confirm(&ahead), 1);
+	let waiter = kio::Waiter::noop();
+	assert_eq!(
+		node.poll_forward(3, Some(far), &room, &waiter),
+		Poll::Ready(Some(Via::Route { node: far }))
+	);
+
+	lagging.recv(claims).unwrap();
+	lagging.flush();
+	assert_eq!(confirm(&lagging), 1);
+}
+
+/// The neighbour whose copy holds a claim leaves while another still routes to its node
+/// with a copy that lacks it. The node keeps showing the claim available, so a request for
+/// it waits for that copy rather than fail: nothing the node shows would change once the
+/// copy arrives, so a request refused meanwhile would never be asked again.
+#[test]
+fn a_request_for_a_claim_shown_available_waits_for_a_copy_that_holds_it() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let claims = Msg::Claims {
+		origin: far,
+		changes: vec![(room.clone(), live(0))],
+		floor: 1,
+	};
+	let viewer = viewer(&node, 5);
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead.recv(claims.clone()).unwrap();
+	ahead.flush();
+	assert_eq!(confirm(&ahead), 1);
+	assert_eq!(told(&viewer), [("room".to_string(), true)]);
+
+	drop(ahead);
+	assert!(told(&viewer).is_empty(), "the claim still shows available");
+	assert!(serves(&lagging).is_empty(), "its copy lacks the claim");
+	let (flag, waiter) = flag();
+	assert!(node.poll_forward(5, None, &room, &waiter).is_pending());
+	assert!(node.poll_forward(5, Some(far), &room, &waiter).is_pending());
+
+	lagging.recv(claims).unwrap();
+	lagging.flush();
+	assert_eq!(confirm(&lagging), 1);
+	assert!(flag.woken(), "a way appeared");
+	assert_eq!(
+		node.poll_forward(5, None, &room, &waiter),
+		Poll::Ready(Some(Via::Route { node: far }))
+	);
+}
+
+/// A request waiting for a way to a claim fails once the node no longer routes to the
+/// claim's node, which shows the claim unavailable.
+#[test]
+fn a_request_waiting_for_a_way_fails_once_its_route_goes() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let viewer = viewer(&node, 5);
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead
+		.recv(Msg::Claims {
+			origin: far,
+			changes: vec![(room.clone(), live(0))],
+			floor: 1,
+		})
+		.unwrap();
+	ahead.flush();
+	confirm(&ahead);
+	drop(ahead);
+	told(&viewer);
+	let (flag, waiter) = flag();
+	assert!(node.poll_forward(5, None, &room, &waiter).is_pending());
+
+	lagging
+		.recv(Msg::Route {
+			origin: far,
+			offer: None,
+		})
+		.unwrap();
+	lagging.flush();
+	assert!(flag.woken(), "the route went");
+	assert_eq!(node.poll_forward(5, None, &room, &waiter), Poll::Ready(None));
+	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
+}
+
+/// A request waiting for a way to a claim fails once a claim of better precedence outranks
+/// it, as the node then shows the broadcast by that claim, which its sender asks anew.
+#[test]
+fn a_request_waiting_for_a_way_fails_once_its_claim_is_outranked() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let viewer = viewer(&node, 5);
+	let publisher = publisher(&node, 6);
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead
+		.recv(Msg::Claims {
+			origin: far,
+			changes: vec![(room.clone(), live(0))],
+			floor: 1,
+		})
+		.unwrap();
+	ahead.flush();
+	confirm(&ahead);
+	drop(ahead);
+	told(&viewer);
+	let (flag, waiter) = flag();
+	assert!(node.poll_forward(5, Some(far), &room, &waiter).is_pending());
+
+	announce(&publisher, &room, live(1));
+	confirm(&publisher);
+	assert!(flag.woken(), "a newer claim arrived");
+	assert_eq!(told(&viewer), [("room".to_string(), true)], "shown by the newer claim");
+	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
+}
+
+/// A copy its publisher withdraws as another session's copy shows the claim again at
+/// once still ends, though it waits for that session to serve the claim: the wait keeps
+/// why it is leaving.
+#[test]
+fn a_withdrawn_copy_waiting_on_another_session_still_ends() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let first = publisher(&node, 1);
+	announce(&first, &room, live(0));
+	assert_eq!(confirm(&first), 1);
+	let second = publisher(&node, 2);
+
+	// Taken in together: the reader ends the claim and shows it again in one flush.
+	first
+		.recv(Msg::Announce {
+			changes: vec![(room.clone(), Change::Ended)],
+		})
+		.unwrap();
+	announce(&second, &room, live(0));
+	let handed = serves(&second);
+	assert!(matches!(handed.as_slice(), [Output::Serve { .. }]), "{handed:?}");
+	assert_eq!(serves(&first), [], "kept until the other session serves it");
+
+	second.serving(node.me(), &room, true);
+	let unserved = serves(&first);
+	assert!(
+		matches!(
+			unserved.as_slice(),
+			[Output::Unserve {
+				gone: Gone::Withdrawn,
+				..
+			}]
+		),
+		"{unserved:?}"
+	);
 }

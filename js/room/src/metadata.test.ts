@@ -4,6 +4,7 @@ import * as Net from "@moq/net";
 import type * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type * as Watch from "@moq/watch";
+import { defined } from "./defined.test-util.ts";
 import { consume, type ExtendedCatalog, type Preview, serve, TRACK, userFields } from "./metadata.ts";
 
 // Drain queued effects and their asynchronous subscription continuations.
@@ -49,10 +50,10 @@ test("metadata clears when entries disappear or broadcast becomes inactive", asy
 	});
 	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
 	const user = new Json.Snapshot.Producer({
-		track: net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const preview = new Json.Snapshot.Producer({
-		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	user.update({ name: "Alice" }, Net.Time.Timestamp.now());
 	preview.update({ info: { video: true } }, Net.Time.Timestamp.now());
@@ -84,10 +85,10 @@ test("metadata refuses values that do not match their schema and keeps the last 
 	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
 	// Unvalidated producers, standing in for a remote publisher that sends anything.
 	const user = new Json.Snapshot.Producer<unknown>({
-		track: net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const preview = new Json.Snapshot.Producer<unknown>({
-		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
@@ -116,6 +117,75 @@ test("metadata refuses values that do not match their schema and keeps the last 
 		warn.mockRestore();
 		user.finish();
 		preview.finish();
+		net.close();
+	}
+});
+
+test("an unrelated catalog update keeps the metadata subscriptions", async () => {
+	const net = new Net.Broadcast.Producer();
+	const hang = { user: { track: TRACK.user }, preview: { track: TRACK.preview } };
+	const catalog = new Signal<ExtendedCatalog | undefined>({ hang });
+	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
+	const user = new Json.Snapshot.Producer({
+		track: defined(net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI })),
+	});
+	const preview = new Json.Snapshot.Producer({
+		track: defined(net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI })),
+	});
+	user.update({ name: "Alice" }, Net.Time.Timestamp.now());
+	preview.update({ info: { video: true } }, Net.Time.Timestamp.now());
+	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
+	const names: (string | undefined)[] = [];
+	const previews: Preview[] = [];
+	const watcher = new Effect();
+	watcher.run((effect) => {
+		names.push(effect.get(consumed.user.name));
+	});
+	watcher.run((effect) => {
+		previews.push(effect.get(consumed.preview));
+	});
+	try {
+		await flush();
+		expect(names.at(-1)).toBe("Alice");
+		const seen = [names.length, previews.length];
+
+		// A new rendition and an app's chat entry leave both track names alone.
+		catalog.set({ video: { renditions: {} }, hang: { ...hang, chat: { track: TRACK.chat } } });
+		await flush();
+		expect([names.length, previews.length]).toEqual(seen);
+
+		// Renaming one track resubscribes only that one.
+		const other = defined(net.createTrack("other.json", { timescale: Net.Time.Timescale.MILLI }));
+		catalog.set({ hang: { ...hang, user: { track: "other.json" } } });
+		await flush();
+		expect(names.at(-1)).toBeUndefined();
+		expect(previews.length).toBe(seen[1]);
+		other.close();
+	} finally {
+		watcher.close();
+		consumed.close();
+		user.finish();
+		preview.finish();
+		net.close();
+	}
+});
+
+test("a malformed hang catalog section is refused as absent", async () => {
+	const net = new Net.Broadcast.Producer();
+	const catalog = new Signal<ExtendedCatalog | undefined>(
+		JSON.parse('{"hang":{"user":{"track":5},"preview":"hang/preview.json"}}'),
+	);
+	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
+	try {
+		await flush();
+		expect(consumed.user.name.peek()).toBeUndefined();
+		expect(consumed.preview.peek()).toEqual({});
+		expect(warn).toHaveBeenCalledTimes(1);
+	} finally {
+		consumed.close();
+		warn.mockRestore();
 		net.close();
 	}
 });

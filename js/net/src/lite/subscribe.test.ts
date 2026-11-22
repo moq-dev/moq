@@ -8,6 +8,8 @@ import {
 	encodeSubscribeResponse,
 	inclusiveGroupEnd,
 	LiveRanges,
+	positionFrames,
+	rangeSize,
 	requestedRanges,
 	Subscribe,
 	SubscribeDrop,
@@ -188,11 +190,18 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 			new Reader(undefined, await encodeMessage(Version.DRAFT_07, msg), Version.DRAFT_07),
 			Version.DRAFT_07,
 		);
-	// A range covers whole groups: a slice of one is a FETCH.
+	// A range ends only at a group: a slice of one is a FETCH.
 	await expect(encodeMessage(Version.DRAFT_07, message)).rejects.toThrow("frame bounds not supported");
 	await expect(encodeMessage(Version.DRAFT_07, new Subscribe({ ...message, startFrame: 0 }))).rejects.toThrow(
 		"frame bounds not supported",
 	);
+	// It starts partway through one as a Position.
+	const resumed = await decode(new Subscribe({ ...message, endFrame: undefined }));
+	expect([resumed.startGroup, resumed.startFrame, resumed.ranges]).toEqual([
+		3n,
+		2,
+		[{ start: { absolute: 3n, frame: 2 }, end: { time: 9n } }],
+	]);
 	const whole = await decode(new Subscribe({ ...message, startFrame: 0, endFrame: undefined }));
 	expect([whole.startGroup, whole.startFrame, whole.endGroup, whole.endFrame]).toEqual([3n, 0, 9n, undefined]);
 	const open = await decode(
@@ -201,7 +210,7 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 	expect([open.startGroup, open.endGroup]).toEqual([undefined, undefined]);
 });
 
-test("a lite-07 list decodes its time and relative anchors", async () => {
+test("a lite-07 list decodes its time anchors and starts with none", async () => {
 	// Priority, order, max delay, and an unstated min delay as SubscribeUpdate writes them,
 	// then no Range ID to retire, the ranges it adds, and an absent wanted group.
 	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [] }))).slice(1, 5);
@@ -214,18 +223,18 @@ test("a lite-07 list decodes its time and relative anchors", async () => {
 		return { ...got, ...spanOf(Version.DRAFT_07, got.ranges ?? []) };
 	};
 
-	// Type 1 is a time, both ends inclusive, and type 2 counts back. A time names the group it
-	// keys, so the span covers it, and the model reads it as the same time, the end inclusive.
-	const timed = await update([2, 1, 40, 1, 90, 2, 3, 0]);
-	expect(timed.ranges).toEqual([{ start: { time: 40n }, end: { time: 90n } }, { start: { relative: 3n } }]);
+	// Type 1 is a time, both ends inclusive, and type 0 none. A time names the group it keys, so
+	// the span covers it, and the model reads it as the same time, the end inclusive.
+	const timed = await update([2, 1, 40, 1, 90, 0, 0]);
+	expect(timed.ranges).toEqual([{ start: { time: 40n }, end: { time: 90n } }, {}]);
 	expect([timed.startGroup, timed.endGroup]).toEqual([undefined, undefined]);
-	expect(requestedRanges(timed)).toEqual([{ start: { time: 40n }, end: { time: 90n } }, { start: { relative: 3n } }]);
+	expect(requestedRanges(timed)).toEqual([{ start: 40n, end: 90n }, {}]);
 	const bounded = await update([1, 1, 40, 1, 90]);
 	expect([bounded.startGroup, bounded.endGroup]).toEqual([40n, 90n]);
 
 	// One ending before its start covers no group there, and keeps its place.
 	const reversed = await update([1, 1, 5, 1, 3]);
-	expect(requestedRanges(reversed)).toEqual([{ start: { time: 5n }, end: { time: 3n } }]);
+	expect(requestedRanges(reversed)).toEqual([{ start: 5n, end: 3n }]);
 
 	// A time past what a JS number holds exactly reads at full width.
 	const far = 1n << 60n;
@@ -235,13 +244,94 @@ test("a lite-07 list decodes its time and relative anchors", async () => {
 		Version.DRAFT_07,
 	);
 	expect(got.ranges).toEqual([{ start: { time: far } }]);
-	expect(requestedRanges({ ...got, startFrame: 0 })).toEqual([{ start: { time: far } }]);
+	expect(requestedRanges({ ...got, startFrame: 0 })).toEqual([{ start: far }]);
 
 	// An update may add no range, retiring some or none.
 	expect((await update([0])).ranges).toEqual([]);
-	// Any other type is a violation.
-	await expect(update([1, 3, 0, 0])).rejects.toThrow(ProtocolViolation);
-	await expect(update([1, 4, 0, 0])).rejects.toThrow(ProtocolViolation);
+	// Any other type is a violation, the retired Relative (3 before) included, and so is a Position
+	// at frame 0 or as an end.
+	await expect(update([1, 2, 0, 0, 0])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, 1, 0, 2, 7, 4])).rejects.toThrow(ProtocolViolation);
+	for (const kind of [3, 4]) await expect(update([1, kind, 0, 0])).rejects.toThrow(ProtocolViolation);
+});
+
+test("a lite-07 range may start partway through a group, which the span keeps", async () => {
+	const position = { start: { absolute: 7n, frame: 4 } };
+	const update = new SubscribeUpdate({ priority: 0, ranges: [position] });
+	const bytes = await encodeMessage(Version.DRAFT_07, update);
+	// One range: type 2, start 7, frame 4, then no end, and an absent wanted group.
+	expect(Array.from(bytes.slice(-6))).toEqual([1, 2, 7, 4, 0, 0]);
+	expect(rangeSize(position)).toBe(4);
+	const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.ranges).toEqual([position]);
+	const span = spanOf(Version.DRAFT_07, got.ranges ?? []);
+	expect([span.startGroup, span.startFrame]).toEqual([7n, 4]);
+	// Group 0 stays named when a frame qualifies it.
+	const zero = spanOf(Version.DRAFT_07, [{ start: { absolute: 0n, frame: 2 } }]);
+	expect([zero.startGroup, zero.startFrame]).toEqual([0n, 2]);
+	// The model reads the group whole: the publisher cuts the frames.
+	expect(requestedRanges(span)).toEqual([{ start: 7n }]);
+
+	// Another range that may cover the group asks for it whole, since a group is delivered once.
+	for (const other of [{ start: { time: 3n } }, {}, { end: { time: 9n } }]) {
+		expect(spanOf(Version.DRAFT_07, [position, other]).startFrame).toBe(0);
+	}
+	expect(spanOf(Version.DRAFT_07, [position, { start: { time: 9n } }]).startFrame).toBe(4);
+	// The span qualifies only its lowest start; the publisher reads every Position from the ranges.
+	expect(spanOf(Version.DRAFT_07, [position, { start: { time: 1n }, end: { time: 3n } }]).startFrame).toBe(0);
+	const disjoint = [{ start: { absolute: 7n, frame: 4 }, end: { time: 8n } }, { start: { absolute: 9n, frame: 2 } }];
+	expect([...positionFrames(disjoint)]).toEqual([
+		[7n, 4],
+		[9n, 2],
+	]);
+	const overlapping = [{ start: { absolute: 7n, frame: 4 } }, { start: { absolute: 9n, frame: 2 } }];
+	expect([...positionFrames(overlapping)]).toEqual([[7n, 4]]);
+	// A Position range ending before its group covers nothing, so the group goes whole.
+	expect([...positionFrames([{ start: { absolute: 7n, frame: 4 }, end: { time: 6n } }, {}])]).toEqual([]);
+
+	// The sorted sweep keeps exactly what a scan of every range per Position keeps.
+	let seed = 0x6672616d;
+	const random = (n: number) => {
+		seed = (seed * 1103515245 + 12345) % 2 ** 31;
+		return seed % n;
+	};
+	for (let i = 0; i < 2000; i++) {
+		const anchor = () => (random(3) === 0 ? undefined : { time: BigInt(random(8)) });
+		const ranges: WireRange[] = [];
+		for (let n = random(6); n > 0; n--) {
+			const range: WireRange =
+				random(3) === 0
+					? { start: { absolute: BigInt(random(8)), frame: 1 + random(3) } }
+					: { start: anchor() };
+			if (random(5) < 3) range.end = { time: BigInt(random(8)) };
+			ranges.push(range);
+		}
+		const scanned = new Map<bigint, number>();
+		for (const range of ranges) {
+			const start = range.start;
+			if (start?.absolute === undefined || !start.frame) continue;
+			const own = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+			if (own !== undefined && own <= start.absolute) continue;
+			let covering = 0;
+			for (const other of ranges) {
+				const from = other.start?.absolute ?? other.start?.time;
+				const to = other.end?.absolute ?? (other.end?.time === undefined ? undefined : other.end.time + 1n);
+				if ((from !== undefined && from > start.absolute) || (to !== undefined && to <= start.absolute))
+					continue;
+				covering++;
+			}
+			if (covering === 1) scanned.set(start.absolute, start.frame);
+		}
+		expect(positionFrames(ranges)).toEqual(scanned);
+	}
+
+	// An end there can't go out.
+	await expect(
+		encodeMessage(
+			Version.DRAFT_07,
+			new SubscribeUpdate({ priority: 0, ranges: [{ end: { absolute: 9n, frame: 2 } }] }),
+		),
+	).rejects.toThrow("a range ends only at a group");
 });
 
 test("lite-07 sends an absolute anchor as a time, an end as the time before it", async () => {
@@ -260,14 +350,9 @@ test("lite-07 sends an absolute anchor as a time, an end as the time before it",
 	).rejects.toThrow("empty subscription range cannot be encoded");
 });
 
-test("lite-07 carries every range, relative and time anchors included, and older wires the span alone", async () => {
-	// A model time anchor is already a group start in the track's timescale: it goes out as is.
-	const ranges = toWireRanges([
-		{ start: { time: 2n }, end: { time: 4n } },
-		{ start: { relative: 1n } },
-		{ end: { relative: 0n } },
-		{ start: { time: 1_500n }, end: { time: 3_000n } },
-	]);
+test("lite-07 carries every range, times and no start included, and older wires the span alone", async () => {
+	// A model time is already a group start in the track's timescale: it goes out as is.
+	const ranges = toWireRanges([{ start: 2n, end: 4n }, {}, { end: 3n }, { start: 1_500n, end: 3_000n }]);
 	expect(ranges[3]).toEqual({ start: { time: 1_500n }, end: { time: 3_000n } });
 	const message = new Subscribe({
 		id: 1n,
@@ -598,26 +683,29 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 test("lite-07 updates edit only the changed ranges", async () => {
 	const version = Version.DRAFT_07;
 	const a = { start: { time: 1n }, end: { time: 4n } };
-	const b = { start: { relative: 3n } };
+	const b = {};
 	const c = { start: { time: 9_000n } };
 	const sent = new LiveRanges(version, [a, b]);
 	const live = new LiveRanges(version, [a, b]);
-	const step = async (ranges: WireRange[], remove: bigint[], add: WireRange[]) => {
-		const edit = sent.edit(ranges);
-		expect(edit).toEqual({ remove, add, fillIds: [] });
+	const step = async (ranges: WireRange[], remove: bigint[], add: WireRange[], renew?: Set<bigint>) => {
+		const edit = sent.edit(ranges, {}, renew);
+		expect(edit).toEqual({ remove, add, fillIds: [], probeIds: [] });
 		const update = new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add });
 		const got = await SubscribeUpdate.decode(
 			new Reader(undefined, await encodeMessage(version, update), version),
 			version,
 		);
-		const resolved = live.apply(got).map(({ id, range }) => [id, range]);
-		expect(resolved).toEqual(sent.entries());
+		live.apply(got);
+		expect(live.entries()).toEqual(sent.entries());
 	};
 	await step([b, a], [], []);
 	await step([a, c], [1n], [c]);
 	await step([c, c, a], [], [c]);
 	await step([b], [0n, 2n, 3n], [b]);
 	expect(live.entries()).toEqual([[4n, b]]);
+	// One renewed is retired and added again though still wanted, so the publisher resolves it afresh.
+	await step([b], [4n], [b], new Set([4n]));
+	expect(live.entries()).toEqual([[5n, b]]);
 
 	// An id never assigned or already retired, or nothing left live, is refused.
 	const refused = (remove: bigint[], ranges: WireRange[]) =>
@@ -627,18 +715,25 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	expect(() => refused([0n], [])).toThrow(ProtocolViolation);
 });
 
-// An edit that changes nothing hands back the snapshot it last did, so a stream of empty updates
-// copies nothing; one that changes a range takes a fresh one. Mirrors the Rust
-// `lite07_an_empty_edit_reuses_the_snapshot`.
-test("lite-07 an empty edit reuses the snapshot", () => {
+// An edit resolves to the Range IDs it names. Mirrors the Rust `lite07_an_edit_names_its_range_ids`.
+test("lite-07 an edit names its range ids", () => {
 	const live = new LiveRanges(Version.DRAFT_07, [{}]);
-	const empty = () => new SubscribeUpdate({ priority: 0, remove: [], ranges: [] });
-	const first = live.apply(empty());
-	expect(live.apply(empty())).toBe(first);
-	const range: WireRange = { start: { absolute: 4n } };
-	const edited = live.apply(new SubscribeUpdate({ priority: 0, remove: [0n], ranges: [range] }));
-	expect(edited).toEqual([{ id: 1n, range }]);
-	expect(live.apply(empty())).toBe(edited);
+	const range = (group: bigint): WireRange => ({ start: { absolute: group } });
+	const edit = (remove: bigint[], ranges: WireRange[]) =>
+		live.apply(new SubscribeUpdate({ priority: 0, remove, ranges }));
+	expect(edit([], [])).toEqual({ retired: [], added: [] });
+	expect(edit([0n], [range(4n), range(5n)])).toEqual({
+		retired: [0n],
+		added: [
+			[1n, range(4n)],
+			[2n, range(5n)],
+		],
+	});
+	expect(edit([1n], [range(6n)])).toEqual({ retired: [1n], added: [[3n, range(6n)]] });
+	expect(live.entries()).toEqual([
+		[2n, range(5n)],
+		[3n, range(6n)],
+	]);
 });
 
 // An edit to ranges too large for a SUBSCRIBE is refused before anything changes, so the live
@@ -653,7 +748,7 @@ test("lite-07 a refused edit leaves the ranges as sent", () => {
 	expect(() => live.edit(wide)).toThrow("too many ranges");
 	expect(live.entries()).toEqual([[0n, {}]]);
 	expect(live.next()).toBe(1n);
-	expect(live.edit(wide.slice(0, 2))).toEqual({ remove: [0n], add: wide.slice(0, 2), fillIds: [] });
+	expect(live.edit(wide.slice(0, 2))).toEqual({ remove: [0n], add: wide.slice(0, 2), fillIds: [], probeIds: [] });
 });
 
 test("SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it", async () => {

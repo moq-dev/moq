@@ -99,7 +99,7 @@ impl ConnectionTag {
 		Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 	}
 }
-pub use stats::{CreditStats, FrameStats, PathStats, Stats, UdpStats};
+pub use stats::{CreditStats, FrameStats, PathStats, SendCreditStats, Stats, UdpStats};
 
 pub(crate) mod streams;
 pub use streams::Streams;
@@ -555,6 +555,8 @@ impl Connection {
 	#[must_use]
 	pub(crate) fn transmit(&mut self, now: Instant, max_datagrams: usize, buf: &mut Vec<u8>) -> Option<Transmit> {
 		assert!(max_datagrams != 0);
+		// A write that blocked on the peer's credit woke this call: date its wait from here.
+		self.observe_send_credit(now);
 		let max_datagrams = match self.config.segmentation_offload {
 			false => 1,
 			true => max_datagrams,
@@ -1375,6 +1377,7 @@ impl Connection {
 					// the server's first flight is lost.
 					self.set_loss_detection_timer(now);
 				}
+				self.observe_send_credit(now);
 			}
 			NewIdentifiers(ids, now) => {
 				self.local_cid_state.new_cids(&ids, now);
@@ -1466,6 +1469,13 @@ impl Connection {
 				}
 			}
 		}
+		self.observe_send_credit(now);
+	}
+
+	/// Accrue a writer's wait on the peer's connection credit up to `now`
+	fn observe_send_credit(&mut self, now: Instant) {
+		let closed = self.state.is_closed();
+		self.streams.observe_send_credit(now, closed);
 	}
 
 	/// Close a connection immediately
@@ -1487,7 +1497,8 @@ impl Connection {
 				reason: reason.clone(),
 			});
 		}
-		self.close_inner(now, Close::Application(frame::ApplicationClose { error_code, reason }))
+		self.close_inner(now, Close::Application(frame::ApplicationClose { error_code, reason }));
+		self.observe_send_credit(now);
 	}
 
 	/// Report that a send to the peer found no route, such as `ENETUNREACH`
@@ -1535,6 +1546,7 @@ impl Connection {
 		stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
 		stats.path.current_mtu = self.path.mtud.current_mtu();
 		stats.credit = self.streams.credit_stats();
+		stats.send_credit = self.streams.send_credit_stats();
 
 		stats
 	}

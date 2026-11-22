@@ -294,10 +294,17 @@ impl PrepareFetch {
 					group: largest.group,
 					object: largest.object.saturating_add(1),
 				},
-				Filter::Relative(groups) => Location {
+				// Counting further back would be group arithmetic on keys that are starts.
+				Filter::Relative(groups @ (0 | 1)) => Location {
 					group: largest.group.saturating_add(1).saturating_sub(groups),
 					object: 0,
 				},
+				Filter::Relative(_) => {
+					return Err((
+						Error::Unsupported,
+						"FETCH counting groups back from Largest Object".into(),
+					));
+				}
 				Filter::Absolute { start, .. } => start,
 			};
 			range.end = Location {
@@ -1652,12 +1659,14 @@ impl Serving {
 						match datagrams.poll_info(waiter) {
 							Poll::Ready(Ok(info)) => {
 								let local = crate::broadcast::Producer::new(crate::broadcast::Info::default());
-								let producer = local.create_track(
-									request.msg.track_name.as_ref(),
-									track::Info::default()
-										.with_timescale(info.timescale)
-										.with_priority(info.priority),
-								)?;
+								let producer = local
+									.create_track(
+										request.msg.track_name.as_ref(),
+										track::Info::default()
+											.with_timescale(info.timescale)
+											.with_priority(info.priority),
+									)
+									.expect("a fresh broadcast holds no track");
 								let cache = producer.consume();
 								let mut serve = TrackServe::new(
 									request.publisher.session.clone(),
@@ -1988,13 +1997,18 @@ impl SubscribeTrack {
 		// bound the subscription before subscribing so the ratio never judges it. From the
 		// start of its group, so a relay's copy holds the group's head for its other readers,
 		// as a live join would; the resolved range trims below.
-		let fixed: ServeRange = filter_range(msg.filter, LiveEdge::default(), |_, _| None);
-		if let Some(start) = fixed.start {
-			ServeRange {
+		let fixed: ServeRange = match filter_range(msg.filter, LiveEdge::default()) {
+			Ok(fixed) => fixed,
+			Err(err) => return Poll::Ready(Some(Err((err, None)))),
+		};
+		match fixed.start {
+			Some(start) => ServeRange {
 				start: Some(Location { object: 0, ..start }),
 				..fixed
 			}
-			.apply(&mut subscription);
+			.apply(&mut subscription),
+			// Every other filter starts at the live edge, which resolves below.
+			None => live_join(&mut subscription),
 		}
 
 		// Subscribe before resolving the filter: on a routed broadcast the live edge only
@@ -2032,7 +2046,10 @@ impl SubscribeTrack {
 		// current-group join (Next Object plus a StartGroup=1 fill) cover the group with no gap
 		// and no overlap.
 		let edge = live_edge(track);
-		let mut range = filter_range(msg.filter, edge, |latest, back| track.group_back(latest, back));
+		// Refused above, before subscribing, as anything else that counts groups back.
+		let Ok(mut range) = filter_range(msg.filter, edge) else {
+			return Poll::Ready(Some(Err((Error::Unsupported, None))));
+		};
 		let fill = msg
 			.fill
 			.filter(|_| msg.forward && Filter::is_draft20(publisher.version))
@@ -2040,7 +2057,7 @@ impl SubscribeTrack {
 		if let Some(next) = range.fill_tail(fill, edge) {
 			range.start = Some(next);
 		}
-		range.apply(&mut subscription);
+		range.request(&mut subscription, msg.filter, edge);
 		let _ = subscribed.update(subscription);
 		// Serve the track while reading updates; only abrupt closure cancels on draft-22. A
 		// fill or joining FETCH ranks in the same subscription as the group it carries.
@@ -4262,12 +4279,9 @@ impl Publisher {
 				}
 				ns.watched.clear();
 				*prefix = next;
-				let scope = crate::Pattern::subtree(prefix.as_str())
-					.map(|p| p.rebase(prefix.as_str()))
-					.unwrap_or_default();
 				let origin = self
 					.origin
-					.scope(&*prefix, &scope)
+					.scope(&*prefix, &crate::Prefixes::all())
 					.unwrap_or_else(|_| self.origin.empty());
 				*announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).routes();
 				true
@@ -5108,8 +5122,13 @@ impl FetchOpen {
 
 		let end_location = if joined {
 			// The subscription starts at the saved Largest Object, so the prefix of that
-			// group has to be here in full or the two leave a gap.
-			if stop != range.end.object {
+			// group has to be here in full or the two leave a gap. A Largest Object that is the
+			// group's End of Group status sits one past the last object a FETCH carries, and
+			// that status proves nothing follows it.
+			let ends_at_status = end == Some(stop)
+				&& group.end_object().is_some_and(|status| status.id == stop)
+				&& stop.checked_add(1) == Some(range.end.object);
+			if stop != range.end.object && !ends_at_status {
 				return self.reject(&Error::NotFound, "joining prefix unavailable");
 			}
 			range.end
@@ -6568,17 +6587,14 @@ impl NamespaceOpen {
 					// A prefix outside our scope (empty origin, or a token that doesn't grant it)
 					// just means we have nothing to announce; respond with an empty set rather
 					// than erroring, which would look fatal to the peer.
-					// The wire prefix decodes as a literal path; convert it explicitly to its
-					// subtree grant, refusing anything that cannot be a subtree.
+					// The wire prefix decodes as a literal path, scoped as its whole subtree; a
+					// prefix no grant can spell (holding a `*`) reaches nothing.
 					// The cursor is rooted at the prefix so every update arrives named as its
 					// wire suffix, a route covering the prefix included: that one presents at
 					// the root, as the empty suffix.
-					let scope = crate::Pattern::subtree(prefix.as_str())
-						.map(|subtree| subtree.rebase(prefix.as_str()))
-						.unwrap_or_default();
 					let origin = publisher
 						.origin
-						.scope(prefix, &scope)
+						.scope(prefix, &crate::Prefixes::all())
 						.unwrap_or_else(|_| publisher.origin.empty());
 
 					// Register the split-horizon peer on the announce cursor too. The origin
@@ -6810,7 +6826,7 @@ impl TrackServe {
 					start: Some(Location { group: 0, object: 0 }),
 					end: None,
 				},
-				_ => filter_range(filter, edge, |latest, back| cache.group_back(latest, back)),
+				_ => filter_range(filter, edge)?,
 			};
 		}
 		let mut range = self.requested;
@@ -6818,7 +6834,10 @@ impl TrackServe {
 			*bounds = range;
 		}
 		let mut subscription = self.track.subscription();
-		range.apply(&mut subscription);
+		// Only a new filter moves the request: the edge an old one resolved against has moved.
+		if update.filter.is_some() {
+			range.request(&mut subscription, self.filter, edge);
+		}
 		self.track.update(subscription)?;
 		let fill = update.fill.map(|fill| fill_range(fill, self.filter, edge.largest));
 		if let Some(next) = range.fill_tail(fill, edge) {
@@ -7312,11 +7331,7 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		self.inner.lock().unwrap().stream.offset()
 	}
 
-	fn poll_acked(
-		&self,
-		waiter: &kio::Waiter,
-		offset: &Self::Offset,
-	) -> Poll<Result<crate::transport::poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
 		self.inner.lock().unwrap().stream.poll_acked(waiter, offset)
 	}
 
@@ -8011,7 +8026,8 @@ impl GroupServe {
 		flags.has_end = self.slice.until.is_none() && wire.as_ref().is_some_and(|wire| wire.has_end);
 		if wire.is_none() {
 			// Only the end: a start would clamp past a prefix the group never held, which
-			// `skip_to` leaves to fail as `Lagged`.
+			// `skip_to` leaves the read to fetch through the track's handlers or a front's
+			// route, or to fail as `Lagged` when neither serves it.
 			self.group.skip_to(self.slice.skip);
 			self.group.end_at(self.slice.until);
 		}
@@ -11500,7 +11516,7 @@ mod serve_tests {
 			let request = taken_token(&mut running, &mut requests).await;
 
 			issued.update(crate::auth::Grant {
-				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Prefix::try_from("other").unwrap().into(),
 				..crate::auth::Grant::default()
 			});
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -12309,7 +12325,7 @@ mod serve_tests {
 			let scoped = h
 				._origin
 				.consume()
-				.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
+				.scope(root.as_str(), &crate::Prefixes::all())
 				.unwrap();
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer::default());
@@ -13688,6 +13704,57 @@ mod serve_tests {
 		);
 		assert!(response.is_empty());
 		assert!(h.log.resets().is_empty());
+	}
+
+	/// A relayed group that ended with an End of Group status reports that status as its
+	/// Largest Object. FETCH carries no status, so the join's prefix is every object before it.
+	#[kio::test]
+	async fn a_joining_fetch_ending_at_the_end_of_group_status_is_answered() {
+		for version in JOINING_DRAFTS {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { start: 5 }).unwrap();
+			group
+				.set_wire(group::Wire {
+					sparse: false,
+					first_object: true,
+					first_id: 0,
+					extensions: true,
+					has_end: true,
+					fetchable: true,
+					last: None,
+				})
+				.unwrap();
+			group.write_frame(group.key_time(), b"catalog".as_slice()).unwrap();
+			group
+				.set_end_object(crate::model::object::Fields {
+					id: 1,
+					properties: Default::default(),
+				})
+				.unwrap();
+			group.finish().unwrap();
+			settle().await;
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = Box::pin(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None)),
+			);
+			registered(&h, serving.as_mut()).await;
+			let mark = h.log.writes.lock().unwrap().len();
+			let mut buf = bytes::Bytes::from(joining_fetch(&h, mark).await.unwrap());
+			assert_eq!(
+				crate::coding::decode_varint(&mut buf, version).unwrap(),
+				ietf::FetchOk::ID,
+				"{version}"
+			);
+			let ok = crate::coding::decode_buf(&mut buf, version, |r, v| ietf::FetchOk::decode(r, v)).unwrap();
+			assert_eq!(ok.end_location, Location { group: 5, object: 2 }, "{version}");
+			assert_eq!(occurrences(&h.log, b"catalog"), 1, "{version}");
+			assert!(h.log.resets().is_empty(), "{version}");
+		}
 	}
 
 	/// A joining FETCH whose prefix group was evicted is refused as missing before FETCH_OK.
@@ -15338,7 +15405,13 @@ mod serve_tests {
 		let request = h._broadcast.broadcast().reserve_track("cam").unwrap();
 		let dynamic = request.requests();
 		let fetching = request.consume().fetch_group(4, None);
-		let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
+		let mut fetched = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(None)
+			.unwrap()
+			.expect("a fresh group");
 		for object in 0..2 {
 			fetched
 				.write_frame(
@@ -17294,8 +17367,8 @@ mod serve_tests {
 	/// A grant to subscribe to everything, lapsing in `secs` (or never), on the publisher's clock.
 	fn grant_all_expiring(runtime: &crate::time::Deadlines, secs: Option<u64>) -> crate::auth::Grant {
 		crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: secs.map(|s| runtime.now().checked_add(Duration::from_secs(s)).unwrap()),
 		}
 	}
@@ -17310,8 +17383,8 @@ mod serve_tests {
 		// The peer lets us publish everything, and we let it read only "other".
 		auth.grant(0, crate::auth::Grant::all());
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from("other").unwrap().into(),
 			expires: None,
 		});
 		assert!(
@@ -18381,13 +18454,13 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_subscribe_token_needs_a_subscribe_grant() {
 		let read_only = crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: None,
 		};
 		let write_only = crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		let nothing = Some(crate::auth::Grant::default());
@@ -18408,8 +18481,8 @@ mod serve_tests {
 			"a limit of nothing defers to the token"
 		);
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from("other").unwrap().into(),
 			expires: None,
 		});
 		assert!(
@@ -18464,8 +18537,8 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_covering_limit_still_verifies_the_token() {
 		let limit = |subtree: &str| crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree(subtree).unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from(subtree).unwrap().into(),
 			expires: None,
 		};
 		let (_auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::default(), Some(limit("room"))).await;
@@ -18724,8 +18797,8 @@ mod serve_tests {
 		auth.grant(
 			0,
 			crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
+				publish: crate::Prefix::try_from("other").unwrap().into(),
+				subscribe: crate::Prefixes::new(),
 				expires: None,
 			},
 		);
@@ -19524,7 +19597,7 @@ mod tests {
 		let consume = match scoped {
 			true => origin
 				.consume()
-				.scope("", &crate::Pattern::subtree(".stats").unwrap().into())
+				.scope("", &crate::Prefix::try_from(".stats").unwrap().into())
 				.unwrap(),
 			false => origin.consume(),
 		};
@@ -21575,6 +21648,29 @@ impl ServeRange {
 		}
 	}
 
+	/// Ask for this range, resolved from `filter` against `edge`. A filter other than an
+	/// absolute one starting at the latest group or past it stays a [`live_join`], which the
+	/// serve's floor trims to the range: a time start there would also have the route replay
+	/// what it retains. On a track with no group yet it asks from the oldest group, since
+	/// nothing is retained, and a live join would start at whichever group lands first.
+	fn request(&self, subscription: &mut Subscription, filter: Filter, edge: LiveEdge) {
+		let live = !matches!(filter, Filter::Absolute { .. })
+			&& self.end.is_none()
+			&& edge
+				.latest
+				.is_some_and(|latest| self.start.is_none_or(|start| start.group >= latest));
+		match live {
+			true => live_join(subscription),
+			// From time zero rather than with no start: replacing a live join's range with an
+			// equal one would leave it where it already resolved.
+			false => ServeRange {
+				start: self.start.or(Some(Location { group: 0, object: 0 })),
+				..*self
+			}
+			.apply(subscription),
+		}
+	}
+
 	/// Bound `subscription` to the whole groups this range touches: a model subscription
 	/// starts and ends on a group boundary, and [`GroupSlice`] cuts the objects when serving.
 	fn apply(&self, subscription: &mut Subscription) {
@@ -21582,6 +21678,15 @@ impl ServeRange {
 			.with_start(self.start.map(|start| start.group))
 			.with_end(self.end.and_then(|end| end.group.checked_add(1)));
 	}
+}
+
+/// Ask for a live join with a Min Age of zero, as a SUBSCRIBE without an absolute start does:
+/// a range with no start and no Min Age would reach back to the oldest group and have a
+/// relay's route replay everything it retains, and SUBSCRIBE_OK then name the oldest group
+/// replayed so far as Largest.
+fn live_join(subscription: &mut Subscription) {
+	*subscription = std::mem::take(subscription).with_ranges([track::Range::default()]);
+	subscription.delay.min = Some(Duration::ZERO);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.
@@ -21595,10 +21700,11 @@ struct GroupSlice {
 
 /// The Locations a single Location Filter selects, resolved against the live edge.
 ///
-/// `back` counts groups back from a key, as [`track::Consumer::group_back`] does: keys are
-/// group starts, so subtracting from one counts no groups.
-fn filter_range(filter: Filter, edge: LiveEdge, back: impl Fn(u64, u64) -> Option<u64>) -> ServeRange {
-	match filter {
+/// Fails with [`Error::Unsupported`] for a Relative filter counting back past the current
+/// group: keys are group starts, so no arithmetic on one counts groups, and a moq-lite range
+/// has no such start to serve it with.
+fn filter_range(filter: Filter, edge: LiveEdge) -> Result<ServeRange, Error> {
+	Ok(match filter {
 		// No restriction. moq-lite starts at the beginning of the latest group, which is
 		// the join point it is built around; a subscription passes objects as they are
 		// published, so an absent filter is not a request to replay history. A subscriber
@@ -21613,28 +21719,29 @@ fn filter_range(filter: Filter, edge: LiveEdge, back: impl Fn(u64, u64) -> Optio
 			end: None,
 		},
 		// `{Largest.Group + 1 - groups, 0}`, counted in groups: 0 is the next group and 1 is
-		// the current one. Counted from `Largest.Group`, which sits below the newest group
-		// while that group has no objects yet; only with no largest at all does the newest
-		// group stand in for it. One counting back past every group held starts at the oldest.
-		Filter::Relative(groups) => ServeRange {
+		// the current one, a live join. Counted from `Largest.Group`, which sits below the
+		// newest group while that group has no objects yet; only with no largest at all does
+		// the newest group stand in for it.
+		Filter::Relative(groups @ (0 | 1)) => ServeRange {
 			start: edge
 				.largest
 				.map(|largest| largest.group)
 				.or(edge.latest)
 				.map(|group| Location {
-					group: match groups.checked_sub(1) {
-						None => group.saturating_add(1),
-						Some(count) => back(group, count).unwrap_or(0),
+					group: match groups {
+						0 => group.saturating_add(1),
+						_ => group,
 					},
 					object: 0,
 				}),
 			end: None,
 		},
+		Filter::Relative(_) => return Err(Error::Unsupported),
 		Filter::Absolute { start, end } => ServeRange {
 			start: Some(start),
 			end,
 		},
-	}
+	})
 }
 
 /// What a draft-22 fill request resolves to.
@@ -21671,10 +21778,12 @@ fn fill_range(fill: ietf::Fill, subscription: Filter, largest: Option<Location>)
 		Filter::Unfiltered => Location { group: 0, object: 0 },
 		// One past the edge, which for a Fetch is always empty.
 		Filter::NextObject => return FillServe::Empty,
-		Filter::Relative(groups) => Location {
+		// Counting further back would be group arithmetic on keys that are starts.
+		Filter::Relative(groups @ (0 | 1)) => Location {
 			group: largest.group.saturating_add(1).saturating_sub(groups),
 			object: 0,
 		},
+		Filter::Relative(_) => return FillServe::Unsupported,
 		Filter::Absolute { start, .. } => start,
 	};
 
@@ -21730,11 +21839,6 @@ mod range_tests {
 		}
 	}
 
-	/// Counts groups back over contiguous keys, as a track holding every group does.
-	fn contiguous(latest: u64, back: u64) -> Option<u64> {
-		latest.checked_sub(back)
-	}
-
 	/// A live edge of group 100 whose current group has objects 0 through 4.
 	const EDGE: LiveEdge = LiveEdge {
 		latest: Some(100),
@@ -21776,7 +21880,7 @@ mod range_tests {
 			end: Some(EndLocation { group: 9, object: None }),
 		});
 		assert_eq!(
-			filter_range(msg.filter, EDGE, contiguous),
+			filter_range(msg.filter, EDGE).unwrap(),
 			ServeRange {
 				start: Some(Location { group: 4, object: 0 }),
 				end: Some(EndLocation { group: 9, object: None })
@@ -21789,7 +21893,7 @@ mod range_tests {
 	#[test]
 	fn an_unfiltered_subscription_stays_live() {
 		let msg = subscribe(Filter::Unfiltered);
-		assert_eq!(filter_range(msg.filter, EDGE, contiguous), ServeRange::default());
+		assert_eq!(filter_range(msg.filter, EDGE).unwrap(), ServeRange::default());
 	}
 
 	/// An absolute start from group 0 is the request for history the absent filter is not.
@@ -21800,7 +21904,7 @@ mod range_tests {
 			end: None,
 		});
 		assert_eq!(
-			filter_range(msg.filter, EDGE, contiguous),
+			filter_range(msg.filter, EDGE).unwrap(),
 			ServeRange {
 				start: Some(Location::default()),
 				end: None
@@ -21814,7 +21918,7 @@ mod range_tests {
 	fn next_object_starts_past_the_largest_object() {
 		let msg = subscribe(Filter::NextObject);
 		assert_eq!(
-			filter_range(msg.filter, EDGE, contiguous),
+			filter_range(msg.filter, EDGE).unwrap(),
 			ServeRange {
 				start: Some(Location { group: 100, object: 5 }),
 				end: None,
@@ -21833,7 +21937,7 @@ mod range_tests {
 		};
 		let msg = subscribe(Filter::NextObject);
 		assert_eq!(
-			filter_range(msg.filter, edge, contiguous),
+			filter_range(msg.filter, edge).unwrap(),
 			ServeRange {
 				start: Some(Location { group: 101, object: 0 }),
 				end: None,
@@ -21841,14 +21945,15 @@ mod range_tests {
 		);
 	}
 
-	/// `{Largest.Group + 1 - groups, 0}`: one is the current group, zero is the next one,
-	/// and larger values reach further back.
+	/// `{Largest.Group + 1 - groups, 0}`: one is the current group and zero is the next one.
+	/// Larger values reach further back, which group arithmetic on keys that are starts can't
+	/// serve, so they are refused.
 	#[test]
 	fn relative_counts_back_from_the_next_group() {
-		for (groups, expected) in [(0, 101), (1, 100), (2, 99), (5, 96)] {
+		for (groups, expected) in [(0, 101), (1, 100)] {
 			let msg = subscribe(Filter::Relative(groups));
 			assert_eq!(
-				filter_range(msg.filter, EDGE, contiguous),
+				filter_range(msg.filter, EDGE).unwrap(),
 				ServeRange {
 					start: Some(Location {
 						group: expected,
@@ -21858,6 +21963,17 @@ mod range_tests {
 				},
 				"{groups} groups back"
 			);
+		}
+		for groups in [2, 5, 500] {
+			let msg = subscribe(Filter::Relative(groups));
+			assert!(
+				matches!(filter_range(msg.filter, EDGE), Err(Error::Unsupported)),
+				"{groups} groups back"
+			);
+			assert!(matches!(
+				filter_range(msg.filter, LiveEdge::default()),
+				Err(Error::Unsupported)
+			));
 		}
 	}
 
@@ -21872,7 +21988,7 @@ mod range_tests {
 		};
 		let msg = subscribe(Filter::Relative(1));
 		assert_eq!(
-			filter_range(msg.filter, edge, contiguous),
+			filter_range(msg.filter, edge).unwrap(),
 			ServeRange {
 				start: Some(Location { group: 0, object: 0 }),
 				end: None,
@@ -21880,25 +21996,12 @@ mod range_tests {
 		);
 	}
 
-	/// Counting back further than the track goes lands at its start rather than wrapping.
-	#[test]
-	fn relative_saturates_at_the_start() {
-		let msg = subscribe(Filter::Relative(500));
-		assert_eq!(
-			filter_range(msg.filter, EDGE, contiguous),
-			ServeRange {
-				start: Some(Location { group: 0, object: 0 }),
-				end: None,
-			}
-		);
-	}
-
-	/// Nothing published yet means there is no edge to count back from.
+	/// Nothing published yet means there is no edge to join at.
 	#[test]
 	fn relative_without_an_edge_stays_live() {
-		let msg = subscribe(Filter::Relative(3));
+		let msg = subscribe(Filter::Relative(1));
 		assert_eq!(
-			filter_range(msg.filter, LiveEdge::default(), contiguous),
+			filter_range(msg.filter, LiveEdge::default()).unwrap(),
 			ServeRange::default()
 		);
 	}
@@ -22062,7 +22165,7 @@ mod range_tests {
 			}),
 		});
 		assert_eq!(
-			filter_range(msg.filter, EDGE, contiguous),
+			filter_range(msg.filter, EDGE).unwrap(),
 			ServeRange {
 				start: Some(Location { group: 4, object: 3 }),
 				end: Some(EndLocation {
@@ -22341,8 +22444,7 @@ mod compression_tests {
 		use crate::lite::test_transport::{Log, SinkSession};
 		for (version, draft) in [(Version::Draft18, 18), (Version::Draft22, 22)] {
 			let input = serde_json::json!({"draft": draft});
-			let bytes: Vec<u8> =
-				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			let bytes: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun("ietf-compression", input)).unwrap();
 			let (parameters, consumed) = ietf::Parameters::decode_slice(&bytes, version).unwrap();
 			assert_eq!(consumed, bytes.len());
 			let negotiated = super::super::flate::from_setup(&parameters).unwrap();
@@ -22380,7 +22482,7 @@ mod compression_tests {
 			let written = log.writes.lock().unwrap().clone();
 			let input = serde_json::json!({"draft": draft, "response": response.to_vec(), "group": written});
 			let received: Vec<Vec<u8>> =
-				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression", input)).unwrap();
 			assert_eq!(received, frames, "draft{draft}: plain JS fallback");
 		}
 	}

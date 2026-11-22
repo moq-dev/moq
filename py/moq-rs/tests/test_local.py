@@ -12,7 +12,7 @@ import moq_ffi
 import pytest
 
 # Every group from the first, rather than only what the live edge still reaches.
-FROM_GROUP_0 = [moq.Range(start=moq.Anchor.ABSOLUTE(group=0))]
+FROM_GROUP_0 = [moq.Range(start=moq.Timestamp.unscaled(0))]
 
 
 async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
@@ -652,12 +652,12 @@ def test_track_info_reads_compression_back():
 
 
 def test_default_subscription_skips_superseded_groups_at_once():
-    """A bare record carries moq-net's zero delay too; only an explicit None leaves a bound unset."""
+    """A bare record carries moq-net's delay too: no min and a zero max; an explicit None leaves max unset."""
     assert moq.Subscription.default() == moq.Subscription()
     delay = moq.Subscription()._ffi().delay
-    assert (delay.min, delay.max) == (timedelta(0), timedelta(0))
-    delay = moq.Subscription(delay=moq.Delay(min=None, max=None))._ffi().delay
-    assert (delay.min, delay.max) == (None, None)
+    assert (delay.min, delay.max) == (None, timedelta(0))
+    delay = moq.Subscription(delay=moq.Delay(min=timedelta(0), max=None))._ffi().delay
+    assert (delay.min, delay.max) == (timedelta(0), None)
 
 
 def test_backoff_keeps_its_positional_timeout():
@@ -1286,7 +1286,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
     consumer = track.consume(
         moq.Subscription(
             delay=moq.Delay(max=timedelta(seconds=10)),
-            ranges=[moq.Range(start=moq.Anchor.RELATIVE(groups=2))],
+            ranges=[moq.Range(start=moq.Timestamp.unscaled(0))],
             order=moq.Order.ASCENDING,
         )
     )
@@ -1298,8 +1298,8 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
     assert starts == [0, 1_000, 2_000]
 
 
-async def test_time_anchor_starts_at_the_group_containing_it():
-    """A time anchor takes an unscaled time in the track's timescale and starts at the group containing it."""
+async def test_range_time_starts_at_the_group_containing_it():
+    """A range start is an unscaled time in the track's timescale and starts at the group containing it."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("timed", moq.TrackInfo(max_age=None, timescale=1_000))
     for second in range(3):
@@ -1308,7 +1308,7 @@ async def test_time_anchor_starts_at_the_group_containing_it():
         group.write_frame(b"x", moq.Timestamp(second, 1))
         group.finish()
 
-    start = moq.Anchor.TIME(timestamp=moq.Timestamp.unscaled(1_500))
+    start = moq.Timestamp.unscaled(1_500)
     consumer = track.consume(
         moq.Subscription(
             delay=moq.Delay(max=timedelta(seconds=10)),
@@ -1319,6 +1319,27 @@ async def test_time_anchor_starts_at_the_group_containing_it():
     group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
     assert group is not None
     assert group.start == 1_000
+
+
+async def test_delay_min_places_a_range_with_no_start():
+    """A stated zero min joins a range with no start at the latest group; an unstated one reaches back."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("joined", moq.TrackInfo(max_age=None, timescale=1_000))
+    for second in range(3):
+        group = track.create_group(second * 1_000)
+        group.write_frame(b"x", moq.Timestamp(second, 1))
+        group.finish()
+
+    async def first(min: timedelta | None) -> int:
+        consumer = track.consume(
+            moq.Subscription(delay=moq.Delay(min=min, max=None), ranges=[moq.Range()], order=moq.Order.ASCENDING)
+        )
+        group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
+        assert group is not None
+        return group.start
+
+    assert await first(timedelta(0)) == 2_000
+    assert await first(None) == 0
 
 
 async def test_raw_group_producer_consume_direct():

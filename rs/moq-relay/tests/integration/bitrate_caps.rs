@@ -25,7 +25,7 @@ const LEAST: Duration = Duration::from_millis(700);
 
 /// A grant of everything, with `publish` and `subscribe` caps.
 fn grant(publish: Option<u64>, subscribe: Option<u64>) -> moq_auth::Grant {
-	let all: moq_auth::Patterns = moq_auth::Pattern::all().into();
+	let all = moq_auth::Prefixes::all();
 	let mut grant = moq_auth::Grant::new(all.clone(), all);
 	grant.publish.rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
 	grant.subscribe.rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
@@ -250,6 +250,8 @@ async fn window_opens_once_admitted(dial: &Dial, admissions: &mut Admissions, ho
 		"sent {} bytes before admission",
 		stats.udp_tx.bytes
 	);
+	// Reading SETUP returns a little credit, so the window may hold the writer more than once.
+	assert!(stats.send_credit.stalls > 0, "the SETUP window held the writer");
 
 	// Nothing reads the blocked stream before admission, so only opening the window
 	// credits more. The session then stops that stream, so watch the credit, not the data.
@@ -267,6 +269,8 @@ async fn window_opens_once_admitted(dial: &Dial, admissions: &mut Admissions, ho
 			opened.expect("the window never opened once admitted");
 		}
 	}
+	let waited = conn.stats().send_credit.stalled;
+	assert!(waited > Duration::ZERO, "the wait for admission counts, not {waited:?}");
 
 	conn.close(driver::VarInt::from_u32(0), "done");
 	endpoint.close(driver::VarInt::from_u32(0), "done").await;

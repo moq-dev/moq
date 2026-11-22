@@ -23,10 +23,17 @@ import {
 	pollChunk,
 	WAIT,
 } from "./frame.ts";
-import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
+import {
+	type Expiry,
+	type GroupRecover,
+	hooks,
+	type ReadGroupFrame,
+	type RecoverCause,
+	type Replacement,
+} from "./internal.ts";
 import { Queue } from "./queue.ts";
 import { rescaleIn } from "./rescale.ts";
-import type { Timestamp } from "./time.ts";
+import { floorAt, type Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
 import { checkKey, RESERVED } from "./util/key.ts";
 import { MAX_FRAME_BYTES } from "./util/limits.ts";
@@ -312,11 +319,8 @@ export class Producer {
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
+		hooks.groupWholeEnd = (group) => (group.#state.closed.peek() === null ? group.#state.end : undefined);
 		hooks.groupHeadless = (group) => group.#state.index > 0 || headShed(group.#state.frames.peek().first);
-		hooks.groupMayStart = (group) => {
-			const state = group.#state;
-			return state.offset === 0 && state.total.peek() === 0 && state.closed.peek() === undefined;
-		};
 		hooks.holdGroup = (group) => {
 			group.#holds++;
 			let held = true;
@@ -724,13 +728,23 @@ export class Producer {
 	/**
 	 * Ends the group whole at `end`, the exclusive end of its presentation in the track's
 	 * timescale, returning it as {@link Finished}, as the Rust `group::Producer::finish_at`. An
-	 * `end` at or before the group's start throws {@link TimestampMismatch}.
+	 * `end` below the group's start, or below its highest frame timestamp, throws
+	 * {@link TimestampMismatch}; one equal to either is accepted.
 	 */
 	finishAt(end: bigint): Finished {
-		if (end <= this.start) throw new TimestampMismatch();
+		if (end < this.start || end < this.#highest()) throw new TimestampMismatch();
 		if (this.#state.closed.peek() === undefined) this.#state.end = end;
 		this.#end(null);
 		return this;
+	}
+
+	// The highest frame timestamp in the track's timescale, or the start when there is none to
+	// compare: no frame is timed, or no track says which timescale `end` is in.
+	#highest(): bigint {
+		const { latest, track } = this.#state;
+		if (latest === undefined || track?.timescale == null) return this.start;
+		// A streamed frame keeps the timestamp it was created with, in any scale.
+		return BigInt(floorAt(latest, track.timescale));
 	}
 
 	/**
@@ -792,8 +806,8 @@ let makeConsumer: (state: GroupState) => Consumer;
 
 // A replacement copy asked for on behalf of one consumer, settled or still out.
 interface Attempt {
-	/** Asked for a copy that failed, rather than one that stalled. */
-	failed: boolean;
+	/** Why it was asked for. */
+	cause: RecoverCause["kind"];
 	abort: AbortController;
 	result: Promise<void>;
 	settled: boolean;
@@ -890,36 +904,56 @@ class Expired implements GetPromise<Error> {
 // `hooks.groupFailed` instead. A front serving another front is the exception: the inner front
 // holds the handle before the outer attaches its recovery, so attaching rebuilds a handle that
 // latched a failure, and the inner front alone keeps the failure it saw.
+//
+// `final` may judge a short close (see `Consumer.#continues`) when told to `look`: a handle that
+// `looks` does whenever its caller peeks or awaits it, as a read would, and an internal watcher's
+// never does, leaving the judgment to the reader.
 class CombinedClosed implements GetPromise<Error | null> {
 	#preferred: Once<Error>;
 	#source: () => Once<Error | null>;
-	#final: (value: Error | null) => boolean;
+	#final: (value: Error | null, look: boolean) => boolean;
+	#looks: boolean;
+	// Callers watching it now, so a change they wake for is a look: one per live subscription,
+	// and one for good per awaited promise, which waits until the handle settles.
+	#watchers = 0;
 	#value = new Once<Error | null>();
 	#watched?: Once<Error | null>;
 	// The watcher on `#watched`, replaced when a recovery moves to another copy's state.
 	#unwatch?: Dispose;
 	#dispose: Dispose[] = [];
 
-	constructor(preferred: Once<Error>, source: () => Once<Error | null>, final: (value: Error | null) => boolean) {
+	constructor(
+		preferred: Once<Error>,
+		source: () => Once<Error | null>,
+		final: (value: Error | null, look: boolean) => boolean,
+		looks: boolean,
+	) {
 		this.#preferred = preferred;
 		this.#source = source;
 		this.#final = final;
-		if (this.#sync()) return;
-		this.#dispose.push(preferred.changed(() => this.#sync()));
+		this.#looks = looks;
+		if (this.#sync(false)) return;
+		this.#dispose.push(preferred.changed(() => this.#sync(this.#watchers > 0)));
 	}
 
-	#sync(): boolean {
+	#sync(look: boolean): boolean {
 		if (this.#value.peek() !== undefined) return true;
 		const preferred = this.#preferred.peek();
 		const source = this.#source();
 		const current = source.peek();
 		const value =
-			preferred !== undefined ? preferred : current !== undefined && this.#final(current) ? current : undefined;
+			preferred !== undefined
+				? preferred
+				: current !== undefined && this.#final(current, look && this.#looks)
+					? current
+					: undefined;
+		// Judging a short close final refreshes this handle, which may have settled it already.
+		if (this.#value.peek() !== undefined) return true;
 		if (value === undefined) {
 			if (this.#watched !== source) {
 				this.#unwatch?.();
 				this.#watched = source;
-				this.#unwatch = source.changed(() => this.#sync());
+				this.#unwatch = source.changed(() => this.#sync(this.#watchers > 0));
 			}
 			return false;
 		}
@@ -934,24 +968,47 @@ class CombinedClosed implements GetPromise<Error | null> {
 	}
 
 	refresh() {
-		this.#sync();
+		this.#sync(this.#watchers > 0);
+	}
+
+	// The value it settled with, without looking again.
+	latched(): Error | null | undefined {
+		return this.#value.peek();
 	}
 
 	peek(): Error | null | undefined {
-		this.#sync();
+		this.#sync(true);
 		return this.#value.peek();
 	}
 
 	changed(): Promise<Error | null | undefined>;
 	changed(fn: (value: Error | null | undefined) => void): Dispose;
 	changed(fn?: (value: Error | null | undefined) => void): Promise<Error | null | undefined> | Dispose {
-		this.#sync();
-		return fn ? this.#value.changed(fn) : this.#value.changed();
+		if (!fn) {
+			this.#watchers++;
+			this.#sync(true);
+			return this.#value.changed();
+		}
+		return this.#watch(() => this.#value.changed(fn));
 	}
 
 	subscribe(fn: (value: Error | null | undefined) => void): Dispose {
-		this.#sync();
-		return this.#value.subscribe(fn);
+		return this.#watch(() => this.#value.subscribe(fn));
+	}
+
+	// Counts a subscription as watching until its caller disposes it, as a race does once decided.
+	#watch(subscribe: () => Dispose): Dispose {
+		this.#watchers++;
+		this.#sync(true);
+		const dispose = subscribe();
+		let live = true;
+		return () => {
+			if (live) {
+				live = false;
+				this.#watchers--;
+			}
+			dispose();
+		};
 	}
 
 	// biome-ignore lint/suspicious/noThenProperty: CombinedClosed is intentionally awaitable.
@@ -959,7 +1016,8 @@ class CombinedClosed implements GetPromise<Error | null> {
 		onFulfilled?: ((value: Error | null) => R1 | PromiseLike<R1>) | null,
 		onRejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
 	): PromiseLike<R1 | R2> {
-		this.#sync();
+		this.#watchers++;
+		this.#sync(true);
 		return this.#value.then(onFulfilled, onRejected);
 	}
 }
@@ -990,11 +1048,15 @@ export class Consumer {
 	// ends the consumer whatever its copy does. See `#fail`.
 	#verdict = new Once<Error>();
 	#closed?: CombinedClosed;
+	// Settles as `#closed` does, for internal watchers, which never judge a short close.
+	#quiet?: CombinedClosed;
 	// Settles once {@link done}: its reader read or released everything it holds.
 	#finished?: CombinedClosed;
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
+	// A short close (see `#continues`) was judged final: no route read on past it.
+	#ended = false;
 	// Settles once this reader is released, made only when something waits on it.
 	#releasing?: PromiseWithResolvers<void>;
 	// The arrival of the copy first read, kept once a replacement copy is adopted.
@@ -1035,30 +1097,39 @@ export class Consumer {
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
 	get closed(): GetPromise<Error | null> {
-		this.#closed ??= new CombinedClosed(
-			this.#verdict,
-			() => this.#state.closed,
-			(value) =>
-				value instanceof Error ? !this.#recovers(value) : this.#released || this.#bufferedFrames().length === 0,
-		);
+		this.#closed ??= this.#makeClosed(true);
 		return this.#closed;
 	}
 
+	#makeClosed(looks: boolean): CombinedClosed {
+		return new CombinedClosed(
+			this.#verdict,
+			() => this.#state.closed,
+			(value, look) =>
+				value instanceof Error
+					? !this.#recovers(value)
+					: (this.#released || this.#bufferedFrames().length === 0) && !this.#continues(look),
+			looks,
+		);
+	}
+
 	// Settles with its terminal state once {@link done}, unlike {@link closed}, which a failure
-	// settles while frames are still unread.
+	// settles while frames are still unread. Internal, so it never judges a short close itself.
 	#done(): GetPromise<Error | null> {
 		this.#finished ??= new CombinedClosed(
 			this.#verdict,
 			() => this.#state.closed,
 			(value) =>
-				(!(value instanceof Error) || !this.#recovers(value)) &&
+				(value instanceof Error ? !this.#recovers(value) : !this.#continues(false)) &&
 				(this.#released || this.#bufferedFrames().length === 0),
+			false,
 		);
 		return this.#finished;
 	}
 
 	#refresh(): void {
 		this.#closed?.refresh();
+		this.#quiet?.refresh();
 		this.#finished?.refresh();
 	}
 
@@ -1099,6 +1170,42 @@ export class Consumer {
 		return !this.#verdict.peek() && !this.#torn() && this.#recover?.wants(failed) === true;
 	}
 
+	// Whether the read may go on past a close of the copy being read that names no end (a FIN
+	// without GROUP_END), with every frame it delivered read: the group may hold more, which the
+	// route that replaced the copy reads on from. A read that reaches the close (`decide`) judges
+	// it, once: it goes on while a newer route serves, and otherwise ends there for good, so every
+	// later look agrees. Until then it may go on, so the end is not yet final.
+	#continues(decide: boolean): boolean {
+		if (this.#ended || this.#released || !this.#recover || this.#verdict.peek()) return false;
+		const state = this.#state;
+		if (state.closed.peek() !== null || state.end !== undefined || this.#bufferedFrames().length > 0) return false;
+		if (!decide) return true;
+		if (!this.#torn() && this.#recover.wants(undefined)) return true;
+		this.#end();
+		return false;
+	}
+
+	// Judge a short close final.
+	#end(): void {
+		this.#ended = true;
+		this.#refresh();
+	}
+
+	// Read on past a short close (see `#continues`) from the route that replaced the copy, within
+	// the reader's budget, which ends the group there as it would a stall. Returns whether to look
+	// again. Unless it may `decide`, a close no route took over yet is left for the next read to
+	// judge, as a wait for readability is no read.
+	async #readOn(decide: boolean): Promise<boolean> {
+		if (!this.#continues(false) || (!decide && !this.#recover?.wants(undefined)) || !this.#continues(true))
+			return false;
+		if (this.#expiry?.expired()) {
+			this.#end();
+			return false;
+		}
+		await this.#resume({ kind: "closed" });
+		return true;
+	}
+
 	// Whether a frame handed out to stream was cut short.
 	#torn(): boolean {
 		const done = this.#streamed?.done.peek();
@@ -1109,6 +1216,10 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.groupDone = (group) => group.#done();
+		hooks.groupClosed = (group) => {
+			group.#quiet ??= group.#makeClosed(false);
+			return group.#quiet;
+		};
 		hooks.groupReleased = (group) => {
 			if (group.#released) return Promise.resolve();
 			group.#releasing ??= Promise.withResolvers<void>();
@@ -1146,8 +1257,10 @@ export class Consumer {
 			group.#recover = recover;
 			// A front serving another front attaches its recovery after the inner one handed the
 			// group out, whose reads may have latched a failure this recovery continues past.
-			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined)
-				group.#closed = undefined;
+			if (group.#verdict.peek() === undefined) {
+				if (group.#closed?.latched() instanceof Error) group.#closed = undefined;
+				if (group.#quiet?.latched() instanceof Error) group.#quiet = undefined;
+			}
 		};
 		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
@@ -1214,19 +1327,19 @@ export class Consumer {
 		return Signal.race(...changed);
 	}
 
-	// Continue from the serving route's copy once the one being read failed with `failed`, or
-	// stalled (no `failed`) while a newer route serves. Returns whether the read should look
-	// again; throws the error that ends the group once nothing can continue it.
-	async #resume(failed: Error | undefined, preferBuffered = true): Promise<boolean> {
+	// Continue from the serving route's copy once the one being read looks past itself for
+	// `cause`. Returns whether the read should look again; throws the error that ends the group
+	// once nothing can continue it, except past a short close, which then ends where it closed.
+	async #resume(cause: RecoverCause): Promise<boolean> {
 		const recover = this.#recover;
-		if (this.#torn() || !recover?.wants(failed)) return false;
-		// A stall's attempt learns nothing of a failure since: ask again with it.
-		if (failed && this.#attempt && !this.#attempt.failed) this.#abandon();
+		if (this.#torn() || !recover?.wants(cause.kind === "failed" ? cause.error : undefined)) return false;
+		// A stall's attempt learns nothing of a failure or close since: ask again with it.
+		if (cause.kind !== "stalled" && this.#attempt && this.#attempt.cause !== cause.kind) this.#abandon();
 		let attempt = this.#attempt;
 		if (!attempt) {
 			const abort = new AbortController();
-			const started: Attempt = { failed: failed !== undefined, abort, result: Promise.resolve(), settled: false };
-			started.result = recover.replace(this.#index(), failed, abort.signal).then(
+			const started: Attempt = { cause: cause.kind, abort, result: Promise.resolve(), settled: false };
+			started.result = recover.replace(this.#index(), cause, abort.signal).then(
 				(replacement) => {
 					started.settled = true;
 					// Abandoned while it was out: nobody reads it.
@@ -1236,14 +1349,16 @@ export class Consumer {
 				(err: unknown) => {
 					started.settled = true;
 					if (abort.signal.aborted) return;
-					this.#fail(err);
+					if (cause.kind === "closed") this.#end();
+					else this.#fail(err);
 				},
 			);
 			attempt = started;
 			this.#attempt = attempt;
 		}
-		// A stalled copy may still deliver first; a failed one never will.
-		if (failed) await attempt.result;
+		// A failed copy never delivers again. A stalled one may first, and a short close waits on the
+		// reader's budget too.
+		if (cause.kind === "failed") await attempt.result;
 		else await race([attempt.result, this.#changed()]);
 		// The copy being read moved first: look again, keeping the attempt out.
 		if (!attempt.settled) return true;
@@ -1253,8 +1368,8 @@ export class Consumer {
 		attempt.replacement = undefined;
 		if (!replacement) return true;
 		if (
-			!failed &&
-			((preferBuffered && this.#bufferedFrames().length > 0) || this.#state.closed.peek() !== undefined)
+			cause.kind === "stalled" &&
+			(this.#bufferedFrames().length > 0 || this.#state.closed.peek() !== undefined)
 		) {
 			// The copy being read delivered or ended meanwhile; keep reading it.
 			replacement.discard();
@@ -1370,10 +1485,12 @@ export class Consumer {
 		);
 	}
 
-	// Whether the copy being read ended, for good: a failure recovery may continue is not an end.
+	// Whether the copy being read ended, for good: a failure recovery may continue is not an end,
+	// nor a short close the read goes on past.
 	#settled(): boolean {
 		const closed = this.#state.closed.peek();
-		return closed !== undefined && !(closed instanceof Error && this.#recovers(closed));
+		if (closed === null) return !this.#continues(true);
+		return closed !== undefined && !this.#recovers(closed);
 	}
 
 	/**
@@ -1415,7 +1532,8 @@ export class Consumer {
 			}
 			if (this.#ready()) return;
 			const closed = this.#state.closed.peek();
-			if (closed instanceof Error && (await this.#resume(closed))) continue;
+			if (closed instanceof Error && (await this.#resume({ kind: "failed", error: closed }))) continue;
+			if (closed === null && (await this.#readOn(false))) continue;
 			if (closed !== undefined) {
 				this.#abandon();
 				this.#refresh();
@@ -1423,7 +1541,7 @@ export class Consumer {
 			}
 			if (this.#released || this.#expire()) return;
 			if (this.#recover?.wants(undefined)) {
-				await this.#resume(undefined);
+				await this.#resume({ kind: "stalled" });
 				continue;
 			}
 			await this.#changed();
@@ -1480,11 +1598,13 @@ export class Consumer {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) {
-				if (await this.#resume(closed)) continue;
+				if (await this.#resume({ kind: "failed", error: closed })) continue;
 				this.#abandon();
 				throw closed;
 			}
 			if (closed !== undefined) {
+				// Closed short after a newer route took over, which may hold more.
+				if (await this.#readOn(true)) continue;
 				// The copy finished the group: a replacement asked for meanwhile is moot.
 				this.#abandon();
 				this.#refresh();
@@ -1496,7 +1616,7 @@ export class Consumer {
 			if (this.#expire()) continue;
 			// A stall while a newer route serves looks there too.
 			if (this.#recover?.wants(undefined)) {
-				await this.#resume(undefined);
+				await this.#resume({ kind: "stalled" });
 				continue;
 			}
 			await this.#changed();

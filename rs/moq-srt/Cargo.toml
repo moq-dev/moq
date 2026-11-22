@@ -28,6 +28,8 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# `Catalog::subscribe` in the tests.
+hang = { path = "../hang", features = ["async"] }
 kio = { workspace = true, features = ["runtime"] }
 srt-protocol = "0.4"
 tracing-subscriber = { workspace = true }

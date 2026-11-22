@@ -231,6 +231,38 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
   quests for a code-free `libmoq` stub were deleted.
 
+Decided 2026-11-20 (maintainer, /quest-plan of the pre-cut flow-control
+audit): ✅ the cut waits on the credit model (`verify-credit`),
+[#9210](https://github.com/moq-dev/moq/pull/9210)'s
+paused-stream allowance, which merges once the model passes on it, and a bounded relay cache by
+default. Rejected: cutting with flow
+control unverified; landing #9210 after the cut. The
+[JS frame cap](https://github.com/moq-dev/moq/pull/9283) ships with the cut only if it
+lands first.
+
+Decided 2026-11-21 (maintainer, /quest-plan of the main → release
+flow-control review): ✅ the cut waits on
+send-credit stalls (landed: `credit_stalls` and `credit_stalled` in session
+stats, and in the relay's `Presence`), so the release that
+ships the flow-control rework ships a counter for its failure mode, a
+connection blocked on its peer's credit (rejected: the cut not waiting;
+leaving it in m3). The peer window default
+([#9329](https://github.com/moq-dev/moq/pull/9329)) ships with the cut only if it lands first
+(rejected: the cut waiting on it). If it does, rewrite the
+[#7624](https://github.com/moq-dev/moq/pull/7624) entries in moq-relay's, moq-tokio's, and
+moq-uring's `MIGRATE.md` from its Impact section: the peer windows stay at release's 64 MiB, not 16 MiB,
+and every connection's stream window stays at release's 4 MiB, not 1 MiB. `@moq/net`'s
+"WebSocket receive windows match Rust" entry then says 4 MiB per stream.
+
+Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
+full-codebase audit): ✅ the cut waits on the release-pipeline and packaging
+bugs found in m0: simultaneous apt/rpm/brew tag cancellation and npm publish
+propagation retries and the frozen `moq-cli` `.deb` smoke target ([smoke-moq-deb-name](/quest/m0/smoke-moq-deb-name.md)), while
+[crates-trusted-publisher](/quest/m3/crates-trusted-publisher.md) adds
+`moq-vaapi` after the cut first-publishes it by token (rejected: putting all
+pipeline fixes in m1 without gating the cut; fixing only 3 publish-breaking
+bugs and dropping the rest).
+
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
 Repeat the two-relay smoke with the candidate and the last published relay. Put each binary upstream
@@ -238,6 +270,26 @@ in turn, then publish from each side, discover it from the other, fetch and comp
 observe withdrawal. All four paths passed on lite-06 with 0.17.17 and audited main at d0ce553674.
 Re-run the existing cut checks on the resolved merge and version bump. After publication,
 check that Release remeasure opened or updated its pin PR, as RELEASE.md describes.
+
+From the 2026-11-20 main → release audit (main `9828a20cab` against release `381b802d9b`: 4,241
+main-only and 307 release-only commits, 330 paths conflicted in a trial merge), for the
+candidate:
+- Keep the behavior of release-only fixes while resolving conflicts, not just their text, and
+  run a test of each on the candidate: stopped-stream receive credit (`b834502dfa`, qmux 0.5.4
+  and `@moq/qmux` 0.3.5), a far-ahead group sequence costing a relay nothing extra
+  (`0c9ffdd7a7`, backport of [moq-dev/moq#9044](https://github.com/moq-dev/moq/pull/9044)), a
+  relay restarting under its old hop ID stranding nothing (`4a9005c3c5`), a 64-bit Hop ID read
+  as unknown in Rust and JS (`f48b7a066e`, `a480bba27c`), and a restarted publisher winning over
+  its lingering session (`5511441a02`). List the rest with
+  `git log --no-merges origin/main..origin/release`.
+- Widen the two-relay smoke above: keep a reader attached through each roll, in both directions
+  (last published relay to candidate and back), and check it keeps receiving the same frames
+  after the roll and after a withdrawal and return.
+- The cut PR (head `main`) now runs the full moq-transport matrix and Released wire
+  compatibility in its Release gate, which a backport PR still skips (planned by the audit's
+  PR). Read both results on the cut PR rather than repeating them by hand.
+- Attach each result to the candidate SHA in the cut PR body, so a later push visibly
+  invalidates it.
 
 ## Required
 
@@ -250,4 +302,4 @@ check that Release remeasure opened or updated its pin PR, as RELEASE.md describ
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
-- [Pre-cut correctness fixes](/quest/m1/precut-fixes/README.md) - both pre-cut audits' required fixes have landed
+- [Update smoke workflow to install moq instead of retired moq-cli](/quest/m0/smoke-moq-deb-name.md) - post-cut deb smoke tests install the newly published `moq` package

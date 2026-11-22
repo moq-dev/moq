@@ -778,7 +778,8 @@ test("a group that ends on its own abandons the replacement it asked for", async
 	await yieldNow();
 	expect(signal?.aborted).toBe(false);
 
-	producer.finish();
+	// Whole, so no other route holds more of it.
+	producer.finishAt(1n);
 	expect(await read).toBeUndefined();
 	expect(signal?.aborted).toBe(true);
 });
@@ -827,7 +828,7 @@ test.each([false, true])("a group ending beside its replacement discards it (con
 		consumer.close();
 		expect(released).toBe(1);
 	} else {
-		producer.finish();
+		producer.finishAt(1n);
 	}
 	expect(await read).toBeUndefined();
 	expect(adopted).toBe(false);
@@ -886,7 +887,7 @@ test("a stalled group whose copy then fails asks again with the failure", async 
 		changed: route,
 		wants: (failed) => failed !== undefined || route.peek() > 0,
 		// A stall waits for the route; a failure gets the route's verdict.
-		replace: (_index, failed) => (failed ? Promise.reject(verdict) : new Promise(() => {})),
+		replace: (_index, cause) => (cause.kind === "failed" ? Promise.reject(verdict) : new Promise(() => {})),
 	});
 	producer.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(producer.start) });
 	await consumer.readFrame();

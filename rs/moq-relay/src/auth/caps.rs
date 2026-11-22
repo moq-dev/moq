@@ -102,13 +102,13 @@ mod tests {
 	}
 
 	fn grant(publish: &[&str], publish_rate: Option<Rate>, subscribe: &[&str], subscribe_rate: Option<Rate>) -> Grant {
-		let patterns = |texts: &[&str]| {
+		let prefixes = |texts: &[&str]| {
 			texts
 				.iter()
 				.map(|text| text.parse().unwrap())
-				.collect::<moq_auth::Patterns>()
+				.collect::<moq_auth::Prefixes>()
 		};
-		let mut grant = Grant::new(patterns(publish), patterns(subscribe));
+		let mut grant = Grant::new(prefixes(publish), prefixes(subscribe));
 		grant.publish.rate = publish_rate;
 		grant.subscribe.rate = subscribe_rate;
 		grant
@@ -116,8 +116,8 @@ mod tests {
 
 	#[test]
 	fn a_union_takes_the_highest_cap_and_an_uncapped_grant_lifts_it() {
-		let low = grant(&["a/**"], rate(1_000), &["**"], rate(8_000));
-		let high = grant(&["b/**"], rate(2_000), &["**"], rate(4_000));
+		let low = grant(&["a"], rate(1_000), &[""], rate(8_000));
+		let high = grant(&["b"], rate(2_000), &[""], rate(4_000));
 		let caps = Caps::union([&low, &high]);
 		assert_eq!(
 			caps,
@@ -127,7 +127,7 @@ mod tests {
 			}
 		);
 
-		let uncapped = grant(&["c/**"], None, &[], None);
+		let uncapped = grant(&["c"], None, &[], None);
 		let caps = Caps::union([&low, &high, &uncapped]);
 		assert_eq!(
 			caps,

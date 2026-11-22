@@ -1,5 +1,6 @@
 //! Replays `tests/corpus.json`, which `js/auth/src/corpus.test.ts` replays too, so the
-//! two parsers cannot disagree on a token, key, key set, or grant without both failing.
+//! two parsers cannot disagree on a token, key, key set, grant, or signable root without
+//! both failing.
 
 use crate::{Claims, Grant, Key, KeySet};
 use kio::clock::Wall;
@@ -16,6 +17,16 @@ struct Corpus {
 	jwk: Vec<Case>,
 	sets: Vec<Case>,
 	grants: Vec<Case>,
+	roots: Vec<RootCase>,
+}
+
+/// A root, and whether a token or key scope may be minted for it: exactly when
+/// `moq_net::Path::new` accepts it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootCase {
+	root: String,
+	signable: bool,
 }
 
 /// A token, given signed or as a payload the case's key signs here, and the claims it
@@ -132,5 +143,23 @@ fn documents() {
 				_ => {}
 			}
 		}
+	}
+}
+
+#[test]
+fn roots() {
+	let corpus = corpus();
+	let key: Key = serde_json::from_value(corpus.keys["hs256"].clone()).unwrap();
+	let all = crate::Prefixes::all();
+	for case in corpus.roots {
+		let claims = Claims::default().with_root(&case.root).with_publish(all.clone());
+		let scope = crate::Scope {
+			root: case.root.clone(),
+			publish: all.clone(),
+			subscribe: Default::default(),
+		};
+		let signed = key.sign(&claims).is_ok();
+		let scoped = key.clone().with_scope(scope).is_ok();
+		assert_eq!((signed, scoped), (case.signable, case.signable), "{:?}", case.root);
 	}
 }

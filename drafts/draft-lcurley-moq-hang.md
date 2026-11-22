@@ -164,9 +164,11 @@ A consumer MUST read an entry's `version` before the rest of the entry, and MUST
 One that skips an entry SHOULD tell its user that an upgrade would show more.
 
 A publisher writes on each entry the highest draft whose fields the entry uses that an older consumer would misread, and on the root the highest such draft for the root's own fields, omitting each `version` while it is 3.
-A field one entry carries raises only that entry's `version`, so an older consumer still plays the rest of the catalog, including a compatibility rendition beside the new one.
+A field one entry carries raises only that entry's `version`, so a consumer of moq-hang-04 or later still plays the rest of the catalog, including a compatibility rendition beside the new one.
+A consumer of moq-hang-03 has no version rule: it reads every entry, ignores `version`, and subscribes to the entry's ID.
 A change raises a version only when a consumer that ignored it would misread the catalog, never for a field it can safely ignore.
 This draft writes no root `version`, and needs an entry `version` of 4 only for a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead.
+While a moq-hang-03 consumer matters, a publisher keeps each rendition's `track` equal to its ID, since `version` cannot hide an entry from it.
 
 Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `sync` ({{sync}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `preference` leaves an older consumer choosing among every rendition it can decode; `instance` ({{field-instance}}) leaves it reading whichever stream it resolves; video `reorder` leaves it inferring decode times from timestamps; video `color`, `projection`, `stereo`, and `interlaced` and audio `layout` leave it presenting the decoded picture or channels unadjusted; `jitter`, `delay`, audio `warmup` ({{field-warmup}}), and the data track estimates are hints.
 
@@ -235,7 +237,7 @@ A publisher MUST NOT change them for a track once a catalog lists it.
 Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
 The picture size MAY change at any keyframe, which a `description` carrying parameter sets rules out, and `codec` names a profile and level that covers every picture the track carries.
 A publisher that changes an identity field MUST publish the media under a new track name, or as a new broadcast under a new Instance {{moql}}.
-A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID.
+A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID; a moq-hang-03 consumer subscribes to the ID instead and reads the old track, so a publisher it still serves renames the ID too.
 A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.
 
@@ -654,7 +656,7 @@ A second group would present a gap as if it were a complete log; ending the trac
 
 A consumer MUST NOT skip to the newest group, since a later group does not supersede an earlier one the way a `snapshot` group does.
 It reads the one group the track carries, and MUST fail the read if the track carries a second, since whatever would have completed the first group is gone and yielding the remainder would present that gap as a continuous log.
-This is why a consumer takes groups in arrival order rather than by ascending sequence: groups are separate streams, so a second group MAY arrive with a lower sequence than the first, and skipping it would report a truncated log as a whole one.
+This is why a consumer takes groups in arrival order rather than by ascending start: groups are separate streams, so a second group MAY arrive with a lower start than the first, and skipping it would report a truncated log as a whole one.
 
 A consumer MUST NOT wait for the first group to end before it looks for a second.
 A publisher that opens a second group while the first is still open is broken in exactly the way this rule exists to catch, and a consumer that only checks at the group boundary waits forever on a group that publisher may never finish.
@@ -905,7 +907,7 @@ Every container shares the same group rules:
 
 Each group MUST start with a keyframe, except a group that contains only a discontinuity marker.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
-Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
+Otherwise, a group MUST consist of a keyframe followed by zero or more frames that decode from the frames before them in the group.
 
 A group with no decodable frames is a walk-now discontinuity: one empty codec payload and no media.
 An empty payload is data on a data track, so in every container a data track's marker is one object with no bytes, which is no frame; it ends at the furthest point the consumer has read.
@@ -914,11 +916,11 @@ A consumer MUST NOT submit the marker to a decoder.
 Empty groups (zero objects) are permitted and mean nothing.
 After a discontinuity the timeline continues forward.
 A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD publish a discontinuity marker when it stops, so the group before the pause does not reach across the gap and read as live.
-The first timestamp of a group MUST NOT be lower than the first timestamp of any group with a lower sequence, and no frame of a group may be lower than the first timestamp of the group before it; a group that breaks either is malformed.
-A group MAY start at the same timestamp as the previous group.
-Frames MAY present below the previous group's content (B-frames, or a keyframe overlapping the previous group's last frame).
+Every frame of a group MUST present after every frame of any group with a lower start; a group that breaks this is malformed.
+Frames within a group MAY present out of order (B-frames, open-GOP leading pictures), so a consumer bounds a group that isn't whole by the lowest timestamp it knows in a higher group.
+A publisher splicing in new content keeps this by continuing the current group at a keyframe that doesn't present after the group's newest frame, and by dropping a later frame that presents at or before the previous group's newest frame, such as a leading picture that references the old content, along with the leading pictures of the same keyframe that decode after it, which may reference it.
 A publisher whose source restarts below the previous group's start begins a new broadcast instead.
-A delivered sequence hole is a playhead event unless the boundary is contiguous within 1 ms.
+A hole between delivered groups is a playhead event unless the publisher declared the starts between them skipped or the boundary is contiguous within 1 ms.
 A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.
 
 ## legacy
@@ -982,7 +984,7 @@ The grid draws a line at every multiple of that segment length in presentation t
 An edge derives the length from the interval alone, so every edge agrees.
 A broadcast without `sync.interval` is not served as HLS or DASH.
 
-A group spans from its first frame's timestamp to the next group's.
+A group spans from its start to the next group's start, or from its first frame's timestamp where the track has no timescale.
 It belongs to one segment: the first line it contains, so segment N starts at the group containing N times the segment length, or, when it contains none, the line it starts after.
 A segment holds whole groups, since one starting mid-group is not independent.
 Every rendition numbers its segments on the one grid, so they share segment numbers while each cuts its boundaries at its own groups.
@@ -991,8 +993,8 @@ A line no group starts a segment at, because a group longer than the segment or 
 On a 2 second grid, a group spanning 0 to 7 seconds is segment 0, segments 1 and 2 are gaps, and the group after it, starting at 7 seconds, starts segment 3; an edge that joins at that group numbers it alike without the one before.
 
 A segment starts at its first group's timestamp, or at its line when that group starts after it, as a group resuming from a pause does; a gap starts at its line; and each lasts until the next segment starts.
-A group longer than the segment is listed at its first line, so its duration understates its media, and the gaps after it overstate theirs.
-`EXT-X-TARGETDURATION` is twice the segment length, rounded up to whole seconds: the group containing a line starts at most one interval, and so one segment length, before it, and a gap ends where the next segment starts, under two lengths after its line, so only a group longer than the interval can exceed it.
+A group longer than the segment, an overrun, is an edge's to tolerate: it stays on the grid at its first line, and how the edge reports the durations around it is its own policy.
+`EXT-X-TARGETDURATION` is twice the segment length, rounded up to whole seconds: the group containing a line starts at most one interval, and so one segment length, before it, and a gap ends where the next segment starts, under two lengths after its line, so only an overrun can exceed it.
 The HLS media sequence and the segment URL derive from the segment number, and DASH addresses the same segments by `$Time$`.
 
 An edge lists a segment once a later one starts or the track ends.
@@ -1046,10 +1048,11 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- An HLS or DASH edge places a group on the segment grid by its start rather than its first frame's timestamp, and a hole between groups whose skipped starts the publisher declared is no playhead event.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A catalog update takes effect at its frame's timestamp on the media timeline, not when a consumer reads it, and a publisher keeps superseded catalog groups as fresh as its media's for consumers behind the live edge; an untimed catalog track's updates apply on arrival.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, and JSON data tracks SHOULD be compressed.
-- Added `version` on the root and on each rendition, data track, and include ({{catalog-version}}): the oldest draft that reads it. A consumer refuses a catalog whose root `version` is above its own, and skips an entry whose `version` is. A `track` other than the entry's ID needs an entry `version` of 4. Consumers MUST ignore unknown fields.
+- Added `version` on the root and on each rendition, data track, and include ({{catalog-version}}): the oldest draft that reads it. A consumer refuses a catalog whose root `version` is above its own, and skips an entry whose `version` is. A `track` other than the entry's ID needs an entry `version` of 4, which gates only consumers of -04 or later. Consumers MUST ignore unknown fields.
 - A root member this draft defines has its shape, or the catalog is refused: a section or field of the wrong type, `null`, or out of range is never read as absent. An application MUST NOT carry its own data under a root key this draft defines.
 - Replaced the root `archive` and `clock` sections, and the timeline track the archive named, with the root `sync` section ({{sync}}): `sync.clock` is the former root `clock`, which every track, the catalog track included, converts into, and `sync.interval` is the longest group of any audio or video track, fixed for the broadcast. Removed the Timeline section.
 - Added the HLS and DASH section ({{hls}}): an edge numbers segments on the grid `sync.interval` fixes, each segment the smallest whole multiple of the interval at least a second long and starting at the group containing its line, and lists a line no group starts as a gap.
@@ -1081,7 +1084,7 @@ This document has no IANA actions.
 - A `ttml` payload is one complete TTML document in the `media` time base, clipped to its frame: its `body` begin matches the frame timestamp, and its `body` end bounds what it presents.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Added optional `bitrate`, `jitter`, and `delay` fields to `json` and `binary` track entries, `delay` measured only from payloads stamped with their capture time on the broadcast clock.
-- Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
+- Replaced the live-edge floor with groups that never overlap: every frame of a group presents after every frame of a lower group, while frames within a group may reorder. A spliced keyframe that doesn't present after its group's newest frame continues that group.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks, and a fragment's runs lie back to back in its `mdat`, each `data_offset` counting from its `moof`.
 - A `loc` frame's codec payload uses the `legacy` framing.

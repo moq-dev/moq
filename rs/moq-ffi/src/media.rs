@@ -860,7 +860,7 @@ impl MoqMediaCatalogProducer {
 		value.flip = properties.flip;
 
 		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
-			let mut catalog = state.catalog.modify()?;
+			let mut catalog = state.catalog.modify(state.catalog.next_timestamp())?;
 			catalog.video.set_properties(value)?;
 			catalog.commit()?;
 			Ok(())
@@ -878,7 +878,7 @@ impl MoqMediaCatalogProducer {
 		let _guard = crate::ffi::enter();
 		let value: serde_json::Value = serde_json::from_str(&json)?;
 		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
-			let mut guard = state.catalog.modify()?;
+			let mut guard = state.catalog.modify(state.catalog.next_timestamp())?;
 			guard.set_section(name, value)?;
 			guard.commit()?;
 			Ok(())
@@ -889,7 +889,7 @@ impl MoqMediaCatalogProducer {
 	pub fn remove_section(&self, name: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
-			let mut guard = state.catalog.modify()?;
+			let mut guard = state.catalog.modify(state.catalog.next_timestamp())?;
 			guard.remove_section(&name);
 			guard.commit()?;
 			Ok(())
@@ -1457,8 +1457,8 @@ fn reserve_track(
 	suffix: &str,
 ) -> Result<moq_net::track::Request, MoqError> {
 	let name = track.unwrap_or_else(|| broadcast.unique_name(suffix));
-	broadcast.reserve_track(name).map_err(|err| MoqError::Codec {
-		reason: format!("init failed: {err}"),
+	broadcast.reserve_track(name.clone()).ok_or_else(|| MoqError::Codec {
+		reason: format!("init failed: the track {name} already exists"),
 	})
 }
 
@@ -1666,8 +1666,8 @@ mod read_tests {
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
 		let (_broadcast, track, reader) = subscribe_warmup().await;
 		let mut media = reader.reads.take(|_| Ok(())).unwrap();
-		let write = |start: u64, micros| {
-			let mut group = track.create_group(start.into()).unwrap();
+		let write = |micros: u64| {
+			let mut group = track.create_group(micros.into()).unwrap();
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio)
 				.write(
 					&mut group,
@@ -1681,11 +1681,12 @@ mod read_tests {
 				.unwrap();
 			group.finish().unwrap();
 		};
-		// Newest first, all before the first read. Group 4 covers the min delay alone, so
-		// without the warmup the start would skip group 3; only the warmup's reach keeps it.
-		write(5, 5_000_000);
-		write(4, 4_700_000);
-		write(3, 4_400_000);
+		// Newest first, all before the first read, each group starting at its frame. The group
+		// at 4.7s covers the min delay alone, so without the warmup the start would skip the one
+		// at 4.4s; only the warmup's reach keeps it.
+		write(5_000_000);
+		write(4_700_000);
+		write(4_400_000);
 		let _track = track.finish().unwrap();
 		let mut micros = Vec::new();
 		while let Some(read) = media.read().await.unwrap() {
@@ -1902,11 +1903,16 @@ impl MoqMediaCatalogConsumer {
 		broadcast: &MoqBroadcastConsumer,
 		delay: std::time::Duration,
 	) -> Result<Arc<MoqMediaCatalogConsumer>, MoqError> {
-		let consumer =
-			hang::catalog::Consumer::new(broadcast.inner.track(hang::catalog::Catalog::DEFAULT_NAME)?, delay);
-		Ok(Arc::new(MoqMediaCatalogConsumer {
-			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
-		}))
+		broadcast
+			.driver
+			.watch(async {
+				let consumer =
+					hang::catalog::Consumer::new(broadcast.inner.track(hang::catalog::Catalog::DEFAULT_NAME)?, delay);
+				Ok(Arc::new(MoqMediaCatalogConsumer {
+					reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
+				}))
+			})
+			.await
 	}
 }
 
@@ -2231,11 +2237,7 @@ mod timebase_tests {
 				.await
 				.unwrap()
 				.ordered();
-			let mut group = loop {
-				if let Some(group) = catalogs.next_group().await.unwrap().unwrap().group() {
-					break group;
-				}
-			};
+			let mut group = catalogs.next_group().await.unwrap().unwrap();
 			let stamp = group.read_frame().await.unwrap().unwrap().timestamp;
 			// Catalogs published in the same millisecond, such as a rendition and its first estimate,
 			// start a unit apart, since each starts its own group.

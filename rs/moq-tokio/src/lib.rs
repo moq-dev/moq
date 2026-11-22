@@ -83,7 +83,7 @@ fn spawn_qmux<T: qmux::transport::Transport + Send + 'static>(
 // new `pub` item in these modules doesn't silently join it.
 pub use client::Client;
 pub use connect::{Addrs, ConnectError};
-pub use connection::{Backoff, Connection, Redirect, Restart, Status};
+pub use connection::{Backoff, Connection, Hold, Redirect, Restart};
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 pub use server::{Listener, Server};
