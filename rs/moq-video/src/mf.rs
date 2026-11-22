@@ -3,7 +3,8 @@
 
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Media::MediaFoundation::{
-	IMFDXGIDeviceManager, MF_VERSION, MFCreateDXGIDeviceManager, MFSTARTUP_FULL, MFShutdown, MFStartup,
+	IMFDXGIDeviceManager, IMFMediaBuffer, MF_VERSION, MFCreateDXGIDeviceManager, MFCreateMemoryBuffer, MFSTARTUP_FULL,
+	MFShutdown, MFStartup,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 
@@ -13,6 +14,77 @@ use crate::frame::d3d11;
 /// Wrap a `windows` error with context as a codec error.
 pub(crate) fn mf_err(ctx: &str, e: windows::core::Error) -> Error {
 	Error::codec(anyhow::anyhow!("{ctx}: {e}"))
+}
+
+/// A system-memory buffer of `len` bytes, refusing a length Media Foundation
+/// cannot hold rather than truncating it.
+pub(crate) fn memory_buffer(len: usize) -> Result<IMFMediaBuffer, Error> {
+	let len = u32::try_from(len)
+		.map_err(|_| Error::codec(anyhow::anyhow!("{len} bytes exceeds a Media Foundation buffer")))?;
+	unsafe { MFCreateMemoryBuffer(len) }.map_err(|e| mf_err("MFCreateMemoryBuffer", e))
+}
+
+/// An `IMFMediaBuffer` locked for access, unlocked on drop so no early return
+/// leaks the lock.
+pub(crate) struct Locked<'a> {
+	buffer: &'a IMFMediaBuffer,
+	data: *mut u8,
+	max: usize,
+	current: usize,
+}
+
+impl<'a> Locked<'a> {
+	pub(crate) fn new(buffer: &'a IMFMediaBuffer) -> Result<Self, Error> {
+		let mut data = std::ptr::null_mut();
+		let mut max = 0;
+		let mut current = 0;
+		unsafe { buffer.Lock(&mut data, Some(&mut max), Some(&mut current)) }.map_err(|e| mf_err("lock buffer", e))?;
+		let locked = Self {
+			buffer,
+			data,
+			max: max as usize,
+			current: current as usize,
+		};
+		// A null pointer is only an empty buffer; anything else is unreadable.
+		if locked.data.is_null() && locked.max != 0 {
+			return Err(Error::codec(anyhow::anyhow!(
+				"Media Foundation locked a {max} byte buffer at a null address"
+			)));
+		}
+		Ok(locked)
+	}
+
+	/// The valid bytes, up to the buffer's current length.
+	pub(crate) fn data(&self) -> &[u8] {
+		if self.data.is_null() {
+			return &[];
+		}
+		// SAFETY: the lock maps `max` bytes at `data` until it is released, and
+		// Media Foundation never reports a current length past the maximum.
+		unsafe { std::slice::from_raw_parts(self.data, self.current.min(self.max)) }
+	}
+
+	/// The first `len` bytes to write, refused if the buffer holds fewer.
+	pub(crate) fn data_mut(&mut self, len: usize) -> Result<&mut [u8], Error> {
+		if len > self.max {
+			return Err(Error::codec(anyhow::anyhow!(
+				"Media Foundation buffer holds {} bytes, not {len}",
+				self.max
+			)));
+		}
+		if len == 0 {
+			return Ok(&mut []);
+		}
+		// SAFETY: as `data`, `len` is within the mapped `max` bytes, and `&mut
+		// self` excludes any other view of them.
+		Ok(unsafe { std::slice::from_raw_parts_mut(self.data, len) })
+	}
+}
+
+impl Drop for Locked<'_> {
+	fn drop(&mut self) {
+		let _ = unsafe { self.buffer.Unlock() };
+	}
 }
 
 /// Pack two 32-bit values into the high/low halves of a u64, the layout Media

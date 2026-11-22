@@ -1586,7 +1586,7 @@ impl TrackState {
 	/// or the live feed may still deliver: a fill refused is no verdict on the feed.
 	fn drop_unfed(&mut self, groups: ops::Range<u64>, hole: super::Hole) {
 		// Until the serving session resolves where the feed starts, it may deliver anything.
-		if matches!(self.start, super::Start::Pending(_)) {
+		if matches!(self.start, super::FeedStart::Pending(_)) {
 			return;
 		}
 		let now = self.cache.pool().now_wall();

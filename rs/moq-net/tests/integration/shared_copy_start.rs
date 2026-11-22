@@ -81,7 +81,7 @@ async fn read_from_expired(version: &str) -> Vec<u64> {
 	let subscription = Subscription::default()
 		.with_delay(Delay::default().with_max(Duration::from_secs(60)))
 		.with_ranges([Range {
-			start: Some(500),
+			start: moq_net::track::Start::Time(500),
 			end: None,
 		}]);
 	let mut sub = remote.track("video").unwrap().subscribe(subscription).await.unwrap();

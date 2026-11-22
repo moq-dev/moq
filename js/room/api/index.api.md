@@ -184,7 +184,7 @@ export class Room {
 	readonly enabled: Getter<boolean>;
 	readonly identity: Getter<Path.Valid | undefined>;
 	readonly prefix: Getter<Path.Valid | undefined>;
-	get remotes(): Getter<Map<Path.Valid, Remote>>;
+	get remotes(): Getter<ReadonlyMap<Path.Valid, Remote>>;
 }
 
 export interface RoomProps {

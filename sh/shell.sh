@@ -26,7 +26,11 @@ wait "$!"
 case "${1:-}" in
     check)
         shfmt --diff "${scripts[@]}"
-        shellcheck "${scripts[@]}"
+        # Without `-x`, shellcheck follows a `source` only to a file in the same invocation,
+        # so a script sourcing one from another batch would fail with SC1091.
+        cpus=$(getconf _NPROCESSORS_ONLN)
+        ((cpus <= 8)) || cpus=8
+        printf '%s\0' "${scripts[@]}" | xargs -0 -n 16 -P "$cpus" shellcheck -x --
         ;;
     fix)
         shfmt --write "${scripts[@]}"

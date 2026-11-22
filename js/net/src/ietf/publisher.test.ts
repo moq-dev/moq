@@ -27,6 +27,7 @@ import { Cursor, Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { unwanted } from "../util/demand.ts";
+import { liveMillis } from "../window.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
@@ -615,9 +616,10 @@ test("a live SUBSCRIBE asks its track for a live join with no Min Age", async ()
 		);
 		const asked = (track: TrackProducer) => {
 			const subscription = track.subscription.peek();
-			return { ranges: subscription?.ranges, min: subscription?.delay?.min?.asMillis() };
+			const range = subscription?.ranges?.[0];
+			return { count: subscription?.ranges?.length, live: range && liveMillis(range), end: range?.end };
 		};
-		const live = { ranges: [{}], min: 0 };
+		const live = { count: 1, live: 0, end: undefined };
 		try {
 			const track = await accepted;
 			expect(asked(track)).toEqual(live);

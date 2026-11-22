@@ -258,6 +258,14 @@ impl Client {
 		self
 	}
 
+	/// Replace the tokens each new [`Connection`] starts presenting, as
+	/// [`connect.tokens`](crate::connect::Config::tokens) sets them; change a live
+	/// connection's with [`Connection::tokens`].
+	pub fn with_tokens(mut self, tokens: Vec<moq_net::auth::Token>) -> Self {
+		self.tokens = tokens;
+		self
+	}
+
 	/// Override whether this client redials after a session drop.
 	///
 	/// Defaults to true. Each clone can choose its own reconnect policy.

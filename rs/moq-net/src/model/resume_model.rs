@@ -1805,10 +1805,9 @@ fn regressions() {
 			],
 			finish: false,
 		},
-		// The JS model runs these ops on a local route, whose ordered read passes key 0 once group 1
-		// lands past its range. On this received route the read waits for key 0 instead, and the
-		// oracle accepts either: `an_ordered_read_of_a_received_copy_waits_below_a_later_group` in
-		// `track.rs` pins the wait.
+		// An ordered read of a received route waits for key 0 below group 1, which landed past its
+		// range, rather than passing it: `an_ordered_read_of_a_received_copy_waits_below_a_later_group`
+		// in `track.rs` pins the wait.
 		Case {
 			ops: vec![
 				Op::Join {
@@ -1891,6 +1890,30 @@ fn regressions() {
 					group: 1,
 				},
 				Op::Ranges { reader: 1, range: None },
+			],
+			finish: false,
+		},
+		// A group the local floor keeps out of where an earlier copy placed a range, below where
+		// the serving copy places it: the read runs without a stall. The oracle owes nothing
+		// below the serving copy's placement, so it does not check that group yet; see
+		// quest/m0/nightly/resume-model-placement.md.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 2,
+					spec: spec(false, Budget::Hour, Some((8, 9)), false),
+				},
+				Op::Bounds {
+					reader: 2,
+					range: Some((1, 9)),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
 			],
 			finish: false,
 		},
