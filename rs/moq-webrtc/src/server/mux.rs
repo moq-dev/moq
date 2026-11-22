@@ -26,10 +26,14 @@
 //!
 //! Backpressure mirrors a UDP socket buffer: each session has a bounded inbox
 //! and a full inbox drops the datagram (WebRTC tolerates loss). A closed inbox
-//! (session ended) evicts the address-cache entry; the ufrag entry is removed by
-//! the [`Registration`] guard the accept path holds for the session's lifetime.
+//! (session ended) evicts the address-cache entry; the [`Registration`] guard the
+//! accept path holds for the session's lifetime removes the rest.
+//!
+//! A session holds or claims at most [`MAX_ADDRS`] addresses, least recently signed
+//! first out, so a peer signing requests from rotating spoofed sources grows only its
+//! own short list, and a session's end removes its entries without a sweep.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -41,19 +45,31 @@ use tokio::sync::mpsc;
 use crate::Result;
 use crate::session::advertised_candidates;
 
+/// The most addresses one session holds or claims at once. A peer has a handful of
+/// candidates (host per interface, reflexive, relayed), and its consent checks keep
+/// the address in use the most recent.
+const MAX_ADDRS: usize = 16;
+
 /// Per-session routing table, shared between the demux task and the accept path.
 struct Registry {
 	/// Checks a binding request's MESSAGE-INTEGRITY, as str0m does.
 	hmac: &'static dyn str0m::crypto::Sha1HmacProvider,
-	/// Local ICE ufrag -> session inbox. Populated at registration, the only
+	/// Local ICE ufrag -> session. Populated at registration, the only
 	/// way a brand-new peer (STUN binding request) finds its session.
-	by_ufrag: HashMap<String, Arc<Entry>>,
+	by_ufrag: HashMap<String, Session>,
 	/// Source address -> session inbox. Cached after first contact so non-STUN
 	/// packets (DTLS/RTP/RTCP, which carry no ufrag) route without parsing.
 	by_addr: HashMap<SocketAddr, Arc<Entry>>,
 	/// Source address -> the session a signed binding request claimed it for while
 	/// another session holds it, until [`Route::confirm`] or the holder's end.
 	claims: HashMap<SocketAddr, Arc<Entry>>,
+}
+
+/// A registered session and the addresses it holds or claims.
+struct Session {
+	entry: Arc<Entry>,
+	/// Every key in `by_addr` or `claims` naming `entry`, least recently signed first.
+	addrs: VecDeque<SocketAddr>,
 }
 
 struct Entry {
@@ -85,7 +101,7 @@ impl Drop for Mux {
 	}
 }
 
-/// Removes a session's ufrag entry (and sweeps any dead address entries) when
+/// Removes a session's ufrag entry and every address it holds or claims when
 /// dropped. The accept path hands this to the session task, so the registration
 /// lives exactly as long as the session.
 pub(crate) struct Registration {
@@ -96,16 +112,12 @@ pub(crate) struct Registration {
 impl Drop for Registration {
 	fn drop(&mut self) {
 		let mut registry = self.registry.lock().unwrap();
-		registry.by_ufrag.remove(&self.ufrag);
-		// Sweep address-cache entries whose session inbox has closed (this one,
-		// and any other session that ended without another inbound packet to
-		// trigger the per-packet eviction below).
-		registry
-			.by_addr
-			.retain(|_, entry| entry.ufrag != self.ufrag && !entry.sender.is_closed());
-		registry
-			.claims
-			.retain(|_, entry| entry.ufrag != self.ufrag && !entry.sender.is_closed());
+		let Some(session) = registry.by_ufrag.remove(&self.ufrag) else {
+			return;
+		};
+		for addr in session.addrs {
+			registry.release(&session.entry, addr);
+		}
 	}
 }
 
@@ -122,7 +134,9 @@ impl Route {
 		let mut registry = self.registry.lock().unwrap();
 		if registry.claims.get(&src).is_some_and(|claim| claim.ufrag == self.ufrag) {
 			let claim = registry.claims.remove(&src).expect("the claim was found");
-			registry.by_addr.insert(src, claim);
+			if let Some(holder) = registry.by_addr.insert(src, claim) {
+				registry.forget(&holder.ufrag, src);
+			}
 		}
 	}
 }
@@ -139,7 +153,7 @@ impl Registry {
 			Datagram::Request(request) => {
 				let named = (request.split_username())
 					.and_then(|(local, _remote)| self.by_ufrag.get(local))
-					.cloned();
+					.map(|session| session.entry.clone());
 				let Some(entry) = named else {
 					return [self.holder(src), None];
 				};
@@ -153,14 +167,50 @@ impl Registry {
 						// waits for its claimant to confirm, end, or be replaced.
 						Some(holder) if Arc::ptr_eq(&holder, &entry) => {}
 						Some(_) => {
-							self.claims.insert(src, entry.clone());
+							if let Some(replaced) = self.claims.insert(src, entry.clone())
+								&& !Arc::ptr_eq(&replaced, &entry)
+							{
+								self.forget(&replaced.ufrag, src);
+							}
 						}
 					}
+					self.touch(&entry, src);
 				}
 				[Some(entry), None]
 			}
 			Datagram::Answer => [self.holder(src), self.claims.get(&src).cloned()],
 			Datagram::Other => [self.holder(src), None],
+		}
+	}
+
+	/// Record that `entry` holds or claims `src`, most recently, evicting its least
+	/// recently signed address past [`MAX_ADDRS`].
+	fn touch(&mut self, entry: &Arc<Entry>, src: SocketAddr) {
+		let Some(session) = self.by_ufrag.get_mut(&entry.ufrag) else {
+			return;
+		};
+		session.addrs.retain(|addr| *addr != src);
+		session.addrs.push_back(src);
+		if session.addrs.len() > MAX_ADDRS {
+			let oldest = session.addrs.pop_front().expect("over the limit");
+			self.release(entry, oldest);
+		}
+	}
+
+	/// Drop `addr` from the session `ufrag`'s list, once another session took it.
+	fn forget(&mut self, ufrag: &str, addr: SocketAddr) {
+		if let Some(session) = self.by_ufrag.get_mut(ufrag) {
+			session.addrs.retain(|held| *held != addr);
+		}
+	}
+
+	/// Remove `entry`'s hold or claim on `addr`, leaving any other session's.
+	fn release(&mut self, entry: &Arc<Entry>, addr: SocketAddr) {
+		if self.by_addr.get(&addr).is_some_and(|held| Arc::ptr_eq(held, entry)) {
+			self.by_addr.remove(&addr);
+		}
+		if self.claims.get(&addr).is_some_and(|claim| Arc::ptr_eq(claim, entry)) {
+			self.claims.remove(&addr);
 		}
 	}
 
@@ -249,11 +299,15 @@ impl Mux {
 			pass: creds.pass.clone(),
 			sender: tx,
 		});
+		let session = Session {
+			entry,
+			addrs: VecDeque::new(),
+		};
 		self.registry
 			.lock()
 			.unwrap()
 			.by_ufrag
-			.insert(creds.ufrag.clone(), entry);
+			.insert(creds.ufrag.clone(), session);
 		let registration = Registration {
 			ufrag: creds.ufrag.clone(),
 			registry: self.registry.clone(),
@@ -651,6 +705,41 @@ mod tests {
 		new_inbound.route.as_ref().unwrap().confirm(address);
 		let [holder, _] = mux.registry.lock().unwrap().route(address, &Datagram::Other);
 		assert_eq!(holder.unwrap().ufrag, new.ufrag, "the refresh dropped the claim");
+	}
+
+	/// A peer signing from rotating sources holds only its [`MAX_ADDRS`] most recently signed,
+	/// keeping one it refreshes, and its end removes them all without touching another session's.
+	#[tokio::test]
+	async fn a_session_holds_its_most_recent_addresses() {
+		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
+		let (spoofer, _spoofer_inbound, spoofer_registration) = mux.register();
+		let (other, _other_inbound, _other_registration) = mux.register();
+		let (request, request_other) = (binding_request(&spoofer), binding_request(&other));
+		let addr = |port: u16| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+		let held_by = |registry: &Registry, port: u16| registry.by_addr.get(&addr(port)).map(|e| e.ufrag.clone());
+
+		let mut registry = mux.registry.lock().unwrap();
+		registry.route(addr(1), &Datagram::parse(&request_other));
+		// A claim on the other session's address counts too.
+		registry.route(addr(1), &Datagram::parse(&request));
+		for port in 2..1_000 {
+			registry.route(addr(port), &Datagram::parse(&request));
+			// Consent checks keep the address in use.
+			registry.route(addr(2), &Datagram::parse(&request));
+		}
+		assert_eq!(registry.by_ufrag[&spoofer.ufrag].addrs.len(), MAX_ADDRS);
+		assert_eq!(registry.by_addr.len(), MAX_ADDRS + 1);
+		assert!(registry.claims.is_empty(), "the oldest address, a claim, was kept");
+		assert_eq!(held_by(&registry, 2), Some(spoofer.ufrag.clone()), "the refreshed address was evicted");
+		assert_eq!(held_by(&registry, 999), Some(spoofer.ufrag.clone()));
+		assert_eq!(held_by(&registry, 3), None);
+		assert_eq!(held_by(&registry, 1), Some(other.ufrag.clone()));
+		drop(registry);
+
+		drop(spoofer_registration);
+		let registry = mux.registry.lock().unwrap();
+		assert_eq!(registry.by_addr.len(), 1);
+		assert_eq!(held_by(&registry, 1), Some(other.ufrag.clone()));
 	}
 
 	/// A claimant takes the address once its holder ends, confirmed or not.
