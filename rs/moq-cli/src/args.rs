@@ -1334,8 +1334,9 @@ pub struct Transport {
 
 	/// Write the multiplex an `import ts --passthrough` published back out byte-identical,
 	/// paced on its own PCR, `--delay` behind it. Packets that arrive later than that are
-	/// dropped, leaving a continuity error.
-	#[usage(long, conflicts("--follow", "--stitch", "--mux-rate"))]
+	/// dropped, leaving a continuity error. `--stitch` carries on with a replacement's
+	/// packets verbatim from its first group, so the seam shows as each PID's continuity break.
+	#[usage(long, conflicts("--mux-rate"))]
 	pub passthrough: bool,
 
 	/// The released spelling of [`Self::follow`].
@@ -1626,8 +1627,8 @@ mod tests {
 		}
 	}
 
-	/// `export ts --passthrough` writes the source's own packets, so it neither switches
-	/// programs, waits for a return, nor pads to a rate.
+	/// `export ts --passthrough` writes the source's own packets, so it pads to no rate, but
+	/// follows a return or a replacement as the demultiplexed export does.
 	#[test]
 	fn export_ts_passthrough_writes_the_source_alone() {
 		let parse = |args: &[&str]| {
@@ -1642,9 +1643,13 @@ mod tests {
 		let stdout = export.sink.container().unwrap();
 		assert!(stdout.passthrough);
 		assert_eq!(stdout.max_delay, Duration::from_secs(2));
-		for flags in [&["--stitch"][..], &["--follow", "10s"], &["--mux-rate", "20000000"]] {
-			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
-		}
+		assert!(parse(&["--mux-rate", "20000000"]).is_err(), "--mux-rate must not start a run");
+		let cli = parse(&["--follow", "10s", "--stitch"]).unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("not an export");
+		};
+		let stdout = export.sink.container().unwrap();
+		assert_eq!((stdout.follow, stdout.stitch), (Duration::from_secs(10), true));
 	}
 
 	fn export(flags: &[&str]) -> Result<Invocation, ParseError> {
