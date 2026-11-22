@@ -582,7 +582,7 @@ impl Consumer {
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
-				skipped: Delivered::default(),
+				skipped: RangeSet::new(),
 				resumed: None,
 				refused: None,
 				window,
@@ -1744,11 +1744,12 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: a switch's boundary is never below it.
 	newest: Option<u64>,
-	/// The runs the reader lacked whole that a copy declared skipped as it was let go, so a
-	/// key the local floor or cap keeps out under the serving copy's resume point counts as
-	/// accounted for after the copy that knew it is gone; see [`Reader::accounts`]. Only whole
-	/// gaps of what the reader handed out, so it holds no more runs than those gaps.
-	skipped: Delivered,
+	/// What copies declared skipped as they were let go, so a key the local floor or cap keeps
+	/// out under the serving copy's resume point counts as accounted for after the copy that
+	/// knew it is gone; see [`Reader::accounts`] and [`Reader::lacking`]. Only the skipped start
+	/// and end of each gap the reader lacks there, which is all the floor and cap keep out, so
+	/// it holds at most two runs a gap.
+	skipped: RangeSet<u64>,
 	/// Set once the serving copy's resume point may pass over groups the reader lacks: the
 	/// route changed, or the ranges did. Kept until the gaps are backfilled: see
 	/// [`Reader::backfill_gaps`].
@@ -2299,26 +2300,51 @@ impl Reader {
 				}
 			}
 		});
-		// A skip is final, and only that copy may know it: keep each gap of the window under
-		// its bound that it skipped whole. A gap with a key left open stays owed as a whole
-		// wherever the cursor keeps any of it out, so a partial skip of it would only cost.
+		// A skip is final, and only that copy may know it: keep what it skipped of each gap's
+		// start and end under its bound.
+		let lacking = self.lacking(delivered);
 		for (track, end) in gone {
 			let end = end.unwrap_or(u64::MAX);
-			let from = self.window.floor().unwrap_or(0).max(delivered.floor());
-			let gaps: Vec<_> = self
-				.window
-				.runs(from)
-				.take_while(|run| *run.start() < end)
-				.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(end)))
-				.collect();
-			for gap in gaps {
-				if track.skipped_in(gap.clone()).gaps(&gap).next().is_none() {
-					self.skipped.insert_run(gap);
+			for gap in &lacking {
+				let skipped = track.skipped_in(gap.start..gap.end.min(end));
+				if let Some(first) = skipped.iter().next().filter(|run| run.start == gap.start) {
+					self.skipped.insert(first.clone());
+				}
+				if let Some(last) = skipped.iter().next_back().filter(|run| run.end == gap.end) {
+					self.skipped.insert(last.clone());
 				}
 			}
 		}
-		self.skipped.forget_below(delivered.floor());
+		// Only what still starts or ends a gap the reader lacks: a range edit, a hand-out, or a
+		// later switch leaves the rest unneeded.
+		if !self.skipped.is_empty() {
+			let mut kept = RangeSet::new();
+			for gap in &lacking {
+				if let Some(first) = self.skipped.overlapping(gap).next().filter(|run| run.start <= gap.start) {
+					kept.insert(gap.start..first.end.min(gap.end));
+				}
+				if let Some(last) = self.skipped.overlapping(gap).next_back().filter(|run| run.end >= gap.end) {
+					kept.insert(last.start.max(gap.start)..gap.end);
+				}
+			}
+			self.skipped = kept;
+		}
 		waits
+	}
+
+	/// The gaps of `delivered` in the reader's window under the serving copy's resume point:
+	/// where a key the local floor or cap keeps out, a start or an end of one, needs a skip to
+	/// count as accounted for. See [`Self::accounts`].
+	fn lacking(&self, delivered: &Delivered) -> Vec<std::ops::Range<u64>> {
+		let resumed = (self.copies.last())
+			.filter(|copy| !copy.replaced)
+			.and_then(|copy| copy.floor)
+			.unwrap_or(0);
+		self.window
+			.runs(self.window.floor().unwrap_or(0))
+			.take_while(|run| *run.start() < resumed)
+			.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(resumed)))
+			.collect()
 	}
 
 	/// Whether the serving copy drained cleanly. Nothing newer then supersedes what the copies
@@ -2685,7 +2711,7 @@ impl Reader {
 			let open = kept_out
 				.into_iter()
 				.filter(|run| !run.is_empty())
-				.flat_map(|run| self.skipped.gaps(run))
+				.flat_map(|run| self.skipped.gaps(&run).collect::<Vec<_>>())
 				.any(|open| !skipped(&open));
 			if open {
 				return false;
@@ -12482,6 +12508,42 @@ mod test {
 			sub.poll_recv_group(&kio::Waiter::noop()),
 			Poll::Ready(Ok(None))
 		));
+	}
+
+	/// As above, with the skip only the start of a gap the reader lacks: the rest of the gap,
+	/// a group the replaced copy dropped, is inside the local floor, so only the skip is needed.
+	#[kio::test]
+	async fn a_skip_starting_a_gap_the_local_floor_keeps_out_ends_the_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.skip_groups(1..2);
+		a.drop_groups(2..3, StreamError::NotFound);
+		write(&a, 3);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Some(0),
+				end: Some(4),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 3]);
+		let b = copy();
+		write(&b, 4);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(2..5);
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending(), "the replaced copy may still deliver 2");
+		// Past the grace a late group is waited for, the replaced copy has nothing more and goes.
+		kio::clock::sleep(HOUR).await;
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
 
 	/// As above, with the replaced route behind an inner front: its skip is read through that

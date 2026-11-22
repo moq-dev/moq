@@ -456,10 +456,10 @@ class Reader implements ResumeSource {
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: bigint;
 	/**
-	 * The runs the reader lacked whole that a copy declared skipped as it was let go, so a key the
-	 * cursor keeps out under the serving copy's resume point counts as accounted for after the copy
-	 * that knew it is gone; see {@link #accounts}. Only whole gaps of what the reader handed out,
-	 * so it holds no more runs than those gaps.
+	 * What copies declared skipped as they were let go, so a key the cursor keeps out under the
+	 * serving copy's resume point counts as accounted for after the copy that knew it is gone; see
+	 * {@link #accounts} and {@link #lacking}. Only the skipped start and end of each gap the reader
+	 * lacks there, which is all the cursor keeps out, so it holds at most two runs a gap.
 	 */
 	#skipped = new Delivered();
 	/**
@@ -1669,6 +1669,7 @@ class Reader implements ResumeSource {
 		const edge = last && hooks.latestKey(last.sub);
 		const cursor = this.#shell.cursor.peek();
 		let waits = false;
+		const lacking = this.#lacking(delivered);
 		this.#copies = this.#copies.filter((copy) => {
 			if (!copy.replaced) {
 				if (!this.#ended || copy.lease > 0) return true;
@@ -1682,32 +1683,51 @@ class Reader implements ResumeSource {
 				if (retains) return true;
 			}
 			// Before the drop, which closes a front's copy along with its own copies.
-			this.#keepSkips(copy, delivered);
+			this.#keepSkips(copy, lacking);
 			this.#drop(copy);
 			return false;
 		});
-		this.#skipped.forgetBelow(delivered.runEnd(0n) ?? 0n);
+		// Only what still starts or ends a gap the reader lacks: a range edit, a hand-out, or a later
+		// switch leaves the rest unneeded.
+		if (this.#skipped.runs > 0) {
+			const kept = new Delivered();
+			for (const gap of this.#lacking(delivered)) {
+				const open = this.#skipped.gaps(gap.start, gap.end);
+				const prefix = open[0]?.start ?? gap.end;
+				if (prefix > gap.start) kept.addRun(gap.start, prefix);
+				const suffix = open.at(-1)?.end ?? gap.start;
+				if (suffix < gap.end) kept.addRun(suffix, gap.end);
+			}
+			this.#skipped = kept;
+		}
 		return waits;
 	}
 
 	/**
-	 * Keep each gap of the window under `copy`'s bound that `delivered` lacks and `copy` skipped
-	 * whole, as it is let go: a skip is final, and only that copy may know it. A gap with a key left
-	 * open stays owed as a whole wherever the cursor keeps any of it out, so a partial skip of it
-	 * would only cost. Mirrors the Rust `Reader::let_go`.
+	 * Keep what `copy` skipped of the start and end of each gap in `lacking` under its bound, as it
+	 * is let go: a skip is final, and only that copy may know it. Mirrors the Rust `Reader::let_go`.
 	 */
-	#keepSkips(copy: Copy, delivered: Delivered): void {
-		const window = this.#window();
-		const end = copyEnd(copy) ?? window.end();
-		if (end === undefined) return;
-		const from = max(window.floor() ?? 0n, delivered.runEnd(0n) ?? 0n);
-		for (const run of window.runs(from, end)) {
-			for (const gap of delivered.gaps(run.start, run.end)) {
-				const skipped = new Delivered();
-				for (const skip of hooks.skippedIn(copy.sub, gap.start, gap.end)) skipped.addRun(skip.start, skip.end);
-				if (skipped.covers(gap.start, gap.end)) this.#skipped.addRun(gap.start, gap.end);
-			}
+	#keepSkips(copy: Copy, lacking: readonly Run[]): void {
+		const bound = copyEnd(copy);
+		for (const gap of lacking) {
+			const skipped = hooks.skippedIn(copy.sub, gap.start, bound === undefined ? gap.end : min(gap.end, bound));
+			const first = skipped[0];
+			if (first?.start === gap.start) this.#skipped.addRun(first.start, first.end);
+			const last = skipped.at(-1);
+			if (last?.end === gap.end) this.#skipped.addRun(last.start, last.end);
 		}
+	}
+
+	/**
+	 * The gaps of `delivered` in the reader's window under the serving copy's resume point: where a
+	 * key the cursor keeps out, a start or an end of one, needs a skip to count as accounted for.
+	 * See {@link #accounts}. Mirrors the Rust `Reader::lacking`.
+	 */
+	#lacking(delivered: Delivered): Run[] {
+		const serving = this.#copies.at(-1);
+		const resumed = serving && !serving.replaced ? (resumePoint(serving) ?? 0n) : 0n;
+		const window = this.#window();
+		return window.runs(window.floor() ?? 0n, resumed).flatMap((run) => delivered.gaps(run.start, run.end));
 	}
 
 	/**

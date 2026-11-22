@@ -1045,6 +1045,50 @@ test("a skip under the resume point the local floor keeps out ends the read", as
 });
 
 /**
+ * A gap the local floor keeps out only the start of, which the replaced copy skipped, is accounted
+ * for once that copy goes, though the copy still owed the rest of the gap. Mirrors the Rust
+ * `a_skip_starting_a_gap_the_local_floor_keeps_out_ends_the_read`.
+ */
+test("a skip starting a gap the local floor keeps out ends the read", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(0n);
+	ta.producer.skipGroups(1n, 2n);
+	hooks.dropTrackGroups(ta.producer, 2n, 3n, { error: new StreamError(StreamCode.NotFound) });
+	ta.write(3n);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 4n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([0n, 3n]);
+		tb.write(4n);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 2n }, end: { excluded: 5n } });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([4n]);
+		// The replaced copy may still deliver 2.
+		const ended = sub.recvGroup();
+		expect(await isPending(ended)).toBe(true);
+		// Past the grace a late group is waited for, the replaced copy has nothing more and goes.
+		await clock.advance(Duration.millis(3_600_000));
+		expect(await ended).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
+/**
  * As above, with the replaced route behind an inner front: its skip is read through that front's
  * serving copy, before the copy goes. Mirrors the Rust
  * `a_skip_behind_an_inner_front_the_local_floor_keeps_out_ends_the_read`.
