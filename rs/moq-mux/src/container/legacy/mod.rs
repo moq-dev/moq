@@ -116,6 +116,8 @@ impl Audio {
 			// AAC-LC codes 1024 samples per packet. SBR and PS packets decode to twice that, at a
 			// rate the catalog may or may not double, so they state nothing here.
 			hang::catalog::AudioCodec::AAC(aac) if aac.profile == 2 => Packets::Fixed { samples: 1024, rate },
+			// Layer II codes 1152 samples per frame.
+			hang::catalog::AudioCodec::Mp2 => Packets::Fixed { samples: 1152, rate },
 			hang::catalog::AudioCodec::Pcm => Packets::Pcm {
 				frame_bytes: config.channel_count.checked_mul(4).filter(|bytes| *bytes > 0)?,
 				rate,
@@ -179,10 +181,13 @@ mod tests {
 	}
 
 	#[test]
-	fn aac_lc_and_pcm_state_a_fixed_or_measured_count() {
+	fn aac_lc_mp2_and_pcm_state_a_fixed_or_measured_count() {
 		let aac = hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile: 2 });
 		let audio = Audio::new(&config(aac, 48_000, 2)).unwrap();
 		assert_eq!(micros(audio.duration(&[0xff])), Some(21_333));
+
+		let audio = Audio::new(&config(hang::catalog::AudioCodec::Mp2, 48_000, 2)).unwrap();
+		assert_eq!(micros(audio.duration(&[0xff])), Some(24_000));
 
 		let audio = Audio::new(&config(hang::catalog::AudioCodec::Pcm, 1_000, 2)).unwrap();
 		// Ten stereo frames of 32-bit samples are 10 ms at 1 kHz.
