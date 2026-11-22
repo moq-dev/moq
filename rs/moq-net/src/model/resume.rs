@@ -583,6 +583,7 @@ impl Consumer {
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
+				skipped: RangeSet::new(),
 				resumed: None,
 				refused: None,
 				window,
@@ -788,7 +789,7 @@ impl Copy {
 	}
 
 	/// Whether this copy is of `serving`'s route, did not fail, and was asked for a key of
-	/// `owed`: what [`Reader::accounts`] would ask that route for again were it let go.
+	/// `owed`: one [`Reader::accounts`] would ask that route for again were it let go.
 	fn asked(&self, serving: &track::Consumer, owed: &[std::ops::Range<u64>]) -> bool {
 		let (start, end) = (self.floor.unwrap_or(0), self.end().unwrap_or(u64::MAX));
 		!matches!(self.done, Some(Err(_)))
@@ -1853,6 +1854,11 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: a switch's boundary is never below it.
 	newest: Option<u64>,
+	/// The skipped run from the start of each key run the local floor or cap keeps out of a gap
+	/// under the serving copy's resume point, recorded as the copies declare it, so it outlives
+	/// the copy and the cache that held it. Only that run, at most two a gap however many routes
+	/// come and go: the rest is asked of the serving route again; see [`Reader::owed`].
+	skipped: RangeSet<u64>,
 	/// Set once the serving copy's resume point may pass over groups the reader lacks: the
 	/// route changed, or the ranges did. Kept until the gaps are backfilled: see
 	/// [`Reader::backfill_gaps`].
@@ -2396,8 +2402,8 @@ impl Reader {
 	/// may still deliver a group the reader lacks, which a clean end waits for.
 	///
 	/// A copy of the serving route asked for a key [`Self::owed`] names stays too: it is the
-	/// ask [`Self::accounts`] makes, waiting on that route's answer or holding a group there,
-	/// and letting it go would only ask again.
+	/// ask [`Self::accounts`] makes, waiting on that route's answer or holding what the record
+	/// does not, and letting it go would only ask again.
 	fn let_go(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> bool {
 		self.learn_end(None);
 		self.window();
@@ -2408,7 +2414,7 @@ impl Reader {
 			true => self.copies.last().and_then(|copy| copy.track.latest_key()),
 			false => None,
 		};
-		let owed = self.owed(delivered);
+		let owed = self.owed(delivered, waiter);
 		let serving = (self.copies.last())
 			.filter(|copy| !copy.replaced)
 			.map(|copy| copy.track.clone());
@@ -2442,10 +2448,12 @@ impl Reader {
 		waits
 	}
 
-	/// The parts of `groups` a copy held now declared skipped. Parks `waiter` on each copy read
-	/// while some of `groups` is not skipped there.
+	/// The parts of `groups` recorded skipped or a copy held now declared skipped. Parks
+	/// `waiter` on each copy read while some of `groups` is not skipped there.
 	fn skipped_in(&self, groups: std::ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
-		let mut skipped = RangeSet::new();
+		let mut skipped: RangeSet<u64> = (self.skipped.overlapping(&groups))
+			.map(|run| run.start.max(groups.start)..run.end.min(groups.end))
+			.collect();
 		for copy in &self.copies {
 			skipped.extend(copy.skipped_in(groups.clone(), waiter).iter().cloned());
 		}
@@ -2466,29 +2474,42 @@ impl Reader {
 	}
 
 	/// The keys of a bounded window under the serving copy's resume point that `delivered`
-	/// lacks, the local floor or cap keeps out, and the serving copy has not declared skipped:
-	/// what [`Self::accounts`] asks the serving route for. Empty while no replaced copy of that
-	/// route may have been asked, so a reader following one route pays nothing.
-	fn owed(&self, delivered: &Delivered) -> Vec<std::ops::Range<u64>> {
-		let Some(serving) = self.copies.last().filter(|copy| !copy.replaced) else {
+	/// lacks and the local floor or cap keeps out, past the skipped run [`Self::skipped`] records
+	/// from the start of each: what [`Self::accounts`] may ask the serving route for. Records
+	/// that run first, from what every copy held now declares, parking `waiter` on each while
+	/// some is not, so an answer is kept before the cache that holds it forgets it. A reader
+	/// whose floor and cap keep nothing out, or that follows one route, pays nothing.
+	fn owed(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Vec<std::ops::Range<u64>> {
+		let resumed = (self.copies.last())
+			.filter(|copy| !copy.replaced)
+			.and_then(|copy| copy.floor)
+			.filter(|_| self.window.end().is_some() && self.groups != (0, None));
+		let Some(resumed) = resumed else {
+			self.skipped = RangeSet::new();
 			return Vec::new();
 		};
-		let asked = (self.copies.iter()).any(|copy| copy.replaced && copy.track.same_channel(&serving.track));
-		if !asked || self.window.end().is_none() {
-			return Vec::new();
-		}
-		let resumed = serving.floor.unwrap_or(0);
-		let mut owed = RangeSet::new();
-		let gaps = (self.window.runs(self.window.floor().unwrap_or(0)))
+		let gaps: Vec<std::ops::Range<u64>> = (self.window.runs(self.window.floor().unwrap_or(0)))
 			.take_while(|run| *run.start() < resumed)
-			.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(resumed)));
-		for gap in gaps {
-			for run in self.kept_out(&gap, resumed) {
-				let skipped = serving.skipped_in(run.clone(), &kio::Waiter::noop());
-				owed.extend(skipped.gaps(&run));
+			.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(resumed)))
+			.collect();
+		let mut kept = RangeSet::new();
+		let mut owed = Vec::new();
+		for gap in &gaps {
+			for run in self.kept_out(gap, resumed) {
+				let start = match self.skipped_in(run.clone(), waiter).iter().next() {
+					Some(first) if first.start == run.start => {
+						kept.insert(first.clone());
+						first.end
+					}
+					_ => run.start,
+				};
+				if start < run.end {
+					owed.push(start..run.end);
+				}
 			}
 		}
-		owed.into_iter().collect()
+		self.skipped = kept;
+		owed
 	}
 
 	/// Whether the serving copy drained cleanly. Nothing newer then supersedes what the copies
@@ -2863,11 +2884,11 @@ impl Reader {
 	}
 
 	/// Ask the serving route for `keys`, which hold a key the local floor or cap keeps out that
-	/// no copy held now declares skipped. Its answer settles each such key as it would on one
-	/// cursor: a skip accounts for it, while a group or a drop leaves it owed. A copy of that
-	/// route already asked for them, kept by [`Self::let_go`] until the serving copy knows them
-	/// skipped, asks nothing more, so neither a reader waiting on the answer nor one a group
-	/// holds open asks again.
+	/// is neither recorded nor declared skipped by a copy held now. Its answer settles each such
+	/// key as it would on one cursor: a skip accounts for it, while a group or a drop leaves it
+	/// owed. A copy of that route already asked for them, kept by [`Self::let_go`] until
+	/// [`Self::skipped`] records them, asks nothing more, so neither a reader waiting on the
+	/// answer nor one a group holds open asks again.
 	fn ask(&mut self, keys: std::ops::Range<u64>, delivered: &Delivered, waiter: &kio::Waiter) {
 		self.backfill(keys.clone(), false, delivered);
 		let groups = self.groups;
@@ -13035,8 +13056,7 @@ mod test {
 	}
 
 	/// A group of the window under the serving copy's resume point that the local floor keeps
-	/// out and the publisher skipped is accounted for once a copy held declares it: with the
-	/// copy that knew it let go, the serving route is asked, and its skip ends the read.
+	/// out and the publisher skipped is accounted for: the read ends once the rest is read.
 	#[test]
 	fn a_skip_under_the_resume_point_the_local_floor_keeps_out_ends_the_read() {
 		let routes = Producer::new();
@@ -13065,21 +13085,22 @@ mod test {
 		routes.serve(b.consume());
 		let mut sub = sub.with_range(2..4);
 		assert_eq!(drain(&mut sub, false), [3]);
-		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 is owed");
-		assert!(asked_for(&b, 1), "{:?}", b.subscription());
-		b.skip_groups(1..2);
-		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
 	}
 
-	/// As above, through another front serving the reader: the ask reaches that front's own
-	/// route, whose skip ends the read.
+	/// A kept-out key no copy ever declared anything for is asked of the serving route, here
+	/// another front: the ask reaches that front's own route, whose skip ends the read.
 	#[test]
 	fn a_kept_out_key_is_asked_through_an_inner_front() {
 		let routes = Producer::new();
 		let front = logical(&routes);
 		let a = copy();
 		write(&a, 0);
-		a.skip_groups(1..2);
+		// A drop is no verdict on the track: another route may still carry the group.
+		a.drop_groups(1..2, StreamError::NotFound);
 		write(&a, 2);
 		routes.serve(a.consume());
 		let subscription = Subscription::default()
@@ -13104,8 +13125,9 @@ mod test {
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
 
-	/// As above, with the skip only the start of a gap the reader lacks: the rest of the gap,
-	/// a group the replaced copy dropped, is inside the local floor, so only the skip is needed.
+	/// As above, with the skip only the start of a gap the reader lacks, declared while the copy
+	/// that knew it is still held: the reader records it, so it needs no new ask once that copy
+	/// goes. The rest of the gap, a group the replaced copy dropped, is inside the local floor.
 	#[kio::test]
 	async fn a_skip_starting_a_gap_the_local_floor_keeps_out_ends_the_read() {
 		let routes = Producer::new();
@@ -13140,15 +13162,13 @@ mod test {
 		);
 		// Past the grace a late group is waited for, the replaced copy has nothing more and goes.
 		kio::clock::sleep(HOUR).await;
-		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 is owed");
-		assert!(asked_for(&b, 1), "{:?}", b.subscription());
-		b.skip_groups(1..2);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+		assert!(!asked_for(&b, 1), "{:?}", b.subscription());
 	}
 
 	/// As above, with the kept-out start of the gap skipped in parts: the replaced copy knows
-	/// one, the serving copy the other, and neither knows it whole. The serving route is asked
-	/// for the replaced copy's part once it goes.
+	/// one, the serving copy the other, and neither knows it whole. The reader records the run
+	/// they declare together.
 	#[kio::test]
 	async fn a_skip_split_between_a_replaced_and_the_serving_copy_ends_the_read() {
 		let routes = Producer::new();
@@ -13184,9 +13204,6 @@ mod test {
 			"the replaced copy may still deliver 3"
 		);
 		kio::clock::sleep(HOUR).await;
-		assert!(sub.poll_recv_group(&fresh()).is_pending(), "2 is owed");
-		assert!(asked_for(&b, 2), "{:?}", b.subscription());
-		b.skip_groups(2..3);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
 
@@ -13230,6 +13247,57 @@ mod test {
 		b.skip_groups(3..5);
 		assert!(sub.poll_recv_group(&fresh()).is_pending(), "2 is owed");
 		b.skip_groups(2..3);
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A kept-out key the serving route answers with a group stays owed, as on one cursor, and is
+	/// asked once: the copy asked for it stays, so the read waits without asking again, and a
+	/// floor lowered under it hands that group out.
+	#[test]
+	fn a_kept_out_group_is_asked_once_and_stays_owed() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		write(&a, 2);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: track::Start::Time(0),
+				end: Some(3),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 2]);
+		let b = copy();
+		write(&b, 3);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(2..4);
+		assert_eq!(drain(&mut sub, false), [3]);
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 is owed");
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		// The copy asked, by its own lease, which goes with it.
+		let asked = {
+			let readers = routes.readers.lock().unwrap();
+			let reader = readers.iter().find_map(Weak::upgrade).unwrap();
+			let reader = reader.lock().unwrap();
+			let b = b.consume();
+			let asked = reader.copies.iter().find(|copy| copy.replaced && copy.track.same_channel(&b));
+			Arc::downgrade(&asked.expect("a copy asked").lease)
+		};
+		write(&b, 1);
+		for _ in 0..4 {
+			assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 is owed");
+			assert!(asked.strong_count() > 0, "asked once");
+		}
+		let mut sub = sub.with_range(1..4);
+		assert_eq!(drain(&mut sub, false), [1]);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
 
@@ -13281,8 +13349,9 @@ mod test {
 		drop(reading);
 	}
 
-	/// A skip known only to a route an inner front replaced is asked again of the outer front's
-	/// serving route, once the outer front switches away from the inner one too.
+	/// A skip known to a route an inner front replaced still ends the read once the outer front
+	/// switches away from the inner one too: from what the reader recorded, or else from the
+	/// outer front's serving route, asked again.
 	#[kio::test]
 	async fn a_skip_behind_an_inner_switch_ends_the_read() {
 		let routes = Producer::new();
@@ -13313,8 +13382,7 @@ mod test {
 		let mut sub = sub.with_range(2..5);
 		assert_eq!(drain(&mut sub, false), [4]);
 		kio::clock::sleep(HOUR).await;
-		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 is owed");
-		assert!(asked_for(&c, 1), "{:?}", c.subscription());
+		// The route's answer, for a reader that asks.
 		c.skip_groups(1..2);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
