@@ -1733,6 +1733,7 @@ mod tests {
 			match ordered.next_item().await.unwrap().unwrap() {
 				track::Item::Group(group) => assert_eq!(group.start, second.start, "{version}"),
 				track::Item::Gap { range, error, .. } => panic!("{version}: groups {range:?} given up: {error}"),
+				_ => panic!("{version}: unexpected item"),
 			}
 		}
 	}
@@ -1809,6 +1810,7 @@ mod tests {
 				announce: route,
 				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 

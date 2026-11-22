@@ -855,6 +855,7 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 			announce,
 			..
 		} => (announce, true),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }
 
