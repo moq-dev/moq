@@ -89,11 +89,13 @@ Future<_Resolved> _resolveLibrary(
 /// another recipe with different features. Cargo's own timestamp check makes
 /// the no-op case cheap.
 Future<_Resolved> _build(Uri workspace, String target, String library) async {
-  // Keep the leak-test hooks out of the default cdylib while sharing the
-  // `testing,openh264` target directory with py. A separate output directory
-  // preserves Cargo's native compilation mode and dependency cache identities;
-  // passing the host as --target would split them.
-  final targetDir = workspace.resolve('target/ffi-testing/');
+  // Keep the leak-test allocator out of the shared cdylib and isolated from
+  // target/ffi-testing/: Dart's build hook strips CC/PKG_CONFIG*/BINDGEN_*
+  // from Cargo's environment, so sharing target/ffi-testing/ with full-env
+  // generate.sh/py builds would thrash build scripts on bare `dart test`.
+  // A separate output directory preserves Cargo's native compilation mode and
+  // dependency cache identities; passing the host as --target would split them.
+  final targetDir = workspace.resolve('target/dart/');
   final cargoArgs = [
     'build-ffi',
     '--message-format=json-render-diagnostics',
