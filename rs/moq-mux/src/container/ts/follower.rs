@@ -1,4 +1,5 @@
-//! [`Follower`]: an [`Export`] driven by the publisher instances serving its path, as a player is.
+//! [`Follower`]: an [`Export`] or a [`Release`] driven by the publisher instances serving its path, as
+//! a player is.
 
 use std::pin::Pin;
 use std::task::Poll;
@@ -7,8 +8,98 @@ use std::time::Duration;
 use kio::clock::Instant;
 
 use super::error::malformed;
-use super::{Export, catalog};
+use super::{Export, Release, catalog};
 use crate::container::Frame;
+
+/// What a [`Follower`] carries across its broadcast's returns: an [`Export`], or the [`Release`]
+/// of a passthrough track.
+pub trait Followed<E: catalog::Catalog> {
+	/// The next frame, or `None` once the broadcast being read ends.
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>>;
+
+	/// The source being read.
+	fn source(&self) -> &crate::Source;
+
+	/// The instance of the broadcast being read, `None` for one not resolved through an origin.
+	fn instance(&self) -> Option<&moq_net::Instance>;
+
+	/// Whether the broadcast last carried on into has served its catalog.
+	fn cataloged(&self) -> bool;
+
+	/// The format a replacement's catalog is subscribed in.
+	fn catalog_format(&self) -> crate::catalog::CatalogFormat;
+
+	/// Carry on into `broadcast`, whose `catalog` is subscribed.
+	fn followed(
+		&mut self,
+		broadcast: &moq_net::broadcast::Consumer,
+		catalog: crate::catalog::Consumer<E>,
+		follow: Duration,
+	) -> crate::Result<()>;
+}
+
+impl<E: catalog::Catalog> Followed<E> for Export<crate::catalog::Consumer<E>> {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		Export::poll_next(self, waiter)
+	}
+
+	fn source(&self) -> &crate::Source {
+		Export::source(self)
+	}
+
+	fn instance(&self) -> Option<&moq_net::Instance> {
+		Export::instance(self)
+	}
+
+	fn cataloged(&self) -> bool {
+		Export::cataloged(self)
+	}
+
+	fn catalog_format(&self) -> crate::catalog::CatalogFormat {
+		Export::catalog_format(self)
+	}
+
+	fn followed(
+		&mut self,
+		broadcast: &moq_net::broadcast::Consumer,
+		catalog: crate::catalog::Consumer<E>,
+		follow: Duration,
+	) -> crate::Result<()> {
+		Export::followed(self, broadcast, catalog, follow)
+	}
+}
+
+impl Followed<super::Ext> for Release {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		Release::poll_next(self, waiter)
+	}
+
+	fn source(&self) -> &crate::Source {
+		Release::source(self)
+	}
+
+	fn instance(&self) -> Option<&moq_net::Instance> {
+		Release::instance(self)
+	}
+
+	fn cataloged(&self) -> bool {
+		Release::cataloged(self)
+	}
+
+	fn catalog_format(&self) -> crate::catalog::CatalogFormat {
+		Release::catalog_format(self)
+	}
+
+	fn followed(
+		&mut self,
+		broadcast: &moq_net::broadcast::Consumer,
+		catalog: crate::catalog::Consumer<super::Ext>,
+		_follow: Duration,
+	) -> crate::Result<()> {
+		Release::followed(self, broadcast, catalog);
+		Ok(())
+	}
+}
 
 /// What the instances say serves the exported path.
 enum Serving {
@@ -59,8 +150,8 @@ enum State<E: catalog::Catalog> {
 	Done,
 }
 
-/// Carries an [`Export`] across its broadcast's returns, following the publisher instances
-/// serving its path through [`Following`](moq_net::origin::Following).
+/// Carries an [`Export`] or a [`Release`] across its broadcast's returns, following the publisher
+/// instances serving its path through [`Following`](moq_net::origin::Following).
 ///
 /// The same stream (the same instance) returning within the [follow](Self::with_follow)
 /// continues the export. Another instance taking the path fails with
@@ -78,8 +169,8 @@ enum State<E: catalog::Catalog> {
 /// deadline but its own end. A return that refuses its catalog waits for the next change, and
 /// the follow running out reports that refusal. A refusal to resolve the path at all fails at
 /// once, as it does for every [`Following`](moq_net::origin::Following) reader.
-pub struct Follower<E: catalog::Catalog = ()> {
-	export: Export<crate::catalog::Consumer<E>>,
+pub struct Follower<E: catalog::Catalog = (), F: Followed<E> = Export<crate::catalog::Consumer<E>>> {
+	export: F,
 	state: State<E>,
 	instances: moq_net::origin::Following,
 	path: moq_net::Path,
@@ -95,11 +186,11 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	timer: Option<Pin<Box<kio::clock::Sleep>>>,
 }
 
-impl<E: catalog::Catalog + 'static> Follower<E> {
+impl<E: catalog::Catalog + 'static, F: Followed<E>> Follower<E, F> {
 	/// Follow the path `export` reads, from the broadcast it resolved.
 	///
 	/// Fails when the export's origin can never cover its path.
-	pub fn new(export: Export<crate::catalog::Consumer<E>>) -> crate::Result<Self> {
+	pub fn new(export: F) -> crate::Result<Self> {
 		let source = export.source();
 		let instances = source.origin().follow(source.path(), None)?;
 		let mut follower = Self {
@@ -141,7 +232,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	}
 
 	/// The export being carried on.
-	pub fn export(&self) -> &Export<crate::catalog::Consumer<E>> {
+	pub fn export(&self) -> &F {
 		&self.export
 	}
 

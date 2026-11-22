@@ -53,6 +53,7 @@ just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
 just test ts --passthrough      # carry the multiplex whole, grade it packet by packet
 just test ts --passthrough --mpts # the same with two programs on their own clocks
+just test ts --passthrough --restart 8 # kill -9 the import 8 s in, under one export
 just test ts-passthrough-capture # the same over an in-repo capture the T-STD model passes
 ```
 
@@ -813,6 +814,17 @@ the source's last packet, which a stall or a growing latency loses.
 ./passthrough.py source.ts capture.ts [--loss-ok]
 ```
 
+`--restart S` kills the import with `kill -9` S seconds in, under one running
+export. The source plays live into a local UDP port, as a contribution feed
+arrives, so a killed import loses only what it held, and a loop restarts the
+import 0.5 s after it exits. Each run is a new instance of the broadcast, so the
+export runs with `--follow 5s --stitch`. It also runs with `--delay 2s`, because
+the live input ends only a second after the source's last datagram. The capture
+is graded with `--loss-ok`: the export must run on as one process and end on the
+source's last packet. Its gap, in seconds of the clip, must be no more than the
+import was down (from the kill until the restart connected) plus the clip's
+one-second group, which the restart holds back until its first keyframe.
+
 Release timing is the Rust tests' job
 (`rs/moq-mux/src/container/ts/release_test.rs`, on a paused clock), with the
 packet and schedule oracle in `oracle.rs` and the fixtures it cannot get from a
@@ -966,7 +978,7 @@ browser interop. It runs nightly on `main`, and release PRs touching a workspace
 crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
 toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion, MPTS and a restarted import), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,

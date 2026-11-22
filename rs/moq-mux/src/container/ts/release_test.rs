@@ -253,6 +253,80 @@ async fn a_capture_is_released_byte_identical_on_its_own_pcr() {
 	}
 }
 
+/// A route at `live` serving `data` imported whole, as a new importer instance publishes it.
+fn publish_import(
+	origin: &moq_net::origin::Producer,
+	data: &[u8],
+) -> (
+	moq_net::origin::Route,
+	crate::catalog::Producer<Ext>,
+	crate::container::ts::passthrough::Finished,
+) {
+	let options = moq_net::origin::RouteOptions::default().with_instance(moq_net::Instance::random(), 0);
+	let route = origin.route("live", options).unwrap();
+	let mut broadcast = route.broadcast().clone();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
+	let mut passthrough = Passthrough::new(broadcast, catalog.reserve()).unwrap();
+	passthrough.decode(data).unwrap();
+	(route, catalog, passthrough.finish().unwrap())
+}
+
+/// Every object `follower` writes until it ends, stalls or fails, and how it ended.
+async fn drain_follower(
+	follower: &mut super::Follower<Ext, Release>,
+) -> (Vec<(Instant, Frame)>, Option<crate::Result<()>>) {
+	let mut released = Vec::new();
+	loop {
+		match kio::clock::timeout(STALL, follower.next()).await {
+			Ok(Ok(Some(frame))) => released.push((Instant::now(), frame)),
+			Ok(Ok(None)) => return (released, Some(Ok(()))),
+			Ok(Err(err)) => return (released, Some(Err(err))),
+			Err(_) => return (released, None),
+		}
+	}
+}
+
+/// A restarted importer is another instance of the path. Stitching, the release carries on into
+/// its multiplex once the first instance goes, written whole after the first's; without, the
+/// replacement ends it.
+#[tokio::test(start_paused = true)]
+async fn a_follower_carries_a_release_on_into_a_restarted_importer() {
+	let objects = |imported: Imported| imported.objects.into_iter().map(|object| object.payload);
+	let first: Vec<Bytes> = objects(import(KYRION).await).collect();
+	let second: Vec<Bytes> = objects(import(KYRION_H264).await).collect();
+	for stitch in [true, false] {
+		let origin = crate::source::produce_origin();
+		let killed = publish_import(&origin, KYRION);
+		let source = crate::source::resolved(&origin, "live").await;
+		let release = Release::new(source, CatalogFormat::Hang, RECORDING)
+			.await
+			.unwrap()
+			.with_replay();
+		let mut follower = super::Follower::new(release)
+			.unwrap()
+			.with_follow(RECORDING * 4)
+			.with_stitch(stitch);
+		let (before, end) = drain_follower(&mut follower).await;
+		assert!(end.is_none(), "following the first instance once it ends: {end:?}");
+		assert_eq!(payloads(&before), bytes(&first), "stitch {stitch}");
+
+		drop(killed);
+		let _restarted = publish_import(&origin, KYRION_H264);
+		let (after, end) = drain_follower(&mut follower).await;
+		match stitch {
+			true => {
+				assert!(end.is_none(), "following the restarted instance: {end:?}");
+				assert_eq!(payloads(&after), bytes(&second));
+				assert_eq!(follower.export().dropped(), 0);
+			}
+			false => {
+				assert!(after.is_empty());
+				assert!(matches!(end, Some(Err(crate::Error::Replaced(_)))), "{end:?}");
+			}
+		}
+	}
+}
+
 /// The capture, then the capture again with its PCRs moved by `step` 90 kHz ticks around the
 /// 33-bit wrap and its first PCR flagged as a discontinuity when `flagged`.
 fn stepped(step: i64, flagged: bool) -> Vec<u8> {

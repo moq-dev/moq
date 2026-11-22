@@ -574,10 +574,14 @@ impl Subscribe {
 	}
 
 	/// Write the multiplex the broadcast's passthrough track carries, each run of packets as its
-	/// time on the source's PCR comes round.
+	/// time on the source's PCR comes round, carried across the broadcast's returns as the
+	/// demultiplexed export is.
 	async fn run_ts_passthrough(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
-		let mut release = moq_mux::container::ts::Release::new(self.source, self.catalog, self.args.max_delay).await?;
+		let release = moq_mux::container::ts::Release::new(self.source, self.catalog, self.args.max_delay).await?;
+		let mut release = moq_mux::container::ts::Follower::new(release)?
+			.with_follow(self.args.follow)
+			.with_stitch(self.args.stitch);
 		let report = |stats: &moq_mux::container::ts::stats::Release| {
 			if let Some(sections) = &self.sections {
 				sections.set(|report| report.release = Some(stats.clone()));
@@ -585,13 +589,18 @@ impl Subscribe {
 		};
 		let mut sampled = kio::clock::now();
 		let mut reported = (0, 0, 0, 0);
-		while let Some(object) = release.next().await? {
+		let end = loop {
+			let object = match release.next().await {
+				Ok(Some(object)) => object,
+				Ok(None) => break Ok(()),
+				Err(err) => break Err(err),
+			};
 			stdout.write_all(&object.payload).await?;
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = kio::clock::now();
-				let stats = release.stats();
+				let stats = release.export().stats();
 				report(&stats);
 				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);
 				if counts != reported {
@@ -599,11 +608,16 @@ impl Subscribe {
 					log_release(&stats, "TS passthrough release clock");
 				}
 			}
-		}
-		let stats = release.stats();
+		};
+		let stats = release.export().stats();
 		report(&stats);
 		log_release(&stats, "TS passthrough release clock");
-		Ok(())
+		match end {
+			Err(err @ moq_mux::Error::Replaced(_)) => {
+				Err(anyhow::Error::from(err).context("pass --stitch to follow a replacement"))
+			}
+			end => Ok(end?),
+		}
 	}
 
 	async fn run_flv(self) -> anyhow::Result<()> {

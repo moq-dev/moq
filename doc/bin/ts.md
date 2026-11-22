@@ -145,8 +145,11 @@ unlocked encoders, is spliced instead: the timestamps carry on from where the
 clock was, and the bytes still go out unchanged, step and all.
 
 `export ts --passthrough` writes each run `--delay` after its time on the
-source clock, so two exporters emit the same bytes. It takes neither
-`--follow`, `--stitch` nor `--mux-rate`. Only the hang catalog names the
+source clock, so two exporters emit the same bytes. It does not take
+`--mux-rate`. `--follow` and `--stitch` carry it across the broadcast's returns
+as they do the demultiplexed export: with `--stitch`, a restarted importer's
+multiplex goes out as it sends it, on a new clock, once the importer's
+announcement comes. Only the hang catalog names the
 track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
 

@@ -28,9 +28,16 @@ use crate::jitter::{self, Arrival, Push};
 /// is rewritten, and carries on with the next object. A PCR clock break, which the importer
 /// declares with a discontinuity marker, opens a new clock, so the output does not wait out a
 /// jump; the bytes carry the break as the source sent it.
+///
+/// A [`Follower`](super::Follower) carries a release on into the instance that takes its path:
+/// that instance's objects open a new clock, after whatever of the last one is still queued.
 pub struct Release {
 	source: crate::Source,
+	/// The instance of the broadcast being released, `None` for one not resolved through an
+	/// origin.
+	instance: Option<moq_net::Instance>,
 	catalog: Option<crate::catalog::Consumer<super::Ext>>,
+	catalog_format: crate::catalog::CatalogFormat,
 	/// The passthrough track, once a catalog names it.
 	track: Option<(String, ExportSource)>,
 	/// When the track was subscribed. Nothing it delivers reached the release before then,
@@ -42,6 +49,11 @@ pub struct Release {
 	delay: Duration,
 	jitter: jitter::Buffer<(), Frame>,
 	replay: bool,
+	/// The timeline restarts of the instances released before this one, each counting one more
+	/// for the switch away from it.
+	restarts: u64,
+	/// The groups the instances released before this one skipped.
+	gaps: u64,
 }
 
 impl Release {
@@ -56,8 +68,10 @@ impl Release {
 		let mut jitter = jitter::Buffer::new(delay);
 		jitter.expect([()]);
 		let release = Self {
+			instance: source.broadcast().info().instance.clone(),
 			source,
 			catalog: Some(catalog),
+			catalog_format,
 			track: None,
 			subscribed: kio::clock::now(),
 			finished: false,
@@ -65,8 +79,47 @@ impl Release {
 			delay,
 			jitter,
 			replay: false,
+			restarts: 0,
+			gaps: 0,
 		};
 		Ok(release)
+	}
+
+	/// The source being released.
+	pub(super) fn source(&self) -> &crate::Source {
+		&self.source
+	}
+
+	/// The instance of the broadcast being released.
+	pub(super) fn instance(&self) -> Option<&moq_net::Instance> {
+		self.instance.as_ref()
+	}
+
+	/// Whether the catalog last carried on into has named the passthrough track.
+	pub(super) fn cataloged(&self) -> bool {
+		self.track.is_some()
+	}
+
+	/// The format the catalog is subscribed in.
+	pub(super) fn catalog_format(&self) -> crate::catalog::CatalogFormat {
+		self.catalog_format
+	}
+
+	/// Carry on into `broadcast`, whose `catalog` is subscribed: its passthrough track replaces the
+	/// one being read, and its objects go out on a new clock once what is queued has.
+	pub(super) fn followed(
+		&mut self,
+		broadcast: &moq_net::broadcast::Consumer,
+		catalog: crate::catalog::Consumer<super::Ext>,
+	) {
+		self.source = self.source.switched(broadcast);
+		self.instance = broadcast.info().instance.clone();
+		self.catalog = Some(catalog);
+		if let Some((_, track)) = self.track.take() {
+			self.restarts += track.markers() + 1;
+			self.gaps += track.skips() - track.markers();
+		}
+		self.finished = false;
 	}
 
 	/// Read the track from the oldest group the delay still reaches instead of the live edge,
@@ -107,8 +160,9 @@ impl Release {
 	/// Snapshot how the release clock is keeping up with the source.
 	pub fn stats(&self) -> super::stats::Release {
 		let mut stats = super::stats::Release::of(&self.jitter);
+		stats.gaps = self.gaps;
 		if let Some((_, track)) = &self.track {
-			stats.gaps = track.skips() - track.markers();
+			stats.gaps += track.skips() - track.markers();
 		}
 		stats
 	}
@@ -155,7 +209,7 @@ impl Release {
 					arrived: arrived.max(self.subscribed),
 					read: kio::clock::now(),
 					decode: frame.timestamp.try_into()?,
-					restart: track.markers(),
+					restart: self.restarts + track.markers(),
 					// The output opens on a group, at a random access point; from then on every
 					// object goes out on its own, so one dropped late is a gap of its packets only.
 					sync: frame.keyframe || self.released,

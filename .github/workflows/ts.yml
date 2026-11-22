@@ -138,6 +138,15 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # The import killed and restarted under a running export, which must carry on, losing
+      # no more than the import missed while down and its first group.
+      - name: TS passthrough across an import restart
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --restart 8
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
       # so the export has to spread it over the slots before its DTS and still keep
       # the constant-rate schedule.
