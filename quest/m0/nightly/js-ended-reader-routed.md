@@ -37,8 +37,3 @@ Rust tests for it, and update the JS tests that pin the old behavior. Then add
 the three cases to the JS `regressions`.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Switch parity](/quest/m1/switch-no-boundary-parity.md) - another case where the
-  JS front's switch differs from Rust's

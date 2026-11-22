@@ -4270,32 +4270,67 @@ test("a switch backfills a group the replaced copy holds without its head", asyn
 	}
 });
 
-// The Rust reader drops the replaced copy instead (`a_switch_before_any_group_drops_the_replaced_copy`):
-// here it reads as the incumbent until the new route delivers, which bounds it.
-test("a switch before any group leaves the replaced copy uncapped as the incumbent", async () => {
+// Mirrors `a_switch_before_any_group_drops_the_replaced_copy` in rs/moq-net/src/model/resume.rs, once
+// the new route delivers: the Rust front splices a replacement only then.
+test("a switch before any group drops the replaced copy once the new route delivers", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
+	// The old route's groups may land late.
+	hooks.receiveTrack(ta.producer);
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
+	// A budget long enough that the replaced copy's late group would still be read.
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
 	try {
 		expect(drain(sub)).toEqual([]);
 		front.serve(b.consume());
-		expect(drain(sub)).toEqual([]);
 		await settle();
 		// Nothing held nor handed out: nothing to split, so the new route is asked as the reader was.
 		expect(tb.producer.subscription.peek()?.ranges?.[0]?.start).toBeUndefined();
-		expect(ta.producer.subscription.peek()?.ranges?.[0]?.end).toBeUndefined();
-		ta.write(0n);
-		tb.write(1n);
-		expect(drain(sub)).toEqual([0n, 1n]);
+		expect(ta.producer.subscription.peek()).toBeDefined();
+		tb.write(2n);
+		expect(sub.tryRecvGroup()?.start).toBe(2n);
+		// Landing after the new route delivered, the old route's group is not read: the Rust
+		// reader never held that copy past the splice.
+		ta.write(1n);
+		expect(drain(sub)).toEqual([]);
+		await settle();
+		expect(ta.producer.subscription.peek()).toBeUndefined();
 	} finally {
 		sub.close();
 		front.consumer.close();
 		a.close();
 		b.close();
+	}
+});
+
+// A switch keeps only the incumbent's copy: one whose route was replaced before it delivered goes
+// at once, as the Rust front never splices it.
+test("a switch before any group drops a replaced copy that never delivered", async () => {
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb, tc] = sources.map(copy);
+	front.serve(sources[0].consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		front.serve(sources[1].consume());
+		await settle();
+		expect(tb.producer.subscription.peek()).toBeDefined();
+		front.serve(sources[2].consume());
+		await settle();
+		expect(tb.producer.subscription.peek()).toBeUndefined();
+		// The incumbent still serves until the new route delivers.
+		ta.write(0n);
+		await settle();
+		expect(drain(sub)).toEqual([0n]);
+		tc.write(1n);
+		expect(drain(sub)).toEqual([1n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const source of sources) source.close();
 	}
 });
 

@@ -597,14 +597,20 @@ class Reader implements ResumeSource {
 			(copy) => copy.source.from.closed === source.from.closed && !(copy.sub.closed.peek() instanceof Error),
 		);
 		const [returning] = index === -1 ? [] : this.#copies.splice(index, 1);
-		for (const copy of this.#copies) {
-			copy.replaced = true;
-			// Nothing held nor handed out: nothing to split. Asked for nothing, a copy's subscription
-			// would end with the track, and a fetch then landing a later group would read as the
-			// whole of it. Left uncapped, it reads as an incumbent until the new copy delivers (see
-			// #joinIncumbent and #observe), where the Rust reader lets it go at once, until
-			// quest/m1/switch-no-boundary-parity.md aligns them.
-			if (boundary !== undefined) this.#cap(copy, boundary);
+		if (boundary !== undefined) {
+			for (const copy of this.#copies) {
+				copy.replaced = true;
+				this.#cap(copy, boundary);
+			}
+		} else {
+			// Nothing held nor handed out: nothing to split, so the new copy serves it all. Kept and
+			// asked for nothing, a copy's subscription would end with the track, and a fetch then
+			// landing a later group would read as the whole of it. Only the incumbent's copy stays,
+			// uncapped until the new copy delivers (see #observe), as the Rust front splices a
+			// replacement only then; the rest go, as the Rust `Reader::sync` drops them.
+			const incumbent = route.incumbent;
+			this.#dropCopies((copy) => copy.source.from.closed !== incumbent?.from.closed);
+			for (const copy of this.#copies) copy.replaced = true;
 		}
 		if (returning) {
 			const copy = returning;
@@ -651,7 +657,7 @@ class Reader implements ResumeSource {
 		const incumbent = route.incumbent;
 		if (!incumbent || serving.source !== route.source) return;
 		if (hooks.latestKey(serving.sub) !== undefined) {
-			route.delivered(serving.source);
+			this.#delivering(serving);
 			return;
 		}
 		if (this.#copies.some((copy) => copy.source.from.closed === incumbent.from.closed)) return;
@@ -672,8 +678,7 @@ class Reader implements ResumeSource {
 	/**
 	 * Where a switch splits the subscription: the largest group any copy holds, never below the
 	 * newest handed out. `undefined` while neither exists, when the new copy is asked for the ranges
-	 * as the copies it replaces were, and they are left uncapped. Mirrors the Rust
-	 * `Reader::boundary`.
+	 * as the copies it replaces were, and they go. Mirrors the Rust `Reader::boundary`.
 	 */
 	#boundary(): bigint | undefined {
 		let boundary = this.#newest;
@@ -1181,9 +1186,9 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * `copy` handed out `key`. The serving copy's first group bounds the replaced copies a switch
-	 * left uncapped, just below it: the incumbent copies a reader joining mid-switch reads (see
-	 * {@link #joinIncumbent}), and those replaced before any group was held or handed out. What
+	 * `copy` handed out `key`. The serving copy's first group bounds the incumbent copies a switch
+	 * left uncapped, just below it, unless they go (see {@link #delivering}): one a reader joining
+	 * mid-switch reads (see {@link #joinIncumbent}), and one a switch before any group kept. What
 	 * they hold under it may be groups the new route never has, and what is at or above it the new
 	 * route delivers. Never below a group already handed out. A group it replays, already handed
 	 * out, bounds nothing: the incumbent may still hold the next. Nor does a backfill of the
@@ -1192,7 +1197,7 @@ class Reader implements ResumeSource {
 	#observe(copy: Copy, key: bigint): void {
 		copy.delivered = true;
 		if (copy.replaced || copy.generation !== this.#generation) return;
-		this.route.delivered(copy.source);
+		if (this.#delivering(copy)) return;
 		const bound = max(this.#newest ?? -1n, key - 1n);
 		for (const replaced of this.#copies) {
 			if (replaced === copy || !replaced.replaced || replaced.until !== undefined) continue;
@@ -1201,6 +1206,29 @@ class Reader implements ResumeSource {
 			this.#update(replaced);
 			this.#bound(replaced);
 		}
+	}
+
+	/**
+	 * Serving `copy` delivers, which is when the Rust front splices it in. With nothing held nor
+	 * handed out, the replaced copies a switch left uncapped have nothing to drain, so they go, as
+	 * the Rust `Reader::sync` drops them on a switch without a boundary. Whether they went.
+	 */
+	#delivering(copy: Copy): boolean {
+		this.route.delivered(copy.source);
+		if (this.#newest !== undefined) return false;
+		if (this.#copies.some((other) => other !== copy && hooks.latestKey(other.sub) !== undefined)) return false;
+		this.#dropCopies((other) => other.replaced && other.until === undefined);
+		return true;
+	}
+
+	/** Let go of every copy `drops` picks, learning first any end one declared, which outlives it. */
+	#dropCopies(drops: (copy: Copy) => boolean): void {
+		this.#learnEnd();
+		this.#copies = this.#copies.filter((copy) => {
+			if (!drops(copy)) return true;
+			this.#drop(copy);
+			return false;
+		});
 	}
 
 	#deliverable(copy: Copy, key: bigint, delivered: Delivered): boolean {

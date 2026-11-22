@@ -8764,7 +8764,9 @@ mod test {
 	}
 
 	/// A switch before any copy holds a group has nothing to split: the replaced copy goes at
-	/// once, and the new route serves everything from the reader's own start.
+	/// once, and the new route serves everything from the reader's own start. Mirrors the
+	/// `@moq/net` "a switch before any group drops the replaced copy once the new route delivers",
+	/// where the front switches before the new copy delivers.
 	#[test]
 	fn a_switch_before_any_group_drops_the_replaced_copy() {
 		let routes = Producer::new();
