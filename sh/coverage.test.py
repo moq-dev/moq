@@ -17,7 +17,14 @@ class CoverageTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        for script in ("sh/js/install.py", "sh/js/coverage.py", "sh/rs/coverage.sh", "sh/rs/no-fuzz.sh", "sh/rs/nextest.sh", "sh/local.sh"):
+        for script in (
+            "sh/js/install.py",
+            "sh/js/coverage.py",
+            "sh/rs/coverage.sh",
+            "sh/rs/no-fuzz.sh",
+            "sh/rs/nextest.sh",
+            "sh/local.sh",
+        ):
             target = self.root / script
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / script, target)
@@ -33,7 +40,8 @@ if sys.argv[1:] == ["--version"]:
     sys.exit(0)
 # sh/rs/no-fuzz.sh reads the workspace members; this is not a recorded call.
 if sys.argv[1:2] == ["metadata"]:
-    print(json.dumps({"packages": [{"name": name} for name in ("moq-net", "moq-net-fuzz", "qmux-fuzz", "moq-auth-fuzz")]}))
+    names = ("moq-net", "moq-net-fuzz", "qmux-fuzz", "moq-auth-fuzz")
+    print(json.dumps({"packages": [{"name": name} for name in names]}))
     sys.exit(0)
 if "install" in sys.argv:
     Path("node_modules").mkdir(exist_ok=True)
