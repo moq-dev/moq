@@ -4589,7 +4589,7 @@ impl SubscribeOnce {
 		// reader's budget reaches, even one from the oldest group, which names none of them.
 		let _ = match (plan.live, largest) {
 			(true, Some(largest)) => track.start_resolved(largest.group),
-			(true, largest) => track.start_at(largest.map_or(0, |largest| largest.group)),
+			(true, None) => track.start_at(0),
 			(false, _) => track.start_at(plan.start),
 		};
 		let shared = match (this.session.max_datagram_size() > 0, &self.source) {
