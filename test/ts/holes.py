@@ -33,7 +33,10 @@ ffprobe. A real capture's streams need not keep a constant step, so it grades ge
 Under `--program N` the source is a multiplex and the capture one export of its program N: only
 that program's streams are graded, and the capture's PAT must list that program alone, its PMT
 naming the source's PCR PID and elementary streams. `--join S` is how far into the source that
-export started, which it may start later by.
+export started, which it may start later by. Each track joins at its own latest group then, so
+no stream may start more than one of the source's video groups before the join, which would be
+a replay from before the export started, or after the capture's first video keyframe, which
+would leave that stream missing what the program carries from there.
 
 Exit status is 0 when every source stream is in the capture without a hole (or, under
 `--shed`, losing only whole groups) or a cut, 1 otherwise.
@@ -221,6 +224,45 @@ def probe(path: str) -> dict[str, Stream]:
     }
 
 
+def starts(source: dict[str, Stream], capture: dict[str, Stream], join: Fraction) -> dict[str, list[str]]:
+    """Where each of a program's streams starts against its source's video groups, by PID: under a
+    `join`, no earlier than one group before it, and in any case no later than one group after
+    the capture's first video keyframe."""
+    videos = [pid for pid, src in source.items() if src.info.get("codec_type") == "video"]
+    if not videos:
+        return {}
+
+    def keyframes(stream: Stream) -> list[Fraction]:
+        base = Fraction(stream.info["time_base"])
+        return sorted(t * base for t, key in zip(stream.pts, stream.sync) if key)
+
+    group = max(
+        (b - a for pid in videos for a, b in zip(keyframes(source[pid]), keyframes(source[pid])[1:])),
+        default=Fraction(0),
+    )
+    opened = min(
+        (keyframes(capture[pid])[0] for pid in videos if pid in capture and any(capture[pid].sync)),
+        default=None,
+    )
+    found: dict[str, list[str]] = {}
+    for pid, src in source.items():
+        if pid not in capture:
+            continue
+        first = capture[pid].span[0]
+        reasons = found.setdefault(pid, [])
+        if join and first - src.span[0] < join - group:
+            reasons.append(
+                f"starts {float(first - src.span[0]):.3f}s into its source, over a {float(group)}s group "
+                f"before the {float(join)}s join"
+            )
+        if opened is not None and first - opened > group:
+            reasons.append(
+                f"starts {float(first - opened):.3f}s after the program's first video keyframe, "
+                f"past a {float(group)}s group"
+            )
+    return found
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("capture")
@@ -249,6 +291,7 @@ def main() -> None:
             print(f"        {reason}")
         failed = bool(found)
         source = {pid: s for pid, s in source.items() if pid in want.streams}
+    early = starts(source, capture, args.join) if args.program is not None else {}
     if not source:
         sys.exit(f"error: {args.source} has no audio or video stream")
 
@@ -294,6 +337,7 @@ def main() -> None:
             reasons += cuts(src.span, got.span, frame * base, join)
             missing = sum(gap - frame for _, gap in found) * base
             summary = f"{len(found)} holes, {float(missing) * 1000:.0f} ms missing"
+        reasons += early.get(pid, [])
         failed |= bool(reasons)
         print(
             f"  {'FAIL' if reasons else 'PASS'}  {label}: {len(got.dts)} frames of "

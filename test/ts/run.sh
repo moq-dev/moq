@@ -102,8 +102,9 @@ QUEUE=""        # how long a datagram may wait for RATE before the path tail-dro
 PASSTHROUGH=""  # carry the multiplex whole and grade the capture packet by packet against the source
 MPTS=""         # publish two programs, which only --passthrough carries whole
 PROGRAM=""      # with --mpts: import each program as its own broadcast, and export this one late
-# How far into the run that export starts: it joins mid-broadcast, on its program's own groups.
-PROGRAM_JOIN=5
+# How far into the run that export starts (5 s under --program): it joins mid-broadcast, on its
+# program's own groups.
+PROGRAM_JOIN=""
 # How soon the late export must write its first byte, in seconds: connecting, its catalog, and
 # the group it joins on.
 FIRST_BYTE_MAX=3
@@ -385,6 +386,11 @@ if [[ -n "$PROGRAM" && (-z "$MPTS" || -n "$PASSTHROUGH$ANALYZE_ONLY$PAIR$LIVE") 
     echo "error: --program exports one program of --mpts, and cannot be combined with --passthrough, --analyze-only, --pair, or --live" >&2
     exit 1
 fi
+if [[ -n "$PROGRAM_JOIN" && -z "$PROGRAM" ]]; then
+    echo "error: --join sets when the --program export starts, and needs --program" >&2
+    exit 1
+fi
+[[ -n "$PROGRAM" ]] && PROGRAM_JOIN="${PROGRAM_JOIN:-5}"
 if [[ -n "$PROGRAM" && ! ("$PROGRAM" =~ ^[12]$ && "$PROGRAM_JOIN" =~ ^[0-9]+$ && PROGRAM_JOIN -lt DURATION) ]]; then
     echo "error: --program is 1 or 2, and --join whole seconds within the ${DURATION}s run" >&2
     exit 1
