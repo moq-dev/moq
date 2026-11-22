@@ -17,7 +17,7 @@ use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Polled;
 use crate::media::MoqTimestamp;
-use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
+use crate::producer::{Child, Children, MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for a JSON snapshot producer (lossy latest-value mode).
 ///
@@ -190,7 +190,7 @@ impl MoqJsonSnapshotProducer {
 		let _guard = crate::ffi::enter();
 		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
 		let config = moq_mux::json::Config::default();
-		let this = track.adopt(|track| {
+		let this = track.adopt(|track, _| {
 			let producer =
 				broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config, options)?))?;
 			Ok(Self {
@@ -378,7 +378,7 @@ impl MoqJsonStreamProducer {
 	pub fn new(broadcast: &MoqBroadcastProducer, track: &MoqTrackProducer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = moq_mux::json::Config::default();
-		track.adopt(|track| {
+		track.adopt(|track, _| {
 			let producer = broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?))?;
 			Ok(Self {
 				inner: std::sync::Mutex::new(Some(producer)),
@@ -495,6 +495,10 @@ pub struct MoqJsonWindowProducer {
 
 	/// Closed on finish or drop, which stops the refresh task.
 	alive: kio::Producer<()>,
+
+	/// The broadcast's children, which keep the finished window so a late subscriber still finds
+	/// it. `None` when the track had already finished before this handle took it.
+	family: Option<Children>,
 }
 
 impl MoqJsonWindowProducer {
@@ -562,7 +566,7 @@ impl MoqJsonWindowProducer {
 	pub fn new(track: &MoqTrackProducer, config: MoqJsonWindowConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = config.try_into()?;
-		let this = track.adopt(|track| {
+		let this = track.adopt(|track, family| {
 			if track.info().timescale.is_none() {
 				return Err(moq_net::Error::TimestampMismatch.into());
 			}
@@ -571,6 +575,7 @@ impl MoqJsonWindowProducer {
 					track, config,
 				)))),
 				alive: kio::Producer::new(()),
+				family: family.cloned(),
 			})
 		})?;
 		crate::ffi::spawn(Self::refresh(this.inner.clone(), this.alive.consume()));
@@ -635,11 +640,16 @@ impl MoqJsonWindowProducer {
 	}
 
 	/// Finish the track, closing any open group.
+	///
+	/// The broadcast keeps the finished window until it ends, so a late subscriber still finds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		let _ = self.alive.close();
-		drop(producer.finish()?);
+		let finished = producer.finish()?;
+		if let Some(family) = &self.family {
+			family.keep(finished);
+		}
 		Ok(())
 	}
 }

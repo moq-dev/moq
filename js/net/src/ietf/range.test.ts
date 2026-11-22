@@ -406,6 +406,41 @@ for (const version of VERSIONS) {
 		expect(await group.readFrame()).toBeUndefined();
 		group.close();
 	});
+
+	test(`${version}: an End of Range may name a 62-bit Object ID`, async () => {
+		const fx = fixture(version);
+		const reader = fx.broadcast.track("video").subscribe(ranges(1n, 3n));
+		fx.readers.push(reader);
+		const ordered = reader.ordered();
+		const read = ordered.nextGroup();
+		await fx.status();
+		const { stream, request } = await fx.fetch();
+		await fx.answer(stream, 2n);
+		const frame = (payload: string) => new FetchFrame({ payload: new TextEncoder().encode(payload), priority: 0 });
+		const bytes = await Writer.collect(version, async (writer) => {
+			await writer.u62(request.requestId);
+			await frame("1a").encode(writer, { group: 1n, object: 0, first: true }, version);
+			// The rest of group 1, through the largest Object ID, does not exist.
+			const object = (1n << 62n) - 1n;
+			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, group: 1n, object }).encode(writer, version);
+			for (const [object, payload] of ["2a", "2b", "2c"].entries())
+				await frame(payload).encode(
+					writer,
+					// After an End of Range the next object states its priority, and its group as a delta.
+					{ group: 2n, object, first: object === 0, previousGroup: object === 0 ? 1n : undefined },
+					version,
+				);
+		});
+		await fx.subscriber.handleFetch(new Reader(undefined, bytes, version));
+		const first = await read;
+		if (!first) throw new Error("missing group 1");
+		expect(await payloads(first)).toEqual(["1a"]);
+		first.close();
+		const second = await ordered.nextGroup();
+		if (!second) throw new Error("missing group 2");
+		expect(await payloads(second)).toEqual(["2a", "2b", "2c"]);
+		second.close();
+	});
 }
 
 for (const ietf of [undefined, Version.DRAFT_18]) {

@@ -819,6 +819,16 @@ void main() {
       () => const Duration(microseconds: -1).toTimestamp(),
       throwsArgumentError,
     );
+    expect(
+      () => Timestamp(value: 3, scale: 0).toDuration(),
+      throwsArgumentError,
+    );
+    // A u64 past 2^63 reads as a negative int, and still converts as unsigned.
+    expect(() => Timestamp(value: -1, scale: 1).toDuration(), throwsRangeError);
+    expect(
+      Timestamp(value: 1 << 62, scale: -1).toDuration(),
+      const Duration(microseconds: 250000),
+    );
     // A scale-less track's key is no time.
     final unscaled = Timestamp.unscaled(3);
     expect([unscaled.value, unscaled.scale], [3, null]);

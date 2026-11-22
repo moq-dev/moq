@@ -1,5 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { rotateDimensions } from "@moq/video";
 import type { Broadcast } from "../broadcast";
 import { SupportProbe } from "../support-probe";
 import { decoderConfigKey } from "./config";
@@ -13,10 +14,11 @@ export type Target = {
 	// Maximum desired pixel area (codedWidth * codedHeight).
 	pixels?: number;
 
-	// Maximum desired coded width in pixels.
+	// Maximum desired width in pixels as shown: the coded width, or the coded height once the
+	// section's rotation turns the picture sideways.
 	width?: number;
 
-	// Maximum desired coded height in pixels. With `width`, the box's shape also prefers the
+	// Maximum desired height in pixels as shown, like `width`. With `width`, the box's shape also prefers the
 	// renditions shown in its orientation, landscape or portrait.
 	height?: number;
 
@@ -110,12 +112,12 @@ function byPixels(target: number): RenditionFilter {
 }
 
 /**
- * Filter and rank renditions by maximum coded dimensions.
- * Returns renditions where codedWidth <= width AND codedHeight <= height
+ * Filter and rank renditions by maximum dimensions as shown, the coded size turned by `rotation`.
+ * Returns renditions whose shown width <= width AND shown height <= height
  * (each cap is optional). Within-budget renditions rank by area (largest first).
  * If nothing fits, falls back to the single smallest over-budget rendition.
  */
-function byDimensions(width?: number, height?: number): RenditionFilter {
+function byDimensions(width: number | undefined, height: number | undefined, rotation?: number): RenditionFilter {
 	return (entries) => {
 		const within: { name: string; size: number }[] = [];
 		const rest: { name: string; size: number }[] = [];
@@ -123,8 +125,9 @@ function byDimensions(width?: number, height?: number): RenditionFilter {
 		for (const [name, config] of entries) {
 			if (!config.codedWidth || !config.codedHeight) continue;
 			const size = config.codedWidth * config.codedHeight;
-			const fitsWidth = width == null || config.codedWidth <= width;
-			const fitsHeight = height == null || config.codedHeight <= height;
+			const shown = rotateDimensions({ width: config.codedWidth, height: config.codedHeight }, rotation);
+			const fitsWidth = width == null || shown.width <= width;
+			const fitsHeight = height == null || shown.height <= height;
 			if (fitsWidth && fitsHeight) {
 				within.push({ name, size });
 			} else {
@@ -324,7 +327,11 @@ export class Source {
 
 		// Orientation first, so a lower preference ranks a broadcast's secondary orientation
 		// rather than dropping it as a decode fallback.
-		return this.#select(preferredRenditions(orientedRenditions(section, available, target)), target);
+		return this.#select(
+			preferredRenditions(orientedRenditions(section, available, target)),
+			target,
+			section?.rotation,
+		);
 	}
 
 	/**
@@ -334,7 +341,11 @@ export class Source {
 	 * The first rendition present in every filter's output is selected.
 	 * If the rankings conflict, the first ranking's best rendition is selected.
 	 */
-	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
+	#select(
+		renditions: Record<string, Catalog.VideoConfig>,
+		target: Target | undefined,
+		rotation: number | undefined,
+	): string | undefined {
 		const entries = Object.entries(renditions);
 		if (entries.length === 0) return undefined;
 		if (entries.length === 1) return entries[0][0];
@@ -346,7 +357,7 @@ export class Source {
 			filters.push(byPixels(target.pixels));
 		}
 		if (target?.width != null || target?.height != null) {
-			filters.push(byDimensions(target.width, target.height));
+			filters.push(byDimensions(target.width, target.height, rotation));
 		}
 		if (target?.bitrate != null) {
 			filters.push(byBitrate(target.bitrate));

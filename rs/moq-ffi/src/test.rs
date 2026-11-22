@@ -1623,6 +1623,33 @@ async fn json_window_roundtrip() {
 	assert_eq!(next_window(&consumer).await, None);
 }
 
+/// A finished window outlives its handles: the broadcast keeps it, so a late subscriber still
+/// reads it until the broadcast closes.
+#[tokio::test]
+async fn json_window_finish_serves_a_late_subscriber() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	producer.push(r#"{"n":0}"#.into(), us(0)).unwrap();
+	producer.finish().unwrap();
+	// A binding's garbage collector may release both handles before the broadcast closes.
+	drop(producer);
+	drop(track);
+
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await).unwrap();
+	assert_eq!(
+		next_window(&consumer).await,
+		Some(MoqJsonWindowTimed {
+			event: window_push(0, 0),
+			timestamp: us(0),
+		})
+	);
+	assert_eq!(next_window(&consumer).await, None);
+}
+
 /// A cut closes the open group, so the next push opens a new group whose header restates the
 /// retained window, while a live reader sees only the new record.
 #[tokio::test]
@@ -1774,7 +1801,8 @@ fn json_window_refuses_an_untimed_track() {
 	assert!(track.demand().is_ok(), "a refused track stays open");
 }
 
-/// The window producer reports subscriber demand, and drops it once finished.
+/// The window producer reports subscriber demand. Its finish hands the track to the broadcast,
+/// so the demand ends when the broadcast does.
 #[tokio::test]
 async fn json_window_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -1800,7 +1828,11 @@ async fn json_window_demand() {
 
 	producer.finish().unwrap();
 	assert!(matches!(producer.demand(), Err(MoqError::Closed)));
-	assert!(matches!(demand.until_wanted().await, Err(MoqError::Closed)));
+	broadcast.close().unwrap();
+	let ended = kio::clock::timeout(TIMEOUT, demand.until_wanted())
+		.await
+		.expect("timed out waiting for the finished window");
+	assert!(matches!(ended, Err(MoqError::Closed)), "{ended:?}");
 }
 
 /// A demand handle waits without the producer, and fails once the track is gone.
@@ -5445,7 +5477,7 @@ async fn a_track_is_adopted_by_one_writer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("json".into(), Some(timed_info())).unwrap();
 	let config = || MoqJsonSnapshotConfig { deltas: false };
-	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_| {
+	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_, _| {
 		assert!(matches!(
 			MoqJsonSnapshotProducer::new(&broadcast, &track, config()),
 			Err(MoqError::Closed)
@@ -7516,6 +7548,49 @@ async fn server_cancel_during_listen_releases_the_port() {
 	server.cancel();
 	std::net::UdpSocket::bind(addr).expect("cancel should release the socket before it returns");
 	drop(listen);
+}
+
+/// A listen dropped before it reports its address leaves the server idle, not stranded listening:
+/// the next listen waits out the dropped one's socket and binds the same address.
+#[tokio::test]
+async fn server_listen_dropped_mid_start_rolls_back() {
+	let addr = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some(addr.to_string()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+
+	// Hold the FFI runtime's one background driver, so the accept loop cannot report its address
+	// before the listen is dropped.
+	let (entered, held) = std::sync::mpsc::channel();
+	let (release, released) = std::sync::mpsc::channel::<()>();
+	let _blocker = crate::ffi::spawn(async move {
+		entered.send(()).unwrap();
+		let _ = released.recv();
+	});
+	held.recv().unwrap();
+
+	let waker = std::task::Waker::noop();
+	let mut listen = Box::pin(server.listen());
+	assert!(
+		listen
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(waker))
+			.is_pending()
+	);
+	drop(listen);
+	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Bind { .. })));
+	drop(release);
+
+	let rebound = kio::clock::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("the dropped listen should leave the server idle");
+	assert_eq!(rebound, addr.to_string());
+	server.cancel();
+	std::net::UdpSocket::bind(addr).expect("cancel should release the socket before it returns");
 }
 
 /// A cancelled server lets go of its configured origins, though its handle lives on.

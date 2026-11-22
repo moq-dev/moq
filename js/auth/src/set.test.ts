@@ -52,6 +52,14 @@ test("verify - a kid-less token is accepted only when the set holds one key", as
 	await expect(KeySet.verify({ keys: [key, other] }, token)).rejects.toThrow(/Missing kid/);
 });
 
+test("verify - a set holding a private key verifies with its public half", async () => {
+	const set: KeySet = { keys: [await Key.generate("ES256", "key-1"), await Key.generate("EdDSA", "key-2")] };
+	for (const key of set.keys) {
+		const token = await Key.sign(key, CLAIMS);
+		expect((await KeySet.verify(set, token)).root).toBe("demo");
+	}
+});
+
 test("sign - fails when no key can sign", async () => {
 	const set = await keySet("key-1");
 	set.keys[0].key_ops = ["verify"];

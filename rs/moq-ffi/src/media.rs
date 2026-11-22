@@ -1903,11 +1903,16 @@ impl MoqMediaCatalogConsumer {
 		broadcast: &MoqBroadcastConsumer,
 		delay: std::time::Duration,
 	) -> Result<Arc<MoqMediaCatalogConsumer>, MoqError> {
-		let consumer =
-			hang::catalog::Consumer::new(broadcast.inner.track(hang::catalog::Catalog::DEFAULT_NAME)?, delay);
-		Ok(Arc::new(MoqMediaCatalogConsumer {
-			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
-		}))
+		broadcast
+			.driver
+			.watch(async {
+				let consumer =
+					hang::catalog::Consumer::new(broadcast.inner.track(hang::catalog::Catalog::DEFAULT_NAME)?, delay);
+				Ok(Arc::new(MoqMediaCatalogConsumer {
+					reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
+				}))
+			})
+			.await
 	}
 }
 

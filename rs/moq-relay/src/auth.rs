@@ -47,7 +47,7 @@ pub struct Config {
 	pub url: Option<Url>,
 
 	/// PEM roots used instead of system roots to verify the auth server's hostname.
-	#[usage(long = "auth-root", env = "MOQ_AUTH_ROOT", setting = "auth.root")]
+	#[usage(long = "auth-root", env = "MOQ_AUTH_ROOT", setting = "auth.root", delimiter = ',')]
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
