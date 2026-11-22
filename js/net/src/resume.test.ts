@@ -524,10 +524,11 @@ test("a backfill places a raised start under an end past the resume point", asyn
 
 /**
  * As a backfill placing a raised start under an end past the resume point, with the received
- * replacement behind an inner front, through which the backfill places nothing. Mirrors the Rust
- * `a_raised_start_behind_an_inner_front_hands_out_nothing_past_its_end`.
+ * replacement behind an inner front: the backfill through it places the start as a plain copy's
+ * would, so the read ends once the range is read. Mirrors the Rust
+ * `a_raised_start_behind_an_inner_front_places_through_it`.
  */
-test("a raised start behind an inner front hands out nothing past its end", async () => {
+test("a raised start behind an inner front places through it", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const front = new Front();
@@ -551,14 +552,71 @@ test("a raised start behind an inner front hands out nothing past its end", asyn
 		sub.update({ delay, ranges: [{ start: 7n, end: 7n }] });
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([]);
-		// The backfill through the inner front places nothing, so its groups wait for the window:
-		// none past the range's end goes out.
+		const read: bigint[] = [];
 		for (const key of [6n, 7n, 8n, 9n]) {
 			tb.write(key);
 			await clock.advance(Duration.ZERO);
 			await clock.advance(Duration.ZERO);
-			expect(drain(sub)).toEqual([]);
+			read.push(...drain(sub));
 		}
+		expect(read).toEqual([7n]);
+		expect(hooks.servingResolved(sub)[0]).toMatchObject({ start: 7n, end: 8n });
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		inner.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * A backfill through an inner front waits on a copy that front replaced, not only on its serving copy:
+ * the replaced copy still lands a late group under its bound that the serving copy, whose feed starts
+ * past it, never will. Mirrors the Rust `a_backfill_through_an_inner_front_waits_on_a_copy_it_replaced`.
+ */
+test("a backfill through an inner front waits on a copy it replaced", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const inner = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb, tc] = sources.map(copy);
+	for (const t of [ta, tb, tc]) hooks.receiveTrack(t.producer);
+	const delay = { max: Duration.millis(3_600_000) };
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([6n, 8n]);
+		tb.write(6n);
+		tb.write(8n);
+		inner.serve(handles[1]);
+		front.serve(inner.consumer);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		// The late group 7 is asked of the inner front.
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+
+		// The inner front moves on to a copy whose feed starts past the gap.
+		hooks.startTrack(tc.producer, { start: 9n });
+		tc.write(9n);
+		inner.serve(handles[2]);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([9n]);
+
+		tb.write(7n);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([7n]);
 	} finally {
 		sub.close();
 		front.consumer.close();
