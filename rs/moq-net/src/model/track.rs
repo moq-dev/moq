@@ -12171,11 +12171,42 @@ impl Subscriber {
 		subscription: Subscription,
 		since: impl IntoIterator<Item = (u64, u64)>,
 	) -> Result<()> {
+		self.replace(subscription, since, true)
+	}
+
+	/// [`Self::update`] for a subscription restated whole, as a SUBSCRIBE_UPDATE before
+	/// lite-07 restates it: every range is placed afresh, a live join whose `max` alone
+	/// changed included, since that wire names no range to retune. What this reader already
+	/// handed out or reported stays settled.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn restate(&mut self, subscription: Subscription) -> Result<()> {
+		self.replace(subscription, [], false)
+	}
+
+	/// [`Self::restate`], each live join keyed in `since` noted as added at its tick before the
+	/// window places it: see [`Preferences::stamp`].
+	pub(super) fn restate_stamped(
+		&mut self,
+		subscription: Subscription,
+		since: impl IntoIterator<Item = (u64, u64)>,
+	) -> Result<()> {
+		self.replace(subscription, since, false)
+	}
+
+	fn replace(
+		&mut self,
+		subscription: Subscription,
+		since: impl IntoIterator<Item = (u64, u64)>,
+		retune: bool,
+	) -> Result<()> {
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
-		channel.update(subscription)?;
+		match retune {
+			true => channel.update(subscription)?,
+			false => channel.restate(subscription)?,
+		}
 		channel.stamp(since)?;
 		match &mut self.inner {
 			Inner::Plain(cursor) => {

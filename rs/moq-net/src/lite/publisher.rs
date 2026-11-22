@@ -5729,7 +5729,7 @@ impl TrackRun {
 		pins
 	}
 
-	/// Before lite-07: replace every range, as an update there does. Returns whether it applied.
+	/// Before lite-07: restate every range, as an update there does. Returns whether it applied.
 	fn replace_ranges(
 		&mut self,
 		ranges: Vec<(u64, lite::Range)>,
@@ -5744,8 +5744,10 @@ impl TrackRun {
 			order,
 			..bounds.groups()
 		};
-		// A refusal leaves the model's ranges as they were, so this side keeps them too.
-		if let Err(err) = self.track.update(model) {
+		// Restated whole, so an absent start is placed afresh within the new max age rather
+		// than retuned where the old one joined. A refusal leaves the model's ranges as they
+		// were, so this side keeps them too.
+		if let Err(err) = self.track.restate(model) {
 			self.refused = Some(err);
 			return false;
 		}

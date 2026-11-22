@@ -878,9 +878,13 @@ impl Copy {
 				Joining::Since(since) => Some((position, *since)),
 				Joining::At(_) => None,
 			});
+		// Restated, as the reader's ranges were: a live join whose `max` alone changed is
+		// placed afresh rather than retuned where the copy placed the old one.
 		let _ = match &mut self.sub {
-			Sub::Pending(pending) => pending.update(wire).and_then(|_| pending.preferences().stamp(since)),
-			Sub::Ready(sub) => sub.update_stamped(wire, since),
+			Sub::Pending(pending) => {
+				(pending.preferences().restate(wire)).and_then(|_| pending.preferences().stamp(since))
+			}
+			Sub::Ready(sub) => sub.restate_stamped(wire, since),
 		};
 		// Keyed by position as replaced: the reader's own keys from then on.
 		let keyed = self

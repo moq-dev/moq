@@ -744,15 +744,17 @@ impl Prefs {
 	}
 
 	/// Replace every preference, rekeying the ranges by position when they change: every
-	/// reader resolves them all again, its live joins added at join tick `tick`. Ranges that
-	/// change only a live join's `max` keep their keys, so each stays where it joined.
-	fn replace(&mut self, next: Subscription, tick: u64) {
+	/// reader resolves them all again, its live joins added at join tick `tick`. With
+	/// `retune`, ranges that change only a live join's `max` keep their keys, so each stays
+	/// where it joined; without, as a restated subscription, every range is placed afresh.
+	fn replace(&mut self, next: Subscription, tick: u64, retune: bool) {
 		(self.priority, self.order, self.feed, self.resume) = (next.priority, next.order, next.feed, next.resume);
 		let placed = self.placed_by_index();
 		if self.ranges.values().eq(&next.ranges) && placed == next.placed {
 			return;
 		}
-		let retunes = self.ranges.len() == next.ranges.len()
+		let retunes = retune
+			&& self.ranges.len() == next.ranges.len()
 			&& placed == next.placed
 			&& (self.ranges.values().zip(&next.ranges))
 				.all(|(old, new)| old == new || (new.join().is_some() && old.join() == new.join()));
@@ -806,8 +808,18 @@ impl Preferences {
 	}
 
 	/// Replace every preference, as [`super::Subscriber::update`] does: replaced ranges are
-	/// keyed afresh and resolve again.
+	/// keyed afresh and resolve again, except a live join whose `max` alone changed.
 	pub(in crate::model) fn update(&self, next: Subscription) -> crate::Result<()> {
+		self.replace(next, true)
+	}
+
+	/// Replace every preference, every range placed afresh, as
+	/// [`super::Subscriber::restate`] does.
+	pub(in crate::model) fn restate(&self, next: Subscription) -> crate::Result<()> {
+		self.replace(next, false)
+	}
+
+	fn replace(&self, next: Subscription, retune: bool) -> crate::Result<()> {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
 		let old = value.held();
 		let contribution = value.contribution();
@@ -830,7 +842,7 @@ impl Preferences {
 			subs.lock()
 				.replace(Some(contribution), Some(next_contribution), (&gone, &came))
 		});
-		value.replace(next, join_tick());
+		value.replace(next, join_tick(), retune);
 		drop(value);
 		if let Some(wakes) = &mut wakes {
 			wakes.wake();
