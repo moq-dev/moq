@@ -1,4 +1,5 @@
 use std::{
+	collections::BTreeMap,
 	ops::{Bound, RangeBounds},
 	time::Duration,
 };
@@ -8,7 +9,7 @@ mod window;
 pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
-pub(super) use window::{Budget, Containing, Found, Holdings, Join, Unheld, Unplaced, Window};
+pub(super) use window::{Budget, Containing, Found, Holdings, Join, Joining, Unheld, Unplaced, Window};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -50,6 +51,12 @@ pub struct Subscription {
 	/// copy. Only a range whose start is exactly that group's start uses
 	/// it. Aggregated only when every reader resumes: the lowest position then.
 	pub(crate) resume: Option<Position>,
+	/// The group each live join among [`Self::ranges`] was already placed at, by its index
+	/// there: a route switch asks a new copy for a join an earlier copy placed, which starts at
+	/// that group as a time start would and still goes stale past its `max`. Its lag places
+	/// nothing. moq-lite-07 carries one as a `Joined` start; older wires as a time start under
+	/// the one max age, which takes its `max` (see [`Self::start`] and [`Self::max_age`]).
+	pub(crate) placed: BTreeMap<u64, u64>,
 	/// The time starts a received copy's readers wait on: the copy can't prove where the
 	/// publisher would start them, so its session asks its upstream with a range of its own
 	/// from each. Only an aggregate holds any.
@@ -78,6 +85,16 @@ impl JoinAsk {
 	pub(crate) fn max(&self) -> Option<Duration> {
 		max_of(self.budget)
 	}
+}
+
+/// The widest staleness budget `ranges` give a group: none while a history range is asked
+/// for, and otherwise the largest live join's `max`.
+pub(super) fn widest<'a>(ranges: impl IntoIterator<Item = &'a Range>) -> Duration {
+	(ranges.into_iter())
+		.filter(|range| !range.is_empty())
+		.map(Range::budget)
+		.max()
+		.unwrap_or(Duration::ZERO)
 }
 
 /// A [`Start::Live`] `max` as a budget: `None` waits as long as anything could.
@@ -227,7 +244,7 @@ impl Start {
 	/// A live join reaching back past every group, so it takes every group still within `max`
 	/// of the live edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and
 	/// no start.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	#[cfg(any(feature = "async", test))]
 	pub(crate) const fn within(max: Duration) -> Self {
 		Self::Live {
 			min: PAST_EVERY_GROUP,
@@ -393,6 +410,7 @@ impl Default for Subscription {
 			order: Order::Descending,
 			feed: false,
 			resume: None,
+			placed: BTreeMap::new(),
 			asks: Vec::new(),
 			joins: Vec::new(),
 		}
@@ -416,16 +434,13 @@ impl Subscription {
 	/// The widest staleness budget any range gives a group: none while a history range is
 	/// asked for, and otherwise the largest live join's `max`.
 	pub(crate) fn widest(&self) -> Duration {
-		(self.ranges.iter())
-			.filter(|range| !range.is_empty())
-			.map(Range::budget)
-			.max()
-			.unwrap_or(Duration::ZERO)
+		widest(&self.ranges)
 	}
 
 	/// Replace [`Self::ranges`], returning `self` for chaining.
 	pub fn with_ranges(mut self, ranges: impl IntoIterator<Item = Range>) -> Self {
 		self.ranges = ranges.into_iter().collect();
+		self.placed.clear();
 		self
 	}
 
@@ -442,11 +457,23 @@ impl Subscription {
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn start(&self) -> Option<u64> {
 		let mut floor: Option<u64> = None;
-		for range in self.ranges.iter().filter(|range| !range.is_empty()) {
-			let start = range.time()?;
+		for (range, time) in self.times() {
+			if range.is_empty() {
+				continue;
+			}
+			let start = time?;
 			floor = Some(floor.map_or(start, |floor| floor.min(start)));
 		}
 		floor
+	}
+
+	/// Each range with the time it starts from: its own, or the group a live join was
+	/// [placed](Self::placed) at.
+	#[cfg(any(feature = "async", test))]
+	pub(crate) fn times(&self) -> impl Iterator<Item = (&Range, Option<u64>)> + '_ {
+		(0..)
+			.zip(&self.ranges)
+			.map(|(index, range)| (range, self.placed.get(&index).copied().or_else(|| range.time())))
 	}
 
 	/// The exclusive end past every range, or `None` when one is open. An empty list, or one
@@ -519,6 +546,31 @@ impl Range {
 	}
 }
 
+impl Range {
+	/// This range as a copy asked from `floor` through the exclusive `end` asks for it, and the
+	/// group it is [placed](Subscription::placed) at: as [`Self::clamped`] places it, except a
+	/// live join with a `max`, which stays itself, placed at the group [`Self::clamped`] starts
+	/// it at. As a time start it would read as history, whose groups never go stale.
+	pub(super) fn asked(
+		&self,
+		floor: Option<u64>,
+		end: Option<u64>,
+		resolved: Option<Resolved>,
+	) -> (Self, Option<u64>) {
+		let clamped = self.clamped(floor, end, resolved);
+		match (self.start, clamped.start) {
+			(Start::Live { max: Some(_), .. }, Start::Time(group)) if !clamped.is_empty() => (
+				Self {
+					start: self.start,
+					end: clamped.end,
+				},
+				Some(group),
+			),
+			_ => (clamped, None),
+		}
+	}
+}
+
 /// Group spans for unit tests whose groups start at consecutive keys, where a span of
 /// starts counts groups.
 #[cfg(test)]
@@ -572,18 +624,34 @@ impl Subscription {
 #[derive(Default)]
 pub(super) struct Combined {
 	sub: Option<Subscription>,
+	/// The placed joins folded in, by the group each was placed at and its end, with the
+	/// widest budget asked of each.
+	placed: BTreeMap<(u64, Option<u64>), Duration>,
 }
 
 #[cfg(test)]
 impl Combined {
 	/// Fold in one subscriber's preferences.
 	pub(super) fn add(&mut self, sub: &Subscription) {
+		let mut unplaced = Vec::new();
+		for (index, range) in (0..).zip(&sub.ranges) {
+			match sub.placed.get(&index) {
+				Some(group) => {
+					let budget = self.placed.entry((*group, range.end)).or_default();
+					*budget = (*budget).max(range.budget());
+				}
+				None => unplaced.push(*range),
+			}
+		}
 		let Some(combined) = &mut self.sub else {
-			self.sub = Some(sub.clone());
+			self.sub = Some(Subscription {
+				placed: BTreeMap::new(),
+				..sub.clone().with_ranges(unplaced)
+			});
 			return;
 		};
 		combined.priority = combined.priority.max(sub.priority);
-		combined.ranges.extend_from_slice(&sub.ranges);
+		combined.ranges.extend(unplaced);
 		// Key-first prioritization is enabled only when every subscriber wants it.
 		if let Order::Descending = sub.order {
 			combined.order = Order::Descending;
@@ -596,6 +664,17 @@ impl Combined {
 	pub(super) fn finish(self) -> Option<Subscription> {
 		let mut combined = self.sub?;
 		combined.ranges = union(std::mem::take(&mut combined.ranges));
+		// Each placed join after the union, its lag placing nothing.
+		for ((group, end), budget) in self.placed {
+			combined.placed.insert(combined.ranges.len() as u64, group);
+			combined.ranges.push(Range {
+				start: Start::Live {
+					min: Duration::ZERO,
+					max: max_of(budget),
+				},
+				end,
+			});
+		}
 		Some(combined)
 	}
 }
@@ -699,11 +778,12 @@ mod tests {
 		combine(subscriptions).unwrap().ranges
 	}
 
+	fn join(min: Duration, max: Option<Duration>) -> Range {
+		Range::from(Start::Live { min, max })
+	}
+
 	fn joining(min: Duration) -> Subscription {
-		Subscription::default().with_ranges([Range::from(Start::Live {
-			min,
-			max: Some(std::time::Duration::ZERO),
-		})])
+		Subscription::default().with_ranges([join(min, Some(Duration::ZERO))])
 	}
 
 	/// A legacy span becomes inclusive times: an exclusive end of 0 holds nothing, whatever
@@ -764,8 +844,8 @@ mod tests {
 	}
 
 	/// The aggregate is the union: overlapping and adjacent time ranges merge, an open range
-	/// absorbs what starts inside it, and a range with no start absorbs everything only while
-	/// it reaches back as far as the budget allows.
+	/// absorbs what starts inside it, a range from the oldest group absorbs everything, and
+	/// live joins of one lag and end merge under their widest `max`.
 	#[test]
 	fn combined_ranges_are_the_union() {
 		let sub = |ranges: &[Range]| Subscription::default().with_ranges(ranges.iter().copied());
@@ -798,14 +878,8 @@ mod tests {
 			ranges(&[sub(&[groups(2, 5)]), joining(two), joining(five), joining(two)]),
 			vec![
 				groups(2, 5),
-				Range::from(Start::Live {
-					min: two,
-					max: Some(std::time::Duration::ZERO)
-				}),
-				Range::from(Start::Live {
-					min: five,
-					max: Some(std::time::Duration::ZERO)
-				})
+				join(two, Some(Duration::ZERO)),
+				join(five, Some(Duration::ZERO))
 			]
 		);
 		// Unless another reader starts at the oldest group.
@@ -814,9 +888,80 @@ mod tests {
 			vec![Range::ALL]
 		);
 
+		// Joins of one lag land on the same group whatever their `max`, so they merge under
+		// the widest, and no limit is the widest of all.
+		assert_eq!(
+			ranges(&[sub(&[join(two, Some(five))]), joining(two)]),
+			vec![join(two, Some(five))]
+		);
+		assert_eq!(
+			ranges(&[sub(&[join(two, Some(five))]), sub(&[join(two, None)])]),
+			vec![join(two, None)]
+		);
+		// A join's end keeps it apart from an open one of the same lag.
+		let ended = Range {
+			end: Some(9),
+			..join(two, Some(five))
+		};
+		assert_eq!(
+			ranges(&[sub(&[ended]), joining(two)]),
+			vec![join(two, Some(Duration::ZERO)), ended]
+		);
+
 		// Empty ranges ask for nothing.
 		assert_eq!(ranges(&[sub(&[groups(5, 5)])]), Vec::<Range>::new());
 		assert_eq!(ranges(&[sub(&[]), sub(&[groups(1, 2)])]), vec![groups(1, 2)]);
+	}
+
+	/// A copy asked from a floor gets a resolved live join with a `max` as a live join taking
+	/// every group within it, so its groups still go stale there; one with no `max`, and
+	/// history, are asked from where they resolved.
+	#[test]
+	fn a_resolved_live_join_is_asked_placed_with_its_max() {
+		let max = Duration::from_secs(2);
+		let join = |max, end| Range {
+			start: Start::Live {
+				min: Duration::from_millis(2),
+				max,
+			},
+			end,
+		};
+		let at = |start, end| {
+			Some(Resolved {
+				start,
+				end,
+				floored: true,
+			})
+		};
+		// Placed at the floor it is raised to, still the join it was.
+		assert_eq!(
+			join(Some(max), None).asked(Some(10), None, at(8, None)),
+			(join(Some(max), None), Some(10))
+		);
+		assert_eq!(
+			join(Some(max), None).asked(Some(6), None, at(8, None)),
+			(join(Some(max), None), Some(8))
+		);
+		// Its end where it resolved, as a placed one's.
+		assert_eq!(
+			join(Some(max), Some(500)).asked(Some(10), None, at(8, Some(12))),
+			(join(Some(max), Some(11)), Some(10))
+		);
+		assert_eq!(
+			join(None, None).asked(Some(10), None, at(8, None)),
+			(groups(10, None), None)
+		);
+		assert_eq!(
+			groups(8, None).asked(Some(10), None, at(8, None)),
+			(groups(10, None), None)
+		);
+		// Not yet resolved: asked as it is, for the copy to place.
+		assert_eq!(
+			join(Some(max), None).asked(Some(10), None, None),
+			(join(Some(max), None), None)
+		);
+		// Capped at where it resolved: nothing, whatever its `max`.
+		assert!(join(Some(max), None).asked(None, Some(8), at(8, None)).0.is_empty());
 	}
 
 	/// Combining is order-independent and stops changing once it covers everyone.

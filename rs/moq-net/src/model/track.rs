@@ -24,9 +24,11 @@ use crate::ledger::{self, Ledger};
 
 use super::subscription;
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Budget, Containing, Cover, Found, Holdings, Join, Unplaced, Window, minus};
 #[cfg(feature = "async")]
 pub(crate) use super::subscription::budget;
+use super::subscription::{
+	Accounted, Budget, Containing, Cover, Found, Holdings, Join, Joining, Unplaced, Window, minus,
+};
 pub(crate) use super::subscription::{JoinAsk, live_millis};
 pub use super::subscription::{Order, Position, Range, Start, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
@@ -1926,7 +1928,8 @@ impl TrackState {
 	}
 
 	/// Forget the runs of the drop set given up longer than the pool's expiry window before
-	/// `now`: their keys are unknown again, as a shed run's are. Walks the set only once
+	/// `now`: their keys are unknown again to a reader that never judged them, as a shed run's
+	/// are. Walks the set only once
 	/// its oldest run is due, which a quarter of the window separates from the next.
 	fn expire_drops(&mut self, now: u64) {
 		if !self.drops_expired(now) {
@@ -1975,8 +1978,9 @@ impl TrackState {
 	}
 
 	/// Forget the lowest runs of the drop set until the debt is paid or `cap` bytes are
-	/// freed, returning the bytes freed. Their keys are unknown again: a reader judges
-	/// them by its budget, or fills them by range.
+	/// freed, returning the bytes freed. Their keys are unknown again to a reader that never
+	/// judged them, which judges them by its budget or fills them by range; one that did keeps
+	/// its verdict.
 	fn shed_drops(&mut self, cap: u64) -> u64 {
 		let mut paid = 0u64;
 		let kept = self.kept_drops();
@@ -2000,7 +2004,7 @@ impl TrackState {
 
 	/// Forget `run` of the drop set to reclaim it, accounting it in the arrivals as an evicted
 	/// group stays: the publisher accounted for it, so neither the tail nor a reader waits on
-	/// it again, and a reader that wants it asks a fill or judges it by its budget.
+	/// it again, and a reader that never judged it asks a fill or judges it by its budget.
 	///
 	/// A reclaim never adds a run to the arrivals, so forgetting a flood of fragments costs
 	/// nothing there: a run touching no accounted one takes the gap below it too, given up
@@ -9402,8 +9406,8 @@ enum Change {
 
 /// The join tick each live join range in `prefs` keyed `keys` was added at: see
 /// [`demand::Prefs::since`].
-fn since_of(prefs: &demand::Prefs, keys: impl IntoIterator<Item = u64>) -> BTreeMap<u64, u64> {
-	keys.into_iter().map(|key| (key, prefs.since(key))).collect()
+fn since_of(prefs: &demand::Prefs, keys: impl IntoIterator<Item = u64>) -> BTreeMap<u64, Joining> {
+	keys.into_iter().map(|key| (key, prefs.joining(key))).collect()
 }
 
 /// A cursor's own ranges, resolved, and what keeps them current.
@@ -9446,7 +9450,7 @@ impl Cursor {
 			let since = since_of(&preferences, preferences.ranges().map(|(key, _)| key));
 			let window = Window::keyed_since(
 				preferences.ranges(),
-				|key| since.get(&key).copied().unwrap_or(0),
+				|key| since.get(&key).copied().unwrap_or_default(),
 				state.latest_live(),
 				&*state,
 			);
@@ -9675,7 +9679,7 @@ impl Cursor {
 		let holdings = &*state;
 		let moved = match changed {
 			Some((revision, change, since)) => {
-				let since = |key: u64| since.get(&key).copied().unwrap_or(0);
+				let since = |key: u64| since.get(&key).copied().unwrap_or_default();
 				self.filter.resolved = revision;
 				match change {
 					Change::Edit(changes) => {
@@ -10225,25 +10229,25 @@ impl Cursor {
 		self.prune_skipped();
 		self.record.delivered.insert(key);
 		let mut delivered = std::mem::take(&mut self.record.delivered);
-		self.forget_past_budget(&mut delivered);
+		self.forget_past_budget(&mut delivered, self.filter.window.budget());
 		self.record.delivered = delivered;
 		self.retire_written_off();
 	}
 
-	/// Forget the gaps in `delivered` below each group past this cursor's budget now,
-	/// whether this track holds it or not: one landing there would be written off. A group
-	/// skipped as stale is not forgotten, since a wider budget owes it again, and neither is
-	/// one a widening still owes, which a newest-first re-offer has yet to judge.
+	/// Forget the gaps in `delivered` below each group past `budget` now, whether this track
+	/// holds it or not: one landing there would be written off. A group skipped as stale is
+	/// not forgotten, since a wider budget owes it again, and neither is one a widening still
+	/// owes, which a newest-first re-offer has yet to judge.
 	///
 	/// One edge for every group judged, so forgetting N gaps never resolves it N times.
-	fn forget_past_budget(&self, delivered: &mut Delivered) {
+	fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget) {
 		if delivered.above_gap().is_none() {
 			return;
 		}
 		let owed = self.filter.owed.first().map(|run| *run.start());
 		let skipped = self.record.skipped.lowest().into_iter().chain(owed).min();
 		let state = self.state.read();
-		let budgets = self.filter.window.budget().clamped(state.max_age_bound());
+		let budgets = budget.clamped(state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
 		let now = state.cache.pool().now_wall();
 		while let Some(oldest) = delivered.above_gap() {
@@ -11096,7 +11100,7 @@ impl Republish {
 			return;
 		}
 		let state = self.state.read();
-		let since = |key: u64| since.get(&key).copied().unwrap_or(0);
+		let since = |key: u64| since.get(&key).copied().unwrap_or_default();
 		let window = Window::keyed_since(ranges, since, state.latest_live(), &*state);
 		drop(state);
 		let runs = Servable::of(&window, &Arc::default());
@@ -11521,12 +11525,13 @@ impl Subscriber {
 		}
 	}
 
-	/// Forget the gaps in `delivered` below each group past this subscriber's budget now:
-	/// one landing there would be written off.
-	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
+	/// Forget the gaps in `delivered` below each group past `budget` now: one landing there
+	/// would be written off. The budget is the reader's whose `delivered` this is, which a
+	/// front's copy, its ranges raised to a resume point, cannot judge by its own.
+	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget) {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.forget_past_budget(delivered),
-			Inner::Resume(resume, _) => resume.forget_past_budget(delivered),
+			Inner::Plain(cursor) => cursor.forget_past_budget(delivered, budget),
+			Inner::Resume(resume, _) => resume.forget_past(delivered, budget),
 		}
 	}
 
@@ -11978,7 +11983,11 @@ impl Subscriber {
 				let tick = demand::join_tick();
 				let state = cursor.state.read();
 				let ranges = (0..).zip(subscription.ranges.iter().copied());
-				Window::keyed_since(ranges, |_| tick, state.latest_live(), &*state).resolved()
+				let joining = |key| match subscription.placed.get(&key) {
+					Some(group) => Joining::At(*group),
+					None => Joining::Since(tick),
+				};
+				Window::keyed_since(ranges, joining, state.latest_live(), &*state).resolved()
 			}
 			Inner::Resume(..) => Vec::new(),
 		}
@@ -17706,6 +17715,7 @@ mod test {
 		let added = demand::join_tick();
 		producer.answer_join(lag, None, Some(9), Duration::MAX);
 		let edit = Edit {
+			placed: Default::default(),
 			retire: Vec::new(),
 			add: vec![(1, Range::from(Start::Live { min: lag, max: None }))],
 			priority: 0,
@@ -29602,6 +29612,7 @@ mod test {
 			live.extend(add.iter().copied());
 			edited
 				.edit(Edit {
+					placed: Default::default(),
 					retire,
 					add,
 					priority: 0,
@@ -31053,11 +31064,12 @@ mod test {
 		));
 	}
 
-	/// A reader that judged a dropped run before the pool forgot it, and has not read past it,
-	/// asks a fill for it once it is unknown again.
+	/// A reader that judged a dropped run before the pool forgot it keeps that verdict as its
+	/// own, so it asks no fill for the run once the track forgets it; only a reader that never
+	/// judged it finds it unknown and asks.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_reader_asks_a_fill_for_a_forgotten_run_it_judged() {
+	fn a_forgotten_run_is_asked_only_by_a_reader_that_never_judged_it() {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
 		let producer = track_producer_pooled("test", pool.clone());
 		producer.received();
@@ -31080,10 +31092,18 @@ mod test {
 		pool.sweep();
 		assert!(producer.state.read().drops.is_empty(), "the run expired");
 		let _ = subscriber.poll_recv_group(&waiter);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the reader keeps its verdict on the forgotten run"
+		);
+
+		let mut later = producer.subscribe(patient());
+		let _ = later.poll_recv_group(&waiter);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the forgotten run is asked of a fill");
+			panic!("a reader that never judged the run asks a fill for it");
 		};
-		assert_eq!(fill.start().group..fill.end(), 1..2);
+		// With group 0, which expired too.
+		assert_eq!(fill.start().group..fill.end(), 0..2);
 	}
 
 	/// A source refusing a fill in disjoint groups pays for the runs it records, as a drop does.

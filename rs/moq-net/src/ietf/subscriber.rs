@@ -14477,11 +14477,9 @@ fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireB
 	if let Some(start) = subscription.start() {
 		return (Some(start), end);
 	}
-	let first = subscription
-		.ranges
-		.iter()
-		.filter(|range| !range.is_empty())
-		.filter_map(|range| range.time())
+	let first = (subscription.times())
+		.filter(|(range, _)| !range.is_empty())
+		.filter_map(|(_, time)| time)
 		.min();
 	// Every range without a time start joins live, so none reaches back past the join.
 	let joins = (subscription.ranges.iter())

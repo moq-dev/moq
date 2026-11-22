@@ -273,6 +273,7 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		Some(Anchor::Time(_)) => 1,
 		Some(Anchor::Absolute(_)) => 2,
 		Some(Anchor::Live { .. }) => 3,
+		Some(Anchor::Joined { .. }) => 4,
 	};
 	let mut kinds: Vec<Range> = Vec::new();
 	for range in ranges {
@@ -287,6 +288,11 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 			// the others does.
 			(Some(Anchor::Live { min: a, max: x }), Some(Anchor::Live { min: b, max: y })) => Some(Anchor::Live {
 				min: a.max(b),
+				max: x.zip(y).map(|(x, y)| x.max(y)),
+			}),
+			// The join placed earliest, under the widest max age.
+			(Some(Anchor::Joined { at: a, max: x }), Some(Anchor::Joined { at: b, max: y })) => Some(Anchor::Joined {
+				at: a.min(b),
 				max: x.zip(y).map(|(x, y)| x.max(y)),
 			}),
 			(start, _) => start,
