@@ -1007,6 +1007,8 @@ let timeAnchors: (producer: Producer) => {
 	 * lite-07 copy, whose ranges carry each join, until its end is declared. See `hooks.answersJoins`.
 	 */
 	answersJoins: boolean;
+	/** Whether the copy's end is declared, so it receives no more answers. */
+	ended: boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
 };
@@ -1619,6 +1621,7 @@ export class Producer {
 				producer.#answersJoins &&
 				producer.#state.end.peek() === undefined &&
 				producer.#state.outcome.peek() === undefined,
+			ended: producer.#state.end.peek() !== undefined || producer.#state.outcome.peek() !== undefined,
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -3936,7 +3939,12 @@ export class Subscriber {
 			looksUp: () => !receivedCopy(producer) && fillsOf(producer).serving,
 			join: (min, end, budget, since) => {
 				if (!answers)
-					return this.#join(min, (time) => holdings.containing(time, budget), wire && !anchors.atKeys);
+					return this.#join(
+						min,
+						(time) => holdings.containing(time, budget),
+						wire && !anchors.atKeys,
+						anchors.ended,
+					);
 				const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
 				if (answer === undefined || answer.tick <= since || budget > answer.budget) return undefined;
 				return answer.start === undefined ? "empty" : { group: answer.start };
@@ -3967,8 +3975,10 @@ export class Subscriber {
 	// ranges start, but not where each join does) places it only where the groups it holds prove, and
 	// waits otherwise. A copy whose wire keys groups otherwise starts at a group held, by when each
 	// one's first frame presented, as its publisher resolved the join already. A lite-07 copy places
-	// none itself (see {@link Holdings.answersJoins}). Mirrors the Rust `TrackState::join`.
-	#join(min: Duration, containing: (time: bigint) => Containing, wire: boolean): Join | undefined {
+	// none itself (see {@link Holdings.answersJoins}). A `wire` copy whose end is `ended` gets no more
+	// groups to prove it by, so it leaves an unproven join to a time start, which asks its upstream.
+	// Mirrors the Rust `TrackState::join`.
+	#join(min: Duration, containing: (time: bigint) => Containing, wire: boolean, ended: boolean): Join | undefined {
 		const timeline = this.#state.timeline;
 		// The newest group held for which `f` holds, failed ones aside.
 		const newest = (f: (group: GroupConsumer) => boolean) =>
@@ -4013,7 +4023,7 @@ export class Subscriber {
 			const holder = newest((group) => group.start <= target);
 			const through = reach(holder);
 			if (holder && through !== undefined && through >= target) return { group: holder.start };
-			return undefined;
+			return ended ? { time: target } : undefined;
 		}
 		if (edge === undefined) return undefined;
 		const target = edge > back ? edge - back : 0n;

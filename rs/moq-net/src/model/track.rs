@@ -1238,7 +1238,7 @@ impl Holdings for TrackState {
 	/// the live edge is the upstream's, which no group held here measures. Otherwise it waits on
 	/// its upstream, which its session asks with a range of its own. Another copy whose wire
 	/// reports where its ranges start places it only where the groups it holds prove, and waits
-	/// otherwise.
+	/// otherwise, until its end is declared: then the join resolves as a time start.
 	///
 	/// An idle copy waits as [`Self::latest_live`] does: what an ended feed left measures no
 	/// live edge, and the groups it missed since leave a hole the next feed may not fill.
@@ -1319,6 +1319,8 @@ impl Holdings for TrackState {
 		let through = |slot: &Slot| slot.group.latest().and_then(|latest| latest.convert(scale).ok());
 		match holder {
 			Some((&key, slot)) if through(slot).is_some_and(|through| through.value() >= target) => Join::Group(key),
+			// No more groups will prove it once the end is declared: a time start asks upstream.
+			_ if self.outcome.end().is_some() || self.outcome.is_final() => Join::Time(target),
 			_ => Join::Unknown,
 		}
 	}
@@ -17815,6 +17817,25 @@ mod test {
 			budgets.iter().map(|join| join.budget).collect::<Vec<_>>(),
 			[Duration::MAX]
 		);
+	}
+
+	/// Once a copy's end is declared, no more groups or answers arrive, so a live join the held
+	/// groups can't prove resolves as a time start and drains them instead of waiting forever.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_declared_end_resolves_an_unproven_live_join() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		write_group(&producer, 1000);
+		write_group(&producer, 3000);
+		producer.finish_at(Position::group(3001)).unwrap();
+		let join = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([Range::from(Start::Live(Duration::from_millis(1000)))]);
+		let mut reader = producer.subscribe(join);
+		assert_eq!(drain_groups(&mut reader), vec![3000]);
 	}
 
 	/// A bounded live join that upstream answers with nothing to deliver, its start past its

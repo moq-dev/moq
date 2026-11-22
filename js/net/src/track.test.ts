@@ -5847,6 +5847,23 @@ test("track: a copy whose end is declared places a live join from its groups", (
 	}
 });
 
+// Once its end is declared, no more groups or answers arrive, so a join the groups held can't prove
+// resolves as a time start and drains them instead of waiting forever. Mirrors moq-net's
+// `a_declared_end_resolves_an_unproven_live_join`.
+test("track: a declared end resolves an unproven live join", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		putGroup(producer, 1000n, 1000);
+		putGroup(producer, 3000n, 3000);
+		producer.finishAt({ group: 3001n, frame: 0 });
+		const reader = producer.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.millis(1000) } }] });
+		expect(reader.tryRecvGroup()?.start).toBe(3000n);
+	} finally {
+		producer.close();
+	}
+});
+
 // A bounded join its upstream answered empty holds nothing: its start is past its end, so it
 // delivers none of the groups the copy holds or receives later.
 test("track: a bounded join answered empty delivers nothing", () => {
