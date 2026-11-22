@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{
+	FutureExt, StreamExt,
+	future::{AbortHandle, Abortable, BoxFuture},
+	stream::FuturesUnordered,
+};
 use moq_net::{SessionError, auth, setup::Role};
 
 use super::{Caps, Grant, Pacer, Source, Token, caps, lease};
@@ -16,6 +20,12 @@ pub(super) struct Refresh {
 	stats: moq_net::stats::Session,
 	role: Option<Role>,
 	credentials: BTreeMap<u64, Credential>,
+	/// One armed watch per credential for a change to its grant, its expiry, or its end,
+	/// each handing its consumer back to be watched again. Polling only wakes the watch
+	/// that has news, so a connection's cost per event does not grow with its credentials.
+	changes: FuturesUnordered<Abortable<BoxFuture<'static, (u64, Change, lease::Consumer)>>>,
+	/// One armed watch per issued credential for the peer withdrawing it.
+	withdrawals: FuturesUnordered<Abortable<BoxFuture<'static, u64>>>,
 	/// Tokens the decider is verifying, at most `Auth::verifications` counting
 	/// `settling`. A sent check runs to completion, even once its token is withdrawn,
 	/// so the connection's `end` stays its last request.
@@ -56,11 +66,27 @@ impl Waiting {
 }
 
 struct Credential {
+	/// Only asks the decider to re-check: the armed watch owns the consumer it waits on.
 	consumer: lease::Consumer,
 	grant: Grant,
 	expires: Option<kio::clock::Instant>,
 	issued: Option<auth::Issued>,
 	initial: bool,
+	/// Disarms the credential's watches when it leaves.
+	watches: Watches,
+}
+
+/// Aborts the watches in [`Refresh`] that belong to a credential once it is dropped.
+#[derive(Default)]
+struct Watches {
+	changes: Option<AbortHandle>,
+	withdrawal: Option<AbortHandle>,
+}
+
+impl Drop for Watches {
+	fn drop(&mut self) {
+		self.changes.iter().chain(&self.withdrawal).for_each(AbortHandle::abort);
+	}
 }
 
 enum Change {
@@ -78,6 +104,7 @@ impl Credential {
 			grant,
 			issued: None,
 			initial: false,
+			watches: Watches::default(),
 		}
 	}
 
@@ -121,21 +148,65 @@ impl Refresh {
 			admitted: lease.token.clone(),
 			stats: lease.stats.clone(),
 			role,
-			credentials: [(0, initial)].into(),
+			credentials: BTreeMap::new(),
+			changes: FuturesUnordered::new(),
+			withdrawals: FuturesUnordered::new(),
 			pending: FuturesUnordered::new(),
 			settling: FuturesUnordered::new(),
 			waiting: VecDeque::new(),
 			survivors: 0,
-			next: 1,
+			next: 0,
 			pacer: lease.pacer.clone(),
 			caps,
 		};
 		// The same root, mounts, link, role, and cap checks a refreshed grant passes.
-		if !this.valid(&this.credentials[&0].grant) {
+		if !this.valid(&initial.grant) {
 			return Err(moq_net::Error::Unauthorized);
 		}
+		this.insert(initial);
 		this.authorize();
 		Ok(this)
+	}
+
+	/// Hold `credential` and arm its watches.
+	fn insert(&mut self, mut credential: Credential) {
+		let id = self.next;
+		self.next += 1;
+		let consumer = credential.consumer.clone();
+		self.arm_changes(id, &mut credential, consumer);
+		self.arm_withdrawal(id, &mut credential);
+		self.credentials.insert(id, credential);
+	}
+
+	/// Watch `credential`'s grant through `consumer` until it changes, expires, or ends.
+	fn arm_changes(&self, id: u64, credential: &mut Credential, mut consumer: lease::Consumer) {
+		let expires = credential.expires;
+		let (watch, handle) = futures::future::abortable(
+			async move {
+				let change = changed(&mut consumer, expires).await;
+				(id, change, consumer)
+			}
+			.boxed(),
+		);
+		self.changes.push(watch);
+		credential.watches.changes = Some(handle);
+	}
+
+	/// Watch the peer withdrawing what `credential` was issued, if it was.
+	fn arm_withdrawal(&self, id: u64, credential: &mut Credential) {
+		let Some(issued) = &credential.issued else {
+			return;
+		};
+		let closed = issued.closed();
+		let (watch, handle) = futures::future::abortable(
+			async move {
+				closed.await;
+				id
+			}
+			.boxed(),
+		);
+		self.withdrawals.push(watch);
+		credential.watches.withdrawal = Some(handle);
 	}
 
 	/// The caps the connection is held to.
@@ -223,10 +294,13 @@ impl Refresh {
 			}
 			let unissued = self
 				.credentials
-				.values_mut()
-				.find(|credential| credential.initial && credential.issued.is_none());
-			if let Some(initial) = unissued {
+				.iter()
+				.find_map(|(&id, credential)| (credential.initial && credential.issued.is_none()).then_some(id));
+			if let Some(id) = unissued {
+				let mut initial = self.credentials.remove(&id).expect("found above");
 				initial.issued = Some(request.accept(initial.wire(self.role)));
+				self.arm_withdrawal(id, &mut initial);
+				self.credentials.insert(id, initial);
 				return;
 			}
 			// The lease may have revalidated to a grant this session can no longer
@@ -243,8 +317,7 @@ impl Refresh {
 			}
 			credential.initial = true;
 			credential.issued = Some(request.accept(credential.wire(self.role)));
-			self.credentials.insert(self.next, credential);
-			self.next += 1;
+			self.insert(credential);
 			self.authorize();
 			return;
 		}
@@ -353,7 +426,10 @@ impl Refresh {
 				Verified(Option<Verified>, Option<Settling>),
 				Settled,
 				Expired,
-				Changed(u64, Change),
+				/// A credential's change, with the consumer to watch it by again when its grant lives on.
+				Changed(u64, Change, Option<lease::Consumer>),
+				/// A watch its credential disarmed on leaving.
+				Disarmed,
 			}
 			let event = {
 				// The oldest waiting token's deadline is the earliest, as they all wait the
@@ -365,30 +441,19 @@ impl Refresh {
 						None => std::future::pending().await,
 					}
 				};
-				let mut changes = FuturesUnordered::new();
-				let mut withdrawals = FuturesUnordered::new();
-				for (&id, credential) in &mut self.credentials {
-					let Credential {
-						consumer,
-						expires,
-						issued,
-						..
-					} = credential;
-					changes.push(async move { (id, changed(consumer, *expires).await) });
-					if let Some(issued) = issued {
-						withdrawals.push(async move {
-							issued.closed().await;
-							id
-						});
-					}
-				}
 				tokio::select! {
 					biased;
-					Some((id, change)) = changes.next(), if !changes.is_empty() => Event::Changed(id, change),
+					Some(watched) = self.changes.next(), if !self.changes.is_empty() => match watched {
+						Ok((id, change, consumer)) => Event::Changed(id, change, Some(consumer)),
+						Err(_) => Event::Disarmed,
+					},
 					// A session's close withdraws every credential at once. A verdict the decider
 					// already gave outranks it, while a credential the close alone took leaves
 					// the close as the end.
-					Some(id) = withdrawals.next(), if !withdrawals.is_empty() => Event::Changed(id, Change::Withdrawn),
+					Some(watched) = self.withdrawals.next(), if !self.withdrawals.is_empty() => match watched {
+						Ok(id) => Event::Changed(id, Change::Withdrawn, None),
+						Err(_) => Event::Disarmed,
+					},
 					Some((verdict, settling)) = self.pending.next(), if !self.pending.is_empty() => Event::Verified(verdict, settling),
 					Some(()) = self.settling.next(), if !self.settling.is_empty() => Event::Settled,
 					() = expired => Event::Expired,
@@ -398,6 +463,7 @@ impl Refresh {
 			match event {
 				Event::Request(Some(request)) => self.request(request),
 				Event::Request(None) => self.requests_open = false,
+				Event::Disarmed => {}
 				Event::Settled => self.dispatch(),
 				Event::Expired => self.expire(),
 				Event::Verified(verdict, settling) => {
@@ -412,8 +478,7 @@ impl Refresh {
 						Ok(mut credential) => match self.refusal(&credential.grant) {
 							None => {
 								credential.issued = Some(request.accept(credential.wire(self.role)));
-								self.credentials.insert(self.next, credential);
-								self.next += 1;
+								self.insert(credential);
 								self.authorize();
 							}
 							Some(refusal) => request.reject(SessionError::Unauthorized, refusal),
@@ -421,9 +486,9 @@ impl Refresh {
 						Err(err) => refuse(request, err),
 					}
 				}
-				Event::Changed(id, Change::Grant(grant)) if self.valid(&grant) => {
+				Event::Changed(id, Change::Grant(grant), Some(consumer)) if self.valid(&grant) => {
 					let fresh = self.admitted.recheck(&grant).expect("checked by valid");
-					let credential = self.credentials.get_mut(&id).expect("observed credential");
+					let mut credential = self.credentials.remove(&id).expect("observed credential");
 					credential.expires = grant.deadline();
 					if credential.initial {
 						self.stats.retag(fresh.tier, &fresh.label);
@@ -432,9 +497,11 @@ impl Refresh {
 					if let Some(issued) = &credential.issued {
 						issued.update(credential.wire(self.role));
 					}
+					self.arm_changes(id, &mut credential, consumer);
+					self.credentials.insert(id, credential);
 					self.authorize();
 				}
-				Event::Changed(id, change) => {
+				Event::Changed(id, change, _) => {
 					let credential = self.credentials.remove(&id).expect("observed credential");
 					let withdrawn = matches!(change, Change::Withdrawn);
 					let reason = match change {

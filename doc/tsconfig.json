@@ -10,6 +10,8 @@
 		".vitepress/api/*.ts",
 		".vitepress/drafts.ts",
 		".vitepress/drafts.test.ts",
+		".vitepress/worker.test.ts",
+		"worker.ts",
 		"concept/audio-jitter/reference.ts",
 		"concept/audio-jitter/corpus.ts",
 		"concept/audio-jitter/corpus.test.ts"

@@ -93,9 +93,6 @@ this Plan rather than new quests):
   CDN, but the local relay has no export policy of its own, and with a CDN
   token rooted at `tenant-a`, CDN paths land at the local root. Add an
   optional root, mounts, and export and import prefixes per outbound peer.
-- A scoped peer at the root was closed Unauthorized on lite-07; that bug is
-  [its own quest](/quest/m1/lite07-routing/scoped-peer-node-id.md), which
-  lands first.
 
 Public API: report any peer configuration or admission change. Wire: the
 lite-07 draft's Claims and Routing as they ship; any change requires draft

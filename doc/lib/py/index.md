@@ -21,7 +21,7 @@ Share `media.Timebase(broadcast)` through `ContainerInit` when several imports u
 source timeline; omitting it keeps an independent offset. A timebase belongs to its
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
-`ContainerFormat.FMP4` splits each fragment into one frame per sample.
+`ContainerFormat.fmp4()` splits each fragment into one frame per sample.
 Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz tick survives a read and republish.
 `Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
 Every write takes a timestamp, and the library never substitutes zero or now.
@@ -76,7 +76,7 @@ async def main():
         broadcast = route.broadcast
 
         # Already-encoded frames: the catalog is filled from the bitstream
-        audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
+        audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_init_bytes))
         audio.write_frame(payload, moq.media.CatalogProducer(broadcast).now())
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
@@ -84,7 +84,7 @@ async def main():
         catalog_producer = moq.media.CatalogProducer(broadcast)
         video = moq.video.Producer(
             catalog_producer,
-            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
+            moq.VideoEncoderInput(format=moq.VideoPixelFormat.rgba(), width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
             moq.VideoEncoderOutput(
                 codec=moq.VideoCodec.h264(),
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]

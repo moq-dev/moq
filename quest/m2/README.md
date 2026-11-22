@@ -12,8 +12,7 @@ complete it before cutting main into release.
 Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId
 drops Start ([node-id-drop-start](/quest/m2/node-id-drop-start.md)),
-whether an origin forwards moves into its config
-([origin-proxy-config](/quest/m2/origin-proxy-config.md)), and moq-relay's
+whether an origin forwards moves into its config, and moq-relay's
 cluster peers lose `egress` ([relay-peer-egress](/quest/m2/relay-peer-egress.md)).
 [lite07-finalize](/quest/m2/lite07-finalize.md) also requires three m1 fixes
 from [lite07-routing](/quest/m1/lite07-routing/README.md), whose Plan
@@ -30,19 +29,11 @@ native crates, and public APIs:
   `draft-lcurley-qmux-websocket` up to `qmux-VV.<alpn>`
   ([qmux-websocket-draft](/quest/m2/qmux-websocket-draft.md)).
 - **Vendored native crate soundness.** Fix the unsound public APIs in
-  [moq-v4l](/quest/m2/v4l-arena-soundness.md),
-  [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md), and
-  [moq-nvenc](/quest/m2/nvenc-soundness.md) before `0.22.0` publishes them.
+  [moq-v4l](/quest/m2/v4l-arena-soundness.md) and
+  [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md) before `0.22.0`
+  publishes them (moq-nvenc's are fixed).
 - **Public API freezes.** Fence `moq-net` event/item types with
-  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)),
-  fix `hang::Catalog::without_ext` and drop dead `Error` variants and the unused
-  `url` dependency ([hang-without-ext-and-errors](/quest/m2/hang-without-ext-and-errors.md)),
-  rename `moq-gst`'s retired `tls-disable-verify` property to
-  `connect-tls-insecure` ([gst-tls-insecure-prop](/quest/m2/gst-tls-insecure-prop.md)),
-  narrow `@moq/room`'s `Room.remotes` to `ReadonlyMap`
-  ([room-remotes-readonly](/quest/m2/room-remotes-readonly.md)), and open
-  `moq-ffi`'s 5 closed extensible enums while deriving `Debug`/`Eq`/`Hash` on
-  its codec types ([ffi-open-enums](/quest/m2/ffi-open-enums.md)).
+  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)).
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),

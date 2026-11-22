@@ -277,8 +277,8 @@ export function consume(broadcast: Watch.Broadcast): Consumed {
 /**
  * Feed each value on `name` that matches `schema` to `update`.
  *
- * A value that does not match is refused with a warning and the last valid one stays, so a
- * malformed publish neither reaches the UI nor ends the subscription.
+ * A value that does not match ends the subscription, as any failed read does: it never reaches the
+ * UI and the last valid one stays.
  */
 function subscribeJson<T>(
 	broadcast: Moq.Broadcast.Consumer,
@@ -291,18 +291,15 @@ function subscribeJson<T>(
 	effect.cleanup(() => consumer.close());
 
 	effect.spawn(async () => {
-		for (;;) {
-			let state: Moq.Timed<T> | undefined;
-			try {
-				state = await effect.race(consumer.latest());
-			} catch (err) {
-				// The value was decoded and only failed the schema, so the next frame still applies.
-				if (!(err instanceof z.core.$ZodError)) throw err;
-				console.warn(`refused invalid ${name}:`, err);
-				continue;
+		// A failed read ends the loop, so release the subscription instead of downloading what nothing reads.
+		try {
+			for (;;) {
+				const state = await effect.race(consumer.latest());
+				if (state === undefined) break;
+				update(state.value);
 			}
-			if (state === undefined) break;
-			update(state.value);
+		} finally {
+			consumer.close();
 		}
 	});
 }

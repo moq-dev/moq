@@ -16,6 +16,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import * as cache from "./cache.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -24,7 +25,6 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
-import { routeFailed } from "./resume.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -113,6 +113,11 @@ interface Case {
 	ops: Op[];
 	/** Every live route declares the end once it has caught up. */
 	finish: boolean;
+	/**
+	 * The routes are local publishers rather than received copies: only for a regression of a local
+	 * track's own rules, which no JS track test covers.
+	 */
+	local?: boolean;
 }
 
 const range: fc.Arbitrary<Range> = fc.option(
@@ -407,8 +412,12 @@ class Model {
 	/** Bumped by every frame read, so settling sees progress no reader flag shows. */
 	progress = 0;
 
-	constructor(clock: Manual) {
+	/** See {@link Case.local}. */
+	local: boolean;
+
+	constructor(clock: Manual, local = false) {
 		this.clock = clock;
+		this.local = local;
 		this.consumer = this.origin.consume();
 	}
 
@@ -533,8 +542,15 @@ class Model {
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
-		// A local publisher, where the Rust model's route is a received copy.
 		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		if (!this.local) {
+			// Nothing drives a Rust route's pool, so its cache never expires: idle groups stay here too.
+			hooks.poolTrack(producer, new cache.Pool());
+			// The route's live feed, received from its publisher over a wire that reports no range's
+			// start, so its readers place starts against what it holds: the Rust model's `received()`.
+			hooks.receiveTrack(producer);
+			hooks.dropAnchors(producer);
+		}
 		void (async () => {
 			for await (const request of serving.requested()) {
 				request.serve(Upstream.of(broadcast, (key, local) => this.fill(instance, slot, key, local)));
@@ -970,8 +986,6 @@ class Model {
 				// or from the route it would continue from.
 				const gone = reading.end instanceof TooFarBehind || reading.end instanceof NotFound;
 				if (gone && instance.expired !== undefined && key <= instance.expired) continue;
-				// Unlike Rust, an ended JS reader follows no route, so a route failure ends a group still read.
-				if (ended && reading.end instanceof Error && routeFailed(reading.end)) continue;
 				problems += `group ${key} stopped at frame ${reading.frames} (${reading.end}); `;
 			}
 		}
@@ -1007,7 +1021,7 @@ class Model {
 async function run(c: Case): Promise<void> {
 	const clock = new Manual();
 	const installed = clock.install();
-	const model = new Model(clock);
+	const model = new Model(clock, c.local);
 	try {
 		model.up(0, 0);
 		for (const op of c.ops) {
@@ -1420,6 +1434,7 @@ test("regressions", async () => {
 				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: true,
+			local: true,
 		},
 		// A local floor holds a read open only for a group the cache holds under it, so a range whose
 		// groups never arrived ends.
@@ -1445,6 +1460,7 @@ test("regressions", async () => {
 				{ kind: "up", instance: 0, slot: 1 },
 			],
 			finish: true,
+			local: true,
 		},
 		// A replaced copy is waited on only for groups the reader's window names.
 		{
@@ -1504,9 +1520,21 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
-		// An ordered read of a local route that ran out of its range when a group past it was created
-		// passed the key below for good, so the range set again reads on only past it. The Rust model
-		// runs the same ops on a received route, which waits for that key instead.
+		// A group the local floor keeps out of where an earlier copy placed a range, below where the
+		// serving copy places it: the read runs without a stall. The oracle owes nothing below the
+		// serving copy's placement, so it does not check that group yet; see
+		// quest/m0/nightly/resume-model-placement.md. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },
+				{ kind: "bounds", reader: 2, range: [1, 9] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// An ordered read of a received route waits for a key below a group landing past its range,
+		// since the feed may still land it, then ends with the range. Mirrors the Rust case.
 		{
 			ops: [
 				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
@@ -1517,7 +1545,7 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
-		// The same across a route switch, with the range widened past the end the read passed.
+		// The same across a route switch, with the range widened past the range's end.
 		{
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(true, "hour", [0, 1], false) },
@@ -1529,7 +1557,7 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
-		// The same once the route it passed on fails, with the group below landing on the next route.
+		// The same once the route it waits on fails, with the group below landing on the next route.
 		{
 			ops: [
 				{ kind: "up", instance: 0, slot: 2 },
@@ -1538,6 +1566,81 @@ test("regressions", async () => {
 				{ kind: "down", instance: 0, slot: 2 },
 				{ kind: "ranges", reader: 3, range: undefined },
 				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+			],
+			finish: false,
+		},
+		// A received route places a time start at the newest group it holds at or before it, so the
+		// group holding it is handed out before a switch, not placed later at the time's own key.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "ranges", reader: 0, range: [1, 2] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "down", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// The same with the switch's route closing the group as it fails.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
+				{ kind: "write", instance: 1, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "close", instance: 1, slot: 1, group: 0, down: true },
+				{ kind: "up", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// A route's give-up outlives an expiry, as a Rust route's does, so an ordered read joining
+		// after it is not held on the group given up.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "short", [2, 3], false) },
+				{ kind: "giveUp", instance: 0, slot: 0, group: 1 },
+				{ kind: "expire" },
+				{ kind: "join", reader: 1, spec: spec(true, "hour", undefined, false) },
+				{ kind: "advance", ms: 1 },
+			],
+			finish: false,
+		},
+		// An ordered read waiting below a group its route then closes short and fails takes that
+		// group from the failed copy, still buffered for it, and reads on from the next route.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 5], false) },
+				{ kind: "write", instance: 1, slot: 1, group: 4, frames: 1 },
+				{ kind: "close", instance: 1, slot: 1, group: undefined, down: true },
+			],
+			finish: false,
+		},
+		// Once the track ended, a group still read that its route closes short and then fails
+		// continues from the copy the front serves next, as the Rust front's reader does.
+		{
+			ops: [
+				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 1 },
+				{ kind: "end", instance: 0, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "close", instance: 0, slot: 0, group: undefined, down: true },
+				{ kind: "up", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// The same once a route that closed the group short ends the track and then fails.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "write", instance: 1, slot: 2, group: 11, frames: 1 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", [5, 12], false) },
+				{ kind: "close", instance: 1, slot: 2, group: undefined, down: false },
+				{ kind: "end", instance: 1, slot: 2 },
+				{ kind: "down", instance: 1, slot: 2 },
 			],
 			finish: false,
 		},
