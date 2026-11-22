@@ -1849,8 +1849,8 @@ export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: 
 
 /**
  * Order two claims of one tier resolving `path`, each filed at its `prefix`: by preference, hop
- * count, then the hashes of {@link compareRouteCandidates} keyed on `path` whatever each claim's
- * filing, which a tie between two filed at the path itself skips.
+ * count, then one filed at `path` itself, then the hashes of {@link compareRouteCandidates} keyed on
+ * `path` whatever each claim's filing.
  */
 export function compareTier(
 	path: Path.Valid,
@@ -1858,7 +1858,11 @@ export function compareTier(
 	b: { readonly prefix: Path.Valid; readonly route: WireRoute },
 ): number {
 	const order = compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route);
-	if (order !== 0 || (a.prefix === path && b.prefix === path)) return order;
+	if (order !== 0) return order;
+	// A claim filed at the path itself skips the hash and ranks first, as a route entered here at
+	// the path does in Rust; two of them tie, for the newest to win.
+	const exact = Number(b.prefix === path) - Number(a.prefix === path);
+	if (exact !== 0 || a.prefix === path) return exact;
 	const [a1, a2] = routeKey(path, a.route);
 	const [b1, b2] = routeKey(path, b.route);
 	if (a1 !== b1) return a1 < b1 ? -1 : 1;

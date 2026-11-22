@@ -2308,10 +2308,12 @@ test("a covering root advertises what a request for it resolves", async () => {
 			[root, filed],
 		]);
 		const pick = (prefix: Path.Valid) => [at.get(prefix)].filter((route) => route !== undefined);
-		const resolved = mostSpecific(root, pick, (route) => route)?.instance;
+		// The claim filed at the path itself wins the tie, as a route entered here at the path skips
+		// Rust's hash, whichever instance it carries.
+		expect(mostSpecific(root, pick, (route) => route)?.instance).toBe(filed.instance);
 		const reader = origin.scope(root, Path.Prefixes.all()).consume();
 		const covering = await announcedView(reader, undefined, { covering: true });
-		expect(covering.peek().get(Path.empty())?.instance).toBe(resolved);
+		expect(covering.peek().get(Path.empty())?.instance).toBe(filed.instance);
 		await covering.close();
 		for (const handle of handles) handle.close();
 		origin.close();

@@ -11317,7 +11317,12 @@ mod tests {
 					..Lane::default()
 				})
 		};
-		for i in 0..32 {
+		// A route entered here at the path skips the hash, so the claim filed at the root wins
+		// whichever instance it carries; any other pair is settled by the hash on the root.
+		for (link, i) in [Link::Peer, Link::Local]
+			.into_iter()
+			.flat_map(|link| (0..32).map(move |i| (link, i)))
+		{
 			let producer = Config {
 				update_hold: Duration::ZERO,
 				..Config::from(origin(1))
@@ -11326,9 +11331,9 @@ mod tests {
 			let mut announced = (producer.consume().scope("src/a", &Prefixes::all()).unwrap())
 				.covering()
 				.routes();
-			let peer = producer.clone().with_link(Link::Peer);
-			let _made = peer.forward("src", route(&format!("made{i}"), 10, 0)).unwrap();
-			let _filed = peer.forward("src/a", route(&format!("filed{i}"), 11, 1)).unwrap();
+			let handle = producer.clone().with_link(link);
+			let _made = handle.forward("src", route(&format!("made{i}"), 10, 0)).unwrap();
+			let _filed = handle.forward("src/a", route(&format!("filed{i}"), 11, 1)).unwrap();
 
 			let table = producer.shared.read();
 			let resolved = table
@@ -11344,7 +11349,10 @@ mod tests {
 			while let Some(event) = announced.try_next() {
 				advertised = Some(event.announce.route.instance().clone());
 			}
-			assert_eq!(advertised, resolved, "pair {i}");
+			assert_eq!(advertised, resolved, "{link:?} pair {i}");
+			if link == Link::Local {
+				assert_eq!(resolved, Some(format!("filed{i}").parse().unwrap()), "pair {i}");
+			}
 		}
 	}
 
