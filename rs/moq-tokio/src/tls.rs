@@ -1366,6 +1366,7 @@ impl Listen {
 			|| !self.key.is_empty()
 			|| !self.generate.is_empty()
 			|| !self.root.is_empty()
+			|| self.require
 			|| self.identity.is_some()
 	}
 
@@ -2535,6 +2536,8 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(require.client_auth(provider), Err(Error::RequireRoots)));
+		// A shared policy beside it is refused rather than serving without the requirement.
+		assert!(require.configured(), "require alone reads as unconfigured");
 	}
 
 	/// A plain-TLS embedder receives a working config from the shared identity.
