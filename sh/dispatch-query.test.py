@@ -54,6 +54,7 @@ class QueryTests(unittest.TestCase):
             "env",
             "mkdir",
             "mv",
+            "realpath",
         ):
             (self.bin / command).symlink_to(shutil.which(command))
         self.env = dispatch_env(
@@ -538,8 +539,10 @@ class QueryTests(unittest.TestCase):
         self.env.pop("CI_STRICT")
         calls = self.root / "calls"
 
-        def run(action="check", fail=False, **env):
+        def run(action="check", fail=False, zig="", **env):
             self.stub_ci('case "$*" in "rs test-changed "*) exit 5 ;; esac\n' if fail else "")
+            with (self.bin / "zig").open("a") as file:
+                file.write(zig)
             result = subprocess.run(
                 ["bash", "sh/dispatch.sh", action, "origin/main"],
                 cwd=self.repo,
@@ -556,16 +559,23 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(run(fail=True), rust)
         self.assertEqual(run(), {"rs test-changed"})
         self.assertEqual(run(), set())
-        # A file outside the module's pattern leaves it skipped; one inside, or
-        # a different toolchain environment, runs it again.
+        # A file outside the module's pattern, or a dispatcher control, leaves
+        # it skipped; a file inside, any other variable, or a tool replaced in
+        # place runs it again.
         self.change("quest/m1/example.md")
-        self.assertEqual(run(), set())
+        # Each run differs from the one before it in one way only.
+        self.assertEqual(run(CHECK_JOBS="1"), set())
+        self.assertEqual(run(zig="# upgraded\n"), {"rs cross-lint-changed"})
+        self.assertEqual(run(), {"rs cross-lint-changed"})
         self.assertEqual(run(RUSTFLAGS="-Dwarnings"), rust)
+        self.assertEqual(run(RUSTFLAGS="-Dwarnings"), set())
+        self.assertEqual(run(RUSTFLAGS="-Dwarnings", UNFORESEEN="1"), rust)
         self.change("rs/dep/src/lib.rs")
         self.assertEqual(run(), rust)
         self.assertEqual(run(CHECK_RERUN="1"), rust)
-        # CI runs every phase.
+        # CI, the merge queue, and any check on Actions run every phase.
         self.assertEqual(run("ci", CI_STRICT="1"), rust)
+        self.assertEqual(run(GITHUB_ACTIONS="true"), rust)
         self.assertEqual(run(), set())
 
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")

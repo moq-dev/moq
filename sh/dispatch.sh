@@ -14,6 +14,10 @@
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
 
+# The environment as the caller passed it, for the memo below. Taken first: the
+# dev shell exports names such as `name` and `phases` that this script reuses.
+inherited=$(export -p)
+
 usage="usage: sh/dispatch.sh check|fix|ci [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
 base=${2:-}
@@ -603,18 +607,48 @@ snapshot() (
 
 # A hash of what one phase of a module reads, from a snapshot: the files its
 # pattern matches with the slice of the diff that selected it, the scripts that
-# orchestrate it, and the environment that picks and configures its tools.
+# orchestrate it, its tools, and the environment. Every exported variable counts
+# but the shell's and systemd's per-run bookkeeping (`quest gate` runs a command
+# as a systemd unit) and the dispatcher's own CHECK_* controls, so an unforeseen
+# one that steers a build or a test can only cost a rerun.
 memo_key() (
     set -e
     phase=$1 module=$2 tree=$3
     {
         echo "$phase $module ${all:+all}"
-        [[ -n "$all" ]] || grep -E "${scope[$module]}" "$changed" || true
+        [[ -n "$all" ]] || grep -E "${scope[$module]}" "$changed" || (($? == 1))
         git ls-tree -r "$tree" -- justfile sh/dispatch.sh sh/changed.sh
-        env | grep -E '^(PATH|LD_LIBRARY_PATH|PKG_CONFIG_PATH|LIBCLANG_PATH|BINDGEN_[A-Z_]*|CC|CXX|AR|LD|[A-Z_]*FLAGS|(CARGO|RUST|NEXTEST|KIO|MOQ)[A-Z0-9_]*)=' | LC_ALL=C sort || true
+        grep -Ev '^declare -x (PWD|OLDPWD|SHLVL|_|INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_EXEC_PID|MANAGERPID|CHECK_[A-Za-z0-9_]*)(=|$)' <<<"$inherited"
+        read -ra list <<<"${tools[$module]}"
+        tool_identity "${list[@]}"
         git -c core.quotePath=false ls-tree -r --format='%(path)%x09%(objectname)' "$tree" |
             PATTERN=${scope[$module]} awk -F '\t' '$1 ~ ENVIRON["PATTERN"]'
     } | git hash-object --stdin
+)
+
+# What each tool resolves to. A Nix store path names its contents; any other
+# binary, such as a shim or a distribution's compiler, is hashed, since an
+# upgrade replaces it in place. Cargo brings the toolchain it drives, which a
+# rustup shim hides behind the same file, so rustc reports its own version.
+tool_identity() (
+    set -e
+    for tool in "$@"; do
+        [[ "$tool" != cargo ]] || set -- "$@" rustc rustdoc clippy-driver cargo-nextest
+    done
+    for tool in "$@"; do
+        if ! path=$(command -v "$tool"); then
+            echo "$tool absent"
+            continue
+        fi
+        path=$(realpath "$path")
+        case "$path" in
+            /nix/store/*) echo "$tool $path" ;;
+            *) echo "$tool $path $(git hash-object --no-filters "$path")" ;;
+        esac
+    done
+    if [[ " $* " == *" rustc "* ]] && command -v rustc >/dev/null; then
+        rustc -vV
+    fi
 )
 
 # The phases a module runs for this verb: a check also runs the tests of the
