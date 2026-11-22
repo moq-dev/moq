@@ -20,6 +20,10 @@ upstream answer, so the reader drops the join and gets only `[1000, 2000]`.
   such a range later, as SUBSCRIBE_STARTED does for a range an update added; that may need
   a lite-07-wip wire change and the matching draft edit.
 - The JavaScript relay fails the same case (the `relay-warm` marker, `just test relay-fill`),
-  also on `main` before this marker landed; fix both and drop both markers.
+  also on `main` before this marker landed; fix both and drop both markers. The bun
+  suite's `warm` mode and `relay-cold` both pass it, so the JavaScript divergence lies in how
+  the relay serves its warm copy to the next Rust hop (`js/net/src/lite/publisher.ts`), not
+  in the copy: it answers the time range from what it holds and must still ask upstream for
+  the join.
 
 Public API: none. Wire: possibly, under lite-07-wip.
