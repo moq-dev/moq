@@ -1704,6 +1704,19 @@ impl TrackState {
 		runs
 	}
 
+	/// The parts of `groups` the publisher declared skipped: a cost in the skipped runs it
+	/// overlaps, not its length.
+	fn skipped_in(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		if groups.is_empty() {
+			return RangeSet::new();
+		}
+		self.drops
+			.overlapping(&groups)
+			.filter(|(_, hole)| matches!(hole, Hole::Skip))
+			.map(|(run, _)| run.start.max(groups.start)..run.end.min(groups.end))
+			.collect()
+	}
+
 	/// Whether the publisher declared `key` skipped: never produced, which is final.
 	fn skipped(&self, key: u64) -> bool {
 		self.drops.get(&key).is_some_and(|hole| *hole == Hole::Skip)
@@ -5325,16 +5338,7 @@ impl Producer {
 	/// runs it overlaps, not its length.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn skipped(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
-		if groups.is_empty() {
-			return RangeSet::new();
-		}
-		let state = self.state.read();
-		state
-			.drops
-			.overlapping(&groups)
-			.filter(|(_, hole)| matches!(hole, Hole::Skip))
-			.map(|(run, _)| run.start.max(groups.start)..run.end.min(groups.end))
-			.collect()
+		self.state.read().skipped_in(groups)
 	}
 
 	/// Forget every run held as stale: a new upstream subscription judges them afresh, and
@@ -7416,6 +7420,23 @@ impl Consumer {
 			return serving.hole_end(key, dropped);
 		}
 		self.with_state(|state| state?.read().hole_end(key, dropped))
+	}
+
+	/// The parts of `groups` the publisher declared skipped, never to be produced. Parks
+	/// `waiter` until a change here while some of `groups` is not.
+	pub(super) fn skipped_in(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.skipped_in(groups, waiter);
+		}
+		self.with_state(|state| {
+			let state = state?;
+			let mut found = RangeSet::new();
+			match state.poll(waiter, |state| skips(state, &groups, &mut found)) {
+				Poll::Ready(Err(state)) => Some(state.skipped_in(groups)),
+				_ => Some(found),
+			}
+		})
+		.unwrap_or_default()
 	}
 
 	/// Where a run of starts up to `end` ends with the span it reaches into; see
@@ -9663,25 +9684,36 @@ impl Cursor {
 	}
 
 	/// Whether a bounded window has nothing left to deliver: every group in its ranges was
-	/// handed out (in any of `taken`), dropped, skipped as stale, or given up as unfillable.
-	/// An open window, or one with a fill still out, always has more, and so does one its
-	/// cap keeps a group out of, since a reader may raise a cap again. Groups under `from` are
-	/// not judged: a time start resolves to the group containing it, which may lie under a
-	/// copy's resume point.
+	/// handed out, dropped, skipped as stale, or given up as unfillable (see [`Self::accounts`]).
+	fn is_exhausted(&self, ordered: bool) -> bool {
+		let window = &self.filter.window;
+		let Some(end) = window.end() else {
+			return false;
+		};
+		let gaps: Vec<ops::Range<u64>> = window
+			.runs(window.floor().unwrap_or(0))
+			.take_while(|run| *run.start() < end)
+			.flat_map(|run| {
+				let run = *run.start()..run.end().checked_add(1).map_or(end, |next| next.min(end));
+				self.record.delivered.gaps(run)
+			})
+			.collect();
+		self.accounts(&gaps, ordered)
+	}
+
+	/// Whether this cursor accounts for every key of `gaps` it did not hand out itself: each
+	/// was dropped, skipped as stale, or given up as unfillable, or lies outside its window,
+	/// which it never reads. An open window, or one with a fill still out, accounts for nothing
+	/// yet, and a key the cap keeps out stays owed, since a reader may raise a cap again.
 	///
 	/// An `ordered` read of the track's own publisher also passes a key below a group that
 	/// publisher created (see [`Self::passes`]). A received copy never does: only what its
 	/// feed proved, such as a whole group's GROUP_END, accounts for a key there.
-	fn is_exhausted(&self, logical: &[&Delivered], from: u64, ordered: bool) -> bool {
-		let taken: Vec<&Delivered> = std::iter::once(&self.record.delivered)
-			.chain(logical.iter().copied())
-			.collect();
-		let Some(end) = self.filter.window.end() else {
+	fn accounts(&self, gaps: &[ops::Range<u64>], ordered: bool) -> bool {
+		let window = &self.filter.window;
+		let Some(end) = window.end().filter(|_| !window.is_pending() && !self.awaits_fill()) else {
 			return false;
 		};
-		if self.filter.window.is_pending() || self.awaits_fill() {
-			return false;
-		}
 		let given_up = self.misses.as_ref().map(|misses| misses.given_up());
 		let coverage = self.coverage();
 		let state = self.state.read();
@@ -9712,14 +9744,16 @@ impl Cursor {
 			}
 			left.iter().all(|open| passes && Self::passes(&state, open))
 		};
-		self.filter
-			.window
-			.runs(self.filter.window.floor().unwrap_or(0).max(from))
-			.take_while(|run| *run.start() < end)
-			.all(|run| {
-				let run = *run.start()..run.end().checked_add(1).map_or(end, |next| next.min(end));
-				Delivered::gaps_in_all(&taken, run).into_iter().all(&accounted)
+		gaps.iter()
+			.flat_map(|gap| {
+				let gap_end = gap.end.min(end);
+				window
+					.runs(gap.start)
+					.take_while(move |run| *run.start() < gap_end)
+					.map(move |run| (*run.start()).max(gap.start)..run.end().saturating_add(1).min(gap_end))
 			})
+			.flat_map(|gap| self.record.delivered.gaps(gap))
+			.all(accounted)
 	}
 
 	/// Whether an ordered read of its track's own publisher passes `gap` without a group: that
@@ -11289,7 +11323,7 @@ impl Subscriber {
 						Poll::Pending => {
 							// A read that only skipped since its last hand-out settles its write-offs too.
 							cursor.retire_written_off();
-							break match !self.parks && cursor.is_exhausted(&[], 0, ordered) {
+							break match !self.parks && cursor.is_exhausted(ordered) {
 								true => {
 									if ordered && let Some(end) = cursor.filter.window.end() {
 										cursor.pass_end(cursor.end_key.map_or(end, |cap| cap.min(end)));
@@ -11319,26 +11353,45 @@ impl Subscriber {
 		}
 	}
 
-	/// Whether this route copy's bounded window has nothing left for the logical readers that
-	/// handed out `logical`: what this copy took itself, wrote off, or gave up counts too.
-	/// It judges from its resume point `from`: the logical reader judges what lies under it.
-	/// An `ordered` read also ends where [`Cursor::is_exhausted`] says one does.
-	pub(super) fn exhausted_for(
+	/// Whether this route copy accounts for every key of `gaps`, which none of the logical
+	/// readers that handed out `logical` did: what this copy took itself, wrote off, or gave
+	/// up counts, as [`Cursor::accounts`] has it. A copy that is another front's logical
+	/// track judges across its own copies.
+	pub(super) fn accounts_for(
 		&mut self,
 		logical: &[&Delivered],
-		from: Option<u64>,
+		gaps: &[ops::Range<u64>],
 		ordered: bool,
 		waiter: &kio::Waiter,
 	) -> bool {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.is_exhausted(logical, from.unwrap_or(0), ordered),
-			// A copy that is another front's logical track judges across its own copies.
+			Inner::Plain(cursor) => cursor.accounts(gaps, ordered),
 			Inner::Resume(resume, own) => {
 				let mut taken = Vec::with_capacity(logical.len() + 1);
 				taken.push(&own.record.delivered);
 				taken.extend_from_slice(logical);
-				resume.exhausted(&taken, ordered, waiter)
+				let gaps: Vec<ops::Range<u64>> = gaps
+					.iter()
+					.flat_map(|gap| own.record.delivered.gaps(gap.clone()))
+					.collect();
+				resume.accounts(&taken, &gaps, ordered, waiter)
 			}
+		}
+	}
+
+	/// The parts of `groups` the publisher declared skipped, as this subscriber knows them: a
+	/// front's logical track counts every route it held or let go.
+	/// Parks `waiter` until a change while some of `groups` is not.
+	pub(super) fn skipped_in(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => {
+				let mut found = RangeSet::new();
+				match cursor.state.poll(waiter, |state| skips(state, &groups, &mut found)) {
+					Poll::Ready(Err(state)) => state.skipped_in(groups),
+					_ => found,
+				}
+			}
+			Inner::Resume(resume, _) => resume.skipped_in(groups, waiter),
 		}
 	}
 
@@ -13213,6 +13266,16 @@ impl Subscriber {
 
 	pub fn assert_not_clone(&self, other: &Self) {
 		assert!(!self.is_clone(other), "should not be clone");
+	}
+}
+
+/// Read into `found` the parts of `groups` `state` holds skipped: ready once they cover
+/// `groups`, so a poll parks only while some of it is not.
+fn skips(state: &TrackState, groups: &ops::Range<u64>, found: &mut RangeSet<u64>) -> Poll<()> {
+	*found = state.skipped_in(groups.clone());
+	match found.gaps(groups).next() {
+		None => Poll::Ready(()),
+		Some(_) => Poll::Pending,
 	}
 }
 
