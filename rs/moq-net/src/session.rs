@@ -18,7 +18,7 @@ use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, 
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The least time a transport this side closed gets to confirm it, before the session
-/// ends without its confirmation; see [`Supervisor::close`].
+/// ends without its confirmation.
 const CLOSE_GRACE: Duration = Duration::from_millis(100);
 
 /// A close requested by a session handle, executed by the driver.
@@ -782,7 +782,7 @@ impl Supervisor {
 			return Poll::Ready(());
 		}
 		self.poll_running(waiter);
-		// A close executed this turn armed its grace, which has to register its wakeup.
+		// A close executed this turn starts its grace, which has to register its wakeup.
 		if let Poll::Ready(err) = self.poll_ended(waiter) {
 			self.end(err);
 			return Poll::Ready(());
@@ -801,14 +801,23 @@ impl Supervisor {
 			},
 			// A peer that is gone never lets some transports confirm a close, such as a
 			// WebTransport close waiting for its capsule's acknowledgement until the idle
-			// timeout. That transport goes on delivering it on its own.
-			Poll::Pending => match &mut self.unconfirmed {
-				Some(grace) => {
-					ready!(grace.poll(waiter));
-					None
+			// timeout. So a close this side sent, by a handle or the protocol, ends the
+			// session after three round trips and at least [`CLOSE_GRACE`], the time a live
+			// peer takes; the transport goes on delivering it on its own.
+			Poll::Pending => {
+				if self.unconfirmed.is_none() && self.session.closing().is_sent() {
+					let rtt = snapshot(&self.session).rtt.unwrap_or_default();
+					let grace = (rtt * 3).max(CLOSE_GRACE);
+					self.unconfirmed = Some(crate::time::Deadline::after(&self.runtime, grace));
 				}
-				None => return Poll::Pending,
-			},
+				match &mut self.unconfirmed {
+					Some(grace) => {
+						ready!(grace.poll(waiter));
+						None
+					}
+					None => return Poll::Pending,
+				}
+			}
 		};
 		Poll::Ready(err.unwrap_or_else(|| self.session.closing().cause(self.version).unwrap_or(Error::Cancel)))
 	}
@@ -905,16 +914,9 @@ impl Supervisor {
 	}
 
 	/// Close the transport over `cause`, this side's reason for ending the session.
-	///
-	/// The session then ends once the transport confirms the close, or after three round
-	/// trips and at least [`CLOSE_GRACE`] without it, the time a live peer takes to.
 	fn close(&mut self, cause: Error, reason: &str) {
 		let code = self.version.session_code(&SessionError::from(&cause));
 		self.session.abort(&cause, code, reason);
-		if self.unconfirmed.is_none() {
-			let rtt = snapshot(&self.session).rtt.unwrap_or_default();
-			self.unconfirmed = Some(crate::time::Deadline::after(&self.runtime, (rtt * 3).max(CLOSE_GRACE)));
-		}
 	}
 
 	/// Finish a requested drain once the protocol owes the peer nothing, or at
