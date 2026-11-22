@@ -135,3 +135,24 @@ server = "quiche"
 case = "rebind-addr"
 result = "failed"
 why = "As rebind-port."
+
+[[known]]
+client = "quiche"
+server = "moq-quic"
+case = "handshakeloss"
+result = "failed"
+why = "Some runs: quiche's PTO probes resend its first ClientHello datagram, never the lost second one, so the handshake stalls (cloudflare/quiche#2910)."
+
+[[known]]
+client = "moq-quic"
+server = "quic-go"
+case = "handshakeloss"
+result = "failed"
+why = "Some runs: the runner counts distinct server SCIDs, and quic-go drops a half-received handshake after its 5 s handshake idle timeout, so the client's retry counts as a 51st handshake (quic-interop/quic-interop-runner#508). Delete once the runner pin includes quic-interop/quic-interop-runner#509."
+
+[[known]]
+client = "moq-quic"
+server = "quic-go"
+case = "handshakecorruption"
+result = "failed"
+why = "As handshakeloss."
