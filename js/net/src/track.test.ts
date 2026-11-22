@@ -1438,6 +1438,22 @@ test("a received copy places a time from a whole group's span", () => {
 	producer.close();
 });
 
+// Expiry may forget the skip a GROUP_END recorded while the group stays held: its End alone still
+// proves a time inside the span. Mirrors the end of the Rust
+// `a_received_copy_places_a_time_from_a_whole_groups_span`.
+test("a received copy places a time from a whole group's End once its skip is gone", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	const group = producer.createGroup(1000n);
+	group.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
+	group.finishAt(1400n);
+	const reader = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1300n }] });
+	const holdings = hooks.subscriberHoldings(reader);
+	expect(holdings.containing(1300n, NO_MAX_DELAY)).toEqual({ at: 1000n });
+	expect(holdings.containing(1700n, NO_MAX_DELAY)).toBe("unknown");
+	expect(drainGroups(reader)).toEqual([1000n]);
+	producer.close();
+});
+
 // A drop inside a time end is reported, and one past it is not: the end settles by key.
 test("a drop a time end covers is reported", () => {
 	const producer = new TrackProducer("test");

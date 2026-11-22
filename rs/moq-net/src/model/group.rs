@@ -3390,6 +3390,16 @@ impl Handle {
 		settle(self.state.poll_ref(waiter, |state| state.poll_outcome()))
 	}
 
+	/// Poll until the group places `time`: closed, or holding a timed frame past it, which puts
+	/// its End past the time too, so it contains the time whatever it ends at.
+	pub(crate) fn poll_past(&self, waiter: &kio::Waiter, time: u64) -> Poll<()> {
+		(self.state.poll_ref(waiter, |state| match state.timeline {
+			Timeline::Timed { latest, .. } if latest.value() > time => Poll::Ready(Ok(())),
+			_ => state.poll_outcome(),
+		}))
+		.map(|_| ())
+	}
+
 	/// Poll until the group is aborted, including by eviction and after it finished; ready
 	/// with the cause. Finishing alone does not end it.
 	// Sessions and track scans watch for an abort that frees a group, finished or not.

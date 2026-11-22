@@ -997,6 +997,14 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
 // Where the held group at `key` ends, once finished whole; assigned in its static block.
 let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
+// The first key past the group held at `key` that its own End does not give up: its End once whole,
+// even after the skip its GROUP_END recorded expired, else the next key. Mirrors the Rust
+// `TrackState::past_span`.
+function pastSpan(producer: Producer, key: bigint): bigint {
+	const end = wholeAt(producer, key);
+	return end === undefined ? key + 1n : max(end, key + 1n);
+}
+
 // Where a range from `time` starts, the group at `key` being the newest starting at or before it and
 // `end` where it ended whole, if it did: there, unless it ended at or before the time, then at its
 // End, so at the next group, since no group contains a time past a whole group's span. A time at the
@@ -3921,7 +3929,8 @@ export class Subscriber {
 				// between, nor does a stale drop of a reader wider than the budget it was judged under.
 				// Mirrors the Rust `TrackState::containing_received`.
 				if (wire) {
-					if (below !== undefined && drops.givenUp(below + 1n, time + 1n, budget)) return at(below);
+					if (below !== undefined && drops.givenUp(pastSpan(producer, below), time + 1n, budget))
+						return at(below);
 					const reported = timeStartContaining(anchors.starts.get(time), time, budget);
 					if (reported !== undefined) return reported;
 					if (below === undefined && drops.givenUp(0n, time + 1n, budget)) return "before";
@@ -3948,7 +3957,7 @@ export class Subscriber {
 					// Below every group, up to the first, and above the last, past the drops after it.
 					const below = uncovered(0n);
 					if (below && below.start < first) runs.push({ start: below.start, end: first });
-					const above = uncovered(last + 1n);
+					const above = uncovered(pastSpan(producer, last));
 					if (above) runs.push(above);
 				}
 				return { runs, mark };
@@ -4114,11 +4123,12 @@ export class Subscriber {
 			const answer = lookup.lookup?.answer();
 			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
 			// A group answered below the time may end whole before it, which then lies in the pause past
-			// it: wait for it to end, then place the time by its End, held here so the start is the same
-			// whether the cache still holds it or not. Mirrors the Rust `Cursor::look_up_pass`.
+			// it: wait for it to end or hold a frame past the time, then place the time by its End, held
+			// here so the start is the same whether the cache still holds it or not. Mirrors the Rust
+			// `Cursor::look_up_pass`.
 			if (answer?.kind === "group" && answer.group < lookup.time) {
 				lookup.answer ??= answer.answer;
-				if (lookup.answer?.closed.peek() === undefined && lookup.answer !== undefined) continue;
+				if (lookup.answer !== undefined && !hooks.groupPast(lookup.answer, lookup.time)) continue;
 			}
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			lookup.lookup?.leave();
@@ -5532,7 +5542,9 @@ export class Subscriber {
 			this.#state.refused.changed(fn),
 			this.#fillMoves.changed(fn),
 			...this.#lookups.flatMap((lookup) => (lookup.lookup ? [lookup.lookup.changed.changed(fn)] : [])),
-			...this.#lookups.flatMap((lookup) => (lookup.answer ? [lookup.answer.closed.changed(fn)] : [])),
+			...this.#lookups.flatMap((lookup) =>
+				lookup.answer ? [lookup.answer.closed.changed(fn), hooks.groupWrites(lookup.answer).changed(fn)] : [],
+			),
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
 			this.#state.startChanged.changed(fn),

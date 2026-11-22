@@ -107,8 +107,8 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 ///
 /// Every start is the first frame of its group, and every end includes its whole group. A time
 /// names the group containing it, the newest one starting at or before it unless that group ended
-/// whole before the time, so a group's start names exactly it. A start in the pause past a whole
-/// group's end begins at the next group. Both are given [unscaled](MoqTimestamp::unscaled), in the track's
+/// whole at or before the time, so a group's start names exactly it. A start in the pause past a
+/// whole group's end begins at the next group. Both are given [unscaled](MoqTimestamp::unscaled), in the track's
 /// timescale; a scaled one is refused with a timestamp mismatch until the bindings convert it.
 ///
 /// Over a session older than moq-lite-07, a start between two groups reaches the publisher as

@@ -1122,6 +1122,13 @@ export const hooks: {
 	groupHeadless: (group: GroupProducer) => boolean;
 	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
 	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
+	/**
+	 * Whether a source copy places `time`: closed, or holding a timed frame past it, which puts its
+	 * End past the time too. Mirrors the Rust `group::Handle::poll_past`.
+	 */
+	groupPast: (group: GroupProducer, time: bigint) => boolean;
+	/** A source copy's frame count, bumped on each write. */
+	groupWrites: (group: GroupProducer) => Getter<number>;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -1552,6 +1559,12 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupWholeEnd: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupPast: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupWrites: () => {
 		throw new Error("group.ts not loaded");
 	},
 	startGroup: () => {

@@ -1217,7 +1217,7 @@ impl Holdings for TrackState {
 				(Some(_), Some(_)) if self.anchors != Anchors::Wire => [none.clone(), none],
 				// A copy places a time below its groups only once the keys down to 0 were
 				// dropped, and one above them only once the keys down to the newest were.
-				(Some((&first, _)), Some((&last, _))) => {
+				(Some((&first, _)), Some((&last, slot))) => {
 					let below = uncovered(0);
 					let below = *below.start()..=(*below.end()).min(first.saturating_sub(1));
 					let below = match first {
@@ -1225,7 +1225,7 @@ impl Holdings for TrackState {
 						_ => below,
 					};
 					let above = match last.checked_add(1) {
-						Some(next) => uncovered(next),
+						Some(_) => uncovered(TrackState::past_span(last, slot)),
 						None => none,
 					};
 					[below, above]
@@ -1471,7 +1471,7 @@ impl TrackState {
 	fn containing_received(&self, time: u64, budget: Duration) -> Containing {
 		let held = self.lookup.range(..=time).next_back();
 		if let Some((&key, slot)) = held
-			&& self.given_up_for(key.saturating_add(1)..time.saturating_add(1), budget)
+			&& self.given_up_for(Self::past_span(key, slot)..time.saturating_add(1), budget)
 		{
 			return Containing::At(slot.reached(key, time));
 		}
@@ -1482,6 +1482,13 @@ impl TrackState {
 			None if self.given_up_for(0..time.saturating_add(1), budget) => Containing::Before,
 			_ => Containing::Unknown,
 		}
+	}
+
+	/// The first key past the group held at `key` that its own End does not give up: its End
+	/// once whole, even after the skip its GROUP_END recorded expired, else the next key.
+	fn past_span(key: u64, slot: &Slot) -> u64 {
+		let next = key.saturating_add(1);
+		slot.end().map_or(next, |end| end.max(next))
 	}
 
 	/// Whether the range asked from `time` had no group at or before it for a reader within
@@ -10409,8 +10416,8 @@ impl Cursor {
 				},
 			};
 			// A group answered below the time may end whole before it, which then lies in the pause
-			// past it: wait for it to end, then place the time by its End, held here so the start is
-			// the same whether the cache still holds it or not.
+			// past it: wait for it to end or hold a frame past the time, then place the time by its
+			// End, held here so the start is the same whether the cache still holds it or not.
 			if let fill::TimeStart::Group(group) = answer
 				&& group < time
 			{
@@ -10420,7 +10427,7 @@ impl Cursor {
 				if lookup
 					.answer
 					.as_ref()
-					.is_some_and(|answer| answer.poll_closed(waiter).is_pending())
+					.is_some_and(|answer| answer.poll_past(waiter, time).is_pending())
 				{
 					continue;
 				}
@@ -17054,7 +17061,8 @@ mod test {
 	/// A lite-07 copy holding a whole group places a time inside its span from that group
 	/// alone, with no successor, since its GROUP_END gave up the starts there. A time past its
 	/// End waits until the publisher skips the pause up to it, then starts at that End, so at
-	/// the next group: the whole group never contains it.
+	/// the next group: the whole group never contains it. The End proves the span even once
+	/// expiry forgets the skip its GROUP_END recorded.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_received_copy_places_a_time_from_a_whole_groups_span() {
@@ -17090,6 +17098,18 @@ mod test {
 		write_group(&producer, 2000);
 		assert_eq!(drain(&mut paused), vec![2000]);
 		assert_eq!(drain(&mut inside), vec![1000, 2000]);
+
+		// Expiry forgets the skips while the group stays held: its End alone still proves a time
+		// inside the span, with nothing to ask upstream.
+		producer.forget_drops(1001..2000);
+		let mut later = producer.subscribe(from(1300));
+		assert_eq!(start(&mut later), Some(1000), "the End proves it");
+		assert_eq!(drain(&mut later), vec![1000, 2000]);
+		assert_eq!(
+			start(&mut producer.subscribe(from(1700))),
+			None,
+			"the pause is unproven again"
+		);
 	}
 
 	/// A time start an answer places only within a narrower budget than the reader's waits, and
@@ -28696,6 +28716,44 @@ mod test {
 				"cached: {cached}, evicted: {evicted}"
 			);
 		}
+	}
+
+	/// A looked-up group still open is read once it holds a frame past the time, which puts its
+	/// End past the time too: a handler streaming the group from storage need not finish it first.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_looked_up_group_with_a_frame_past_the_time_is_read_before_it_ends() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		for start in [0, 1000, 3000] {
+			let mut group = producer.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(start).unwrap(), &b"x"[..])
+				.unwrap();
+			drop(group.finish_at(start + 400).unwrap());
+		}
+		evict(&producer, 1000);
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
+			start: crate::track::Start::Time(1300),
+			end: None,
+		}]));
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		let mut group = fill.accept(1000, None).unwrap().expect("a fresh group");
+		drop(fill);
+		for (time, read) in [(1000, Vec::<u64>::new()), (1300, Vec::new()), (1350, vec![1000, 3000])] {
+			group
+				.write_frame(Timestamp::from_millis(time).unwrap(), &b"x"[..])
+				.unwrap();
+			let mut drained = drain_groups(&mut subscriber);
+			drained.sort();
+			assert_eq!(drained, read, "a frame at {time}");
+		}
+		assert_eq!(subscriber.resolved_range(0).map(|resolved| resolved.start), Some(1000));
+		drop(group.finish_at(1400).unwrap());
 	}
 
 	/// Two readers look up the same time in a pause: the second handler's accept finds the group

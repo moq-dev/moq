@@ -1719,6 +1719,52 @@ test("fill: a looked-up group ending before the time starts past it", async () =
 	}
 });
 
+// A looked-up group still open is read once it holds a frame past the time, which puts its End past
+// the time too. Mirrors the Rust `a_looked_up_group_with_a_frame_past_the_time_is_read_before_it_ends`.
+test("fill: a looked-up group with a frame past the time is read before it ends", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const requests = track.requests();
+	const write = (group: ReturnType<typeof track.createGroup>, at: number) =>
+		group.writeFrame({ payload: enc.encode(`f${at}`), timestamp: Timestamp.fromMillis(at) });
+	let answered: ReturnType<typeof track.createGroup> | undefined;
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			if (fill.floor > 1000n) {
+				fill.dropGroups(fill.start, fill.end);
+				fill.close();
+				continue;
+			}
+			answered = defined(fill.accept(1000n));
+			fill.close();
+		}
+	})();
+	for (const start of [0, 3000]) {
+		const held = track.createGroup(BigInt(start));
+		write(held, start);
+		held.finishAt(BigInt(start + 400));
+	}
+	const reader = track.subscribe(fromTime(1300n));
+	const next = reader.ordered().nextGroup();
+	while (answered === undefined) await yieldNow();
+	const group = answered;
+	let read: bigint | undefined;
+	void next.then((got) => {
+		read = got?.start;
+	});
+	for (const at of [1000, 1300]) {
+		write(group, at);
+		for (let i = 0; i < 10; i++) await yieldNow();
+		expect(read).toBeUndefined();
+	}
+	write(group, 1350);
+	expect((await next)?.start).toBe(1000n);
+	group.finishAt(1400n);
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a time start dropped after its floor's group is evicted starts at that group", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

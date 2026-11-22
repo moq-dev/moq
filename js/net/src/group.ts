@@ -320,6 +320,8 @@ export class Producer {
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
 		hooks.groupWholeEnd = (group) => (group.#state.closed.peek() === null ? group.#state.end : undefined);
+		hooks.groupPast = (group, time) => group.#state.closed.peek() !== undefined || group.#highest() > time;
+		hooks.groupWrites = (group) => group.#state.total;
 		hooks.groupHeadless = (group) => group.#state.index > 0 || headShed(group.#state.frames.peek().first);
 		hooks.holdGroup = (group) => {
 			group.#holds++;
