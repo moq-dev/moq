@@ -1688,13 +1688,14 @@ export class Subscriber {
 			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
 		// Absolute subscriptions keep their prefix even when the answer follows its first data. A
-		// live join's earlier start is left to the copy's fills, one range FETCH per run. A group-0
-		// join asked for everything the publisher holds, so the groups below its edge stay
-		// fillable even for a reader from the oldest group, which names none of them.
+		// live join's earlier start is left to the copy's fills, one range FETCH per run. The
+		// publisher placed that start at its edge, so the groups below stay fillable for whatever
+		// each reader's budget reaches, even one from the oldest group, which names none of them,
+		// and one that joins after this SUBSCRIBE, which no update re-asks.
 		hooks.startTrack(producer, {
 			start: live ? (ok.largest?.groupId ?? 0n) : (start ?? 0n),
 			requested: bounds.start,
-			resolved: live && start === 0n && ok.largest !== undefined,
+			resolved: live && ok.largest !== undefined,
 		});
 		const source = this.#streamSources.get(request);
 		if (source)

@@ -4584,11 +4584,11 @@ impl SubscribeOnce {
 		}
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
-		// may still arrive after a higher one's. This resolves the pending start. A group-0
-		// join asked for everything the publisher holds, so the groups below its edge stay
-		// fillable even for a reader from the oldest group, which names none of them.
+		// may still arrive after a higher one's. This resolves the pending start. The publisher
+		// placed a live join at its edge, so the groups below stay fillable for whatever each
+		// reader's budget reaches, even one from the oldest group, which names none of them.
 		let _ = match (plan.live, largest) {
-			(true, Some(largest)) if plan.start == Some(0) => track.start_resolved(largest.group),
+			(true, Some(largest)) => track.start_resolved(largest.group),
 			(true, largest) => track.start_at(largest.map_or(0, |largest| largest.group)),
 			(false, _) => track.start_at(plan.start),
 		};
