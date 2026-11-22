@@ -906,6 +906,83 @@ async fn the_wire_counters_follow_the_socket() {
 	assert_eq!((wire.sent_bytes(), wire.received_bytes()), (500, 600));
 }
 
+/// A byte stream that only reaches its socket when flushed, as TLS and WebSocket buffers do,
+/// and the socket that counts what it flushed.
+struct Buffered {
+	inner: Stream<DuplexStream>,
+	queued: u64,
+	socket: Arc<CountedSocket>,
+}
+
+impl Transport for Buffered {
+	fn bind(&mut self, config: &Config) {
+		self.inner.bind(config);
+	}
+
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		self.inner.poll_recv(waiter)
+	}
+
+	fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.inner.poll_ready(waiter)
+	}
+
+	fn send(&mut self, record: Bytes) -> Result<(), Error> {
+		self.queued += record.len() as u64;
+		self.inner.send(record)
+	}
+
+	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let flushed = self.inner.poll_flush(waiter);
+		if flushed.is_ready() {
+			let sent = self.socket.counts.lock().unwrap().sent;
+			self.socket.set(sent + std::mem::take(&mut self.queued), 0);
+		}
+		flushed
+	}
+
+	fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.inner.poll_close(waiter)
+	}
+
+	fn socket_stats(&self) -> Option<crate::SharedSocketStats> {
+		Some(self.socket.clone())
+	}
+}
+
+/// A burst after an idle interval is counted once the transport flushed it, not at the step
+/// that only handed it to the transport's buffer, with nothing later to correct the count.
+#[tokio::test(start_paused = true)]
+async fn the_wire_counters_wait_for_the_flush() {
+	let socket = Arc::new(CountedSocket::default());
+	let mut quiet = config(Version::QMux02);
+	quiet.rtt_interval = None;
+	quiet.idle_timeout = None;
+	let (client, server) = tokio::io::duplex(PIPE);
+	let client = Session::connect(
+		Buffered {
+			inner: Stream::new(client),
+			queued: 0,
+			socket: socket.clone(),
+		},
+		quiet.clone(),
+	);
+	let server = Session::accept(Stream::new(server), quiet);
+	let (client, server) = tokio::join!(client, server);
+	let client = spawn(client.expect("client handshake"));
+	let server = spawn(server.expect("server handshake"));
+
+	kio::clock::sleep(crate::driver::WIRE_INTERVAL * 2).await;
+	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut send, payload(100, 1)).await;
+	send.finish().unwrap();
+	read_all(&mut server.accept_uni().await.unwrap()).await.unwrap();
+
+	let flushed = socket.counts.lock().unwrap().sent;
+	assert!(flushed >= 100, "flushed {flushed}");
+	assert_eq!(client.wire().unwrap().sent_bytes(), flushed);
+}
+
 /// A session over a byte stream with no kernel behind it counts nothing, rather than an
 /// estimate from its records.
 #[tokio::test(start_paused = true)]

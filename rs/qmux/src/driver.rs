@@ -350,8 +350,6 @@ impl<T: Transport> Run<T> {
 		drop(state);
 		self.inner.wire.set_credit_stalls(credit.stalls, credit.stalled);
 
-		let wire_due = self.publish_wire(now, written > 0 || received);
-
 		// Flush what this step queued, what an earlier flush left, and what the transport may
 		// have queued on its own while receiving, such as a WebSocket Pong. Skipping it
 		// otherwise matters: a flush through TLS and tungstenite is not free.
@@ -364,6 +362,16 @@ impl<T: Transport> Run<T> {
 			false => true,
 		};
 		self.unflushed = !flushed;
+		// Count only what reached the socket: the transport may hold records until its flush
+		// finishes, which then steps the driver again to publish them.
+		let moved = written > 0 || received;
+		let wire_due = match flushed {
+			true => self.publish_wire(now, moved),
+			false => {
+				self.wire_stale |= moved;
+				None
+			}
+		};
 		if blocked || !flushed {
 			// The window may have moved since the socket's bound was last set. Setting it
 			// before parking lets a raised bound wake the flush that just went pending sooner.
