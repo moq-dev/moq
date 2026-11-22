@@ -1074,6 +1074,14 @@ struct BucketTier {
 	totals: Totals,
 	paths: Frame<PathUsage>,
 	labels: Frame<Presence>,
+	/// Each listed label's rows that ended on an earlier drain, while another row
+	/// keeps the label listed: a label's sessions in several roots are separate
+	/// rows, and one ending must not take its counts off the label.
+	#[serde(skip)]
+	ended: HashMap<Path, Presence>,
+	/// This drain's ending rows, folded into `ended` once published.
+	#[serde(skip)]
+	ending: Vec<(Path, Presence)>,
 }
 
 /// One path's entry on a bucket track; serializes as a [`Usage`](crate::Usage)
@@ -1165,6 +1173,9 @@ impl BucketTrack {
 			tier.folded.sessions.add(presence);
 		}
 		tier.labels.entries.push((label.clone(), presence));
+		if closed {
+			tier.ending.push((label.clone(), presence));
+		}
 	}
 
 	/// Whether this drain left the bucket empty for at least `linger`.
@@ -1193,6 +1204,19 @@ impl BucketTrack {
 				}
 				same
 			});
+			// A label's ended rows count while it stays listed, and leave with it.
+			let BucketTier {
+				labels, ended, ending, ..
+			} = tier;
+			ended.retain(|label, _| labels.entries.binary_search_by(|row| row.0.cmp(label)).is_ok());
+			for (label, presence) in &mut labels.entries {
+				if let Some(folded) = ended.get(label) {
+					presence.add(*folded);
+				}
+			}
+			for (label, presence) in ending.drain(..) {
+				ended.entry(label).or_default().add(presence);
+			}
 		}
 		if let Err(err) = self.snapshot.update(&self.body, stamp) {
 			tracing::warn!(?err, name = self.name, "stats: failed to write bucket frame");
@@ -2652,6 +2676,38 @@ mod tests {
 		drive_tick().await;
 		let ended = live(&mut routes) == Some(false);
 		assert!(ended, "root c's view ended");
+	}
+
+	/// A label's sessions in two roots are two rows; one ending keeps its counts on
+	/// the label while the other stays, so a reader never sees the label go back.
+	#[tokio::test(start_paused = true)]
+	async fn a_label_keeps_an_ended_roots_counts() {
+		let origin = produce_origin();
+		let producer = crate::produce::spawned(Producer::new(Config::new().with_origin(origin.clone())));
+		let session = |root: &'static str| {
+			producer
+				.registry()
+				.tier(Tier::default())
+				.session(moq_net::stats::SessionInfo::new(Path::from_static("x")).with_root(Path::from_static(root)))
+		};
+		let a = session("a");
+		let _b = session("b");
+		drive_tick().await;
+		let broadcast = origin.consume().request(".stats/node", None).await.expect("node");
+		let label = |frame: crate::BucketFrame| frame.tiers[""].labels["x"];
+		let started = label(read_bucket(&broadcast, "").await);
+		assert_eq!((started.sessions_started, started.sessions_ended), (2, 0));
+
+		drop(a);
+		for _ in 0..3 {
+			drive_tick().await;
+			let x = label(read_bucket(&broadcast, "").await);
+			assert_eq!(
+				(x.sessions_started, x.sessions_ended),
+				(2, 1),
+				"root a's row ended, not reset"
+			);
+		}
 	}
 
 	/// The announce events buffered so far in delivery order, as
