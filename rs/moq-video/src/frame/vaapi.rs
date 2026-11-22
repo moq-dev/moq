@@ -394,7 +394,7 @@ pub(crate) mod testing {
 	use std::os::fd::OwnedFd;
 	use std::sync::Arc;
 
-	use moq_vaapi::{Display, Image, Surface as VaSurface, UsageHint, VA_FOURCC_BGRX, VA_RT_FORMAT_RGB32};
+	use moq_vaapi::{Display, ImageMut, Surface as VaSurface, UsageHint, VA_FOURCC_BGRX, VA_RT_FORMAT_RGB32};
 
 	use super::super::{DmaBuf, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420};
 	use crate::{Error, Size};
@@ -458,7 +458,7 @@ pub(crate) mod testing {
 			None => Display::open()?,
 		};
 		let (width, height) = (size.width, size.height);
-		let surface = display
+		let mut surface = display
 			.create_surfaces(
 				VA_RT_FORMAT_RGB32,
 				Some(VA_FOURCC_BGRX),
@@ -475,7 +475,7 @@ pub(crate) mod testing {
 			.into_iter()
 			.find(|format| format.fourcc == VA_FOURCC_BGRX)?;
 		{
-			let mut image = Image::create_from(&surface, format, (width, height), (width, height)).ok()?;
+			let mut image = ImageMut::create_uninitialized(&mut surface, format).ok()?;
 			let va_image = *image.image();
 			let data = image.as_mut();
 			for y in 0..height as usize {
@@ -486,6 +486,7 @@ pub(crate) mod testing {
 					data[to..to + 4].copy_from_slice(&[b, g, r, 255]);
 				}
 			}
+			image.put().expect("put the image");
 		}
 		surface.sync().ok()?;
 		let mut exported = surface.export_prime().ok()?;

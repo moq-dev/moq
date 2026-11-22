@@ -695,7 +695,13 @@ impl H264 {
 		tracing::debug!("frame_num gap up to {frame_num}");
 
 		let max_frame_num = sps.max_frame_num();
-		let mut unused = (self.prev_ref_pic_info.frame_num + 1) % max_frame_num;
+		let first = (self.prev_ref_pic_info.frame_num + 1) % max_frame_num;
+		// Sliding-window marking keeps only the last `max_num_ref_frames` of the
+		// invented pictures, so inventing the earlier ones would change nothing
+		// but the work a lossy or hostile stream costs.
+		let missing = (frame_num + max_frame_num - first) % max_frame_num;
+		let skipped = missing.saturating_sub(u32::from(sps.max_num_ref_frames));
+		let mut unused = (first + skipped) % max_frame_num;
 		while unused != frame_num {
 			let mut pic = PictureData::new_non_existing(unused, timestamp);
 			self.compute_pic_order_count(&mut pic, sps)?;
@@ -714,7 +720,11 @@ impl H264 {
 	}
 
 	/// 8.2.1: derives the picture order count, which drives output ordering.
+	///
+	/// Fails a picture whose order count leaves the `i32` range the
+	/// specification bounds it to, as a hostile stream's can.
 	fn compute_pic_order_count(&mut self, pic: &mut PictureData, sps: &Sps) -> anyhow::Result<()> {
+		let overflow = || anyhow!("picture order count overflows");
 		match pic.pic_order_cnt_type {
 			// 8.2.1.1
 			0 => {
@@ -733,30 +743,35 @@ impl H264 {
 					)
 				};
 
-				let max_pic_order_cnt_lsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+				let max_pic_order_cnt_lsb: i32 = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+				// Both are below 2^16, except a previous top field order count
+				// after a memory_management_control_operation 5, which is any `i32`.
+				let lsb_delta = i64::from(prev_pic_order_cnt_lsb) - i64::from(pic.pic_order_cnt_lsb);
+				let half = i64::from(max_pic_order_cnt_lsb / 2);
 
-				pic.pic_order_cnt_msb = if (pic.pic_order_cnt_lsb < prev_pic_order_cnt_lsb)
-					&& (prev_pic_order_cnt_lsb - pic.pic_order_cnt_lsb >= max_pic_order_cnt_lsb / 2)
-				{
-					prev_pic_order_cnt_msb + max_pic_order_cnt_lsb
-				} else if (pic.pic_order_cnt_lsb > prev_pic_order_cnt_lsb)
-					&& (pic.pic_order_cnt_lsb - prev_pic_order_cnt_lsb > max_pic_order_cnt_lsb / 2)
-				{
-					prev_pic_order_cnt_msb - max_pic_order_cnt_lsb
+				pic.pic_order_cnt_msb = if lsb_delta >= half {
+					prev_pic_order_cnt_msb.checked_add(max_pic_order_cnt_lsb)
+				} else if -lsb_delta > half {
+					prev_pic_order_cnt_msb.checked_sub(max_pic_order_cnt_lsb)
 				} else {
-					prev_pic_order_cnt_msb
-				};
+					Some(prev_pic_order_cnt_msb)
+				}
+				.ok_or_else(overflow)?;
 
 				if !matches!(pic.field, Field::Bottom) {
-					pic.top_field_order_cnt = pic.pic_order_cnt_msb + pic.pic_order_cnt_lsb;
+					pic.top_field_order_cnt = pic
+						.pic_order_cnt_msb
+						.checked_add(pic.pic_order_cnt_lsb)
+						.ok_or_else(overflow)?;
 				}
 
 				if !matches!(pic.field, Field::Top) {
 					pic.bottom_field_order_cnt = if matches!(pic.field, Field::Frame) {
-						pic.top_field_order_cnt + pic.delta_pic_order_cnt_bottom
+						pic.top_field_order_cnt.checked_add(pic.delta_pic_order_cnt_bottom)
 					} else {
-						pic.pic_order_cnt_msb + pic.pic_order_cnt_lsb
-					};
+						pic.pic_order_cnt_msb.checked_add(pic.pic_order_cnt_lsb)
+					}
+					.ok_or_else(overflow)?;
 				}
 			}
 
@@ -766,16 +781,10 @@ impl H264 {
 					self.prev_pic_info.frame_num_offset = 0;
 				}
 
-				pic.frame_num_offset = if matches!(pic.is_idr, IsIdr::Yes { .. }) {
-					0
-				} else if self.prev_pic_info.frame_num > pic.frame_num {
-					self.prev_pic_info.frame_num_offset + sps.max_frame_num()
-				} else {
-					self.prev_pic_info.frame_num_offset
-				};
+				pic.frame_num_offset = self.frame_num_offset(pic, sps)?;
 
 				let mut abs_frame_num = if sps.num_ref_frames_in_pic_order_cnt_cycle != 0 {
-					pic.frame_num_offset + pic.frame_num
+					pic.frame_num_offset.checked_add(pic.frame_num).ok_or_else(overflow)?
 				} else {
 					0
 				};
@@ -784,7 +793,7 @@ impl H264 {
 					abs_frame_num -= 1;
 				}
 
-				let mut expected_pic_order_cnt = 0;
+				let mut expected_pic_order_cnt: i32 = 0;
 
 				if abs_frame_num > 0 {
 					if sps.num_ref_frames_in_pic_order_cnt_cycle == 0 {
@@ -796,29 +805,42 @@ impl H264 {
 					// The cycle is only summed up to the position this frame sits
 					// at within it, not all the way round.
 					let position_in_cycle = (abs_frame_num - 1) % cycle_len;
-					expected_pic_order_cnt = cycles as i32 * sps.expected_delta_per_pic_order_cnt_cycle;
+					expected_pic_order_cnt = i32::try_from(cycles)
+						.ok()
+						.and_then(|cycles| cycles.checked_mul(sps.expected_delta_per_pic_order_cnt_cycle))
+						.ok_or_else(overflow)?;
 
 					for i in 0..=position_in_cycle {
-						expected_pic_order_cnt += sps.offset_for_ref_frame[i as usize];
+						expected_pic_order_cnt = expected_pic_order_cnt
+							.checked_add(sps.offset_for_ref_frame[i as usize])
+							.ok_or_else(overflow)?;
 					}
 				}
 
 				if pic.nal_ref_idc == 0 {
-					expected_pic_order_cnt += sps.offset_for_non_ref_pic;
+					expected_pic_order_cnt = expected_pic_order_cnt
+						.checked_add(sps.offset_for_non_ref_pic)
+						.ok_or_else(overflow)?;
 				}
 
+				let top = expected_pic_order_cnt.checked_add(pic.delta_pic_order_cnt0);
 				match pic.field {
 					Field::Frame => {
-						pic.top_field_order_cnt = expected_pic_order_cnt + pic.delta_pic_order_cnt0;
-						pic.bottom_field_order_cnt =
-							pic.top_field_order_cnt + sps.offset_for_top_to_bottom_field + pic.delta_pic_order_cnt1;
+						pic.top_field_order_cnt = top.ok_or_else(overflow)?;
+						pic.bottom_field_order_cnt = pic
+							.top_field_order_cnt
+							.checked_add(sps.offset_for_top_to_bottom_field)
+							.and_then(|cnt| cnt.checked_add(pic.delta_pic_order_cnt1))
+							.ok_or_else(overflow)?;
 					}
 					Field::Top => {
-						pic.top_field_order_cnt = expected_pic_order_cnt + pic.delta_pic_order_cnt0;
+						pic.top_field_order_cnt = top.ok_or_else(overflow)?;
 					}
 					Field::Bottom => {
-						pic.bottom_field_order_cnt =
-							expected_pic_order_cnt + sps.offset_for_top_to_bottom_field + pic.delta_pic_order_cnt0;
+						pic.bottom_field_order_cnt = expected_pic_order_cnt
+							.checked_add(sps.offset_for_top_to_bottom_field)
+							.and_then(|cnt| cnt.checked_add(pic.delta_pic_order_cnt0))
+							.ok_or_else(overflow)?;
 					}
 				}
 			}
@@ -829,20 +851,19 @@ impl H264 {
 					self.prev_pic_info.frame_num_offset = 0;
 				}
 
-				pic.frame_num_offset = if matches!(pic.is_idr, IsIdr::Yes { .. }) {
-					0
-				} else if self.prev_pic_info.frame_num > pic.frame_num {
-					self.prev_pic_info.frame_num_offset + sps.max_frame_num()
-				} else {
-					self.prev_pic_info.frame_num_offset
-				};
+				pic.frame_num_offset = self.frame_num_offset(pic, sps)?;
 
 				let pic_order_cnt = if matches!(pic.is_idr, IsIdr::Yes { .. }) {
 					0
-				} else if pic.nal_ref_idc == 0 {
-					2 * (pic.frame_num_offset + pic.frame_num) as i32 - 1
 				} else {
-					2 * (pic.frame_num_offset + pic.frame_num) as i32
+					let doubled = pic
+						.frame_num_offset
+						.checked_add(pic.frame_num)
+						.and_then(|abs| i32::try_from(abs).ok())
+						.and_then(|abs| abs.checked_mul(2))
+						.ok_or_else(overflow)?;
+					// Never underflows: `doubled` is not negative.
+					doubled - i32::from(pic.nal_ref_idc == 0)
 				};
 
 				if matches!(pic.field, Field::Frame | Field::Top) {
@@ -863,6 +884,21 @@ impl H264 {
 		};
 
 		Ok(())
+	}
+
+	/// 8-6 and 8-11: the FrameNumOffset of `pic`, which grows by MaxFrameNum each
+	/// time frame_num wraps without an IDR.
+	fn frame_num_offset(&self, pic: &PictureData, sps: &Sps) -> anyhow::Result<u32> {
+		Ok(if matches!(pic.is_idr, IsIdr::Yes { .. }) {
+			0
+		} else if self.prev_pic_info.frame_num > pic.frame_num {
+			self.prev_pic_info
+				.frame_num_offset
+				.checked_add(sps.max_frame_num())
+				.context("FrameNumOffset overflows")?
+		} else {
+			self.prev_pic_info.frame_num_offset
+		})
 	}
 
 	/// 8.2.5.1: marks the decoded picture as used or unused for reference.
@@ -1843,7 +1879,7 @@ mod tests {
 	/// Encoder settings shared by the tests that need a stream rather than a
 	/// particular picture.
 	fn encoder_config(width: u32, height: u32) -> crate::encode::Config {
-		crate::encode::Config::new(width, height, 30, 2_000_000, 30)
+		crate::encode::Config::new(width, height, 30, 2_000_000, std::num::NonZeroU32::new(30).unwrap())
 	}
 
 	/// A gray field with a moving block, so a picture that decoded into the

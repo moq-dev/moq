@@ -471,7 +471,7 @@ mod tests {
 	}
 	/// An NV12 surface whose left half has luma `left` and right half `right`, so a crop and a scale differ.
 	fn split_surface(processor: &Processor, (width, height): (u32, u32), [left, right]: [u8; 2]) -> Surface<()> {
-		let source = processor
+		let mut source = processor
 			.display()
 			.create_surfaces(
 				VA_RT_FORMAT_YUV420,
@@ -492,8 +492,7 @@ mod tests {
 			.find(|f| f.fourcc == VA_FOURCC_NV12)
 			.expect("an NV12 image format");
 		{
-			let mut image =
-				crate::Image::create_from(&source, format, (width, height), (width, height)).expect("create an image");
+			let mut image = crate::ImageMut::create_uninitialized(&mut source, format).expect("create an image");
 			let va_image = *image.image();
 			let data = image.as_mut();
 			for y in 0..height as usize {
@@ -506,6 +505,7 @@ mod tests {
 				let row = va_image.offsets[1] as usize + y * va_image.pitches[1] as usize;
 				data[row..row + width as usize].fill(128);
 			}
+			image.put().expect("put the image");
 		}
 		source
 	}

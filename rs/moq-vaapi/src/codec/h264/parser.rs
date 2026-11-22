@@ -2108,7 +2108,8 @@ impl Parser {
 				sps.offset_for_ref_frame[i] = r.read_se()?;
 
 				// (7-12) in the spec.
-				offset_acc += sps.offset_for_ref_frame[i];
+				offset_acc = i32::checked_add(offset_acc, sps.offset_for_ref_frame[i])
+					.ok_or("ExpectedDeltaPerPicOrderCntCycle overflows")?;
 			}
 
 			sps.expected_delta_per_pic_order_cnt_cycle = offset_acc;

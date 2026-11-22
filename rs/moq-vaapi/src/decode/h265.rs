@@ -325,7 +325,8 @@ impl Decoder {
 			self.first_picture_after_eos,
 			self.prev_tid0_pic.as_ref(),
 			max_pic_order_cnt_lsb,
-		);
+		)
+		.context("picture order count overflows")?;
 		self.first_picture_in_bitstream = false;
 		self.first_picture_after_eos = false;
 
@@ -391,10 +392,14 @@ impl Decoder {
 			for i in 0..usize::from(hdr.num_long_term_sps + hdr.num_long_term_pics) {
 				let mut poc_lt = hdr.poc_lsb_lt[i] as i32;
 				let msb = hdr.delta_poc_msb_present_flag[i];
+				// Wraps rather than overflows: a hostile stream's lookup key only
+				// fails to find a picture.
 				if msb {
-					poc_lt += poc
+					poc_lt = poc_lt.wrapping_add(
+						poc
 						.wrapping_sub((hdr.delta_poc_msb_cycle_lt[i] as i32).wrapping_mul(max_pic_order_cnt_lsb))
-						.wrapping_sub(poc & (max_pic_order_cnt_lsb - 1));
+						.wrapping_sub(poc & (max_pic_order_cnt_lsb - 1)),
+					);
 				}
 				if hdr.used_by_curr_pic_lt[i] {
 					lt_curr.push((poc_lt, msb));

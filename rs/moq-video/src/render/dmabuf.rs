@@ -355,7 +355,7 @@ pub(super) mod fixture {
 	pub(in crate::render) fn surface(format: DrmFormat, size: Size, pixels: &[u8]) -> Option<DmaBuf> {
 		let fourcc = va_fourcc(format).expect("a VA-API format");
 		let display = moq_vaapi::Display::open()?;
-		let surface = display
+		let mut surface = display
 			.create_surfaces::<()>(
 				moq_vaapi::VA_RT_FORMAT_YUV420,
 				Some(fourcc),
@@ -372,7 +372,7 @@ pub(super) mod fixture {
 			.pop()
 			.expect("one surface");
 
-		upload(&display, &surface, format, size, pixels)?;
+		upload(&display, &mut surface, format, size, pixels)?;
 
 		let exported = surface
 			.export_prime()
@@ -422,7 +422,7 @@ pub(super) mod fixture {
 	/// so the driver writes the pixels into whatever layout the surface has.
 	fn upload(
 		display: &Arc<moq_vaapi::Display>,
-		surface: &moq_vaapi::Surface<()>,
+		surface: &mut moq_vaapi::Surface<()>,
 		format: DrmFormat,
 		size: Size,
 		pixels: &[u8],
@@ -438,7 +438,7 @@ pub(super) mod fixture {
 				None
 			})?;
 
-		let mut image = moq_vaapi::Image::create_from(surface, image_format, surface.size(), surface.size())
+		let mut image = moq_vaapi::ImageMut::create_uninitialized(surface, image_format)
 			.map_err(|e| eprintln!("this driver will not create a {fourcc:#x} image: {e}"))
 			.ok()?;
 		let va_image = *image.image();
@@ -454,9 +454,8 @@ pub(super) mod fixture {
 			source = &source[rows * length..];
 		}
 
-		// `vaPutImage` runs on drop, and the surface has to be idle before
-		// anything exports it.
-		drop(image);
+		// The surface has to be idle before anything exports it.
+		image.put().expect("put the uploaded image");
 		surface.sync().expect("sync the uploaded surface");
 		Some(())
 	}

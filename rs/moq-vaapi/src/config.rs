@@ -71,33 +71,27 @@ impl Config {
 		// Safe because `self` represents a valid VAConfig. We first query how
 		// much space is needed by the C API by passing in NULL in the first
 		// call to `vaQuerySurfaceAttributes`.
-		let attrs_len: std::os::raw::c_uint = 0;
+		let mut attrs_len: std::os::raw::c_uint = 0;
 		va_check(unsafe {
-			bindings::va().vaQuerySurfaceAttributes(
-				self.display.handle(),
-				self.id,
-				std::ptr::null_mut(),
-				&attrs_len as *const _ as *mut std::os::raw::c_uint,
-			)
+			bindings::va().vaQuerySurfaceAttributes(self.display.handle(), self.id, std::ptr::null_mut(), &mut attrs_len)
 		})?;
 
-		let mut attrs = Vec::with_capacity(attrs_len as usize);
+		let capacity = attrs_len as usize;
+		let mut attrs = Vec::with_capacity(capacity);
+		let mut len: std::os::raw::c_uint = attrs_len;
 		// Safe because we allocate a vector with the required capacity as
 		// returned by the initial call to vaQuerySurfaceAttributes. We then
 		// pass a valid pointer to it.
 		va_check(unsafe {
-			bindings::va().vaQuerySurfaceAttributes(
-				self.display.handle(),
-				self.id,
-				attrs.as_mut_ptr(),
-				&attrs_len as *const _ as *mut std::os::raw::c_uint,
-			)
+			bindings::va().vaQuerySurfaceAttributes(self.display.handle(), self.id, attrs.as_mut_ptr(), &mut len)
 		})?;
+		if len as usize > capacity {
+			return Err(VaError::status(bindings::VA_STATUS_ERROR_OPERATION_FAILED));
+		}
 
-		// Safe because vaQuerySurfaceAttributes will have written to
-		// exactly attrs_len entries in the vector.
+		// Safe because vaQuerySurfaceAttributes wrote `len` entries, which fit the capacity.
 		unsafe {
-			attrs.set_len(attrs_len as usize);
+			attrs.set_len(len as usize);
 		}
 
 		Ok(attrs)

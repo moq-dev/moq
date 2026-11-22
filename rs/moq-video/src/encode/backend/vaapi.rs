@@ -101,7 +101,7 @@ impl Vaapi {
 				config.height,
 				config.framerate.rounded(),
 				bitrate,
-				interval,
+				std::num::NonZeroU32::new(interval).unwrap_or(std::num::NonZeroU32::MIN),
 			)
 		};
 		let encoder = Encoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
