@@ -19,9 +19,11 @@ import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, routesEqual, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import {
+	bestOfTier,
 	compareRouteCandidates,
 	compareRoutes,
 	coveringPrefixes,
+	type Filed,
 	firstEligible,
 	hiddenBelow,
 	hooks,
@@ -243,54 +245,6 @@ function frontier(node: WatchNode, out: Path.Valid[] = []): Path.Valid[] {
 		else frontier(child, out);
 	}
 	return out;
-}
-
-/**
- * Whether claim `a` outranks `b`, each covering one root from where it is filed: the more specific,
- * and of claims of one prefix, the higher epoch of one instance, else the better route, else the
- * deeper filing.
- */
-function outranks(
-	a: { specificity: number; depth: number; route: WireRoute },
-	b: { specificity: number; depth: number; route: WireRoute },
-): boolean {
-	if (a.specificity !== b.specificity) return a.specificity > b.specificity;
-	if (a.route.instance === b.route.instance && (a.route.epoch ?? 0n) !== (b.route.epoch ?? 0n)) {
-		return (a.route.epoch ?? 0n) > (b.route.epoch ?? 0n);
-	}
-	const order = compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route);
-	return order !== 0 ? order < 0 : a.depth >= b.depth;
-}
-
-/**
- * Presents advertised prefixes relative to a root. Every prefix at or above the root
- * collapses to the empty path, where the most specific claim wins, ranked against the claims of
- * its prefix filed elsewhere, since that is the route a request beneath the root resolves through.
- */
-class CoveringRoot {
-	readonly #root: Path.Valid;
-	/** The claim presented at the root so far: how specific it is, how deep it is filed, and its route. */
-	#covering?: { specificity: number; depth: number; route: WireRoute };
-
-	constructor(root: Path.Valid) {
-		this.#root = root;
-	}
-
-	/**
-	 * The presented path for `route` at `path`, or undefined when it is outside the root or a
-	 * more specific cover.
-	 */
-	relative(path: Path.Valid, route: WireRoute): Path.Valid | undefined {
-		const relative = Path.stripPrefix(this.#root, path);
-		if (relative !== null && relative !== Path.empty()) return relative;
-		if (relative === null && !Path.hasPrefix(path, this.#root)) return undefined;
-		const depth = Path.parts(path).length;
-		const next = { specificity: depth - Number(route.above ?? 0n), depth, route };
-		const held = this.#covering;
-		if (held && !outranks(next, held)) return undefined;
-		this.#covering = next;
-		return Path.empty();
-	}
 }
 
 /**
@@ -2643,10 +2597,21 @@ export class Consumer implements Reader {
 	/** The routes visible to one announcement watcher. */
 	#listed(patterns: Path.Patterns, hidden: boolean, covering: boolean): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
-		const rooted = new CoveringRoot(this.#scope.root);
+		const root = this.#scope.root;
 		const scopes = [...patterns]
 			.sort((a, b) => Path.compareSpecificity(b.specificity(), a.specificity()))
 			.map((pattern) => ({ pattern, head: scopeHead(pattern) }));
+		// Every prefix at or above the root presents as the empty path, where the claims covering the
+		// root compete as one tier, as a request beneath the root resolves.
+		const atRoot: Filed<{ candidate: Candidate; path: Path.Valid; pattern: Path.Pattern }>[] = [];
+		const present = (path: Path.Valid, entry: Candidate, pattern: Path.Pattern): Presented => ({
+			identity: entry.identity,
+			// Draining is this node's selection state: readers, and the peers a relay forwards to, see
+			// the route as it is.
+			route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
+			captures: scopeCaptures(pattern, path),
+			lost: entry.lost,
+		});
 		for (const [path, candidates] of this.#state.snapshot()) {
 			// The first candidate this reader can see wins, since the preferred one overall may not be,
 			// unless a higher epoch of its instance that the reader also sees supersedes it.
@@ -2657,20 +2622,31 @@ export class Consumer implements Reader {
 						(candidate.exact ? pattern.matches(path) : scopeOverlaps(pattern, path)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
+			const relative = Path.stripPrefix(root, path);
+			if (relative === null || relative === Path.empty()) {
+				if (relative === null && !Path.hasPrefix(path, root)) continue;
+				const depth = Path.parts(path).length;
+				candidates.forEach((candidate, order) => {
+					const scope = scopeOf(candidate);
+					if (scope === undefined) return;
+					// Hold the empty path's place in the order the snapshot lists its first claim.
+					if (atRoot.length === 0) next.set(Path.empty(), present(path, candidate, scope.pattern));
+					const filed = { candidate, path, pattern: scope.pattern };
+					atRoot.push({ prefix: path, depth, order, candidate: filed, route: candidate.route });
+				});
+				continue;
+			}
 			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);
 			const scope = entry && scopeOf(entry);
 			if (!entry || !scope) continue;
-			const relative = rooted.relative(path, entry.route);
-			if (relative === undefined) continue;
-			next.set(relative, {
-				identity: entry.identity,
-				// Draining is this node's selection state: readers, and the peers a relay
-				// forwards to, see the route as it is.
-				route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
-				captures: scopeCaptures(scope.pattern, path),
-				lost: entry.lost,
-			});
+			next.set(relative, present(path, entry, scope.pattern));
 		}
+		const best = bestOfTier(
+			atRoot,
+			(a, b) => compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route),
+		);
+		if (best)
+			next.set(Path.empty(), present(best.candidate.path, best.candidate.candidate, best.candidate.pattern));
 		return next;
 	}
 

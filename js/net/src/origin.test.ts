@@ -2267,6 +2267,30 @@ test("a claim filed deeper ranks against the claim of its prefix", () => {
 	}
 });
 
+// An announce stream rooted beneath claims of one prefix filed at several depths walks the whole
+// tier, as a request does: an instance's older epoch filed deeper never wins back the root once
+// its newer epoch is superseded by rank, as `TableCursor::best` in Rust.
+test("a rooted announce stream ranks the whole tier of claims covering its root", async () => {
+	const origin = new Producer();
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+	const newer = wireOf(origin).receive(Path.from("src"), { instance: a, epoch: 2n, hops: [PEER], cost: 10n });
+	const other = wireOf(origin).receive(Path.from("src/a/b"), { instance: b, hops: [PEER], cost: 5n, above: 2n });
+	const older = wireOf(origin).receive(Path.from("src/a"), {
+		instance: a,
+		epoch: 1n,
+		hops: [PEER],
+		cost: 1n,
+		above: 1n,
+	});
+	const reader = origin.scope(Path.from("src/a/b"), Path.Prefixes.all()).consume();
+	const covering = await announcedView(reader, undefined, { covering: true });
+	expect(covering.peek().get(Path.empty())?.instance).toBe(b);
+	await covering.close();
+	for (const handle of [newer, other, older]) handle.close();
+	origin.close();
+});
+
 // A draining route still reaches its origin, so it outranks one held unavailable, however cheap.
 test("a draining route outranks an unavailable one", () => {
 	const draining = { ...WireRoute.default, draining: true, cost: 5n };

@@ -162,7 +162,7 @@ export function presented(
 }
 
 /** A candidate filed at `prefix`, `depth` segments deep, `order`th in its prefix's preference. */
-interface Filed<T> {
+export interface Filed<T> {
 	readonly prefix: Path.Valid;
 	readonly depth: number;
 	readonly order: number;
@@ -177,13 +177,15 @@ interface Filed<T> {
  * (and `others`, of the same claim when `exact`) is eligible; `compare` ranks the rest, then the
  * deeper filing, then each prefix's own preference. Mirrors `RouteTable::best_route` in rs/moq-net.
  */
-function bestOfTier<T>(
+export function bestOfTier<T>(
 	filed: readonly Filed<T>[],
 	compare: (a: Filed<T>, b: Filed<T>) => number,
 	others: (specificity: number) => readonly WireRoute[] = () => [],
 ): Filed<T> | undefined {
 	const specificity = (entry: Filed<T>) => entry.depth - Number(entry.route.above ?? 0n);
-	const most = Math.max(Number.NEGATIVE_INFINITY, ...filed.map(specificity));
+	// A loop, not a spread: a table may hold more candidates than a call takes arguments.
+	let most = Number.NEGATIVE_INFINITY;
+	for (const entry of filed) most = Math.max(most, specificity(entry));
 	const tier = filed.filter((entry) => specificity(entry) === most);
 	// One claim prefix: an instance's epochs compare across the whole tier.
 	const epochs = new Epochs([...tier.map((entry) => entry.route), ...others(most)], () => 0n);
