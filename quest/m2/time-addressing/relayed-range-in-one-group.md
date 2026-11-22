@@ -21,7 +21,3 @@ nothing and its read ends.
   reference to compare against.
 
 Public API: none. Wire: none expected.
-
-## Related
-
-- [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - changes how a time inside a span resolves, which this case relies on
