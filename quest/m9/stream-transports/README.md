@@ -29,8 +29,10 @@ Facts from the 2026-10-22 audit, so quests don't re-litigate them:
   compiles one tungstenite, 0.30, and since
   [moq-dev/moq#8300](https://github.com/moq-dev/moq/pull/8300) qmux's public
   API names no tungstenite type.
-- tungstenite itself costs a zero-filled 128 KiB read buffer, a copy into
-  its `out_buffer` on write, and a memmove after a partial write.
+- tungstenite itself costs a zero-filled read buffer (one record since
+  2026-11, 128 KiB before), a copy into its `out_buffer` on write, and a
+  memmove after a partial write. qmux copies each message out of that read
+  buffer, so a record never pins it.
 - Before the driver, qmux wrapped the socket in a split BiLock, a `ws_pump`
   task, an `mpsc` channel, a `run_reader` task taking the session `Mutex` per
   record, and on TCP a `tokio::io::split` with a `reader_loop` task, all

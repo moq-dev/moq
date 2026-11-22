@@ -15,9 +15,10 @@ shows tungstenite's read-buffer zero-fill, its `out_buffer` copy, or its
 memmove after a partial write as a real share, abandon the quest.
 
 The stopgap of shrinking tungstenite's `read_buffer_size` (2026-10-31, from
-[moq-dev/moq#7086](https://github.com/moq-dev/moq/pull/7086)'s benchmark) moved
-to [qmux-websocket-read-buffer](/quest/m1/precut-audit/qmux-websocket-read-buffer.md),
-since it also closes a memory-accounting gap. Run the gate above after it lands.
+[moq-dev/moq#7086](https://github.com/moq-dev/moq/pull/7086)'s benchmark) landed
+in 2026-11 with a copy of each message out of tungstenite's buffer: the read
+buffer is now one record, which cut the micro-bench's WebSocket CPU per message
+by 9-73%. Run the gate above against that.
 
 The subset to implement, from the 2026-10-22 audit:
 
