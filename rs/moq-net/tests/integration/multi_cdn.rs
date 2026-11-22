@@ -144,6 +144,7 @@ fn via_a(announce: &origin::RouteEvent) -> bool {
 			kind: origin::RouteKind::End | origin::RouteKind::Offline,
 			..
 		} => return false,
+		other => panic!("unexpected route event {other:?}"),
 	};
 	route.cost().value() >= A_COST
 }

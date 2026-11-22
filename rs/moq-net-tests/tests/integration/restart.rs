@@ -71,16 +71,19 @@ async fn expect_replaced(version: Version, announced: &mut origin::Routes, prefi
 		origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		} if restarts => assert_eq!(announce.prefix.as_str(), prefix),
 		origin::RouteEvent {
 			kind: origin::RouteKind::End,
 			announce,
+			..
 		} if !restarts => {
 			assert_eq!(announce.prefix.as_str(), prefix);
 			match next_event(announced).await {
 				origin::RouteEvent {
 					kind: origin::RouteKind::Start,
 					announce,
+					..
 				} => assert_eq!(announce.prefix.as_str(), prefix),
 				other => panic!("{version}: expected the start, got {other:?}"),
 			}
@@ -139,6 +142,7 @@ async fn relay_chain(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
@@ -253,6 +257,7 @@ async fn prefix_pool(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => advertised(announce),
 		other => panic!("{version}: expected the pool, got {other:?}"),
 	}
@@ -284,6 +289,7 @@ async fn prefix_pool(version: &str) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce,
+				..
 			} => advertised(announce),
 			other => panic!("{version}: expected a restart at most, got {other:?}"),
 		}
@@ -379,6 +385,7 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the claim, got {other:?}"),
 	}

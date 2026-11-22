@@ -32,6 +32,7 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 	let named = |kind: Kind, name: &str| match kind {
 		Kind::Track => name.to_string(),
 		Kind::Datagrams => format!("d:{name}"),
+		kind => panic!("unexpected kind {kind:?}"),
 	};
 	match kio::clock::timeout(TIMEOUT, tracks.next())
 		.await
@@ -41,6 +42,7 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 		Ok(Some(TracksEvent::Removed { kind, name, .. })) => format!("-{}", named(kind, &name)),
 		Ok(Some(TracksEvent::Finished { kind, name, .. })) => format!("~{}", named(kind, &name)),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
+		Ok(Some(event)) => panic!("unexpected event {event:?}"),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
 	}

@@ -91,6 +91,7 @@ async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 					announce,
 					..
 				} => (announce, false),
+				other => panic!("unexpected route event {other:?}"),
 			};
 			if announce.prefix.as_str() == path && now_active == active {
 				return;

@@ -864,6 +864,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 					announce: update,
+					..
 				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true)
@@ -871,6 +872,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					announce: update,
+					..
 				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, false)
@@ -880,6 +882,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::Restart,
 					announce: update,
+					..
 				})) => {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
@@ -1055,6 +1058,7 @@ fn advance<S: Shape>(
 				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added {
 					name: listed,
 					info: broadcast::Listed::Track(_),
+					..
 				}))) => {
 					if parse_bucket_track(&listed).is_some_and(|(bucket, _)| bucket.as_str() == name) {
 						node.offered = Some(listed);
@@ -1064,10 +1068,12 @@ fn advance<S: Shape>(
 					broadcast::TracksEvent::Removed {
 						kind: broadcast::Kind::Track,
 						name: listed,
+						..
 					}
 					| broadcast::TracksEvent::Finished {
 						kind: broadcast::Kind::Track,
 						name: listed,
+						..
 					},
 				))) => {
 					if node.offered.as_ref() == Some(&listed) {

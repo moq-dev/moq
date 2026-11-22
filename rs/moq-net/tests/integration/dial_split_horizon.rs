@@ -112,6 +112,7 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> u64 {
 					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					..
 				} => continue,
+				other => panic!("unexpected route event {other:?}"),
 			};
 			if announce.prefix.as_str() == path {
 				return announce;

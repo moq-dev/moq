@@ -386,6 +386,7 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 		} => {
 			live.remove(update.prefix.as_str());
 		}
+		other => panic!("unexpected route event {other:?}"),
 	};
 	// Take in the replay first, so a retraction is judged against what is announced now
 	// rather than against an empty start.

@@ -53,6 +53,7 @@ async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 					kind: origin::RouteKind::Update,
 					..
 				} => {}
+				other => panic!("unexpected route event {other:?}"),
 			}
 		}
 	});

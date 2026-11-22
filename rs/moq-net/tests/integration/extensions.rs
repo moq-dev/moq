@@ -58,6 +58,7 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 			} => {
 				live &= update.prefix.as_str() != path;
 			}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	live

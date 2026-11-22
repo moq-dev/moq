@@ -165,6 +165,7 @@ pub fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, 
 					announce,
 					..
 				} => (Kind::Offline, announce),
+				other => panic!("unexpected route event {other:?}"),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;

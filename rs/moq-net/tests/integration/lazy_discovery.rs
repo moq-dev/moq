@@ -167,6 +167,7 @@ async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 				kind: origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	seen.sort();
@@ -514,6 +515,7 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 				kind: origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	held.sort();
