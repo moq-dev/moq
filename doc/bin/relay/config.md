@@ -178,8 +178,8 @@ live_edges = 0                       # No bound.
 
 [limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
-receive_window = 16777216            # Connection-wide receive window (16 MiB).
-send_window = 16777216               # Unacknowledged outgoing data (16 MiB).
+receive_window = 67108864            # Connection-wide receive window (64 MiB).
+send_window = 67108864               # Unacknowledged outgoing data (64 MiB).
 ```
 
 `[limits.peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
@@ -187,8 +187,11 @@ any other `[quic]` key is refused. They replace the `[quic]` values for a
 peer's connection once its grant is known, before the SETUP reply, over QUIC,
 WebSocket, or TCP alike. Links the relay dials get them from the handshake on.
 A link carrying a whole cluster is then not throttled by `[quic]` limits sized
-for one viewer, for example `--limits-peer-quic-max-streams=200000`. The 16 MiB windows carry about 450 Mbps at a 250 ms
-RTT and about 1 Gbps at 100 ms; raise both for a busier link.
+for one viewer, for example `--limits-peer-quic-max-streams=200000`. The 64 MiB windows carry about 2 Gbps at a 250 ms
+RTT and about 5 Gbps at 100 ms; raise both for a busier link. Each peer can
+make the relay buffer up to its `receive_window`, so peer memory is bounded by
+the peer count times that window. Peers keep the `[quic]` `stream_receive_window`,
+so one group stream still carries at most about 1 MiB per round trip.
 
 These are the defaults. Each subscription and FETCH holds a stream, as does each
 PUBLISH a peer's track listing gets, so `[quic]` or `[limits.peer.quic]`

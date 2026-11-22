@@ -245,8 +245,11 @@ flow-control review): ✅ the cut waits on
 [send-credit stalls](/quest/m1/send-credit-stalls.md), so the release that
 ships the flow-control rework ships a counter for its failure mode, a
 connection blocked on its peer's credit (rejected: the cut not waiting;
-leaving it in m3). The [peer window default](/quest/m1/peer-window-default.md)
-ships with the cut only if it lands first (rejected: the cut waiting on it).
+leaving it in m3). The peer window default
+([#9329](https://github.com/moq-dev/moq/pull/9329)) ships with the cut only if it lands first
+(rejected: the cut waiting on it). If it does, rewrite moq-relay's `MIGRATE.md`
+`[limits.peer.quic]` entry under [#7624](https://github.com/moq-dev/moq/pull/7624) from its
+Impact section: the peer windows stay at release's 64 MiB, not 16 MiB.
 
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
