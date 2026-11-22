@@ -1120,6 +1120,24 @@ impl GroupState {
 		}
 	}
 
+	/// Shed the front frames the fastest reader took, those ending at or below `read` on the
+	/// pace scale: a reader on the group loses nothing it has yet to take, though a slower one
+	/// falls off as after any shed. Frames adopted from a head are off that scale, so the shed
+	/// stops at them.
+	fn shed_taken(&mut self, read: u64) {
+		if self.outcome.error().is_some() {
+			return;
+		}
+		let mut end = self.held();
+		while let Some(entry) = self.entry(end)
+			&& entry.end != 0
+			&& entry.end <= read
+		{
+			end += 1;
+		}
+		self.shed_to(end);
+	}
+
 	/// Whether a frame still arriving bills the session: its payload or its header's fields.
 	fn arriving(&self) -> bool {
 		self.partial
@@ -2813,14 +2831,12 @@ impl Handle {
 		}
 	}
 
-	/// Shed every committed frame this copy holds, as [`GroupState::shed_all`] does, keeping
-	/// a frame still arriving, and return whether one is.
-	pub(super) fn shed_committed(&self) -> bool {
-		let Ok(mut state) = self.state.write() else {
-			return false;
-		};
-		state.shed_all();
-		state.arriving()
+	/// Shed the frames this copy's fastest reader took: see [`GroupState::shed_taken`].
+	pub(super) fn shed_taken(&self) {
+		if let Ok(mut state) = self.state.write() {
+			let read = self.alive.pace.read();
+			state.shed_taken(read);
+		}
 	}
 
 	pub(super) fn delivery_size(&self) -> u64 {

@@ -672,10 +672,11 @@ const EDGE_SLACK: usize = 64;
 /// Each track a session ingests bills its live edge here: the newest group, which a live
 /// track keeps whatever the pool's budget, so a publisher holding many quiet tracks would
 /// otherwise hold one group each past any capacity. A frame write that leaves the session
-/// past its limit sheds the committed frames of the session's live edges in the order they
-/// last moved, oldest first, then the writer's own older frames, and only then aborts the
-/// edges still receiving a frame, so the cost stays with the session causing it. The default
-/// is unbounded and costs nothing.
+/// past its limit sheds the frames readers took of the session's live edges in the order
+/// they last moved, oldest first, then of the writer's own. Only once none is left does it
+/// shed frames no reader took, every frame of those edges (aborting a copy still receiving
+/// one) and then the writer's older frames, so the cost stays with the session causing it.
+/// The default is unbounded and costs nothing.
 #[derive(Clone, Default)]
 pub(crate) struct Edges(Option<Arc<EdgesInner>>);
 
@@ -732,11 +733,11 @@ impl Edges {
 		used.checked_sub(inner.limit).filter(|excess| *excess > 0)
 	}
 
-	/// Pay the session's excess with the committed frames of its oldest live edges other than
-	/// `writer`'s, then with `writer`'s own older frames, and only then by aborting those edges'
-	/// copies still receiving a frame, which no shed can free: a transfer in progress loses
-	/// nothing its reader has yet to take while frames behind some reader are left to shed.
-	/// Takes track locks: call with none held.
+	/// Pay the session's excess with the frames its readers took, from its oldest live edges
+	/// other than `writer`'s and then from `writer`'s own. Only once none is left does it shed
+	/// frames no reader took yet, which a paced transfer can never get back: every frame of
+	/// those edges, aborting a copy still receiving one, then `writer`'s older frames. Takes
+	/// track locks: call with none held.
 	fn reclaim(&self, writer: &Track) {
 		let Some(inner) = &self.0 else {
 			return;
@@ -744,8 +745,8 @@ impl Edges {
 		// Each entry is offered once per call, so an order holding only edges this write
 		// can't take never spins.
 		let mut offers = inner.order.lock().unwrap_or_else(PoisonError::into_inner).len();
-		// Offered edges still receiving a frame, and the writer's, both put back unless aborted.
-		let mut kept = Vec::new();
+		// The offered edges, put back in order unless the last pass takes them.
+		let mut offered = Vec::new();
 		while offers > 0 && self.excess().is_some() {
 			offers -= 1;
 			let Some((weak, moves)) = inner.order.lock().unwrap_or_else(PoisonError::into_inner).pop_front() else {
@@ -757,45 +758,46 @@ impl Edges {
 			if !track.edge_is(moves) {
 				continue;
 			}
-			// The writer's edge is the one being written: it pays last, and only in part.
-			if std::ptr::eq(Arc::as_ptr(&track), writer) {
-				kept.push((weak, moves));
-				continue;
+			// The writer's edge is the one being written: it pays last.
+			if !std::ptr::eq(Arc::as_ptr(&track), writer)
+				&& let Some(state) = track.state.upgrade()
+				&& let Ok(mut state) = state.write()
+			{
+				state.shed_edge_taken(moves);
 			}
-			let Some(state) = track.state.upgrade() else {
-				continue;
-			};
-			// Unqueued before the shed, so whatever the edge bills after it queues it again.
-			track.queued.store(false, Ordering::Relaxed);
-			let arriving = state.write().is_ok_and(|mut state| state.shed_edge_committed(moves));
-			// Requeued already if it billed more since, which leaves nothing to put back.
-			if arriving && !track.queued.swap(true, Ordering::Relaxed) {
-				kept.push((weak, moves));
-			}
+			offered.push((weak, moves));
 		}
-		if let Some(excess) = self.excess()
+		if self.excess().is_some()
 			&& let Some(state) = writer.state.upgrade()
 			&& let Ok(mut state) = state.write()
 		{
-			state.shed_edge(excess);
+			state.shed_edge_taken(writer.moves.load(Ordering::Relaxed));
 		}
-		kept.retain(|(weak, moves)| {
+		offered.retain(|(weak, moves)| {
 			if self.excess().is_none() {
 				return true;
 			}
 			let Some(track) = weak.upgrade().filter(|track| !std::ptr::eq(Arc::as_ptr(track), writer)) else {
 				return true;
 			};
+			let Some(state) = track.state.upgrade() else {
+				return false;
+			};
+			// Unqueued before the shed, so whatever the edge bills after it queues it again.
 			track.queued.store(false, Ordering::Relaxed);
-			if let Some(state) = track.state.upgrade()
-				&& let Ok(mut state) = state.write()
-			{
+			if let Ok(mut state) = state.write() {
 				state.shed_edge_all(*moves);
 			}
 			false
 		});
+		if let Some(excess) = self.excess()
+			&& let Some(state) = writer.state.upgrade()
+			&& let Ok(mut state) = state.write()
+		{
+			state.shed_edge(excess);
+		}
 		let mut order = inner.order.lock().unwrap_or_else(PoisonError::into_inner);
-		for entry in kept.into_iter().rev() {
+		for entry in offered.into_iter().rev() {
 			order.push_front(entry);
 		}
 	}
