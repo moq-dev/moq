@@ -7918,25 +7918,39 @@ async fn wait_phase(
 /// rather than retrying: nothing has ever connected, so the cause is likely setup.
 #[tokio::test]
 async fn session_state_names_a_failing_first_dial() {
-	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+	// Nextest runs each test in its own process, so this one starts the runtime on a clock
+	// only it moves: the dial times out when the test says, not when the host is slow.
+	assert!(
+		crate::ffi::start_test_clock(),
+		"the runtime already started: run under nextest"
+	);
+	let clock = crate::ffi::test_clock().unwrap();
+	let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 	let addr = silent.local_addr().unwrap();
-	let config = || MoqClientConfig {
+	const DIAL: Duration = Duration::from_millis(100);
+	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
-		timeout: Some(Duration::from_millis(100)),
+		timeout: Some(DIAL),
 		websocket: MoqWebSocketConfig {
 			enabled: Some(false),
 			..Default::default()
 		},
-		backoff: fast_backoff(),
 		..Default::default()
-	};
-	let client = MoqClient::new(config()).unwrap();
+	})
+	.unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
 	let state = session.state();
 	assert!(matches!(state.phase, MoqConnectionPhase::Connecting { .. }));
 	assert_eq!(state.connects, 0);
 	drop(client);
+	// The dial fixes its deadline before it sends, so once its first packet lands, passing
+	// the timeout fails it.
+	kio::clock::timeout(TIMEOUT, silent.recv_from(&mut [0; 2048]))
+		.await
+		.unwrap()
+		.unwrap();
+	clock.advance(DIAL).unwrap();
 	let state = kio::clock::timeout(TIMEOUT, session.state_changed(state.revision))
 		.await
 		.unwrap()
@@ -7953,20 +7967,40 @@ async fn session_state_names_a_failing_first_dial() {
 	);
 	assert_eq!(state.connects, 0);
 	assert!(matches!(session.closed().await, Err(MoqError::Connect { .. })));
+}
 
-	// The accepting side of a session reports its own lifecycle.
-	drop(silent);
+/// The accepting side of a session reports its own lifecycle, and the client reads the
+/// peer's close of a connected session as an outage it redials.
+#[tokio::test]
+async fn session_state_reports_an_accepted_session() {
 	let server = MoqServer::new(MoqServerConfig {
-		bind: Some(addr.to_string()),
+		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
 		..Default::default()
 	})
 	.unwrap();
-	server.listen().await.unwrap();
-	let client = MoqClient::new(config()).unwrap();
+	let addr = kio::clock::timeout(TIMEOUT, server.listen()).await.unwrap().unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		websocket: MoqWebSocketConfig {
+			enabled: Some(false),
+			..Default::default()
+		},
+		backoff: fast_backoff(),
+		..Default::default()
+	})
+	.unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
-	let request = server.accept().await.unwrap().unwrap();
-	let accepted = request.accept(None, None).await.unwrap();
+	let request = kio::clock::timeout(TIMEOUT, server.accept())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	let accepted = kio::clock::timeout(TIMEOUT, request.accept(None, None))
+		.await
+		.unwrap()
+		.unwrap();
 	let connected = kio::clock::timeout(
 		TIMEOUT,
 		wait_phase(&session, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
