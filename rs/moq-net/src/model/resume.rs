@@ -2465,7 +2465,9 @@ impl Reader {
 		// The serving copy, or one between routes with nothing replacing it yet, stays.
 		for mut copy in std::mem::take(&mut self.copies) {
 			let mut retains = copy.replaced.then(|| copy.retains(&reader));
-			if matches!(retains, Some(Retains::No)) && serving.as_ref().is_some_and(|serving| copy.asked(serving, &asking)) {
+			if matches!(retains, Some(Retains::No))
+				&& serving.as_ref().is_some_and(|serving| copy.asked(serving, &asking))
+			{
 				retains = Some(Retains::Keep);
 			}
 			copy.feeds = matches!(retains, None | Some(Retains::Wait));
@@ -13453,7 +13455,10 @@ mod test {
 			let reader = readers.iter().find_map(Weak::upgrade).unwrap();
 			let reader = reader.lock().unwrap();
 			let b = b.consume();
-			let asked = reader.copies.iter().find(|copy| copy.replaced && copy.track.same_channel(&b));
+			let asked = reader
+				.copies
+				.iter()
+				.find(|copy| copy.replaced && copy.track.same_channel(&b));
 			Arc::downgrade(&asked.expect("a copy asked").lease)
 		};
 		write(&b, 1);

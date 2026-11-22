@@ -1818,11 +1818,7 @@ class Reader implements ResumeSource {
 		const cursor = this.#shell.cursor.peek();
 		const window = this.#window();
 		const resumed = serving && !serving.replaced ? resumePoint(serving) : undefined;
-		if (
-			resumed === undefined ||
-			window.end() === undefined ||
-			(cursor.start === 0n && cursor.end === undefined)
-		) {
+		if (resumed === undefined || window.end() === undefined || (cursor.start === 0n && cursor.end === undefined)) {
 			this.#skipped = new Delivered();
 			return [];
 		}
