@@ -5696,11 +5696,19 @@ impl TrackRun {
 		let mut lowest = from;
 		for (id, resolved) in unstarted.into_iter().zip(resolved) {
 			let start = match resolved {
-				// A range added below where delivery started, such as a live join further
-				// behind the live edge, starts where it resolved: its groups from there are
-				// owed, so delivery now starts there too.
 				Some(resolved) => {
-					let start = resolved.start;
+					// A live join placed behind where delivery started, further from the live edge
+					// than the first ranges, starts where it was placed: the subscriber reads its
+					// answer as the join's start, so its groups from there are owed, and delivery
+					// now starts there too. Any other range starts no earlier than delivery.
+					let joins = matches!(
+						self.requested.ranges.get(&id).map(|range| range.start),
+						Some(crate::track::Start::Live(_))
+					);
+					let start = match joins {
+						true => resolved.start,
+						false => resolved.start.max(from),
+					};
 					let started = resolved.end.is_none_or(|end| end > start);
 					if started {
 						lowest = lowest.min(start);

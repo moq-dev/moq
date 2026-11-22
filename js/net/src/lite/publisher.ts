@@ -415,6 +415,11 @@ class SubscriptionControls {
 		return this.#live.get(id) !== undefined;
 	}
 
+	/** Whether Range ID `id` is live and starts with a live join. */
+	joins(id: bigint): boolean {
+		return this.#live.get(id)?.start?.live !== undefined;
+	}
+
 	/** Whether {@link take} has a control to answer with now. */
 	pending(): boolean {
 		return this.#update !== undefined || this.#end !== undefined;
@@ -1571,10 +1576,12 @@ export class Publisher {
 				if (!range && !finished) continue;
 				let start: bigint | undefined;
 				if (range) {
-					// A range added below where delivery started, such as a live join further behind
-					// the live edge, starts where it resolved: its groups from there are owed, so
-					// delivery now starts there too.
-					start = range.start;
+					// A live join placed behind where delivery started, further from the live edge than
+					// the first ranges, starts where it was placed: the subscriber reads its answer as
+					// the join's start, so its groups from there are owed, and delivery now starts there
+					// too. Any other range starts no earlier than delivery.
+					const joins = controls.joins(id);
+					start = joins ? range.start : max(range.start, startKey);
 					if (range.end !== undefined && range.end <= start) start = undefined;
 					else startKey = min(startKey, start);
 				}
