@@ -125,12 +125,20 @@ struct Session {
 impl Session {
 	/// Finish the pictures the session delayed into the sink, then invalidate
 	/// it, returning the status of the wait.
-	///
-	/// The wait is for every callback, so none can outlive the sink.
 	fn finish(self) -> i32 {
-		let status = unsafe { self.session.wait_for_asynchronous_frames() };
-		unsafe { self.session.invalidate() };
-		status
+		unsafe { self.session.wait_for_asynchronous_frames() }
+	}
+}
+
+impl Drop for Session {
+	/// Wait out every callback, then invalidate, so none can outlive the sink
+	/// its refcon points at: a release alone leaves VideoToolbox free to call
+	/// back later.
+	fn drop(&mut self) {
+		unsafe {
+			self.session.wait_for_asynchronous_frames();
+			self.session.invalidate();
+		}
 	}
 }
 
@@ -153,6 +161,14 @@ pub(crate) struct VideoToolbox {
 	sink: Box<Sink>,
 	/// Pictures paired with their timestamps, waiting for `receive`.
 	ready: VecDeque<Frame>,
+}
+
+impl Drop for VideoToolbox {
+	/// Tear the session down before the sink it calls back into is freed,
+	/// rather than leaning on field order.
+	fn drop(&mut self) {
+		self.session.take();
+	}
 }
 
 impl VideoToolbox {

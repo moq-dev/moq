@@ -192,6 +192,8 @@ impl V4l2 {
 
 	/// Hand one access unit to the driver, waiting for a free buffer.
 	fn submit(&mut self, access_unit: &Bytes, timestamp: Timestamp) -> Result<(), Error> {
+		// Ahead of taking a buffer, so a timestamp with no time leaves none claimed.
+		let key = key(timestamp)?;
 		let deadline = Instant::now().saturating_add(BUFFER_TIMEOUT);
 		let index = loop {
 			self.reclaim_coded()?;
@@ -219,7 +221,6 @@ impl V4l2 {
 		self.coded.plane_mut(index, 0)[..access_unit.len()].copy_from_slice(access_unit);
 
 		let bytesused = [access_unit.len() as u32];
-		let key = key(timestamp)?;
 		self.coded.queue(&self.device, index, &bytesused, key)?;
 		remember(&mut self.submitted, key, timestamp);
 		Ok(())
@@ -344,7 +345,7 @@ impl V4l2 {
 	/// `V4L2_BUF_FLAG_LAST` on its last picture and then with `EPIPE` on any
 	/// dequeue past it.
 	fn drain(&mut self) -> Result<bool, Error> {
-		let Phase::Decoding(pictures) = &self.phase else {
+		let Phase::Decoding(pictures) = &mut self.phase else {
 			return Ok(false);
 		};
 
@@ -370,11 +371,13 @@ impl V4l2 {
 					);
 					None
 				}
-				_ => Some(pictures.planes.read(&pictures.queue, &buffer)?),
+				_ => Some(pictures.planes.read(&pictures.queue, &buffer)),
 			};
-			// Back to the driver before anything can fail: a picture buffer left out
-			// of the pool is one the decoder never gets to write again.
+			// Back to the driver before anything can fail, a bad read included: a
+			// picture buffer left out of the pool is one the decoder never gets to
+			// write again.
 			pictures.queue.queue(&self.device, buffer.index, &[], Duration::ZERO)?;
+			let decoded = decoded.transpose()?;
 
 			if let Some(decoded) = decoded {
 				let timestamp = restore(&mut self.submitted, buffer.timestamp)?;

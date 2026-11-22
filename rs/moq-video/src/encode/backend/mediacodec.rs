@@ -257,7 +257,14 @@ impl MediaCodec {
 			.map_err(|e| codec_err("dequeue an input buffer", e))?
 		{
 			DequeuedInputBufferResult::Buffer(mut buffer) => {
-				fill_nv12(buffer.buffer_mut(), &i420, self.width, self.height)?;
+				if let Err(err) = fill_nv12(buffer.buffer_mut(), &i420, self.width, self.height) {
+					// Handed back empty: a dequeued buffer the codec never gets back is
+					// one fewer for the rest of the stream.
+					self.codec
+						.queue_input_buffer(buffer, 0, 0, sample_time as u64, 0)
+						.map_err(|e| codec_err("return an unused input buffer", e))?;
+					return Err(err);
+				}
 				self.codec
 					.queue_input_buffer(buffer, 0, size, sample_time as u64, 0)
 					.map_err(|e| codec_err("queue an input buffer", e))?;
