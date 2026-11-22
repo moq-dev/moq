@@ -463,7 +463,10 @@ fn spawn_drain(
 async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
-	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(max_delay));
+	let subscription = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+		min: max_delay,
+		max: Some(max_delay),
+	})]);
 	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?;
 	let mut gaps = GapTracker::new(stats);
 	let mut learned_shape = false;
@@ -861,7 +864,7 @@ mod tests {
 	}
 
 	fn replay() -> track::Subscription {
-		track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
+		track::Subscription::default().with_ranges([track::Range::ALL])
 	}
 
 	/// A produced group must start with the JSON keyframe describing the rolled

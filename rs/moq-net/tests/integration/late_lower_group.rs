@@ -125,9 +125,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 		.expect("broadcast resolves")
 		.unwrap();
 
-	let subscription = Subscription::default()
-		.with_ranges([floored(start)])
-		.with_max(BUDGET);
+	let subscription = Subscription::default().with_ranges([floored(start)]).with_max(BUDGET);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("late")
@@ -172,9 +170,7 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 				.with_max_age(FOREVER),
 		)
 		.unwrap();
-	let subscription = Subscription::default()
-		.with_ranges([floored(start)])
-		.with_max(BUDGET);
+	let subscription = Subscription::default().with_ranges([floored(start)]).with_max(BUDGET);
 	let mut sub = track.subscribe(subscription);
 	let reader = kio::clock::sim::spawn(async move { read_all(&mut sub).await });
 	kio::clock::sleep(Duration::from_millis(10)).await;
@@ -254,17 +250,12 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		async move {
 			let range = match (range.start, min) {
 				(moq_net::track::Start::Oldest, Some(min)) => Range {
-					start: moq_net::track::Start::Live {
-						min,
-						max: Some(BUDGET),
-					},
+					start: moq_net::track::Start::Live { min, max: Some(BUDGET) },
 					..range
 				},
 				_ => range,
 			};
-			let subscription = Subscription::default()
-				.with_ranges([range])
-				.with_max(BUDGET);
+			let subscription = Subscription::default().with_ranges([range]).with_max(BUDGET);
 			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await
 				.expect("subscribe timeout")

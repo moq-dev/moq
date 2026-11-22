@@ -99,8 +99,12 @@ async fn grouped_roundtrip(version: &str, payload: &[u8]) {
 			.consumer
 			.subscribe(
 				"video",
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(60),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.unwrap()
 			.await

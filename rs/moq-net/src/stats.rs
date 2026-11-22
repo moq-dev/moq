@@ -543,8 +543,8 @@ pub struct Traffic {
 	/// reader shares one inflated copy per group, so each byte counts once. `bytes` still counts
 	/// payload as stored or sent.
 	pub inflated: u64,
-	/// Content skipped because it fell behind a subscriber's
-	/// [`Delay::max`](crate::track::Delay::max) budget. Disjoint from the top-level payload
+	/// Content skipped because it fell behind a live join's
+	/// [`Start::Live`](crate::track::Start::Live) `max`. Disjoint from the top-level payload
 	/// counters: skipped content is never handed over. A steady rate here means
 	/// subscribers are consistently behind the live edge.
 	pub stale: Content,

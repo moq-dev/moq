@@ -16,8 +16,8 @@ use std::hash::{BuildHasher, RandomState};
 use std::time::Duration;
 
 use super::super::{Range, Start};
-use crate::model::subscription::max_of;
 use super::{add, remove};
+use crate::model::subscription::max_of;
 
 /// Every subscriber's ranges, counted so that one change costs O(log n).
 #[derive(Default)]
@@ -139,7 +139,10 @@ impl Ranges {
 		union.extend(self.joins.iter().filter_map(|(&(min, end), budgets)| {
 			let budget = *budgets.last_key_value()?.0;
 			Some(Range {
-				start: Start::Live { min, max: max_of(budget) },
+				start: Start::Live {
+					min,
+					max: max_of(budget),
+				},
 				end,
 			})
 		}));

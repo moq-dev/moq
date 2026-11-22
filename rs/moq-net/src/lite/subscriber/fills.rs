@@ -835,11 +835,7 @@ mod tests {
 	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::FillGroups) {
 		let waiter = kio::Waiter::noop();
 		let mut reader = producer
-			.subscribe(
-				Subscription::default()
-					.with_max(None)
-					.with_range(0..3),
-			)
+			.subscribe(Subscription::default().with_max(None).with_range(0..3))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..3 are owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
@@ -883,11 +879,7 @@ mod tests {
 		Refusal::dropped(StreamError::NotFound).answer(&fill, 0..3);
 		drop((reader, fill));
 		let mut reader = producer
-			.subscribe(
-				Subscription::default()
-					.with_max(None)
-					.with_range(0..3),
-			)
+			.subscribe(Subscription::default().with_max(None).with_range(0..3))
 			.ordered();
 		let _ = reader.poll_next_group(&waiter);
 		assert!(

@@ -535,12 +535,7 @@ impl Misses {
 	///
 	/// Looks only at the joins whose fills answered since the last call, and the joins new
 	/// since, so a reader waiting on thousands of fills costs the ones that answered.
-	pub fn resolve(
-		&mut self,
-		state: &kio::Consumer<TrackState>,
-		given_up: &mut GivenUp,
-		waiter: &kio::Waiter,
-	) {
+	pub fn resolve(&mut self, state: &kio::Consumer<TrackState>, given_up: &mut GivenUp, waiter: &kio::Waiter) {
 		self.answered
 			.tasks
 			.lock()
@@ -1701,8 +1696,8 @@ impl super::super::record::Beside for Misses {
 #[cfg(test)]
 mod tests {
 	use super::super::{Servable, Subscription};
-	use crate::Error;
 	use super::*;
+	use crate::Error;
 
 	/// A refusal starts a deferred grace after the judge returned: either no handler
 	/// could take the fill, or one refused it later. Both must arm the gap's own deadline.
@@ -2229,7 +2224,8 @@ mod tests {
 					.filter(|(_, slot)| slot.is_walked())
 					.map(|(&key, _)| key);
 				for at in cached.chain(std::iter::once(run.end)) {
-					if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget.at(from), None, &waiter) {
+					if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget.at(from), None, &waiter)
+					{
 						stale.insert(from..at);
 					}
 					if at < run.end {

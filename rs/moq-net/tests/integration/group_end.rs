@@ -75,11 +75,10 @@ async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
 		.unwrap();
 	let mut subscriber = kio::clock::timeout(
 		TIMEOUT,
-		remote.track("video").unwrap().subscribe(
-			Subscription::default()
-				.with_ranges([Range::ALL])
-				.with_max(None),
-		),
+		remote
+			.track("video")
+			.unwrap()
+			.subscribe(Subscription::default().with_ranges([Range::ALL]).with_max(None)),
 	)
 	.await
 	.expect("subscribe timeout")

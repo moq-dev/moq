@@ -1911,8 +1911,12 @@ async fn export_scte35_roundtrip() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING_MAX_AGE,
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -2125,8 +2129,12 @@ async fn export_pes_packet_roundtrip() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING_MAX_AGE,
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -2283,8 +2291,12 @@ async fn programs_without_video_roundtrip_opaque_tracks() {
 				.track(&restored)
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: RECORDING_MAX_AGE,
+							max: Some(RECORDING_MAX_AGE),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2330,8 +2342,12 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 		.track(name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING_MAX_AGE,
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -3136,8 +3152,12 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 		.track(name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING_MAX_AGE,
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -10539,10 +10559,12 @@ async fn a_subscription_states_the_whole_delay() {
 		.unwrap();
 	let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
 	let subscription = audio.track().subscription().unwrap();
-	assert_eq!(subscription.delay, moq_net::track::Delay::default().with_max(delay));
 	assert_eq!(
 		subscription.ranges,
-		[moq_net::track::Range::from(moq_net::track::Start::Live(delay))]
+		[moq_net::track::Range::from(moq_net::track::Start::Live {
+			min: delay,
+			max: Some(delay),
+		})]
 	);
 	drop((live, catalog));
 }

@@ -5,7 +5,6 @@
 //! through a relay copy cold, warm, and as a late join, and across a route switch mid-read. A
 //! warm copy also answers from what it holds exactly when the case says it may.
 
-use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
@@ -63,7 +62,10 @@ impl Ask {
 		let start = |range: &Value| match range.get("start") {
 			None => Start::Oldest,
 			Some(start) => match start.get("live") {
-				Some(live) => Start::Live { min: Duration::from_millis(live.as_u64().expect("a lag")), max: Some(std::time::Duration::ZERO) },
+				Some(live) => Start::Live {
+					min: Duration::from_millis(live.as_u64().expect("a lag")),
+					max: None,
+				},
 				None => Start::Time(start.as_u64().expect("a time")),
 			},
 		};
@@ -84,7 +86,6 @@ impl Ask {
 
 	fn subscription(&self) -> Subscription {
 		Subscription::default()
-			.with_max(None)
 			.with_order(Order::Ascending)
 			.with_ranges(self.ranges.clone())
 	}

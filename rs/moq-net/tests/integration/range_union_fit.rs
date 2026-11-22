@@ -101,9 +101,7 @@ async fn a_union_too_large_for_one_message_asks_a_covering_superset() {
 	for index in 0..VIEWERS {
 		let (broadcast, session) = viewer(&relay, 4 + index).await;
 		let ranges = sparse(2 * index);
-		let subscription = Subscription::default()
-			.with_ranges(ranges.clone())
-			.with_max(None);
+		let subscription = Subscription::default().with_ranges(ranges.clone()).with_max(None);
 		readers.push(
 			broadcast
 				.track("quiet")

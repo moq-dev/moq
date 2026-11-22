@@ -84,8 +84,8 @@ type Delay struct {
 	// group. moq-lite-07 sends it upstream.
 	Min *time.Duration
 	// Max is how far a non-latest group may fall behind the live edge before it is skipped. Zero
-	// skips immediately; a larger value tolerates that much reordering. It caps every range,
-	// and bounds lateness only, never the start.
+	// skips immediately; a larger value tolerates that much reordering. It caps each live join,
+	// and bounds lateness only, never the start: a range with a Start is history, delivered in full.
 	Max time.Duration
 	// MaxUnlimited ignores Max and sets no subscriber limit, leaving the publisher's max age
 	// alone to bound it.

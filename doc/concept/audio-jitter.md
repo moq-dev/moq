@@ -68,7 +68,7 @@ as packets come and lets the playback buffer hold the target, rather than
 pacing reads to the speaker.
 
 A frame dropped by the relay is never observed, which is correct only while the
-drop is not the receiver's own doing. The subscription's max delay drops groups
+drop is not the receiver's own doing. The live join's max drops groups
 before any container sees them, at the relay and in the receiver's own transport
 subscriber, so a subscription cut to the target hides every frame later than
 the target: the estimate creeps up one bucket at a time while the frames it

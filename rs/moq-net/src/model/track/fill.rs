@@ -236,10 +236,7 @@ impl Outcome {
 		}
 		let id = self.refusals;
 		self.refusals += 1;
-		self.refused.insert(
-			groups.clone(),
-			Refusal { id, err, dropped },
-		);
+		self.refused.insert(groups.clone(), Refusal { id, err, dropped });
 		self.resolved.insert(groups);
 	}
 }
@@ -1439,7 +1436,10 @@ impl Inner {
 	/// Refuse `groups` with `err`, as their source answered a request for them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn reject(&self, groups: ops::Range<u64>, err: Error) {
-		match (err, self.state.read().max_age_bound()) {
+		// Hoisted: a guard in the scrutinee would live through the arms, deadlocking against
+		// the drop's write.
+		let bound = self.state.read().max_age_bound();
+		match (err, bound) {
 			// Past the publisher's max age, and so is every group older than it: a timed track's
 			// starts never rewind. The bound binds every reader, so the track holds it as a stale
 			// verdict under that age: retryable, it lasts only until new terms or the drop set's

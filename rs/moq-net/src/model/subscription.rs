@@ -176,7 +176,7 @@ pub enum Start {
 		/// The hop serving it measures the live edge in media time, from the newest frame it
 		/// holds, rounded up to whole ticks, and on a scale-less track by arrival on its own
 		/// clock. It resolves that time as a [`Self::Time`] start would, so a publisher looks it
-		/// up in its history; `max` does not move it. A relay's copy forwards each join to its
+		/// up in its history, then starts past any group there that `max` already expired. A relay's copy forwards each join to its
 		/// upstream as its own range and starts it where that range's answer does. A range
 		/// resolves once, so a live edge that moves later moves nothing already started.
 		min: Duration,
@@ -233,10 +233,6 @@ pub enum Start {
 	},
 }
 
-/// The lag of [`Start::within`]: the largest every implementation carries losslessly, long past
-/// any group.
-const WITHIN: Duration = Duration::from_millis((1 << 53) - 1);
-
 impl Start {
 	/// The latest group, skipping each the moment a newer one arrives: a live viewer holding
 	/// no buffer.
@@ -251,16 +247,9 @@ impl Start {
 	#[cfg(any(feature = "async", test))]
 	pub(crate) const fn within(max: Duration) -> Self {
 		Self::Live {
-			min: WITHIN,
+			min: PAST_EVERY_GROUP,
 			max: Some(max),
 		}
-	}
-
-	/// Whether this is a live join whose lag reaches back past every group, as
-	/// [`Self::within`]'s does: it starts at the oldest group, as [`Self::Oldest`] does,
-	/// wherever the live edge is, so placing it needs neither the edge nor an upstream's answer.
-	pub(crate) fn reaches_all(&self) -> bool {
-		matches!(self, Self::Live { min, .. } if *min >= WITHIN)
 	}
 
 	/// Whether this start is a floor for history rather than a live join, so the groups its
@@ -342,6 +331,10 @@ impl Range {
 		(!range.is_empty()).then_some(range)
 	}
 }
+
+/// A lag long past any group, so a join this far behind takes every group still within its
+/// `max`: the largest every implementation carries losslessly.
+pub(crate) const PAST_EVERY_GROUP: Duration = Duration::from_millis((1 << 53) - 1);
 
 /// A live join's lag in whole milliseconds, rounded up, as the wire carries it, so a start is
 /// never newer than the lag allows.
@@ -842,6 +835,8 @@ mod tests {
 
 		let sub = Subscription::default().with_start(5).with_end(10);
 		assert_eq!((sub.start(), sub.end()), (Some(5), Some(10)));
+		// No start and no end is every group, which a wire without ranges can't tell from no
+		// start at all.
 		assert_eq!(
 			sub.with_start(None).with_end(None),
 			Subscription::default().with_ranges([Range::ALL])

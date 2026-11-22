@@ -8867,10 +8867,7 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_max(std::time::Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
 		let serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
 			subscriber,
@@ -8971,10 +8968,7 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_max(std::time::Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		for millis in 0..FRAMES as u64 {
 			group
@@ -9016,9 +9010,7 @@ mod group_priority_test {
 		);
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
-			track.subscribe(Some(
-				track::Subscription::default().with_max(None),
-			)),
+			track.subscribe(Some(track::Subscription::default().with_max(None))),
 			RequestId(0),
 			Version::Draft18,
 			ServeRange::default(),
@@ -9149,10 +9141,8 @@ mod group_priority_test {
 						crate::track::Info::timed(),
 					);
 					// Nothing goes stale, so only the credit bounds what is held.
-					let subscriber = track.subscribe(
-						track::Subscription::default()
-							.with_max(Duration::from_secs(3600)),
-					);
+					let subscriber =
+						track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 					let serve = TrackServe::new(
 						crate::driver::Transport::new(session.clone()),
 						subscriber,
@@ -9196,9 +9186,7 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(SinkSession::gated_open_uni(gate.consume())),
 			subscriber,

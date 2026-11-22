@@ -3358,8 +3358,7 @@ mod test {
 		}
 
 		// What run_subscribe hands the model for a Lite01/02 peer, which sends no budget at all.
-		let served =
-			|| producer.subscribe(track::Subscription::default().with_max(None));
+		let served = || producer.subscribe(track::Subscription::default().with_max(None));
 		let drain = |subscriber: &mut track::Subscriber| {
 			let mut keys = Vec::new();
 			while let Some(Ok(Some(group))) = subscriber.recv_group().now_or_never() {
@@ -3381,18 +3380,12 @@ mod test {
 
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
-		let tolerant = producer.subscribe(
-			track::Subscription::default()
-				.with_max(std::time::Duration::from_secs(5)),
-		);
+		let tolerant = producer.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(5)));
 		let mut tolerant = tolerant.with_range(cursor_floor(Version::Lite05, None, producer.latest_key())..);
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
-		let declared = producer.subscribe(
-			track::Subscription::default()
-				.with_max(std::time::Duration::from_secs(5)),
-		);
+		let declared = producer.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(5)));
 		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_key())..);
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
@@ -3543,9 +3536,7 @@ mod test {
 		use futures::FutureExt;
 
 		let mut producer = track_producer("test");
-		let mut subscriber = producer.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(5)),
-		);
+		let mut subscriber = producer.subscribe(track::Subscription::default().with_max(Duration::from_secs(5)));
 
 		producer
 			.create_group(group::Info { start: 2 })
@@ -4921,7 +4912,9 @@ impl Bounds {
 					max,
 				},
 			};
-			if legacy.is_some() && let Some(lite::Anchor::Absolute(start)) = range.start {
+			if legacy.is_some()
+				&& let Some(lite::Anchor::Absolute(start)) = range.start
+			{
 				bounds.frames.floor = bounds.frames.floor.max(start.group);
 			}
 			let position = match range.start {
@@ -4975,24 +4968,18 @@ impl Bounds {
 	/// `Subscriber Max Age` bounds the whole subscription; `None` on lite-07, which carries
 	/// one on each live start instead.
 	///
-	/// Lite-06 resolves an absent start from that max age, so it takes every group still
-	/// within it; with no max age, it reaches back to the oldest group. Before lite-06 an
-	/// absent start is the latest group, still expiring past the max age, and lite01/02 carry
-	/// none, so nothing expires (see [`cursor_floor`]). A named start is a history floor on
-	/// every wire, bounded by the publisher's max age.
+	/// An absent start takes every group still within that max age, or every group with none,
+	/// as lite01/02 never carry one. Lite-06 resolves it there. Before lite-06 an absent start
+	/// is the latest group, which [`TrackRun::start`] places as the floor once the source's feed
+	/// says where it starts, so a group arriving ahead of an older one doesn't drop it, as a
+	/// live join placed at the first arrival would. A named start is a history floor on every
+	/// wire, bounded by the publisher's max age.
 	fn legacy(version: Version, max_delay: Option<Duration>) -> Option<crate::track::Start> {
 		use crate::track::Start;
 		if version.has_ranges() {
 			return None;
 		}
-		Some(match (version.resolves_start(), max_delay) {
-			(false, max) => Start::Live {
-				min: Duration::ZERO,
-				max,
-			},
-			(true, Some(max)) => Start::within(max),
-			(true, None) => Start::Oldest,
-		})
+		Some(max_delay.map_or(Start::Oldest, Start::within))
 	}
 
 	/// Whether a subscription to these ranges over `version` is answered once they are
@@ -5147,6 +5134,15 @@ impl Requested {
 	/// Whether every range has an end; see [`Bounds::ends`].
 	fn bounded(&self) -> bool {
 		self.open == 0
+	}
+
+	/// The staleness budget of the live join with Range ID `id`, `None` for any other range,
+	/// including a join already placed, which starts where it was placed as a time start does.
+	fn join_budget(&self, id: u64) -> Option<Duration> {
+		match self.placed.contains_key(&id) {
+			true => None,
+			false => self.ranges.get(&id).and_then(join_budget),
+		}
 	}
 
 	/// One past the highest Range ID held.
@@ -5381,8 +5377,9 @@ struct TrackRun {
 	initial: u64,
 	/// Lite-07: the ranges an update added whose start no SUBSCRIBE_STARTED reported yet, by
 	/// Range ID.
-	/// Each with whether it was added as a live join, which a pin before the report replaces.
-	unstarted: std::collections::BTreeMap<u64, bool>,
+	/// Each with its budget when it was added as a live join, which a pin before the report
+	/// replaces.
+	unstarted: std::collections::BTreeMap<u64, Option<Duration>>,
 	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 }
@@ -5415,6 +5412,11 @@ impl Unpinned {
 	fn due(&self, latest: u64) -> Vec<u64> {
 		self.by_due.range(..=(latest, u64::MAX)).map(|(_, id)| *id).collect()
 	}
+}
+
+/// A live join's staleness budget, `None` for any other range.
+fn join_budget(range: &crate::track::Range) -> Option<Duration> {
+	matches!(range.start, crate::track::Start::Live { .. }).then(|| range.budget())
 }
 
 /// The lowest latest group start that could resolve `range`'s start, unless `started`, then
@@ -5663,8 +5665,8 @@ impl TrackRun {
 			self.unpinned.insert(id, due(&range, false));
 			// A live join already placed starts there as a time start does, answering no join.
 			if id >= self.initial {
-				let joins = matches!(range.start, crate::track::Start::Live { .. }) && !placed.contains_key(&id);
-				self.unstarted.insert(id, joins);
+				let budget = join_budget(&range).filter(|_| !placed.contains_key(&id));
+				self.unstarted.insert(id, budget);
 			}
 		}
 		self.positions.extend(positions);
@@ -5778,13 +5780,13 @@ impl TrackRun {
 			let start = match resolved {
 				Some(resolved) => {
 					// A live join placed behind where delivery started, further from the live edge
-					// than the first ranges, starts where it was placed, even once pinned there: the
-					// subscriber reads its answer as the join's start, so its groups from there are
-					// owed, and delivery now starts there too. Any other range starts no earlier
-					// than delivery.
+					// than the first ranges, starts where it was placed, past the groups its max
+					// expired, even once pinned there: the subscriber reads its answer as the join's
+					// start, so its groups from there are owed, and delivery now starts there too.
+					// Any other range starts no earlier than delivery.
 					let start = match joins {
-						true => resolved.start,
-						false => resolved.start.max(from),
+						Some(budget) => self.track.join_start(resolved.start, budget),
+						None => resolved.start.max(from),
 					};
 					let started = resolved.end.is_none_or(|end| end > start);
 					if started {
@@ -6278,7 +6280,14 @@ impl TrackRun {
 			.map(|(id, resolved)| {
 				let waits = waiting.next_if(|(key, _)| *key == id).and_then(|(_, waits)| waits);
 				let (from, end) = match (resolved, waits) {
-					(Some(resolved), _) => (resolved.start.max(start), resolved.end),
+					// A live join starts where it was placed, past the groups its max expired,
+					// which may be below where delivery starts: a relay serves first the groups it
+					// holds, before those the join is owed arrive. Any other range starts no
+					// earlier than delivery.
+					(Some(resolved), _) => match self.requested.join_budget(id) {
+						Some(budget) => (self.track.join_start(resolved.start, budget), resolved.end),
+						None => (resolved.start.max(start), resolved.end),
+					},
 					// A time start still waiting at or below the floor, as an update before the
 					// start leaves one: whichever group contains it is out of range, so the range
 					// starts where delivery does, the answer placing it would give.
@@ -6371,9 +6380,14 @@ impl TrackRun {
 			position,
 			ended: self.track.largest_finished(position),
 		});
+		let starts = self.starts(start);
+		// A live join placed below where delivery starts moves delivery down to it, as one an
+		// update adds does.
+		let start = starts.iter().flatten().fold(start, |start, at| start.min(*at));
+		self.start = Start::Resolved(start);
 		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 			largest,
-			starts: self.starts(start),
+			starts,
 		}))?;
 		// The subscriber now owes itself everything from the start, so a range given up
 		// above it is named as it would have been after the start. A stale run below it is
@@ -6734,7 +6748,14 @@ impl UpdateBench {
 		self.oldest += edited;
 		let next = self.live.next();
 		let add = (next..next + edited).map(Self::range).collect();
-		self.apply(lite::RangeEdit::Edit { remove, add, retune: Vec::new() }, 0);
+		self.apply(
+			lite::RangeEdit::Edit {
+				remove,
+				add,
+				retune: Vec::new(),
+			},
+			0,
+		);
 	}
 
 	/// Move only the priority, leaving every range live.
@@ -8249,10 +8270,8 @@ mod serve_group_test {
 						crate::track::Info::timed(),
 					);
 					// Nothing goes stale, so only the credit bounds what is held.
-					let subscriber = track.subscribe(
-						track::Subscription::default()
-							.with_max(Duration::from_secs(3600)),
-					);
+					let subscriber =
+						track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 					let (run, writer, _) = lite_run(Version::Lite07, session.clone(), subscriber);
 					(track, run, writer)
 				})
@@ -8288,9 +8307,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
@@ -8327,9 +8344,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(1)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(1)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 		for key in 0..10 {
 			write_group(&mut track, key, key * 1000);
@@ -8815,9 +8830,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		// Old groups stay worth sending, so both are in flight at once.
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 		let session = SinkSession::new(Log::default()).with_groups().with_unacked_fin();
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
@@ -8875,9 +8888,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(3600)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 		let log = Log::default();
 		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
 
@@ -8939,7 +8950,10 @@ mod serve_group_test {
 			track::Subscription::default()
 				.with_ranges([
 					// A live join a second behind the newest frame, at 4 s.
-					Range::from(crate::track::Start::Live { min: Duration::from_secs(1), max: Some(std::time::Duration::ZERO) }),
+					Range::from(crate::track::Start::Live {
+						min: Duration::from_secs(1),
+						max: Some(std::time::Duration::ZERO),
+					}),
 					Range {
 						start: crate::track::Start::Time(1500),
 						end: Some(1999),
@@ -8948,7 +8962,10 @@ mod serve_group_test {
 					Range::EMPTY,
 					// Empty only once its join resolves to group 3000.
 					Range {
-						start: crate::track::Start::Live { min: Duration::from_secs(1), max: Some(std::time::Duration::ZERO) },
+						start: crate::track::Start::Live {
+							min: Duration::from_secs(1),
+							max: Some(std::time::Duration::ZERO),
+						},
 						end: Some(1999),
 					},
 				])
@@ -9054,10 +9071,10 @@ mod serve_group_test {
 	}
 
 	/// A live join added behind the SUBSCRIBE's start reports where it was placed, even when a
-	/// later update pins it there before its SUBSCRIBE_STARTED goes out: the report keeps that
-	/// it was added as a join.
+	/// later update lands before its SUBSCRIBE_STARTED goes out: the update leaves it a live
+	/// join, never pinned to a time start, which would turn its groups into history.
 	#[kio::test]
-	async fn lite07_a_join_pinned_before_its_report_keeps_its_start() {
+	async fn lite07_a_join_updated_before_its_report_keeps_its_start() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -9076,11 +9093,14 @@ mod serve_group_test {
 
 		// A live join two seconds behind the newest frame, at 4 s: group 2000, before delivery.
 		let back = lite::Range {
-			start: Some(lite::Anchor::Live { min: Duration::from_secs(2), max: None }),
+			start: Some(lite::Anchor::Live {
+				min: Duration::from_secs(2),
+				max: None,
+			}),
 			end: None,
 		};
 		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
-		// Before any SUBSCRIBE_STARTED, another update pins the join to the group it resolved to.
+		// Before any SUBSCRIBE_STARTED, another update leaves the join live.
 		run.update(lite07_add(
 			&run,
 			&[(0, first), (1, back)],
@@ -9089,8 +9109,11 @@ mod serve_group_test {
 		));
 		assert_eq!(
 			run.track.subscription().ranges[1].start,
-			crate::track::Start::Time(2000),
-			"pinned before the report"
+			crate::track::Start::Live {
+				min: Duration::from_secs(2),
+				max: None
+			},
+			"still a live join"
 		);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let started: Vec<_> = responses(&mut writer, &log)
@@ -9102,6 +9125,58 @@ mod serve_group_test {
 			})
 			.collect();
 		assert_eq!(started, [Some(2000)]);
+	}
+
+	/// An added live join reaching back past groups its max already expired starts at the
+	/// first one it hasn't, as SUBSCRIBE_START names the first group delivery serves: the
+	/// subscriber owes itself every group from the start it is told.
+	#[kio::test]
+	async fn lite07_an_added_join_starts_past_the_groups_its_max_expired() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for key in 0..5 {
+			write_group(&mut track, key * 1000, key * 1000);
+		}
+		let first = lite::Range::span(Some(0), 0, Some(0), None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_max(Duration::from_secs(3600))
+				.with_range(0..1),
+		);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		while run.start.resolved().is_none() {
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		}
+
+		// Placed at group 0, four seconds behind the 4 s edge, but groups 0 and 1 can present
+		// nothing within 1.5 s of it.
+		let back = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Duration::from_secs(4),
+				max: Some(Duration::from_millis(1500)),
+			}),
+			end: None,
+		};
+		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let started: Vec<_> = responses(&mut writer, &log)
+			.await
+			.into_iter()
+			.filter_map(|msg| match msg {
+				lite::SubscribeResponse::Started(started) => Some(started),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			started,
+			[lite::SubscribeStarted {
+				id: 1,
+				start: Some(2000)
+			}]
+		);
 	}
 
 	/// A range an update adds learns where it starts from SUBSCRIBE_STARTED, after
@@ -9130,7 +9205,10 @@ mod serve_group_test {
 
 		// A live join two seconds behind the newest frame, at 4 s: group 2000.
 		let back = lite::Range {
-			start: Some(lite::Anchor::Live { min: Duration::from_secs(2), max: None }),
+			start: Some(lite::Anchor::Live {
+				min: Duration::from_secs(2),
+				max: None,
+			}),
 			end: None,
 		};
 		let join = |update: LiveUpdate| update;
@@ -9166,12 +9244,15 @@ mod serve_group_test {
 		)));
 		let resolved = run.track.resolved_range(1).map(|r| (r.start, r.end));
 		assert_eq!(resolved, Some((2000, None)), "the update kept where it started");
-		// The model holds it pinned to that group, so a relay's copies, which take the whole
-		// preferences, resolve it there too.
+		// The model keeps it a live join, placed by its Range ID rather than pinned to a time
+		// start, so its groups stay live ones that expire past its max age.
 		assert_eq!(
 			run.track.subscription().ranges[1],
 			track::Range {
-				start: crate::track::Start::Time(2000),
+				start: crate::track::Start::Live {
+					min: Duration::from_secs(2),
+					max: None
+				},
 				end: None,
 			}
 		);
@@ -9902,8 +9983,7 @@ mod serve_group_test {
 					crate::track::Info::timed(),
 				);
 				let budget = Duration::from_millis(1500);
-				let subscriber = track
-					.subscribe(track::Subscription::default().with_max(budget));
+				let subscriber = track.subscribe(track::Subscription::default().with_max(budget));
 				let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 				write_group(&mut track, 0, 0);
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -9950,8 +10030,7 @@ mod serve_group_test {
 				"test",
 				crate::track::Info::timed(),
 			);
-			let subscriber =
-				track.subscribe(track::Subscription::default().with_max(budget));
+			let subscriber = track.subscribe(track::Subscription::default().with_max(budget));
 			let session = Log::default();
 			let (mut run, mut writer, log) = lite_run(
 				version,
@@ -10214,9 +10293,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(60)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -10252,9 +10329,7 @@ mod serve_group_test {
 		);
 		// A received copy, whose groups may land out of order.
 		track.received();
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(1)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(1)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		write_group(&mut track, 2, 2);
@@ -10334,9 +10409,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(60)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -10375,9 +10448,7 @@ mod serve_group_test {
 				crate::track::Info::timed(),
 			);
 			let dynamic = track.requests();
-			let subscriber = track.subscribe(
-				track::Subscription::default().with_max(Duration::from_secs(60)),
-			);
+			let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)));
 			let session = SinkSession::new(Log::default());
 			let streams = session.log.clone();
 			let (mut run, mut writer, log) = lite_run(version, session, subscriber);
@@ -10450,10 +10521,7 @@ mod serve_group_test {
 		let track = resolved.track("test").unwrap();
 		let subscribing = kio::clock::sim::spawn(async move {
 			track
-				.subscribe(
-					track::Subscription::default()
-						.with_max(Duration::from_secs(60)),
-				)
+				.subscribe(track::Subscription::default().with_max(Duration::from_secs(60)))
 				.await
 		});
 		let copy = dynamic
@@ -10629,7 +10697,7 @@ mod serve_group_test {
 				let mut live = remote
 					.track("test")
 					.unwrap()
-					.subscribe(track::Subscription::default().with_range(0..))
+					.subscribe(track::Subscription::default())
 					.await
 					.unwrap();
 				assert_eq!(live.recv_group().await.unwrap().unwrap().start, 2);
@@ -10717,7 +10785,7 @@ mod serve_group_test {
 				crate::track::Info::timed(),
 			);
 			track.start_at(0).unwrap();
-			let subscriber = track.subscribe(track::Subscription::default());
+			let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::ZERO));
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			// The newer group beats the older ones, so the start resolves at the source's 0.
 			track.drop_groups(2..4, crate::StreamError::NotFound);
@@ -10826,10 +10894,11 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 4), (6, 6)]);
 	}
 
-	/// A lowered start restarts the age of the gaps it newly asks for, as the subscriber does,
-	/// so a gap below the old start isn't folded away on the time before the update.
+	/// A lowered start is a history floor, so a group it reaches that arrives long after its
+	/// successor is served whole, whatever max age the subscription carries, and the drops at
+	/// the end name only the groups the feed gave up.
 	#[kio::test]
-	async fn the_end_drops_below_a_lowered_start_after_the_grace() {
+	async fn a_lowered_start_serves_a_late_group_whole() {
 		let version = Version::Lite06;
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -10857,9 +10926,8 @@ mod serve_group_test {
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
-			// Group 2's successor arrives with it: group 5 arrived a full budget before
-			// the update, so group 2 bounded by it would be stale on the wall clock. Group 4
-			// is, and goes unserved.
+			// Group 5 arrived a full max age before group 4, which a live join would judge
+			// stale on the wall clock, but the lowered start is history.
 			write_group(&mut track, 4, 4);
 			write_group(&mut track, 2, 2);
 			assert!(futures::poll!(run.as_mut()).is_pending());
@@ -10867,9 +10935,8 @@ mod serve_group_test {
 			drop(track);
 			run.await.unwrap();
 		}
-		// The feed gave up on 0, 1 and 3 before the update, so they are misses named as the
-		// cursor judges them, ahead of the stale group.
-		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 3), (4, 4)]);
+		// The feed gave up on 0, 1 and 3, so they are misses named as the cursor judges them.
+		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 3)]);
 	}
 
 	/// After a raised start, lowering it again restarts the gaps below the raised floor, not
@@ -11102,9 +11169,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_max(Duration::from_secs(1)),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(1)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -12702,7 +12767,8 @@ mod tests {
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 						priority: 0,
-						max_delay: Some(Duration::from_secs(60)),
+						// Lite01/02 carry no max age.
+						max_delay: (version != Version::Lite01).then_some(Duration::from_secs(60)),
 						ranges: vec![lite::Range::span(start, 0, None, None)],
 					};
 					let mut serve =

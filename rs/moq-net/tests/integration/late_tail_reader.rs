@@ -10,7 +10,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::Version;
-use moq_net::track::{Subscription};
+use moq_net::track::Subscription;
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);

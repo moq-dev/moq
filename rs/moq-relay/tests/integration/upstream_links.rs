@@ -217,8 +217,12 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 	.await
 	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"))
 	.expect("the first change is an instance");
-	let subscription = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)));
+	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Duration::from_secs(1),
+			max: Some(Duration::from_secs(1)),
+		},
+	)]);
 	let mut track = within(
 		&format!("subscribe to {path}"),
 		broadcast.track("video").expect("track handle").subscribe(subscription),

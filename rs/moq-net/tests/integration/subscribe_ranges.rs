@@ -244,8 +244,10 @@ async fn a_live_subscriber_merged_with_one_ahead_still_gets_the_newest_group() {
 	let want = (vec![4], vec![3, 4]);
 	let mut failures = Vec::new();
 
+	// In-process the start is time 4, which lies in group 3 until group 4 starts, and a time
+	// start is history, so that reader gets group 3 too. A wire carries it as group 4.
 	let got = ahead_then_live(None, false).await;
-	if got != want {
+	if got != (vec![3, 4], vec![3, 4]) {
 		failures.push(format!("in-process: {got:?}"));
 	}
 	for version in LITE.iter().chain(TRANSPORT) {
@@ -689,7 +691,7 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			// the publisher serves that as a live join.
 			let narrowed = match start {
 				0 => support::keys(future..),
-				_ => Range::from(Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) }),
+				_ => Range::from(Start::Live { min: Duration::ZERO, max: None }),
 			};
 			kio::clock::timeout(
 				TIMEOUT,

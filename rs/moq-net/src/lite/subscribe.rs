@@ -960,7 +960,9 @@ impl LiveRanges {
 
 	/// Put `range` back live under the Range ID `id` it already had.
 	fn insert(&mut self, id: u64, range: Range) {
-		self.size = self.size.saturating_add(range_size(&range, self.version.into()).unwrap_or(usize::MAX));
+		self.size = self
+			.size
+			.saturating_add(range_size(&range, self.version.into()).unwrap_or(usize::MAX));
 		self.live.insert(id, range);
 	}
 
@@ -2440,7 +2442,10 @@ mod test {
 			add: vec![],
 			retune,
 		};
-		assert!(live_side.clone().apply(retune(vec![(1, None)])).is_err(), "a time start");
+		assert!(
+			live_side.clone().apply(retune(vec![(1, None)])).is_err(),
+			"a time start"
+		);
 		assert!(live_side.clone().apply(retune(vec![(0, None)])).is_err(), "retired");
 		assert!(
 			live_side.clone().apply(retune(vec![(2, None), (2, None)])).is_err(),
@@ -2485,7 +2490,10 @@ mod test {
 		// No start on a wire without the Anchor.
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![Range {
-			start: Some(Anchor::Live { min: ms(250), max: None }),
+			start: Some(Anchor::Live {
+				min: ms(250),
+				max: None,
+			}),
 			end: None,
 		}];
 		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, vec![Range::OPEN]);
@@ -2493,7 +2501,10 @@ mod test {
 		// A live end is refused both ways.
 		msg.ranges = vec![Range {
 			start: None,
-			end: Some(Anchor::Live { min: ms(250), max: None }),
+			end: Some(Anchor::Live {
+				min: ms(250),
+				max: None,
+			}),
 		}];
 		assert!(msg.encode_bytes(Version::Lite07).is_err());
 		let mut buf = Vec::new();

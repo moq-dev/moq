@@ -14618,7 +14618,10 @@ mod filter_tests {
 	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
 		let live = |min: Option<Duration>, start: u64| {
 			let first = match min {
-				Some(min) => track::Range::from(track::Start::Live { min, max: Some(std::time::Duration::ZERO) }),
+				Some(min) => track::Range::from(track::Start::Live {
+					min,
+					max: Some(std::time::Duration::ZERO),
+				}),
 				None => track::Range::ALL,
 			};
 			track::Subscription::default().with_ranges([
@@ -17313,11 +17316,9 @@ mod stitch_tests {
 			run.track.create_group(3u64.into()).unwrap().finish().unwrap();
 			let requests = run.track.requests();
 			// From group 0, which a time start names whatever is held.
-			let mut reader = run.track.subscribe(
-				track::Subscription::default()
-					.with_range(0..3)
-					.with_max(None),
-			);
+			let mut reader = run
+				.track
+				.subscribe(track::Subscription::default().with_range(0..3).with_max(None));
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_drop(&waiter).is_pending());
 			assert!(reader.poll_recv_group(&waiter).is_pending());

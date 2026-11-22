@@ -104,7 +104,16 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		kio::clock::sleep(Duration::from_secs(60)).await;
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
 
-		let mut late = remote.subscribe(None).await.unwrap();
+		// A join reaching back past the cached group: one at the latest group may resolve
+		// upstream after the refresh it requests, at the fresh group.
+		let reach = track::Start::Live {
+			min: Duration::from_millis((1 << 53) - 1),
+			max: Some(Duration::ZERO),
+		};
+		let mut late = remote
+			.subscribe(track::Subscription::default().with_ranges([track::Range::from(reach)]))
+			.await
+			.unwrap();
 		// Poll the new reader while the owner drives refresh: a front does not join its
 		// serving copy until read. Refresh is a request, not a hold, so the cached group
 		// arrives first, whole, and the fresh one follows.

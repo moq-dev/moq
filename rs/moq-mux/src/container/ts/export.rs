@@ -1397,14 +1397,14 @@ impl SiTrack {
 			};
 			self.state = match resolved {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
-					Ok(track) => SiState::Subscribing(
-						track.subscribe(
-							self.source.subscription(
-								moq_net::track::Subscription::default()
-									.with_delay(moq_net::track::Delay::default().with_max(self.max_age)),
-							),
-						),
-					),
+					Ok(track) => SiState::Subscribing(track.subscribe(self.source.subscription(
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: self.max_age,
+								max: Some(self.max_age),
+							},
+						)]),
+					))),
 					Err(err) => {
 						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
 						SiState::Done
