@@ -581,6 +581,12 @@ pub fn route_update(prefix: &str, cost: u64) -> crate::origin::RouteEvent {
 	}
 }
 
+/// The announces a session replays for a burst of route events: each prefix's last active
+/// event, in event order. For benches of the replay.
+pub fn replay(events: Vec<crate::origin::RouteEvent>) -> Vec<crate::announce::Announce> {
+	crate::lite::replay::initial(events)
+}
+
 /// A route over `prefix` with `cost`, as an announcement listing reports it, for tests that
 /// hand one to code that consumes announcements.
 pub fn announce(prefix: &str, cost: u64) -> crate::announce::Announce {

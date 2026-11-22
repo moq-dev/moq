@@ -26,10 +26,6 @@ use moq_net::{
 	origin,
 };
 
-// Compile the actual private replay code, as the priority bench does for its queue.
-#[path = "../src/lite/replay.rs"]
-mod replay;
-
 /// The previous replay, retained here as a scaling reference.
 fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
 	let mut initial: Vec<announce::Announce> = Vec::new();
@@ -64,7 +60,7 @@ fn initial(c: &mut Criterion) {
 						|| events.clone(),
 						|events| {
 							let initial = if indexed {
-								replay::initial(events)
+								moq_net::fuzz::replay(events)
 							} else {
 								scanned(events)
 							};

@@ -35,7 +35,7 @@ mod publisher;
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 pub use publisher::{CoverageBench, UpdateBench};
 #[cfg(feature = "async")]
-mod replay;
+pub(crate) mod replay;
 #[cfg(feature = "async")]
 mod session;
 mod setup;
