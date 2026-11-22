@@ -5445,7 +5445,7 @@ async fn a_track_is_adopted_by_one_writer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("json".into(), Some(timed_info())).unwrap();
 	let config = || MoqJsonSnapshotConfig { deltas: false };
-	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_| {
+	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_, _| {
 		assert!(matches!(
 			MoqJsonSnapshotProducer::new(&broadcast, &track, config()),
 			Err(MoqError::Closed)

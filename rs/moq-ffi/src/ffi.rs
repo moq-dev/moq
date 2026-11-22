@@ -544,23 +544,25 @@ impl Background {
 		}
 	}
 
+	/// Run a binding call through [`run`], ending it with the owner's failure once it fails.
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
 		self.check()?;
-		let result = host(async {
-			if self.result.is_some() {
-				tokio::pin!(future);
-				tokio::select! {
-					biased;
-					result = self.finished() => { result?; future.await }
-					result = &mut future => result,
-				}
-			} else {
-				future.await
-			}
-		})
-		.await;
+		let result = run(self.supervise(future)).await;
 		self.check()?;
 		result
+	}
+
+	/// [`Self::watch`] without [`run`], for a caller already inside one.
+	pub async fn supervise<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
+		if self.result.is_none() {
+			return future.await;
+		}
+		tokio::pin!(future);
+		tokio::select! {
+			biased;
+			result = self.finished() => { result?; future.await }
+			result = &mut future => result,
+		}
 	}
 }
 
@@ -954,10 +956,10 @@ impl<T: Send + 'static> Task<T> {
 		Fut: Future<Output = Result<R, MoqError>>,
 	{
 		self.check()?;
-		let result = run(self
+		let result = self
 			.driver
-			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f)))
-		.await;
+			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f))
+			.await;
 		// A foreign future may stop polling while holding the state, so cancellation cannot
 		// wait for cleanup. Its next call still reports a completed cleanup panic.
 		self.check()?;
