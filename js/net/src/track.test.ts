@@ -5215,6 +5215,30 @@ test("a stale skip may be taken only once the budget widens", () => {
 	producer.close();
 });
 
+// Re-offered under a budget the track's max age bounds, a group still stale there is final: the
+// reader may not hand it out, though its skip is no longer recorded. Mirrors the Rust test.
+test("a stale skip at the max age bound may not be taken", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(1500) });
+	const subscriber = producer.subscribe({ delay: { max: Duration.millis(1000) } });
+	stampGroup(producer, 0n, 0);
+	expect(drainGroups(subscriber)).toEqual([0n]);
+	for (const [key, ms] of [
+		[1n, 1000],
+		[2n, 2000],
+		[3n, 3000],
+		[4n, 6000],
+	] as const) {
+		stampGroup(producer, key, ms);
+	}
+	expect(drainGroups(subscriber)).toEqual([3n, 4n]);
+
+	subscriber.update({ delay: { max: Duration.millis(10_000) } });
+	expect(drainGroups(subscriber)).toEqual([]);
+	expect(hooks.mayTake(subscriber, 1n)).toBe(false);
+	expect(hooks.mayTake(subscriber, 2n)).toBe(false);
+	producer.close();
+});
+
 // A read already parked when the budget widens wakes for the re-offer.
 test("a widened maxDelay wakes a parked read", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });

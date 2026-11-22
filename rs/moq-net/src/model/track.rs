@@ -11869,17 +11869,18 @@ impl Subscriber {
 	}
 
 	/// Whether this subscriber may still hand out group `key`: its ranges and floor cover it,
-	/// nothing skipped or gave it up, and it has not handed it out, passed it, as an ordered
-	/// read passes what lies below where it reads next, or skipped it as stale under its
-	/// current budget, which only a wider one reverses.
+	/// nothing skipped or gave it up, it has not handed it out or passed it, as an ordered
+	/// read passes what lies below where it reads next, and it is not stale under the current
+	/// budget, which skips it when reached or already did: only a wider budget offers it again,
+	/// and at the track's max age bound none does.
 	pub(super) fn may_take(&self, key: u64) -> bool {
 		let ahead = match &self.inner {
 			Inner::Plain(cursor) => {
 				cursor.next_key <= key
-					&& cursor.record.skipped.judged(key).is_none_or(|judged| {
-						let budget = cursor.subscription.read().budget();
-						judged < clamp_max_delay(budget, cursor.state.read().max_age_bound())
-					})
+					&& match cursor.poll_drift(&cursor.servable, &kio::Waiter::noop()) {
+						Poll::Ready(Ok(drift)) => !cursor.state.read().is_stale(key, &drift.edge, drift.budget),
+						_ => true,
+					}
 			}
 			Inner::Resume(..) => true,
 		};
@@ -32094,6 +32095,30 @@ mod test {
 		assert!(subscriber.may_take(1), "a wider budget offers it again");
 		assert_eq!(drain(&mut subscriber), vec![2, 1]);
 		assert!(!subscriber.may_take(1), "handed out");
+	}
+
+	/// Re-offered under a budget the track's max age bounds, a group still stale there is
+	/// final: the subscriber may not hand it out, though its skip is no longer recorded.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_skip_at_the_max_age_bound_may_not_be_taken() {
+		let info = Info::timed().with_max_age(Duration::from_millis(1500));
+		let mut producer = track_producer("test", info);
+		let narrow = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1)));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+
+		subscriber
+			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(10))))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), Vec::<u64>::new(), "still stale at the bound");
+		assert!(!subscriber.may_take(1));
+		assert!(!subscriber.may_take(2));
 	}
 
 	/// An ascending subscription gets the re-offer lowest first.

@@ -4711,9 +4711,9 @@ export class Subscriber {
 		hooks.mayTake = (subscriber, key) => {
 			if (!subscriber.#resume) {
 				if (key < subscriber.#nextKey) return false;
-				// Skipped as stale under the current budget, it comes back only once the budget widens.
-				const judged = subscriber.#skipped.get(key);
-				if (judged !== undefined && judged >= subscriber.#drift().budget) return false;
+				// Stale under the current budget, it is skipped when reached or already was: only a wider
+				// budget offers it again, and at the track's max age bound none does.
+				if (subscriber.#staleAt(key, subscriber.#drift())) return false;
 			}
 			return subscriber.#nextInRange(key) === key && !subscriber.#delivered.has(key);
 		};

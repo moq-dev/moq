@@ -99,11 +99,6 @@ impl Skipped {
 		}
 	}
 
-	/// The budget `key` was last judged stale under, if it is skipped.
-	pub fn judged(&self, key: u64) -> Option<Duration> {
-		self.0.as_ref()?.runs.get(&key).copied()
-	}
-
 	/// The lowest key skipped.
 	pub fn lowest(&self) -> Option<u64> {
 		let skipped = self.0.as_ref()?;
