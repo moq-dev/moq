@@ -35,8 +35,6 @@ native crates, and public APIs:
   publishes them (moq-nvenc's are fixed).
 - **Public API freezes.** Fence `moq-net` event/item types with
   `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)),
-  rename `moq-gst`'s retired `tls-disable-verify` property to
-  `connect-tls-insecure` ([gst-tls-insecure-prop](/quest/m2/gst-tls-insecure-prop.md)),
   and open
   `moq-ffi`'s 5 closed extensible enums while deriving `Debug`/`Eq`/`Hash` on
   its codec types ([ffi-open-enums](/quest/m2/ffi-open-enums.md)).
