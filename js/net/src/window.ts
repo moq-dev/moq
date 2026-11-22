@@ -318,9 +318,9 @@ export interface Holdings {
 	 * within `budget` whose range was added at tick `since`. It stands once the end is declared too,
 	 * when {@link answersJoins} no longer holds: a copy holds only the groups from where its feed
 	 * started, so they can't measure a join behind them. Absent for none. Mirrors the Rust
-	 * `Holdings::answered`.
+	 * `Holdings::answered_join`.
 	 */
-	answered?(min: Duration, end: bigint | undefined, budget: number, since: number): bigint | undefined;
+	answeredJoin?(min: Duration, end: bigint | undefined, budget: number, since: number): bigint | undefined;
 	/**
 	 * Whether the producer declared every start in `[start, end)` skipped, so no group starts there
 	 * even in the history a handler serves. Absent for none.
@@ -918,7 +918,7 @@ export class Window {
 				}
 			} else {
 				const since = this.#since.get(key) ?? 0;
-				const answered = holdings.answered?.(live, range.end, this.budget, since);
+				const answered = holdings.answeredJoin?.(live, range.end, this.budget, since);
 				if (answered !== undefined) {
 					// Its upstream's answer places it, whatever the groups held measure.
 					join = { group: answered };

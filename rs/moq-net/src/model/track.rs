@@ -1234,7 +1234,7 @@ impl Holdings for TrackState {
 	/// on a scale-less track, by arrival on this hop's clock, as expiry measures it.
 	///
 	/// A received lite-07 copy places it only where its upstream answered a range asking the
-	/// same join (see [`Self::answered`]): the live edge is the upstream's, which no group held
+	/// same join (see [`Self::answered_join`]): the live edge is the upstream's, which no group held
 	/// here measures. Otherwise it waits on its upstream, which its session asks with a range of
 	/// its own. Another copy whose wire reports where its ranges start, or a lite-07 copy past
 	/// its declared end, places it only where the groups it holds prove, and waits otherwise,
@@ -1328,7 +1328,7 @@ impl Holdings for TrackState {
 		self.joins_answered()
 	}
 
-	fn answered(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
+	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
 		self.join_answer(min, end, budget, since)?.start
 	}
 

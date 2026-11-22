@@ -102,7 +102,7 @@ pub(in crate::model) trait Holdings {
 	/// reader within `budget` whose range was added at join tick `since`. It stands once the
 	/// end is declared too, when [`Self::answers_joins`] no longer holds: a copy holds only the
 	/// groups from where its feed started, so they can't measure a join behind them.
-	fn answered(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
+	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
 		let _ = (min, end, budget, since);
 		None
 	}
@@ -827,7 +827,7 @@ impl Window {
 			Start::Live(min) => {
 				let since = self.since.get(&key).copied().unwrap_or(0);
 				let until = join_end(range.end);
-				match (holdings.answered(min, until, self.budget, since), latest) {
+				match (holdings.answered_join(min, until, self.budget, since), latest) {
 					// Its upstream's answer places it, whatever the groups held measure.
 					(Some(group), _) => (Some(group), false),
 					// Nothing to measure the live edge by yet: wait for the first group, reading
@@ -1188,8 +1188,8 @@ mod tests {
 			self.0.answers_joins()
 		}
 
-		fn answered(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
-			self.0.answered(min, end, budget, since)
+		fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
+			self.0.answered_join(min, end, budget, since)
 		}
 
 		fn complete(&self) -> bool {
