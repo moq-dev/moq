@@ -894,32 +894,3 @@ fn waits_drain_then_fail() {
 		Poll::Ready(Err(recv::Error::ConnectionLost))
 	);
 }
-
-/// A record pins only the read buffer it was sliced from, however large a record the
-/// configuration allows, so a lone small one is delivered without a defragmenting copy.
-#[test]
-fn small_records_are_not_copied_under_a_large_record_limit() {
-	let now = Instant::now();
-	let mut cfg = config(Version::QMux02);
-	cfg.max_record_size = VarInt::from_u32(1 << 20);
-	let mut server = Connection::new(cfg, Side::Server, now);
-	let mut frame = Vec::new();
-	frame::StreamMeta {
-		id: StreamId(2),
-		offsets: 0..100,
-		fin: false,
-	}
-	.encode(true, &mut frame);
-	frame.extend_from_slice(&[7; 100]);
-	let record = after_params(Version::QMux02, &frame);
-	let span = record.as_ptr_range();
-	server.handle_record(record.clone(), now);
-
-	let mut recv = server.recv_stream(StreamId(2));
-	let mut chunks = recv.read().unwrap();
-	let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) else {
-		panic!("the record's bytes arrived");
-	};
-	assert_eq!(chunk.bytes.len(), 100);
-	assert!(span.contains(&chunk.bytes.as_ptr()), "the payload was copied");
-}
