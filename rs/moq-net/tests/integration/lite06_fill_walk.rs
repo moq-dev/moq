@@ -3,7 +3,9 @@
 //! A lite-06 relay copy of a timestamp-keyed track whose publisher never says which keys
 //! between its group starts are empty, and resets its first groups as `Old` after their
 //! headers went out: an ordered reader on the relay reaches the later groups, and the copy
-//! asks upstream about the keys between group starts once per run, not once per key.
+//! asks upstream about the keys between group starts once per run, not once per key. A run
+//! still asked when the publisher ends the track is answered by upstream before the copy
+//! finishes.
 
 use crate::support;
 
@@ -146,4 +148,153 @@ async fn reset_groups(live: bool, join: u64) {
 		"live {live}: {fetched} fetches for {GROUPS} groups"
 	);
 	drop((track, broadcast, upstream, publisher, relay, finished));
+}
+
+/// The SUBSCRIBEs the relay opened upstream: SUBSCRIBE's lite stream type is 2.
+fn subscribes(pair: &support::harness::MockPair) -> usize {
+	pair.client_transport
+		.bidi_types()
+		.into_iter()
+		.filter(|kind| *kind == 2)
+		.count()
+}
+
+/// The publisher ends the track while the copy still recovers a run of history it evicted,
+/// and a FETCH joined that run's fill. The copy's own subscription FINs, but the run is still
+/// asked of upstream, and the FETCH answered from what upstream sends, before the copy
+/// finishes: nothing is given up on the copy's say, and nothing hangs.
+#[kio::test]
+async fn a_recovery_outlives_the_finished_subscription() {
+	const TIMEOUT: Duration = Duration::from_secs(10);
+	// The publisher holds its groups for good; the copy's cache expires them.
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
+	config.pool = moq_net::cache::Pool::unbounded();
+	let (publisher, driver) = origin::Producer::new(config);
+	support::harness::spawn(driver);
+	let publisher = publisher.with_proxy(true);
+	let broadcast = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"video",
+			track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	let mut finished = Vec::new();
+	for start in 0..6 {
+		let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(start * 1000).unwrap(), &b"x"[..])
+			.unwrap();
+		finished.push(group.finish().unwrap());
+	}
+
+	let relay = origin(2);
+	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(relay.clone());
+	let upstream = connect_mock(options).await;
+	let remote = relay
+		.consume()
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	let history = |ranges: track::Range| {
+		let track = remote.track("video").unwrap();
+		async move {
+			track
+				.subscribe(
+					Subscription::default()
+						.with_delay(Delay::default().with_max(None))
+						.with_ranges([ranges]),
+				)
+				.await
+				.unwrap()
+		}
+	};
+
+	// The live subscription delivers every group, which the copy then expires while a reader
+	// keeps it live.
+	let mut first = history(track::Range::default()).await;
+	let mut got = Vec::new();
+	while got.len() < 6 {
+		let group = kio::clock::timeout(TIMEOUT, first.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("a group");
+		got.push(group.start);
+	}
+	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+
+	// A reader reaching back misses groups 1..4, a run asked on a SUBSCRIBE of its own, held
+	// from the publisher.
+	upstream.client_transport.hold_bidis();
+	let before = subscribes(&upstream);
+	let mut second = history(support::keys(1..4)).await;
+	let read = kio::clock::sim::spawn(async move {
+		let mut keys = Vec::new();
+		let end = loop {
+			match second.recv_group().await {
+				Ok(Some(group)) => keys.push(group.start),
+				end => break end.map(|_| ()),
+			}
+		};
+		keys.sort();
+		(keys, end)
+	});
+	kio::clock::timeout(TIMEOUT, async {
+		while subscribes(&upstream) == before {
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the run is recovered on a SUBSCRIBE of its own");
+
+	// A FETCH of a group in the run joins its fill rather than going out on its own.
+	let fetch = kio::clock::sim::spawn({
+		let track = remote.track("video").unwrap();
+		async move {
+			let mut group = track.fetch_group(2, None).await?;
+			let frame = group.read_frame().await?;
+			Ok::<_, moq_net::Error>(frame.map(|frame| frame.payload.to_vec()))
+		}
+	});
+	kio::clock::sleep(Duration::from_millis(100)).await;
+	assert_eq!(fetches(&upstream), 0, "the FETCH joined the run's fill");
+
+	// The publisher ends the track, so the copy's subscription FINs and its tail settles, well
+	// past any grace, while the run is still unanswered.
+	let _ended = track.finish().unwrap();
+	kio::clock::sleep(Duration::from_secs(60)).await;
+	assert!(
+		!fetch.is_finished(),
+		"the FETCH was answered before upstream answered its run"
+	);
+	assert!(
+		!read.is_finished(),
+		"the reader was answered before upstream answered its run"
+	);
+
+	// Upstream answers, and the FETCH and the reader get the run's groups.
+	upstream.client_transport.release_bidis();
+	let fetched = kio::clock::timeout(TIMEOUT, fetch)
+		.await
+		.expect("the FETCH is answered")
+		.unwrap();
+	assert_eq!(fetched.expect("the FETCH gets its group"), Some(b"x".to_vec()));
+	assert_eq!(fetches(&upstream), 0, "the run answered the FETCH");
+	let (keys, end) = kio::clock::timeout(TIMEOUT, read)
+		.await
+		.expect("the reader reaches the end of its range")
+		.unwrap();
+	assert_eq!(keys, [1, 2, 3]);
+	assert!(end.is_ok(), "the range ends cleanly: {end:?}");
+	drop((broadcast, upstream, publisher, relay, finished, first));
 }
