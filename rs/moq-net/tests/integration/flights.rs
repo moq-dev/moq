@@ -45,9 +45,10 @@ fn info(payload: &Bytes) -> frame::Info {
 fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = pool.clone();
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// Write `payload` once `group`'s fastest reader leaves room, or return `false` once no
