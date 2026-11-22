@@ -21,6 +21,8 @@ pub struct Stream {
 	buf_meta: Vec<Metadata>,
 	timeout: Option<i32>,
 	state: State,
+	/// Output only: how many buffers since start userspace has yet to fill.
+	unqueued: usize,
 }
 
 impl Stream {
@@ -50,6 +52,12 @@ impl Stream {
 	pub fn with_buffers(dev: &Device, buf_type: Type, buf_count: u32) -> io::Result<Self> {
 		let mut arena = Arena::new(dev.handle(), buf_type);
 		let count = arena.allocate(buf_count)?;
+		if count == 0 {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"the driver granted no buffers",
+			));
+		}
 		let mut buf_meta = Vec::new();
 		buf_meta.resize(count as usize, Metadata::default());
 
@@ -61,6 +69,7 @@ impl Stream {
 			buf_meta,
 			timeout: None,
 			state: State::Stopped,
+			unqueued: 0,
 		})
 	}
 
@@ -231,13 +240,6 @@ impl<'b> OutputStream<'b> for Stream {
 			v4l2_buf.bytesused = self.buf_meta[index].bytesused;
 			v4l2_buf.field = self.buf_meta[index].field;
 
-			if self.handle.poll(libc::POLLOUT, self.timeout.unwrap_or(-1))? == 0 {
-				// This condition can only happen if there was a timeout.
-				// A timeout is only possible if the `timeout` value is non-zero, meaning we should
-				// propagate it to the caller.
-				return Err(io::Error::new(io::ErrorKind::TimedOut, "VIDIOC_QBUF"));
-			}
-
 			v4l2::ioctl(
 				self.handle.fd(),
 				v4l2::vidioc::VIDIOC_QBUF,
@@ -248,6 +250,12 @@ impl<'b> OutputStream<'b> for Stream {
 
 	fn dequeue(&mut self) -> io::Result<usize> {
 		let mut v4l2_buf = self.buffer_desc();
+
+		// An output queue is writable once the driver hands a consumed buffer back;
+		// before the first QBUF it has none to hand back, so the wait goes here.
+		if self.handle.poll(libc::POLLOUT, self.timeout.unwrap_or(-1))? == 0 {
+			return Err(io::Error::new(io::ErrorKind::TimedOut, "VIDIOC_DQBUF"));
+		}
 
 		unsafe {
 			v4l2::ioctl(
@@ -272,22 +280,30 @@ impl<'b> OutputStream<'b> for Stream {
 	fn next(&'b mut self) -> io::Result<(&'b mut Self::Item, &'b mut Metadata)> {
 		match self.state {
 			State::Stopped => {
-				// The first frame after start is a buffer to fill, not one to queue.
+				// After start every buffer is userspace's to fill.
 				self.start()?;
-				self.state = State::Streaming { held: true };
+				self.arena_index = 0;
+				self.unqueued = self.arena.len().saturating_sub(1);
 			}
 			State::Streaming { held } => {
 				// A queue that failed leaves the filled buffer held for the retry, and
-				// a dequeue that failed leaves it with the driver, so it is not queued
-				// a second time.
+				// a dequeue that failed leaves it with the driver, so neither queues a
+				// buffer twice.
 				if held {
 					OutputStream::queue(self, self.arena_index)?;
 					self.state = State::Streaming { held: false };
 				}
-				self.arena_index = OutputStream::dequeue(self)?;
-				self.state = State::Streaming { held: true };
+				// Fill every buffer once before waiting on one: a driver may not start
+				// until several are queued.
+				if self.unqueued > 0 {
+					self.arena_index = self.arena.len() - self.unqueued;
+					self.unqueued -= 1;
+				} else {
+					self.arena_index = OutputStream::dequeue(self)?;
+				}
 			}
 		}
+		self.state = State::Streaming { held: true };
 
 		// The index used to access the buffer elements is given to us by v4l2, so we assume it
 		// will always be valid.

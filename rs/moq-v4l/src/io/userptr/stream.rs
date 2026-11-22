@@ -50,6 +50,12 @@ impl Stream {
 	pub fn with_buffers(dev: &Device, buf_type: Type, buf_count: u32) -> io::Result<Self> {
 		let mut arena = Arena::new(dev.handle(), buf_type);
 		let count = arena.allocate(buf_count)?;
+		if count == 0 {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"the driver granted no buffers",
+			));
+		}
 		let mut buf_meta = Vec::new();
 		buf_meta.resize(count as usize, Metadata::default());
 

@@ -67,7 +67,6 @@ impl Arena {
 
 		Ok(v4l2_reqbufs.count)
 	}
-
 }
 
 impl Drop for Arena {
