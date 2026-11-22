@@ -190,7 +190,8 @@ fn subscribes(pair: &support::harness::MockPair) -> usize {
 /// The publisher ends the track while the copy still recovers a run of history it evicted,
 /// and a FETCH joined that run's fill. The copy's own subscription FINs, but the run is still
 /// asked of upstream, and the FETCH answered from what upstream sends, before the copy
-/// finishes: nothing is given up on the copy's say, and nothing hangs.
+/// finishes, even once the run's SUBSCRIBE FINs ahead of its group streams: nothing is given
+/// up on the copy's say, and nothing hangs.
 #[kio::test]
 async fn a_recovery_outlives_the_finished_subscription() {
 	const TIMEOUT: Duration = Duration::from_secs(10);
@@ -306,8 +307,14 @@ async fn a_recovery_outlives_the_finished_subscription() {
 		"the reader was answered before upstream answered its run"
 	);
 
-	// Upstream answers, and the FETCH and the reader get the run's groups.
+	// Upstream answers the run and, the track being over, FINs at once: its group streams
+	// land only after that FIN, as QUIC may deliver them. The FETCH and the reader still get
+	// the run's groups.
+	upstream.server_transport.hold_unis();
 	upstream.client_transport.release_bidis();
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	assert!(!fetch.is_finished(), "the FETCH was answered before its group landed");
+	upstream.server_transport.release_unis();
 	let fetched = kio::clock::timeout(TIMEOUT, fetch)
 		.await
 		.expect("the FETCH is answered")

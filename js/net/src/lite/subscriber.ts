@@ -1477,6 +1477,10 @@ export class Subscriber {
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
+				// A run recovered on a subscription of its own outlives this one, as in Rust's tail:
+				// releasing the copy would cancel it before upstream answered.
+				while (entry.fills?.recovering && hooks.trackReleased(producer).peek() === undefined)
+					await race([Signal.race(entry.fillsChanged), hooks.trackReleased(producer)]);
 				tailSettled = true;
 			});
 			// A reset that lands after the race below settled is moot; the race observes one before.
@@ -2124,8 +2128,11 @@ export class Subscriber {
 	async #driveFills(entry: SubscribeEntry, fills: RangeFills): Promise<void> {
 		const demand = entry.track.demand();
 		while (!fills.closed) {
-			// A stream still arriving on a recovery is kept only for someone reading it.
-			if (fills.poll(entry.tail, !isAbandoned(demand))) entry.fillsChanged.update((revision) => revision + 1);
+			// A stream still arriving on a recovery is kept only for someone reading it. A recovery
+			// ending is a change too, which the subscription's end waits on.
+			const recovering = fills.recovering;
+			if (fills.poll(entry.tail, !isAbandoned(demand)) || fills.recovering !== recovering)
+				entry.fillsChanged.update((revision) => revision + 1);
 			await fills.changed(entry.tail);
 		}
 		entry.fillsChanged.update((revision) => revision + 1);
@@ -2328,6 +2335,17 @@ export class Subscriber {
 					await over;
 				} else {
 					await responses;
+					// The publisher FINs unprompted once it finished the track, before every group stream
+					// it opened may have landed: those are waited for, at most the grace, before the rest
+					// is refused.
+					if (!fin) {
+						const drained = new Once<null>();
+						try {
+							await race([entry.tail.settle(covered, drained), leaving]);
+						} finally {
+							drained.set(null);
+						}
+					}
 					opened.close();
 				}
 			} catch (err) {
@@ -2365,8 +2383,8 @@ export class Subscriber {
 	}
 
 	// Read a recovery's responses to the publisher's FIN, giving up what it names it will not
-	// deliver. `fin` says whether our FIN went out, which the publisher's answers. With `cap`,
-	// before lite-07, `groups` narrows to the group it starts at, and `cap` asks no further.
+	// deliver. `fin` says whether our FIN went out, which the publisher's answers, and `onStart`
+	// hears where SUBSCRIBE_START says delivery starts.
 	async #recoveryResponses(
 		stream: Stream,
 		entry: SubscribeEntry,

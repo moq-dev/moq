@@ -10,7 +10,7 @@ use std::{
 
 use rangemap::{RangeMap, RangeSet};
 
-use super::{Establish, SubStream, Tail, TrackServe};
+use super::{Establish, Settle, SubStream, Tail, TrackServe};
 use crate::{
 	Error, StreamError,
 	coding::Recv,
@@ -579,6 +579,9 @@ enum RecoveryState {
 		sub: Box<SubStream>,
 		/// Whether our FIN went out.
 		finished: bool,
+		/// Once the publisher FINs unprompted, as a finished track's does before lite-07, the
+		/// tail it leaves: group streams it opened may still be landing.
+		draining: Option<Box<Settle>>,
 	},
 	/// The subscription failed to open or was reset: everything left is refused.
 	Done,
@@ -648,7 +651,11 @@ impl Recovery {
 		self.serve.subscriber.remove_subscribe(self.id);
 		match state {
 			RecoveryState::Establish(est) => est.abort(&Error::Cancel),
-			RecoveryState::Active { sub, finished: false } => sub.stream.writer.abort(&Error::Cancel),
+			RecoveryState::Active {
+				sub,
+				finished: false,
+				draining: None,
+			} => sub.stream.writer.abort(&Error::Cancel),
 			_ => {}
 		}
 	}
@@ -663,6 +670,7 @@ impl Recovery {
 						self.state = RecoveryState::Active {
 							sub: Box::new(active),
 							finished: false,
+							draining: None,
 						}
 					}
 					Err(err) => {
@@ -670,9 +678,21 @@ impl Recovery {
 						self.end(StreamError::from(&err));
 					}
 				},
-				RecoveryState::Active { sub: active, finished } => {
+				RecoveryState::Active {
+					sub: active,
+					finished,
+					draining,
+				} => {
 					if let Poll::Ready(Err(err)) = active.stream.writer.poll_flush(waiter) {
 						tracing::debug!(%err, "recovery subscribe write failed");
+					}
+					// The publisher is done, so only its streams still landing are waited for,
+					// at most the grace, before what is left is refused.
+					if let Some(settle) = draining {
+						let groups = self.groups.clone();
+						ready!(settle.poll(waiter, |tail| tail.covers(groups.clone())));
+						self.end(StreamError::NotFound);
+						continue;
 					}
 					// FIN once every group is accounted for and read, as a subscriber does once
 					// its tail settles, and the publisher FINs in reply; after any update, whose
@@ -774,8 +794,15 @@ impl Recovery {
 							tracing::warn!(?msg, "unexpected recovery subscribe response");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
-						// The publisher FINs in reply to ours, or once it finished the track.
-						Recv::Ended if *finished || active.end.is_some() => self.end(StreamError::NotFound),
+						// The publisher FINs in reply to ours, once the tail settled.
+						Recv::Ended if *finished => self.end(StreamError::NotFound),
+						// Or once it finished the track, before every stream it opened landed.
+						Recv::Ended if active.end.is_some() => {
+							*draining = Some(Box::new(Settle::new(
+								&self.serve.subscriber.runtime,
+								active.tail.consume(),
+							)));
+						}
 
 						Recv::Ended => {
 							tracing::warn!("recovery subscribe ended without SUBSCRIBE_FINISH");

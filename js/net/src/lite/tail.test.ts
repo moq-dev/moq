@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { defined } from "../defined.test-util.ts";
 import { ProtocolViolation, StreamCode, StreamError, toTransport } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -24,7 +25,7 @@ import {
 } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, hasLengthFirst, hasRanges, resolvesStart, Version } from "./version.ts";
+import { ALPN_05, fillsFromStart, hasLengthFirst, hasRanges, resolvesStart, Version } from "./version.ts";
 
 // The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Duration.millis(100);
@@ -98,6 +99,8 @@ async function subscribed(version: Version, maxDelay = GRACE, range?: Range) {
 		fin: () => sub.writer.close(),
 		subscriberFin: () => sub.reader.done(),
 		reset: (error: Error) => sub.writer.reset(error),
+		// The next stream the subscriber opens, such as a recovery's SUBSCRIBE.
+		accept: () => Stream.accept(pair.server, version),
 	};
 }
 
@@ -347,18 +350,33 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 	test("a floor below SUBSCRIBE_START owes nothing below it", async () => {
 		using clock = manual();
-		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000), {
+		const { subscriber, reader, respond, fin, accept } = await subscribed(version, Duration.millis(60_000), {
 			start: 1n,
 		});
 		await respond({ start: new SubscribeStart([3n]) });
 		const group = groupStream(subscriber, 3n);
 		group.finish();
 		await group.handled;
+		expect((await reader.recvGroup())?.start).toBe(3n);
+		// The reader still asks for the groups below. Unless its fills stop at the start, the copy asks
+		// upstream for them on a SUBSCRIBE of its own, and stays open past the track's end while it is out.
+		const ended = reader.recvGroup();
+		const recovery = fillsFromStart(version) ? undefined : defined(await accept());
 		await respond({ finish: new SubscribeFinish(4n) });
 		await fin();
-
-		expect((await reader.recvGroup())?.start).toBe(3n);
-		expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
+		if (recovery) {
+			expect(await recovery.reader.u53()).toBe(StreamId.Subscribe);
+			await Subscribe.decode(recovery.reader, version);
+			// Once the reader's miss is answered otherwise, the copy may cancel it first, which stops
+			// these writes: the reader ends either way.
+			const answered = async () => {
+				await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([3n]) }, version);
+				await encodeSubscribeResponse(recovery.writer, { finish: new SubscribeFinish(4n) }, version);
+				recovery.writer.close();
+			};
+			await answered().catch(() => undefined);
+		}
+		expect(await settlesWithin(ended, clock, Duration.millis(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 	});
 

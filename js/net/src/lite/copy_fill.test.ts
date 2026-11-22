@@ -33,7 +33,8 @@ const url = new URL("https://localhost:4443/test");
 
 // A JS publisher's track and a JS subscriber's session to it. The publisher's archive serves
 // every group its cache no longer holds, except group 1, which it never had, or with `timed`, none.
-async function peers(alpn: string, timed = false) {
+// `answered`, when given, holds the publisher's archive until it settles.
+async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 	const pair = createMockTransportPair(alpn);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -46,6 +47,7 @@ async function peers(alpn: string, timed = false) {
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			await answered;
 			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
 				if (key === 1n) {
 					fill.dropGroups(1n, 2n);
@@ -69,6 +71,8 @@ async function peers(alpn: string, timed = false) {
 		track,
 		remote,
 		fetches,
+		// The publisher's end of the transport, for steering delivery.
+		server: pair.server,
 		close() {
 			remote.close();
 			requests.close();
@@ -346,6 +350,58 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		}
 	},
 );
+
+// The publisher finishes the track while a lite-05/06 copy still recovers a run it evicted, on a
+// subscription of its own: the copy's subscription FINs, but the copy stays open until upstream
+// answered the run, even once that run's FIN beats its group streams, so the reader still gets it.
+// Mirrors the Rust
+// `lite06_fill_walk::a_recovery_outlives_the_finished_subscription`.
+test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s recovers a run past the track's finish", async (alpn) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	let answer = () => {};
+	const peer = await peers(
+		alpn,
+		false,
+		new Promise<void>((resolve) => {
+			answer = resolve;
+		}),
+	);
+	try {
+		const history: Subscription = { ranges: [{ start: 0n }], delay: { max: null }, order: "ascending" };
+		const first = peer.remote.track("video").subscribe(history);
+		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
+
+		// Both caches age out what nobody touched; only the live edge stays.
+		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
+		write(peer.track.createGroup(4n), 4n, "live");
+		expect((await first.recvGroup())?.start).toBe(4n);
+
+		// The run goes out on a recovery the archive holds, and the publisher ends the track.
+		const again = peer.remote.track("video").subscribe({ ...history, ranges: [{ start: 2n, end: 3n }] });
+		const got = take(again, 2);
+		await clock.advance(Duration.millis(100));
+		peer.track.finish();
+		await clock.advance(Duration.secs(60));
+
+		// Upstream answers and, the track being over, FINs the run's subscription before its group
+		// streams land, as QUIC may deliver them.
+		peer.server.holdUnis();
+		answer();
+		await clock.advance(Duration.secs(1));
+		while (peer.server.heldUnis() > 0) peer.server.releaseOldestUni();
+		expect(sorted(await got)).toEqual([
+			[2n, "old 2"],
+			[3n, "old 3"],
+		]);
+		first.close();
+		again.close();
+	} finally {
+		peer.close();
+		installed.close();
+	}
+});
 
 // Resolve once nobody reads `group` any more.
 async function unwanted(group: { demand(): { wanted: { peek(): boolean; changed(): Promise<boolean> } } }) {
