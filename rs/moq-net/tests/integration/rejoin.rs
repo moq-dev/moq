@@ -379,7 +379,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 /// downstream, rather than wait on a head that is never coming.
 #[kio::test]
 async fn rejoin_goes_live_without_the_join_head() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
@@ -693,7 +693,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 /// the empty block the second one carries.
 #[kio::test]
 async fn rejoin_keeps_source_timestamps() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let client = produce_origin(2);

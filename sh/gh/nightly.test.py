@@ -310,7 +310,7 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-bench")
         self.assertEqual(result.returncode, 0, result.stderr)
         release = [call for call in calls if call.startswith("just gh criterion")]
-        self.assertEqual(len(release), 4)  # moq-net, its CPU clock, kio, then GStreamer.
+        self.assertEqual(len(release), 3)  # moq-net, its CPU clock, then kio.
         # The CPU clock reuses moq-net's build instead of rebuilding it without fuzz.
         self.assertTrue(
             any(
@@ -318,7 +318,7 @@ class NightlyTest(unittest.TestCase):
                 for call in release
             )
         )
-        self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
+        self.assertEqual(release[-1], "just gh criterion --no-fail-fast -p kio --bench *")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
         result, calls = self.run_group("rust-shared")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -474,7 +474,7 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-bench", build)
         self.assertEqual(result.returncode, 1)
         # A failed group publishes no report, but every later target still runs.
-        self.assertEqual(calls[-1], "just gh criterion -p moq-gst --bench catalog")
+        self.assertEqual(calls[-1], "just gh criterion --no-fail-fast -p kio --bench *")
 
     def test_unknown_group_fails_before_running_anything(self):
         result, calls = self.run_group("unknown")

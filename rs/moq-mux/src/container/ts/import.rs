@@ -2800,7 +2800,8 @@ pub(super) fn discontinuity_indicator(pkt: &[u8; 188]) -> bool {
 	pkt[3] & 0x20 != 0 && pkt[4] > 0 && pkt[5] & 0x80 != 0
 }
 
-/// The PCR a packet's adaptation field carries, in 27 MHz ticks.
+/// The PCR a packet's adaptation field carries, in 27 MHz ticks, so below the 2^33 * 300
+/// wrap. `None` for an extension past 299, which no clock counts to.
 pub(super) fn pcr(pkt: &[u8; 188]) -> Option<u64> {
 	if pkt[3] & 0x20 == 0 || pkt[4] < 7 || pkt[5] & 0x10 == 0 {
 		return None;
@@ -2811,7 +2812,7 @@ pub(super) fn pcr(pkt: &[u8; 188]) -> Option<u64> {
 		| (u64::from(pkt[9]) << 1)
 		| (u64::from(pkt[10]) >> 7);
 	let ext = (u64::from(pkt[10] & 0x01) << 8) | u64::from(pkt[11]);
-	Some(base * 300 + ext)
+	(ext < 300).then_some(base * 300 + ext)
 }
 
 /// How long each elementary stream has gone without delivering an access unit.
@@ -3001,7 +3002,8 @@ impl PatReader {
 	}
 }
 
-/// Whether every adaptation field fits inside the length its packet declares.
+/// Whether every adaptation field fits inside the length its packet declares, and a PCR
+/// it carries is one.
 pub(super) fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
 	if pkt[3] & 0x20 == 0 {
 		return true;
@@ -3017,6 +3019,9 @@ pub(super) fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
 	let Some(&flags) = field.first() else {
 		return true;
 	};
+	if flags & 0x10 != 0 && field.len() >= 7 && pcr(pkt).is_none() {
+		return false;
+	}
 	let mut off =
 		1 + usize::from(flags & 0x10 != 0) * 6 + usize::from(flags & 0x08 != 0) * 6 + usize::from(flags & 0x04 != 0);
 	for flag in [0x02, 0x01] {
@@ -10010,6 +10015,31 @@ pub(super) mod test {
 				);
 			}
 		}
+	}
+
+	/// A PCR extension counts to 299: one past it at the top of the clock reads past the
+	/// wrap, so the field is malformed and ends the import before any clock step reads it.
+	#[test]
+	fn a_pcr_extension_past_299_ends_the_import() {
+		const PCR: u16 = 0x0200;
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
+		mux.gop(VIDEO, 90_000);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(&mux.out).unwrap();
+		import.pcr_pid = Some(Pid::new(PCR).unwrap());
+		import.decode(&pcr_packet(PCR, 27_000_000)).unwrap();
+
+		// The largest base, and an extension of 511.
+		let mut packet = pcr_packet(PCR, 0);
+		packet[6..12].fill(0xff);
+		assert_eq!(super::pcr(&packet.clone().try_into().unwrap()), None);
+		let err = import.decode(&packet).unwrap_err();
+		assert!(err.to_string().contains("adaptation field"), "{err}");
 	}
 
 	/// A malformed PES start ends the import after the AU a codec boundary already completed in

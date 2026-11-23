@@ -838,9 +838,9 @@ export const hooks: {
 	 * undefined for one with no group to deliver at or before its time, answered under at most
 	 * `budget`, the max delay in milliseconds, replacing the last set. A reader's time start the
 	 * copy cannot place among its own groups resolves to the range asked from it: a start at or
-	 * before the time names the group containing it, and anything else says no group there is
-	 * left within the budget. Mirrors the Rust `track::Producer::time_starts`; assigned by
-	 * `track.ts`.
+	 * before the time names the group containing it, one past the time starts the range there
+	 * within the budget, and no start says no group at or before the time is left within it.
+	 * Mirrors the Rust `track::Producer::time_starts`; assigned by `track.ts`.
 	 */
 	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined, number]>) => void;
 	/**
@@ -1123,6 +1123,19 @@ export const hooks: {
 	groupHeadless: (group: GroupProducer) => boolean;
 	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
 	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
+	/**
+	 * The first time a source copy can't place, undefined once it finished: it places a time it holds
+	 * a timed frame past, which puts its End past the time too. An aborted copy may have lost its End.
+	 * Mirrors the Rust `group::Handle::unplaced_from`.
+	 */
+	groupUnplacedFrom: (group: GroupProducer) => bigint | undefined;
+	/** A source copy's frame count, bumped on each write. */
+	groupWrites: (group: GroupProducer) => Getter<number>;
+	/**
+	 * Move a reader past every frame buffered now without building a payload, so a streamed frame
+	 * that aborted or shed its head never throws. Mirrors draining Rust's `poll_next_frame`.
+	 */
+	skipGroupFrames: (group: GroupConsumer) => void;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -1555,6 +1568,15 @@ export const hooks: {
 	groupWholeEnd: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupUnplacedFrom: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupWrites: () => {
+		throw new Error("group.ts not loaded");
+	},
+	skipGroupFrames: () => {
+		throw new Error("group.ts not loaded");
+	},
 	startGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1722,24 +1744,15 @@ function rendezvousHash(path: string, instance: string): bigint {
 }
 
 /**
- * Settles among one instance's routes: FNV-1a 64 of `path` then each hop, oldest first, as 8
- * little-endian bytes. Mirrors `chain_key` in `rs/moq-net`.
- */
-export function chainHash(path: string, hops: readonly bigint[]): bigint {
-	const bytes: number[] = [];
-	for (const hop of hops) {
-		for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((hop >> shift) & 0xffn));
-	}
-	return fnv(path, bytes);
-}
-
-/**
  * The best of `candidates`, oldest first, at `prefix` for resolving `path`: `best_route` in
  * rs/moq-net. Only an instance's highest epoch is eligible, ranked by
- * {@link compareRouteCandidates} (`route_order`), and a full tie goes to the newest, as Rust's
- * final `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or
- * epoch), and keeps its place through a re-price. Every selector ranks through this, so the
- * announcements and the consumes of one session never pick apart.
+ * {@link compareRouteCandidates} (`route_order`). A full tie goes to the oldest where
+ * {@link holdsOnTie}, as Rust's `RouteEntry::since`, and otherwise to the newest, as Rust's final
+ * `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or epoch), and
+ * keeps its place through a re-price. Rust also renews `since` when a re-price changes the rank;
+ * this origin forwards no route it received, so a route that dips and recovers here restarts only
+ * its own readers. Every selector ranks through this, so the announcements and the consumes of
+ * one session never pick apart.
  */
 export function bestCandidate<T>(
 	path: Path.Valid,
@@ -1753,9 +1766,25 @@ export function bestCandidate<T>(
 	for (const candidate of list) {
 		const next = route(candidate);
 		if (epochs.supersedes(next)) continue;
-		if (best === undefined || compareRouteCandidates(path, prefix, next, route(best)) <= 0) best = candidate;
+		if (best === undefined) {
+			best = candidate;
+			continue;
+		}
+		const order = compareRouteCandidates(path, prefix, next, route(best));
+		if (order < 0 || (order === 0 && !holdsOnTie(path, prefix, next, route(best)))) best = candidate;
 	}
 	return best;
+}
+
+/**
+ * Whether a full tie between `a` and `b` resolving `path` at `prefix` keeps the route held
+ * longest, rather than the newest: beneath the prefix, where neither is a lite-07 claim. Switching
+ * there would restart the route at every relay downstream that ranks it alike; at the prefix
+ * itself the newest wins, so a publisher that restarts under a new instance takes over at once.
+ * As `route_order` in rs/moq-net.
+ */
+export function holdsOnTie(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): boolean {
+	return path !== prefix && !a.claimed && !b.claimed;
 }
 
 /**
@@ -1853,23 +1882,22 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 }
 
 /**
- * Order eligible routes at `prefix` resolving `path` by preference, hop count, then the spread
- * hash of each instance, then, within one instance, the hash of its chain. A lite-07 claim counts
- * as one hop, to the peer that sent it, and ranks by the rendezvous hash of its instance. The
- * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win
- * (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over from
- * its lingering session at once, matching `route_order` in rs/moq-net for routes a node did not
- * get from a cluster peer, which is every route here.
+ * Order eligible routes at `prefix` resolving `path` by preference, hop count, then, beneath the
+ * prefix, the spread hash of each named instance. A lite-07 claim counts as one hop, to the peer
+ * that sent it, and ranks by the rendezvous hash of its instance. The hashes only spread a pool
+ * over a prefix's paths, as `route_order` in rs/moq-net does. Any other tie is left for the newest
+ * to win (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over
+ * from its lingering session at once. A relay instead keeps the route in use on such a tie, since
+ * switching would restart it at every relay downstream; this origin forwards no route it received,
+ * so its switch restarts nothing past its own readers.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
 	// The most specific claim wins outright: an exact claim shadows broader ones shown at its path.
 	const above = (a.above ?? 0n) - (b.above ?? 0n);
 	const order = (above < 0n ? -1 : above > 0n ? 1 : 0) || compareRoutes(a, b) || routeHops(a) - routeHops(b);
 	if (order !== 0 || path === prefix) return order;
-	const [a1, a2] = routeKey(path, a);
-	const [b1, b2] = routeKey(path, b);
-	if (a1 !== b1) return a1 < b1 ? -1 : 1;
-	return a2 < b2 ? -1 : a2 > b2 ? 1 : 0;
+	const [ka, kb] = [routeKey(path, a), routeKey(path, b)];
+	return ka < kb ? -1 : ka > kb ? 1 : 0;
 }
 
 /** The hops a route ranks by: a lite-07 claim counts as the one hop to the peer that sent it. */
@@ -1877,10 +1905,12 @@ export function routeHops(route: WireRoute): number {
 	return route.claimed ? 1 : route.hops.length;
 }
 
-/** The hash pair a route ranks by beneath its prefix, each route keyed on its own: a lite-07 claim
- * by the rendezvous hash of its instance, any other by the spread hash of its instance and then
- * the hash of its chain. As `route_order` in rs/moq-net. */
-function routeKey(path: Path.Valid, route: WireRoute): [bigint, bigint] {
-	if (route.claimed) return [rendezvousHash(path, route.instance ? Instance.text(route.instance) : ""), 0n];
-	return [spreadHash(path, route.instance ? Instance.text(route.instance) : ""), chainHash(path, route.hops)];
+/** The hash a route ranks by beneath its prefix, each route keyed on its own: a lite-07 claim by
+ * the rendezvous hash of its instance, a named instance by its spread hash, and one a session
+ * minted by none, since no other node shares it. As `route_order` in rs/moq-net. */
+function routeKey(path: Path.Valid, route: WireRoute): bigint {
+	const instance = route.instance;
+	if (route.claimed) return rendezvousHash(path, instance ? Instance.text(instance) : "");
+	if (instance !== undefined && Instance.isMinted(instance)) return 0n;
+	return spreadHash(path, instance ? Instance.text(instance) : "");
 }

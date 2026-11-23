@@ -1589,6 +1589,23 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// The same once the read moved onto a failed copy that holds fewer frames than it read: that
+		// copy cannot continue the group, so the group fails instead of ending at its close.
+		{
+			ops: [
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 3, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 2 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "close", instance: 0, slot: 1, group: undefined, down: true },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "ranges", reader: 0, range: undefined },
+			],
+			finish: false,
+		},
 		// A short close from a route that failed stands once the route replacing it gave the group up,
 		// so nothing continues it. Mirrors the Rust case.
 		{

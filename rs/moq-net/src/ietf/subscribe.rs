@@ -85,7 +85,8 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			0x04 => rendezvous_timeout: Option<u64>,
 			0x06 => _subgroup_delivery_timeout: Option<u64>,
-			0x10 => forward: Option<bool>,
+			0x10 => forward: Option<bool> where !version.paused(),
+			0x11 => paused: Option<bool> where version.paused(),
 			0x20 => subscriber_priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
 			0x22 => group_order: Option<GroupOrder>,
@@ -128,8 +129,8 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			filter,
 			fill,
 			properties_wanted,
-			// Absent means 1.
-			forward: forward.unwrap_or(true),
+			// Absent means forwarding: FORWARD defaults to 1, PAUSED to 0.
+			forward: Version::forward_state(forward, paused).unwrap_or(true),
 			rendezvous,
 			range_filters,
 			authorization_token,
@@ -153,7 +154,8 @@ impl<'a> Message<'a> for Subscribe<'a> {
 
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
-			0x10 => self.forward,
+			0x10 => (!version.paused()).then_some(self.forward),
+			0x11 => version.paused().then_some(!self.forward),
 			0x20 => self.subscriber_priority,
 			0x21 => self.filter,
 			0x22 => self.group_order,
@@ -245,7 +247,8 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		self.request_id.encode(w, version)?;
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
-			0x10 => self.forward,
+			0x10 => self.forward.filter(|_| !version.paused()),
+			0x11 => self.forward.filter(|_| version.paused()).map(|forward| !forward),
 			0x20 => self.subscriber_priority,
 			0x21 => self.filter,
 			0x23 => self.fill.filter(|_| Filter::is_draft20(version)),
@@ -264,7 +267,8 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			0x02 => _object_delivery_timeout: Option<u64>,
 			0x03 => authorization_token: Vec<RequestToken>,
 			0x06 => _subgroup_delivery_timeout: Option<u64>,
-			0x10 => forward: Option<bool>,
+			0x10 => forward: Option<bool> where !version.paused(),
+			0x11 => paused: Option<bool> where version.paused(),
 			0x20 => subscriber_priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
 			0x23 => fill: Option<Fill> where Filter::is_draft20(version),
@@ -279,7 +283,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		Ok(Self {
 			request_id,
 			subscriber_priority,
-			forward,
+			forward: Version::forward_state(forward, paused),
 			filter,
 			authorization_token: super::token::single(authorization_token)?,
 			new_group,
@@ -332,7 +336,7 @@ mod tests {
 	}
 
 	/// Build a SUBSCRIBE body carrying a single RENDEZVOUS_TIMEOUT parameter.
-	const VERSIONS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+	const VERSIONS: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 	/// NEW_GROUP_REQUEST survives SUBSCRIBE and REQUEST_UPDATE.
 	#[test]
@@ -396,7 +400,7 @@ mod tests {
 	/// SUBSCRIBE.
 	#[test]
 	fn rendezvous_timeout_retains_whether_a_wait_was_requested() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for millis in [0, 5000] {
 				let encoded = subscribe_with_rendezvous(millis, version);
 				let msg: Subscribe = decode_message(&encoded, version)
@@ -444,7 +448,7 @@ mod tests {
 			authorization_token: None,
 		};
 
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			// The reader has to be able to see a 0x04, or its absence below proves nothing.
 			assert_eq!(
 				first_param_key(&subscribe_with_rendezvous(5000, version), version),
@@ -452,11 +456,21 @@ mod tests {
 				"{version}: reader missed a planted RENDEZVOUS_TIMEOUT"
 			);
 
-			assert_eq!(
-				first_param_key(&encode_message(&msg, version), version),
-				Some(0x10),
-				"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
-			);
+			// Drafts 18 to 22 lead with FORWARD (0x10). Draft-23 leads with PAUSED (0x11)
+			// in its place.
+			let first = first_param_key(&encode_message(&msg, version), version);
+			match version {
+				Version::Draft18 | Version::Draft20 | Version::Draft22 => assert_eq!(
+					first,
+					Some(0x10),
+					"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
+				),
+				Version::Draft23 => assert_eq!(
+					first,
+					Some(0x11),
+					"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
+				),
+			}
 		}
 	}
 
@@ -503,7 +517,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_ok_accepts_largest_object() {
 		let payload = [0x04, 0x01, 0x09, 0x05, 0x00];
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let decoded: SubscribeOk = decode_message(&payload, version).unwrap();
 
 			assert_eq!(decoded.track_alias, 4, "{version}");
@@ -538,6 +552,7 @@ mod tests {
 		for (version, expected) in [
 			(Version::Draft18, &[42, 1, 0x09, 0x09, 0x03][..]),
 			(Version::Draft22, &[42, 1, 0x09, 0x09, 0x03][..]),
+			(Version::Draft23, &[42, 1, 0x09, 0x09, 0x03][..]),
 		] {
 			let msg = SubscribeOk {
 				track_alias: 42,
@@ -557,7 +572,7 @@ mod tests {
 	/// instead of letting the request reach its answer.
 	#[test]
 	fn subscribe_accepts_the_delivery_timeouts() -> Result<(), EncodeError> {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut body = Vec::new();
 			let w = &mut Encoder::new(&mut body, version.into());
 			RequestId(1).encode(w, version)?;
@@ -580,6 +595,8 @@ mod tests {
 		for (wanted, version) in [
 			(false, Version::Draft22),
 			(true, Version::Draft22),
+			(false, Version::Draft23),
+			(true, Version::Draft23),
 			// Older drafts have no such parameter, so the opt-out is dropped rather than
 			// sent as one they would treat as a protocol violation.
 			(true, Version::Draft18),
@@ -644,7 +661,7 @@ mod tests {
 	/// stack's unset 127, so a relay forwards it unchanged.
 	#[test]
 	fn test_subscribe_omitted_priority_is_128() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut bytes = vec![0x00]; // request_id
 			bytes.extend_from_slice(b"\x01\x0bnonexistent\x0dno-such-track"); // namespace, name
 			bytes.push(0x00); // no parameters
@@ -698,7 +715,7 @@ mod tests {
 	/// decoder returns the same wire value.
 	#[test]
 	fn subscribe_ok_priority_property_bytes_on_every_draft() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut msg = SubscribeOk {
 				track_alias: 42,
 				largest: None,
@@ -891,10 +908,95 @@ mod tests {
 		assert_eq!(encode_message(&msg, Version::Draft22), body);
 	}
 
+	/// Draft-23 (section 9.19.18) replaces FORWARD (0x10) with PAUSED (0x11), inverted and
+	/// defaulting to 0, so each draft refuses the other's parameter as unknown.
+	#[test]
+	fn draft23_carries_paused_in_place_of_forward() {
+		let version = Version::Draft23;
+		for forward in [true, false] {
+			let msg = Subscribe {
+				new_group: None,
+				request_id: RequestId(1),
+				track_namespace: crate::Path::from_static("live"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Descending,
+				filter: Filter::Unfiltered,
+				fill: None,
+				properties_wanted: true,
+				forward,
+				rendezvous: false,
+				range_filters: false,
+				authorization_token: None,
+			};
+
+			#[rustfmt::skip]
+			let expected = subscribe_body(&[
+				0x03, // Number of Parameters
+				0x11, u8::from(!forward), // PAUSED
+				0x0F, 0x80, // SUBSCRIBER_PRIORITY (0x20) = 128, a raw byte
+				0x02, 0x02, // GROUP_ORDER (0x22) = Descending
+			]);
+			assert_eq!(encode_message(&msg, version), expected, "forward={forward}");
+			let decoded: Subscribe = decode_message(&expected, version).unwrap();
+			assert_eq!(decoded.forward, forward);
+		}
+
+		// Omitted means unpaused.
+		let body = subscribe_body(&[0x00]);
+		let decoded: Subscribe = decode_message(&body, version).unwrap();
+		assert!(decoded.forward);
+		// Anything but 0 or 1 closes the session, as does the parameter of the other draft.
+		assert!(decode_message::<Subscribe>(&subscribe_body(&[0x01, 0x11, 0x02]), version).is_err());
+		assert!(decode_message::<Subscribe>(&subscribe_body(&[0x01, 0x10, 0x01]), version).is_err());
+		assert!(decode_message::<Subscribe>(&subscribe_body(&[0x01, 0x11, 0x00]), Version::Draft22).is_err());
+	}
+
+	/// A REQUEST_UPDATE leaves the state alone when it omits PAUSED, so the inversion must
+	/// not turn an absent parameter into a value.
+	#[test]
+	fn draft23_update_carries_paused_only_when_set() {
+		let version = Version::Draft23;
+		for forward in [None, Some(true), Some(false)] {
+			let msg = SubscribeUpdate {
+				new_group: None,
+				request_id: RequestId(10),
+				subscriber_priority: None,
+				forward,
+				filter: None,
+				authorization_token: None,
+				fill: None,
+			};
+			let wire = encode_message(&msg, version);
+			let expected: &[u8] = match forward {
+				None => &[0x0A, 0x00],
+				Some(forward) => &[0x0A, 0x01, 0x11, u8::from(!forward)],
+			};
+			assert_eq!(wire, expected, "{forward:?}");
+			let decoded: SubscribeUpdate = decode_message(&wire, version).unwrap();
+			assert_eq!(decoded.forward, forward);
+		}
+	}
+
+	/// Draft-23's FILL_PARAMETERS has no length, so the parameter after it is found by
+	/// reading the fill's own Parameters to the last one counted.
+	#[test]
+	fn draft23_subscribe_reads_past_a_counted_fill() {
+		#[rustfmt::skip]
+		let body = subscribe_body(&[
+			0x02, // Number of Parameters
+			0x23, 0x01, 0x21, 0x01, 0x01, // FILL_PARAMETERS: one Parameter, LOCATION_FILTER Relative Start 1
+			0x0F, 0x07, // NEW_GROUP_REQUEST (0x32) = 7
+		]);
+		let msg: Subscribe = decode_message(&body, Version::Draft23).unwrap();
+		assert_eq!(msg.fill.and_then(|fill| fill.filter), Some(Filter::Relative(1)));
+		assert_eq!(msg.new_group, Some(7));
+	}
+
 	/// FORWARD=0 is legal on every draft, a paused request rather than a session error.
 	#[test]
 	fn subscribe_decodes_forward_zero() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let msg = Subscribe {
 				new_group: None,
 				request_id: RequestId(1),
@@ -926,7 +1028,7 @@ mod tests {
 			0x01, // Number of Parameters
 			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
 		]);
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let wire = body.clone();
 			let mut buf = Decoder::new(&wire, version.into());
 			Subscribe::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
@@ -993,7 +1095,7 @@ mod cache_duration_tests {
 
 	#[test]
 	fn max_cache_duration_is_read_in_each_drafts_field() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for age in [0u64, 30_000] {
 				let mut payload = vec![0, 0, 4];
 				Encoder::new(&mut payload, version.into()).varint(age).unwrap();
@@ -1011,7 +1113,7 @@ mod cache_duration_tests {
 
 	#[test]
 	fn cache_duration_preserves_optional_value() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 				let ok = SubscribeOk {
 					track_alias: 0,
