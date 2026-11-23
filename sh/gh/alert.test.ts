@@ -81,18 +81,23 @@ test("alert coverage excludes CI-only workflows and retains release and nightly 
 	}
 });
 
-test("a landing failure posts once per streak", () => {
+test("a landing failure streak posts once a day", () => {
 	const root = mkdtempSync(join(tmpdir(), "moq-alert-"));
 	try {
 		mkdirSync(join(root, "bin"));
 		// `gh` prints the runs file, or fails when it is missing; `curl` records each post.
 		writeFileSync(join(root, "bin/gh"), `#!/usr/bin/env bash\nexec cat "${root}/runs.json"\n`, { mode: 0o755 });
 		writeFileSync(join(root, "bin/curl"), `#!/usr/bin/env bash\necho post >> "${root}/posts"\n`, { mode: 0o755 });
-		const post = (once: boolean, runs?: [number, string][]) => {
+		// Earlier runs as [run_number, conclusion, created_at], today's unless given.
+		const post = (once: boolean, runs?: [number, string, string?][], createdAt = "2026-11-23T00:00:05Z") => {
 			rmSync(join(root, "posts"), { force: true });
 			rmSync(join(root, "runs.json"), { force: true });
 			if (runs) {
-				const workflow_runs = runs.map(([run_number, conclusion]) => ({ run_number, conclusion }));
+				const workflow_runs = runs.map(([run_number, conclusion, created_at = "2026-11-23T00:00:01Z"]) => ({
+					run_number,
+					conclusion,
+					created_at,
+				}));
 				writeFileSync(join(root, "runs.json"), JSON.stringify({ workflow_runs }));
 			}
 			const result = Bun.spawnSync(["bash", "sh/gh/alert.sh", "discord"], {
@@ -104,6 +109,7 @@ test("a landing failure posts once per streak", () => {
 					GITHUB_REPOSITORY: "moq-dev/moq",
 					RUN_WORKFLOW_ID: "7",
 					RUN_NUMBER: "10",
+					RUN_CREATED_AT: createdAt,
 					RUN_NAME: "CodSpeed",
 					RUN_EVENT: "push",
 					RUN_REF: "main",
@@ -141,9 +147,21 @@ test("a landing failure posts once per streak", () => {
 				[8, "success"],
 			]),
 		).toBe(true);
-		// No earlier verdict, or no way to read one, posts rather than risk a lost alert.
+		// A streak posts its first failure of each UTC day, so a lost post costs at most a day.
+		expect(post(true, [[9, "failure", "2026-11-22T23:59:59Z"]])).toBe(true);
+		expect(post(true, [[9, "timed_out", "2026-11-20T12:00:00Z"]])).toBe(true);
+		expect(post(true, [[9, "failure", "2026-11-23T23:59:59Z"]], "2026-11-23T23:59:59Z")).toBe(false);
+		// Only the latest earlier verdict's day counts, not an older failure's.
+		expect(
+			post(true, [
+				[9, "failure", "2026-11-22T20:00:00Z"],
+				[8, "failure", "2026-11-23T00:00:00Z"],
+			]),
+		).toBe(true);
+		// No earlier verdict, no way to read one, or no day to compare posts rather than risk a lost alert.
 		expect(post(true, [])).toBe(true);
 		expect(post(true)).toBe(true);
+		expect(post(true, [[9, "failure"]], "")).toBe(true);
 		// Without ALERT_ONCE every failure posts, and earlier runs are never read.
 		expect(post(false, [[9, "failure"]])).toBe(true);
 	} finally {
