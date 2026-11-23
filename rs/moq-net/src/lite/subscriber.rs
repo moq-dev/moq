@@ -3326,15 +3326,10 @@ mod tests {
 		active.starts.insert(1, None);
 		assert_eq!(active.never_serves(largest), largest, "that range served nothing");
 		active.starts.remove(&1);
-		assert_eq!(active.never_serves(largest), None, "an unanswered range may serve it");
-		active.live = live(&[
-			lite::Range::span(Some(0), 0, Some(3), None),
-			lite::Range::span(Some(4), 0, Some(8), None),
-		]);
 		assert_eq!(
 			active.never_serves(largest),
 			largest,
-			"4..9 never reaches group 10, answered or not"
+			"an unanswered range is not waited on"
 		);
 
 		let open = lite::Range { end: None, ..later };
@@ -10880,7 +10875,9 @@ impl SubStream {
 	/// `largest`, when this bounded subscription's ranges, as SUBSCRIBE_START resolved them,
 	/// stop short of it, so the feed never delivers it. The range and arrival ledger then wait
 	/// for the groups it owes instead of an edge outside the requested history. A feed that
-	/// serves Largest waits for it, so an old cache is judged against that edge.
+	/// serves Largest waits for it, so an old cache is judged against that edge. A range still
+	/// unanswered is not waited on: going live is decided once, and it may yet answer with no
+	/// group, which would leave the wait unreleased, while the recorded Largest still bounds reads.
 	fn never_serves(&self, largest: Option<Position>) -> Option<Position> {
 		largest.filter(|largest| {
 			self.live.iter().all(|(_, range)| range.end.is_some())
@@ -10910,8 +10907,8 @@ impl SubStream {
 		}
 	}
 
-	/// Where each bounded range may deliver, up to its end: from its reported start, or from as
-	/// low as it asked while nothing has answered it yet. `None` when a range has no group end.
+	/// Where each bounded range delivers, as its reported start resolved it, up to its end.
+	/// `None` when a range is open, or nothing says yet where one starts.
 	fn spans(&self) -> Option<Vec<std::ops::Range<u64>>> {
 		self.live
 			.iter()
@@ -10920,14 +10917,8 @@ impl SubStream {
 				let Some(lite::Anchor::Absolute(end)) = range.end else {
 					return None;
 				};
-				let start = match self.range_start(id, range) {
-					// Each range's own start accounts for its skipped prefix.
-					Some(start) => start.unwrap_or(end.group),
-					None => match range.start {
-						Some(lite::Anchor::Absolute(start)) => start.group,
-						_ => 0,
-					},
-				};
+				// Each range's own start accounts for its skipped prefix.
+				let start = self.range_start(id, range)?.unwrap_or(end.group);
 				Some(start..end.group)
 			})
 			.collect()
