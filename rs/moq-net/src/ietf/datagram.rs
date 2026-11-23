@@ -178,7 +178,7 @@ mod tests {
 		Ok(datagram)
 	}
 
-	const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+	const ALL: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 	fn single(priority: Option<u8>) -> ObjectDatagram {
 		ObjectDatagram {

@@ -88,6 +88,9 @@ test("WebTransport offers lite-06 first by default", async () => {
 	const { protocols } = await offered(ALPN_06);
 	expect(protocols?.[0]).toBe("moq-lite-06");
 	expect(protocols).not.toContain(ALPN_07_WIP);
+	// The draft-23 port is partial, so it is offered only when named.
+	expect(protocols).not.toContain(Ietf.ALPN.DRAFT_23);
+	expect(protocols).toContain(Ietf.ALPN.DRAFT_22);
 });
 
 test("WebTransport negotiates lite-07-wip only when explicitly offered", async () => {
@@ -714,6 +717,11 @@ test("the WebSocket fallback offers the same versions", async () => {
 	const defaults = await websocketOffer({});
 	expect(defaults.some((protocol) => protocol.endsWith(ALPN_06))).toBe(true);
 	expect(defaults.some((protocol) => protocol.endsWith(ALPN_07_WIP))).toBe(false);
+	expect(defaults.some((protocol) => protocol.endsWith(Ietf.ALPN.DRAFT_23))).toBe(false);
+
+	// Named, draft-23 rides qmux-01 like the other moq-transport drafts.
+	const named = await websocketOffer({ versions: ["moq-transport-23"] });
+	expect(named.filter((protocol) => protocol.includes("."))).toEqual([`qmux-01.${Ietf.ALPN.DRAFT_23}`]);
 
 	const asked = await websocketOffer({ versions: ["moq-lite-07-wip", "moq-lite-06"] });
 	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);

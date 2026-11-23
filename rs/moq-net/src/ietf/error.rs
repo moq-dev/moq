@@ -326,7 +326,7 @@ pub(crate) mod request {
 	mod tests {
 		use super::*;
 
-		const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+		const ALL: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 		const KINDS: [Kind; 6] = [
 			Kind::Subscribe,
@@ -490,14 +490,22 @@ pub(crate) mod request {
 		/// Every code we put in a rejection has to be one the negotiated draft registers for
 		/// that request. The table is transcribed from the drafts (draft-18 section 15.11.2
 		/// on), not derived from the mapping, so a mistake in the mapping cannot talk the
-		/// assertion into agreeing with it.
+		/// assertion into agreeing with it. Draft-23's is its own (section 16.12.2): it adds
+		/// UNAVAILABLE (0xA) and no longer has PREFIX_OVERLAP (0x30), nor the 0x19 and 0x32
+		/// that earlier drafts retired.
 		#[test]
 		fn only_registered_codes_reach_the_wire() {
-			fn registered() -> &'static [u64] {
-				&[
-					0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33, 0x34,
-					0x35, 0x36,
-				]
+			fn registered(version: Version) -> &'static [u64] {
+				match version {
+					Version::Draft18 | Version::Draft20 | Version::Draft22 => &[
+						0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33,
+						0x34, 0x35, 0x36,
+					],
+					_ => &[
+						0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0xA, 0x10, 0x11, 0x12, 0x20, 0x31, 0x33, 0x34, 0x35,
+						0x36,
+					],
+				}
 			}
 
 			// Sent but never read back as itself: a peer's MALFORMED_AUTH_TOKEN stays remote.
@@ -507,9 +515,29 @@ pub(crate) mod request {
 					for err in EVERY_ERROR.iter().chain([&malformed]) {
 						let code = to_code(err, kind, version);
 						assert!(
-							registered().contains(&code),
+							registered(version).contains(&code),
 							"{err:?} sends {code:#x}, which {version} does not register for {kind:?}"
 						);
+					}
+				}
+			}
+		}
+
+		/// UNAVAILABLE (0xA) is new in draft-23 (section 12.3): a responder that cannot fulfill
+		/// the request now, such as a relay without stream credit to forward it. We never send
+		/// it, and no local error means it, so a peer's stays the remote code it was; the Retry
+		/// Interval rides beside it in REQUEST_ERROR.
+		#[test]
+		fn unavailable_stays_the_peers_code() {
+			const UNAVAILABLE: u64 = 0xA;
+			for version in ALL {
+				for kind in KINDS {
+					assert!(
+						matches!(from_code(UNAVAILABLE, kind, version), Error::Remote(0xA)),
+						"{version:?} {kind:?}"
+					);
+					for err in &EVERY_ERROR {
+						assert_ne!(to_code(err, kind, version), UNAVAILABLE, "{version:?} {kind:?} {err:?}");
 					}
 				}
 			}
