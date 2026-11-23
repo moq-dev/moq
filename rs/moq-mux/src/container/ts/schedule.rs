@@ -691,6 +691,9 @@ pub(super) struct Schedule {
 	revising: bool,
 	/// The [`TABLE_REPEAT`] period of the grid's last copy of the tables.
 	repeated: Option<u128>,
+	/// Whether the grid repeats the tables at all, off only for a test comparing against none.
+	#[cfg(test)]
+	grid: bool,
 	/// Tables to go out ahead of the next unit pushed.
 	lead: Option<Tables>,
 	/// The timeline opens ([`Self::open`]) and its first tables are still to go out.
@@ -731,6 +734,8 @@ impl Schedule {
 			stated: 0,
 			revising: false,
 			repeated: None,
+			#[cfg(test)]
+			grid: true,
 			lead: None,
 			opening: false,
 			clocked: 0,
@@ -1402,9 +1407,14 @@ impl Schedule {
 		let Some(psi) = &self.psi else {
 			return;
 		};
+		#[cfg(test)]
+		if !self.grid {
+			return;
+		}
 		// Under a mux rate a copy the media leads has a deadline, so a repeat in Bsys must leave
-		// room for a whole one beside it: tables over half of Bsys go out on the media's cadence.
-		if self.rate.is_some() && 2 * psi.packets.len() as u128 > BSYS {
+		// room for the two a keyframe just after a cadence copy brings: larger tables go out on
+		// the media's cadence alone.
+		if self.rate.is_some() && 3 * psi.packets.len() as u128 > BSYS {
 			return;
 		}
 		self.repeated = Some(period);
@@ -2326,8 +2336,9 @@ mod tests {
 		assert_eq!(marks, [[2; 13], [3; 13]].concat());
 	}
 
-	/// Under a mux rate, repeats leave Bsys room for the copies the media leads to meet their
-	/// frames' deadlines, however short the send-ahead and however large the tables.
+	/// Under a mux rate, the grid's repeats never cost a copy the media leads its deadline: every
+	/// export that keeps its deadlines without them keeps them with them, however short the
+	/// send-ahead, large the tables, or frequent the copies.
 	#[test]
 	fn repeats_leave_bsys_to_the_media_led_copies() {
 		const AUDIO: Buffer = Buffer {
@@ -2337,13 +2348,17 @@ mod tests {
 			transport: 512,
 			reach: Duration::from_millis(40),
 		};
-		let mut failed = Vec::new();
-		let windows = [Duration::ZERO, Duration::from_millis(40), Duration::from_secs(1)];
-		for (delay, count) in windows
-			.into_iter()
-			.flat_map(|delay| [1, 3, 6].map(|count| (delay, count)))
-		{
+		// The media leads a copy every 500 ms, at keyframes every 200 ms, or at a keyframe 40 ms
+		// after each 500 ms copy.
+		let cadences: [fn(u128) -> bool; 3] = [
+			|ms| ms % 500 == 0,
+			|ms| ms % 200 == 0,
+			|ms| ms % 500 == 0 || ms % 500 == 40,
+		];
+		// The error a run ends with, if any, and the PAT packets it laid.
+		let run = |delay: Duration, count: usize, leads: fn(u128) -> bool, grid: bool| {
 			let mut schedule = Schedule::new(delay);
+			schedule.grid = grid;
 			schedule.set_rate(Some(RATE));
 			schedule.set_tables(100);
 			schedule.set_clock(1);
@@ -2353,40 +2368,42 @@ mod tests {
 				flagged: None,
 				clock: 1,
 			});
-			let mut result = Ok(());
 			let mut pats = 0;
 			for ms in (0..5_000).step_by(20) {
-				if ms % 500 == 0 {
+				if leads(ms) {
 					schedule.lead(Tables {
 						rate: Some(RATE),
 						added: Vec::new(),
 					});
 				}
 				schedule.push(1, timing(ms), unit(1, 1), true).unwrap();
-				let horizon = Some(slot(self::ms(ms)));
 				loop {
-					match schedule.next(horizon) {
+					match schedule.next(Some(slot(self::ms(ms)))) {
 						Ok(Some(slot)) => {
 							let packets = slot.packets.as_chunks::<{ TsPacket::SIZE }>().0;
 							pats += packets.iter().filter(|packet| pid(*packet) == 0).count();
 						}
 						Ok(None) => break,
-						Err(err) => {
-							result = Err(err.to_string());
-							break;
-						}
+						Err(err) => return (Some(err.to_string()), pats),
 					}
 				}
-				if result.is_err() {
-					break;
+			}
+			(None, pats)
+		};
+		let mut failed = Vec::new();
+		for delay in [Duration::ZERO, Duration::from_millis(40), Duration::from_secs(1)] {
+			for count in [1, 3, 6] {
+				for (cadence, &leads) in cadences.iter().enumerate() {
+					let (without, _) = run(delay, count, leads, false);
+					let (with, pats) = run(delay, count, leads, true);
+					if let (None, Some(err)) = (without, with) {
+						failed.push(format!("{delay:?}, a {count}-packet PMT, cadence {cadence}: {err}"));
+					}
+					// Ten copies are the media's; the smallest tables also repeat on the grid.
+					if count == 1 && cadence == 0 {
+						assert!(pats > 40, "{delay:?}: {pats} PATs");
+					}
 				}
-			}
-			if let Err(err) = result {
-				failed.push(format!("{delay:?}, a {count}-packet PMT: {err}"));
-			}
-			// Ten copies are the media's; tables Bsys takes twice over also repeat on the grid.
-			if count < 6 {
-				assert!(pats > 40, "{delay:?}, a {count}-packet PMT: {pats} PATs");
 			}
 		}
 		assert!(failed.is_empty(), "{failed:#?}");
