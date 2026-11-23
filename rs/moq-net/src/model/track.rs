@@ -3991,12 +3991,20 @@ impl TrackState {
 
 	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
 	/// bounded subscription of history: the cache can never show that group, so the answer
-	/// alone makes it current, and live joins measure from that group.
+	/// alone makes it current, and live joins measure from that group. `None` for an answer
+	/// that did not know the largest, which says nothing to judge the cache against.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn set_live_ahead(&mut self, largest: Position, finished: Option<bool>, start: Option<u64>) -> Result<()> {
-		self.judge(Some(largest))?;
-		self.report_answer(Some(largest), finished);
-		self.answered(Some(largest), start, false);
+	fn set_live_ahead(
+		&mut self,
+		largest: Option<Position>,
+		finished: Option<bool>,
+		start: Option<u64>,
+	) -> Result<()> {
+		if largest.is_some() {
+			self.judge(largest)?;
+		}
+		self.report_answer(largest, finished);
+		self.answered(largest, start, false);
 		Ok(())
 	}
 
@@ -5497,11 +5505,12 @@ impl Producer {
 
 	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
 	/// bounded subscription of history: readers resume at once, live joins measuring from
-	/// `largest`'s group. A no-op unless idle, but for recording the largest.
+	/// `largest`'s group, or from the first the feed sends when the answer did not know it.
+	/// A no-op unless idle, but for recording the largest.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn set_live_ahead(
 		&mut self,
-		largest: Position,
+		largest: Option<Position>,
 		finished: Option<bool>,
 		start: Option<u64>,
 	) -> Result<()> {
@@ -5546,6 +5555,15 @@ impl Producer {
 	/// rather than from whichever group lands first. A no-op unless live.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_edge(&self, group: u64) {
+		// Most answers repeat an edge already recorded: skip the write lock that wakes every reader.
+		if let Feed::Live {
+			first: Some(_),
+			edge: Some(edge),
+		} = self.state.read().feed
+			&& edge >= group
+		{
+			return;
+		}
 		if let Ok(mut state) = self.modify()
 			&& let Feed::Live { first, edge } = &mut state.feed
 		{
@@ -5586,6 +5604,13 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn is_live(&self) -> bool {
 		self.state.read().feed.is_live()
+	}
+
+	/// Whether the copy waits for its route's answer to go live, which [`Self::set_live`] and
+	/// its kin give it; read without the write lock that wakes every reader.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_idle(&self) -> bool {
+		matches!(self.state.read().feed, Feed::Idle { .. })
 	}
 
 	/// While idle, the newest group cached when the track went idle: a route asked from
@@ -14612,7 +14637,7 @@ mod test {
 		producer.set_idle();
 		let mut reader = producer.subscribe(replay());
 		let _arriving = framed(&producer, 5, 7);
-		producer.set_live_ahead(answer, Some(false), None).unwrap();
+		producer.set_live_ahead(Some(answer), Some(false), None).unwrap();
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(answer)));
 	}
 
@@ -14958,7 +14983,7 @@ mod test {
 
 		let mut producer = idle_copy();
 		assert!(matches!(
-			producer.set_live_ahead(Position::group(2), Some(false), None),
+			producer.set_live_ahead(Some(Position::group(2)), Some(false), None),
 			Err(Error::MalformedTrack)
 		));
 

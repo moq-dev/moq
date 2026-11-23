@@ -1878,7 +1878,7 @@ A subscriber takes the largest position as where the live feed is: a relay holdi
 A relay knows that position only from its upstream's answer, never from its cache: a group it cached earlier says nothing about where the live feed is now.
 A Range that follows the live edge, one whose `Start` is Live or whose `End` is None, is never answered Unknown, so a relay answers it only once its upstream has; a subscriber MUST treat Unknown for one as a PROTOCOL_VIOLATION.
 Any other Range a relay answers from its cache as soon as it can place it.
-On a Track known to have no Group yet, the publisher answers each Range whose `Start` is None or Live at once, Empty with a Range Start of 1, since every Group the Track produces is owed; a Time or Position `Start` waits for a Group to place it.
+On a Track known to have no Group yet, the publisher answers each Range whose `Start` is None at once, Empty with a Range Start of 1, since every Group the Track produces is owed. Any other `Start` waits for a Group to place it: a Live `Start` on an empty Track starts at the first Group produced, and a lower Group produced after it is not owed.
 
 **Largest Group** and **Largest Frame**:
 The largest position the publisher knows of: the last frame that exists, like moq-transport's Largest Location, including one a relay's source reported that has yet to arrive.

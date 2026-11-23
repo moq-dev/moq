@@ -253,7 +253,8 @@ async fn a_reset_group_is_fetched_whole() {
 /// subscription past the publisher's credit is served once an earlier one leaves.
 #[kio::test]
 async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
-	// lite-07 needs 3: session-long AUTH plus TRACK held until SUBSCRIBE answers.
+	// lite-07 needs 3: session-long AUTH plus TRACK held until SUBSCRIBE answers, which a
+	// live join on an empty track leaves for its first group.
 	// moq-transport needs 2: SUBSCRIBE_NAMESPACE and the first SUBSCRIBE. The second
 	// subscription waits for the first's credit.
 	for (version, credit) in [("moq-lite-07-wip", 3), ("moq-transport-22", 2)] {
@@ -286,7 +287,10 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 			.unwrap();
 		let prefs =
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
-		let held = remote.track("first").unwrap().subscribe(prefs.clone()).await.unwrap();
+		let join = prefs
+			.clone()
+			.with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
+		let held = remote.track("first").unwrap().subscribe(join).await.unwrap();
 		let mut waiting = std::pin::pin!(remote.track("second").unwrap().subscribe(prefs));
 		assert!(
 			kio::clock::timeout(Duration::from_secs(5), waiting.as_mut())
@@ -316,7 +320,8 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 /// Abandoning setup returns credit without ending earlier publishers or their route.
 #[kio::test]
 async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
-	// lite-07 needs 3: session-long AUTH plus TRACK held until SUBSCRIBE answers.
+	// lite-07 needs 3: session-long AUTH plus TRACK held until SUBSCRIBE answers, which a
+	// live join on an empty track leaves for its first group.
 	for (version, credit) in [("moq-lite-07-wip", 3)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
@@ -348,7 +353,10 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 			.unwrap();
 		let prefs =
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
-		let held = remote.track("first").unwrap().subscribe(prefs.clone()).await.unwrap();
+		let join = prefs
+			.clone()
+			.with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
+		let held = remote.track("first").unwrap().subscribe(join).await.unwrap();
 		let mut waiting = Box::pin(remote.track("second").unwrap().subscribe(prefs.clone()));
 		assert!(
 			kio::clock::timeout(Duration::from_secs(5), waiting.as_mut())
