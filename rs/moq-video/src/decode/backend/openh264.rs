@@ -109,6 +109,9 @@ pub(crate) struct Openh264 {
 	/// Access units the decoder has refused since the last picture came out, so
 	/// a run of them logs once rather than once per picture.
 	lost: u64,
+	/// Whether openh264 holds the current sequence's pictures in its reordering
+	/// buffer, rather than outputting each as it decodes.
+	reordering: bool,
 	ready: VecDeque<Frame>,
 }
 
@@ -163,6 +166,7 @@ impl Openh264 {
 			decoder,
 			pending: BinaryHeap::new(),
 			lost: 0,
+			reordering: false,
 			ready: VecDeque::new(),
 		})
 	}
@@ -307,11 +311,22 @@ impl Backend for Openh264 {
 		if timestamp.scale().is_none() {
 			return Err(moq_net::TimeOverflow.into());
 		}
-		self.picture_in(timestamp);
 
 		// openh264 holds a picture of a Main or High stream until the next one
 		// even when the SPS rules reordering out; relabelled, it does not.
-		let access_unit = output_order::relabel(&access_unit).unwrap_or(access_unit);
+		let relabelled = output_order::relabel(&access_unit);
+		if let Some(immediate) = relabelled.immediate {
+			// A sequence openh264 outputs immediately skips its reordering buffer,
+			// abandoning the pictures held there while their timestamps stay
+			// queued, which would stamp every later picture early. So drain them
+			// first, as at the end of a stream.
+			if immediate && self.reordering {
+				self.flush()?;
+			}
+			self.reordering = !immediate;
+		}
+		let access_unit = relabelled.access_unit.unwrap_or(access_unit);
+		self.picture_in(timestamp);
 		// `None` means the decoder took the access unit but has no picture yet:
 		// parameter sets only, or a picture its reordering buffer is holding.
 		// The timestamp is corrected below, once the borrow of the decoder ends.
@@ -339,6 +354,7 @@ impl Backend for Openh264 {
 		let tail = self.drain_tail();
 		self.pending.clear();
 		self.lost = 0;
+		self.reordering = false;
 		// Replaced whatever the drain did, so a failed one does not carry its
 		// state into the next stream. `FlushFrame` also leaks a single-threaded
 		// decoder's picture-pool slots, so a drained decoder is never reused.
@@ -592,6 +608,37 @@ mod tests {
 			}
 			assert!(decoder.flush_all().expect("flush").is_empty(), "{name}");
 		}
+	}
+
+	/// A sequence openh264 outputs immediately, following one it reorders with
+	/// no flush between, first hands out the reordered sequence's held pictures,
+	/// each with its own timestamp, then its own pictures on time.
+	#[test]
+	fn switching_to_immediate_output_keeps_held_pictures() {
+		let mut decoder = open();
+		let mut timestamps = Vec::new();
+		for (index, (payload, keyframe)) in access_units().into_iter().enumerate() {
+			for frame in decoder.decode_all(payload, at(index), keyframe).expect("decodes") {
+				timestamps.push(frame.timestamp);
+			}
+		}
+		let vaapi = crate::decode::conformance::split(include_bytes!("../test_data/main_poc0_64x64_pattern_5f.h264"));
+		for (index, unit) in vaapi.into_iter().enumerate() {
+			let timestamp = at(PICTURES + index);
+			let decoded = decoder
+				.decode_all(unit.payload, timestamp, unit.keyframe)
+				.expect("decodes");
+			assert_eq!(
+				decoded.last().map(|frame| frame.timestamp),
+				Some(timestamp),
+				"access unit {index} of the immediate sequence was held back"
+			);
+			timestamps.extend(decoded.iter().map(|frame| frame.timestamp));
+		}
+		assert!(decoder.flush_all().expect("flush").is_empty());
+
+		let expected: Vec<_> = (0..PICTURES + 5).map(at).collect();
+		assert_eq!(timestamps, expected, "pictures were lost or mis-stamped");
 	}
 
 	/// A relabelled stream keeps decoding through a change of SPS and of picture

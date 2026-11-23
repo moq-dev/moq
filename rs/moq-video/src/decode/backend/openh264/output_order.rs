@@ -38,23 +38,40 @@ use moq_mux::codec::annexb;
 
 /// `nal_unit_type` of a sequence parameter set.
 const SPS: u8 = 7;
+const BASELINE: u8 = 66;
 const MAIN: u8 = 77;
 const HIGH: u8 = 100;
 /// The profile openh264 parses as High and outputs as Baseline.
 const SCALABLE_BASELINE: u8 = 83;
 
-/// Returns `access_unit` with every SPS that rules out reordering relabelled so
-/// openh264 outputs each picture as soon as it is decoded, or `None` when no
-/// SPS in it needs that.
+/// What [`relabel`] made of an access unit.
+pub(super) struct Relabelled {
+	/// The access unit with every SPS that rules out reordering relabelled, or
+	/// `None` when no SPS in it needs that.
+	pub access_unit: Option<Bytes>,
+	/// Whether openh264 outputs the pictures of the access unit's last SPS as
+	/// soon as they decode, or `None` when it carries no SPS.
+	pub immediate: Option<bool>,
+}
+
+/// Relabels every SPS in `access_unit` that rules out reordering so openh264
+/// outputs each picture as soon as it is decoded, and reports how openh264
+/// outputs the sequence the access unit starts, if any.
 ///
 /// Parameter sets come ahead of the first slice of an access unit (7.4.1.2.3),
 /// so the scan stops at that slice: an access unit without an SPS costs a look
 /// at the headers of the NAL units ahead of it, and only one with an SPS to
 /// relabel is copied.
-pub(super) fn relabel(access_unit: &Bytes) -> Option<Bytes> {
+pub(super) fn relabel(access_unit: &Bytes) -> Relabelled {
 	let data = access_unit.as_ref();
 	let mut relabelled = Vec::new();
-	let (offset, size) = annexb::find_start_code(data)?;
+	let mut immediate = None;
+	let Some((offset, size)) = annexb::find_start_code(data) else {
+		return Relabelled {
+			access_unit: None,
+			immediate,
+		};
+	};
 	let mut start = offset + size;
 	while let Some(&header) = data.get(start) {
 		// Coded slices, and the slice extensions of SVC (20) and MVC (21).
@@ -63,16 +80,24 @@ pub(super) fn relabel(access_unit: &Bytes) -> Option<Bytes> {
 		}
 		let next = annexb::find_start_code(&data[start..]);
 		let end = next.map_or(data.len(), |(offset, _)| start + offset);
-		if header & 0x1f == SPS
-			&& let Some(sps) = sps(&data[start..end])
-		{
-			relabelled.push((start..end, sps));
+		if header & 0x1f == SPS {
+			if let Some(sps) = sps(&data[start..end]) {
+				relabelled.push((start..end, sps));
+				immediate = Some(true);
+			} else {
+				// openh264 outputs by `profile_idc`, the first payload byte.
+				let profile = data[start..end].get(1).copied();
+				immediate = Some(matches!(profile, Some(BASELINE | SCALABLE_BASELINE)));
+			}
 		}
 		let Some((offset, size)) = next else { break };
 		start += offset + size;
 	}
 	if relabelled.is_empty() {
-		return None;
+		return Relabelled {
+			access_unit: None,
+			immediate,
+		};
 	}
 
 	let grown: usize = relabelled
@@ -87,7 +112,10 @@ pub(super) fn relabel(access_unit: &Bytes) -> Option<Bytes> {
 		copied = at.end;
 	}
 	out.extend_from_slice(&data[copied..]);
-	Some(out.into())
+	Relabelled {
+		access_unit: Some(out.into()),
+		immediate,
+	}
 }
 
 /// Returns the NAL unit `nal` relabelled, when it is an SPS of a Main or High
@@ -286,14 +314,20 @@ mod tests {
 	}
 
 	/// An SPS that allows reordering, or whose pictures openh264 outputs as they
-	/// decode already, passes unchanged.
+	/// decode already, passes unchanged, and each reports how openh264 outputs it.
 	#[test]
 	fn other_sps_pass_unchanged() {
 		assert_eq!(sps(X264_MAIN_BFRAMES), None);
-		let bframes = Bytes::from_static(include_bytes!("../../test_data/bframes_64x64_pattern_30f.h264"));
-		assert_eq!(relabel(&bframes), None, "High with two frames of reordering");
-		let baseline = Bytes::from_static(include_bytes!("../../test_data/seq_64x64_pattern_5f.h264"));
-		assert_eq!(relabel(&baseline), None, "Constrained Baseline");
+		let bframes = relabel(&Bytes::from_static(include_bytes!(
+			"../../test_data/bframes_64x64_pattern_30f.h264"
+		)));
+		assert_eq!(bframes.access_unit, None, "High with two frames of reordering");
+		assert_eq!(bframes.immediate, Some(false), "High with two frames of reordering");
+		let baseline = relabel(&Bytes::from_static(include_bytes!(
+			"../../test_data/seq_64x64_pattern_5f.h264"
+		)));
+		assert_eq!(baseline.access_unit, None, "Constrained Baseline");
+		assert_eq!(baseline.immediate, Some(true), "Constrained Baseline");
 	}
 
 	/// The relabelled access unit keeps every other NAL unit as it was, and an
@@ -312,13 +346,18 @@ mod tests {
 		let units = crate::decode::conformance::split(include_bytes!("../../test_data/main_64x64_yellow_5f.h264"));
 		for unit in units {
 			let before = nals(&unit.payload);
-			let Some(relabelled) = relabel(&unit.payload) else {
+			let Relabelled {
+				access_unit: Some(relabelled),
+				immediate,
+			} = relabel(&unit.payload)
+			else {
 				assert!(
 					before.iter().all(|nal| nal[0] & 0x1f != SPS),
 					"an SPS was left as it was"
 				);
 				continue;
 			};
+			assert_eq!(immediate, Some(true), "a relabelled SPS outputs immediately");
 			let after = nals(&relabelled);
 			assert_eq!(before.len(), after.len());
 			for (before, after) in before.iter().zip(&after) {
