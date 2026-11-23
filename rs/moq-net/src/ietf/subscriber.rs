@@ -19715,11 +19715,11 @@ mod new_group_tests {
 			let _ = read(&mut stream).await;
 			answer(&mut stream).await;
 
-			let wanted = track::Subscription::default();
-			let wanted = match end {
-				Some(end) => wanted.with_range(..end),
-				None => wanted,
-			};
+			// A live join, ending before group `end` when one is given.
+			let wanted = track::Subscription::default().with_ranges([track::Range {
+				start: track::Start::LATEST,
+				end: end.map(|end| end - 1),
+			}]);
 			first.update(wanted).unwrap();
 			let (id, body) = read(&mut stream).await;
 			assert_eq!(id, ietf::SubscribeUpdate::ID);

@@ -12178,9 +12178,9 @@ mod test {
 	/// A bounded reader of keys up to `end`, with an hour's budget.
 	fn subscribe_until(logical: &track::Producer, end: u64) -> track::Subscriber {
 		let subscription = Subscription::default().with_ranges([track::Range {
-				start: crate::track::Start::Time(0),
-				end: Some(end),
-			}]);
+			start: crate::track::Start::Time(0),
+			end: Some(end),
+		}]);
 		logical
 			.consume()
 			.subscribe(subscription)
@@ -13487,9 +13487,9 @@ mod test {
 		write(&a, 2);
 		routes.serve(a.consume());
 		let subscription = Subscription::default().with_ranges([track::Range {
-				start: track::Start::Time(0),
-				end: Some(3),
-			}]);
+			start: track::Start::Time(0),
+			end: Some(3),
+		}]);
 		let mut sub = front.consume().subscribe(subscription).now_or_never().unwrap().unwrap();
 		assert_eq!(drain(&mut sub, false), [0, 2]);
 		let inner_routes = Producer::new();
@@ -13602,9 +13602,9 @@ mod test {
 		write(&a, 5);
 		routes.serve(a.consume());
 		let subscription = Subscription::default().with_ranges([track::Range {
-				start: track::Start::Time(0),
-				end: Some(6),
-			}]);
+			start: track::Start::Time(0),
+			end: Some(6),
+		}]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -13643,9 +13643,9 @@ mod test {
 		write(&a, 2);
 		routes.serve(a.consume());
 		let subscription = Subscription::default().with_ranges([track::Range {
-				start: track::Start::Time(0),
-				end: Some(3),
-			}]);
+			start: track::Start::Time(0),
+			end: Some(3),
+		}]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -13692,9 +13692,7 @@ mod test {
 		write(&a, 10);
 		write(&a, 11);
 		routes.serve(a.consume());
-		let window = |start| {
-			Subscription::default().with_range(start..14)
-		};
+		let window = |start| Subscription::default().with_range(start..14);
 		let mut sub = logical.consume().subscribe(window(10)).now_or_never().unwrap().unwrap();
 		assert_eq!(drain(&mut sub, false), [10, 11]);
 		let b = copy();

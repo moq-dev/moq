@@ -5,8 +5,8 @@
 //! up to, and caps its subscription through `A` at that same frame, so neither link carries a
 //! frame of group 0 the other does, and `E`'s reader gets each frame once.
 
-use crate::route_change::{link, payload, priced_link, produce_origin, settle, timed};
 use crate::WithMax as _;
+use crate::route_change::{link, payload, priced_link, produce_origin, settle, timed};
 use crate::support::harness::MockPair;
 
 use std::time::Duration;

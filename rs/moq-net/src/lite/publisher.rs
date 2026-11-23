@@ -10743,9 +10743,7 @@ mod serve_group_test {
 				.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice())
 				.unwrap();
 			let bounds = Bounds::new(&[at(initially)], None);
-			let subscriber = track.subscribe(
-				track::Subscription::default().with_ranges(bounds.ranges.iter().copied()),
-			);
+			let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
 			let streams = Log::default();
 			let (run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
 			let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
@@ -10799,9 +10797,7 @@ mod serve_group_test {
 			.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice())
 			.unwrap();
 		let bounds = Bounds::new(&[at(Some(2))], None);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_ranges(bounds.ranges.iter().copied()),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
 		let streams = Log::default();
 		let (run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
 		let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
@@ -10879,9 +10875,7 @@ mod serve_group_test {
 				.unwrap();
 		}
 		let bounds = Bounds::new(&[at(Some(2))], None);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_ranges(bounds.ranges.iter().copied()),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
 		let streams = Log::default();
 		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
 		run.ctx.object_records = true;

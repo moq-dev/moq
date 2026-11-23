@@ -664,8 +664,31 @@ export class Window {
 	 * value until the budgets or the groups history covers move. Mirrors the Rust `Window::budget`.
 	 */
 	budget(): Budget {
-		this.#budget ??= new Budget(this.#budgets.last() ?? 0, NO_MAX_DELAY, this.#history.runs(), this.#histories > 0);
+		this.#budget ??= new Budget(
+			this.#budgets.last() ?? 0,
+			NO_MAX_DELAY,
+			this.#withPending(this.#history.runs(), (key) => this.#ranges.get(key)),
+			this.#histories > 0,
+		);
 		return this.#budget;
+	}
+
+	/**
+	 * `runs` with every group a pending history range, as `rangeOf` its key says, may cover: any up to
+	 * its end, since the copies it waits on place it, and every group is in range meanwhile. Mirrors
+	 * the Rust `Window::cover_pending`.
+	 */
+	#withPending(runs: readonly Run[], rangeOf: (key: bigint) => Range | undefined): readonly Run[] {
+		const pending: Range[] = [];
+		for (const key of this.#pending) {
+			const range = rangeOf(key);
+			if (range !== undefined && liveMillis(range) === undefined) pending.push(range);
+		}
+		if (pending.length === 0) return runs;
+		const covered = new Cover();
+		for (const run of runs) covered.add(run.start, run.end, 1);
+		for (const range of pending) covered.add(0n, range.end === undefined ? UNBOUNDED : range.end + 1n, 1);
+		return covered.runs();
 	}
 
 	/**
@@ -687,7 +710,12 @@ export class Window {
 			if (liveMillis(range) === undefined) asked = true;
 			else live = Math.max(live, rangeBudget(range));
 		}
-		return new Budget(live, NO_MAX_DELAY, covered.runs(), asked);
+		return new Budget(
+			live,
+			NO_MAX_DELAY,
+			this.#withPending(covered.runs(), (key) => ranges.get(key)),
+			asked,
+		);
 	}
 
 	// Count a live join's budget among {@link #budgets}, or a history range among {@link #histories},
@@ -783,7 +811,7 @@ export class Window {
 
 	// Take out what the range keyed `key` placed, leaving the range itself.
 	#retire(key: bigint): void {
-		this.#pending.delete(key);
+		if (this.#pending.delete(key)) this.#budget = undefined;
 		this.#reaching.delete(key);
 		const span = this.#spans.get(key);
 		if (span) this.#uncount(key, span);
@@ -1143,6 +1171,7 @@ export class Window {
 		// A hop whose copies place the join waits on them, as one with no group yet does.
 		if (live !== undefined && holdings.defers?.()) {
 			this.#pending.add(key);
+			this.#budget = undefined;
 			return;
 		}
 		// Placed already, where a copy resolved it: one left with no start reached back.
@@ -1170,6 +1199,7 @@ export class Window {
 					// Nothing to measure the live edge by yet: wait for the first group, reading everything
 					// meanwhile.
 					this.#pending.add(key);
+					this.#budget = undefined;
 					return;
 				} else if (live.asNanos() === 0) {
 					// The latest group holds the live edge. One made before any group then starts at the
@@ -1195,6 +1225,7 @@ export class Window {
 		const start = startOf(at, latest, budget, holdings);
 		if (start === "pending") {
 			this.#pending.add(key);
+			this.#budget = undefined;
 			return;
 		}
 		if (start === "waiting") {

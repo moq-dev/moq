@@ -543,14 +543,27 @@ impl Window {
 
 	/// How long each group stays worth delivering once superseded, as these ranges set it.
 	pub fn budget(&self) -> Budget {
+		let mut covered = self.history.clone();
+		self.cover_pending(&mut covered, |key| self.ranges.get(&key));
 		Budget {
 			live: self
 				.budgets
 				.last_key_value()
 				.map_or(Duration::ZERO, |(budget, _)| *budget),
 			history: Duration::MAX,
-			covered: self.history.clone(),
+			covered,
 			asked: self.histories > 0,
+		}
+	}
+
+	/// Add to `covered` every group a pending history range, as `range` of its key says, may
+	/// cover: any up to its end, since the copies it waits on place it, and every group is in
+	/// range meanwhile.
+	fn cover_pending<'a>(&self, covered: &mut Cover, range: impl Fn(u64) -> Option<&'a Range>) {
+		for key in &self.pending {
+			if let Some(range) = range(*key).filter(|range| range.start.is_history()) {
+				covered.add(0..=range.end.unwrap_or(u64::MAX), 1);
+			}
 		}
 	}
 
@@ -567,6 +580,7 @@ impl Window {
 				covered.add(run.clone(), 1);
 			}
 		}
+		self.cover_pending(&mut covered, |key| ranges.get(&key));
 		Budget {
 			live: (asked().filter_map(|range| range.join().map(|_| range.budget())))
 				.max()
@@ -1737,6 +1751,30 @@ mod tests {
 		});
 		window.edit_since([0], &[(0, wider)], |_| Joining::At(66), Some(99), &keys);
 		assert_eq!((window.start(), window.budget().at(33)), (Some(66), Duration::MAX));
+	}
+
+	/// A history range a hop holding nothing leaves to its copies keeps every group it may
+	/// cover from going stale before they place it, beside a live join judged by its `max`:
+	/// a group handed out meanwhile is history's until then.
+	#[test]
+	fn a_pending_history_range_keeps_what_it_may_cover() {
+		let history = Range {
+			start: Start::Time(5001),
+			end: Some(8999),
+		};
+		let max = Duration::from_secs(1);
+		let join = Range::from(Start::Live {
+			min: Duration::ZERO,
+			max: Some(max),
+		});
+		let window = Window::new(&[history, join], None, &Unheld);
+		assert!(window.is_pending());
+		let ranges: BTreeMap<u64, Range> = [(0, history), (1, join)].into();
+		for budget in [window.budget(), window.budget_of(&ranges)] {
+			assert_eq!(budget.at(8000), Duration::MAX, "{budget:?}");
+			assert_eq!(budget.at(0), Duration::MAX, "the copies may place it at any group");
+			assert_eq!(budget.at(9000), max, "past its end");
+		}
 	}
 
 	/// A hop whose copies place its ranges leaves a live join to them, reading everything

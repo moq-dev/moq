@@ -303,6 +303,30 @@ describe("Window", () => {
 		expect([window.start(), window.budget().at(33n)]).toEqual([66n, NO_MAX_DELAY]);
 	});
 
+	// A history range a hop holding nothing leaves to its copies keeps every group it may cover from
+	// going stale before they place it, beside a live join judged by its max. Mirrors the Rust
+	// `a_pending_history_range_keeps_what_it_may_cover`.
+	test("a pending history range keeps what it may cover", () => {
+		const history = range(5001n, 8999n);
+		const join: Range = { start: { live: { min: Duration.ZERO, max: Duration.secs(1) } } };
+		const window = new Window([history, join], undefined, UNHELD);
+		expect(window.pending).toBe(true);
+		for (const budget of [
+			window.budget(),
+			window.budgetOf(
+				new Map([
+					[0n, history],
+					[1n, join],
+				]),
+			),
+		]) {
+			expect(budget.at(8000n)).toBe(NO_MAX_DELAY);
+			// The copies may place it at any group.
+			expect(budget.at(0n)).toBe(NO_MAX_DELAY);
+			expect(budget.at(9000n)).toBe(1000);
+		}
+	});
+
 	test("a zero lag starts a live join at the latest group, once there is one", () => {
 		const held = new Keys(keys(0n, 8n));
 		held.joins = () => ({ group: 2n });
