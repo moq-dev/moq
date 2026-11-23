@@ -1855,11 +1855,12 @@ impl Bbr3 {
         // BBRQuantizationBudget, without the side effects `get_inflight` has on BBR.bdp, nor the
         // 2 SMSS ProbeBW_UP adds: the gain already reaches past BBR.bw, and on a small BDP two
         // more packets only queue ahead of the next frame, over a round trip at 10ms.
-        // The offload budget is taken at the rate the probe fills over: at BBR.max_bw's pacing
-        // rate, a fast path that slowed would keep a floor of up to 64 KiB queued.
+        // The offload budget is taken at the aged rates: at BBR.max_bw's pacing rate, a fast
+        // path that slowed would keep a floor of up to 64 KiB queued.
+        let aged_max_bw = self.max_bw.min(self.aged_bw_filter.max());
         let scale = if self.bw > 0.0 { bw / self.bw } else { 1.0 };
         let quantum = self.send_quantum_at(self.pacing_rate * scale);
-        let floor = self.offload_budget_at(quantum, self.max_bw * scale);
+        let floor = self.offload_budget_at(quantum, aged_max_bw);
         let inflight = Ord::max(inflight, floor);
         Some(Ord::max(inflight, self.min_pipe_cwnd))
     }
@@ -7843,6 +7844,21 @@ mod test {
             assert!(sim.bbr.offload_budget > fill, "the stale floor would bind");
             assert_eq!(sim.bbr.probe_inflight(), Some(fill), "at {rtt_ms}ms");
         }
+
+        // A loss bound under the aged estimate leaves the fill's rate unscaled, and the floor's
+        // delayed-ACK term still reads the aged maximum, not BBR.max_bw.
+        bound_bw(&mut sim, 600_000.0);
+        sim.bbr.min_rtt = Duration::from_millis(10);
+        // A peer acking every 64 packets, so the delayed-ACK term follows the rate.
+        sim.bbr.ack_eliciting_threshold = 64;
+        let quantum = sim.bbr.send_quantum_at(sim.bbr.pacing_rate);
+        let floor = sim.bbr.offload_budget_at(quantum, 1_200_000.0);
+        let stale = sim.bbr.offload_budget_at(quantum, sim.bbr.max_bw);
+        assert!(stale > floor, "the stale delayed-ACK term would bind");
+        let fill = (sim.bbr.probe_bw_up_pacing_gain * 600_000.0 * 0.01) as u64;
+        let fill = fill.max(floor).max(sim.bbr.min_pipe_cwnd);
+        assert!(stale > fill, "the stale floor would bind");
+        assert_eq!(sim.bbr.probe_inflight(), Some(fill));
     }
 
     /// ProbeRTT entered mid-probe ends the probe's feedback: the window ages once, on entry, and
