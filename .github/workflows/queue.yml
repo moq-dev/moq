@@ -29,10 +29,14 @@ on:
         description: The PR head commit to report the skipped Queue context on.
         required: true
 
+# `quest suite` reads the PR's review record and checks, and
+# sh/gh/queue-suite.sh its author's permission.
 permissions:
   contents: read
-  # `quest suite` reads the PR's review record.
   pull-requests: read
+  checks: read
+  statuses: read
+  actions: read
 
 # Each group has its own ref, so a group never cancels another; a pull request's
 # skipped runs replace their own. Dispatches all run on main, so each PR head's
@@ -79,14 +83,7 @@ jobs:
           HEAD_REF: ${{ github.event.merge_group.head_ref }}
         run: |
           rm -rf target/cargo-timings
-          pr=$(sed -nE 's#^(refs/heads/)?gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]+$#\2#p' <<<"$HEAD_REF")
-          if [ -z "$pr" ]; then
-            echo "::error::no PR number in the merge group ref $HEAD_REF"
-            exit 1
-          fi
-          # A high-risk head, or one no review record covers, runs main's
-          # RISK.md full suite in place of the checks its diff selects.
-          suite=$(nix develop --command quest suite "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$pr")
+          suite=$(nix develop --command just gh queue-suite "$HEAD_REF")
           if [ -n "$suite" ]; then
             echo "Full suite: $suite"
             nix develop --command bash -c "$suite"
