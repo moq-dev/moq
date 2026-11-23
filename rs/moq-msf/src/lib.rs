@@ -27,6 +27,9 @@ use serde_with::DurationMilliSecondsWithFrac;
 /// The default track name for the MSF catalog.
 pub const DEFAULT_NAME: &str = "catalog";
 
+/// Maximum serialized catalog bytes and aggregate resolved initData string bytes.
+const MAX_CATALOG_BYTES: usize = 32 * 1024 * 1024;
+
 /// A snapshot of an MSF catalog: the tracks currently in a broadcast.
 ///
 /// This is a version-agnostic view. The on-wire details (the catalog `version`
@@ -223,6 +226,12 @@ impl<E: CatalogExt> Catalog<E> {
 	/// Deserialize an MSF catalog from a JSON string.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> Result<Self, serde_json::Error> {
+		// Reject oversized wire input before allocating any catalog fields.
+		if s.len() > MAX_CATALOG_BYTES {
+			return Err(serde::de::Error::custom(format!(
+				"MSF catalog exceeds {MAX_CATALOG_BYTES} serialized bytes"
+			)));
+		}
 		serde_json::from_str(s)
 	}
 }
@@ -319,6 +328,26 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 		// id -> init data entry, built once so resolution is linear in the number
 		// of tracks rather than tracks x entries.
 		let by_id: HashMap<&str, &InitData> = init_data_list.iter().map(|e| (e.id.as_str(), e)).collect();
+
+		// Preflight the complete resolved size before ANY
+		// initRef payload is cloned. Inline data is already owned and counts once,
+		// including when it also carries a matching reference. Missing references
+		// and conflicting data retain the upstream errors in the resolution below.
+		let mut remaining = MAX_CATALOG_BYTES;
+		for track in &wire.tracks {
+			let data = track.init_data.as_ref().or_else(|| {
+				track
+					.init_ref
+					.as_ref()
+					.and_then(|id| by_id.get(id.as_str()).map(|entry| &entry.data))
+			});
+			let len = data.map_or(0, String::len);
+			remaining = remaining.checked_sub(len).ok_or_else(|| {
+				<D::Error as serde::de::Error>::custom(format!(
+					"MSF catalog exceeds {MAX_CATALOG_BYTES} resolved initData bytes"
+				))
+			})?;
+		}
 
 		let tracks = wire
 			.tracks
@@ -619,6 +648,131 @@ impl<'de> Deserialize<'de> for Role {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	// Both the string parser and serde's Value path enforce the resolved byte limit.
+	fn assert_bound_error_both(value: serde_json::Value, expected: &str) {
+		let json = serde_json::to_string(&value).unwrap();
+		let error = Catalog::<()>::from_str(&json).expect_err("string parser must reject catalog");
+		assert_eq!(error.classify(), serde_json::error::Category::Data);
+		assert!(error.to_string().contains(expected), "unexpected string error: {error}");
+		let error = serde_json::from_value::<Catalog<()>>(value).expect_err("Value parser must reject catalog");
+		assert_eq!(error.classify(), serde_json::error::Category::Data);
+		assert!(error.to_string().contains(expected), "unexpected Value error: {error}");
+	}
+
+	#[test]
+	fn more_than_64_tracks_and_init_entries_are_accepted_within_the_byte_limits() {
+		const ENTRIES: usize = 65;
+		let tracks: Vec<_> = (0..ENTRIES)
+			.map(|i| serde_json::json!({"name": format!("v{i}"), "packaging": "loc", "initRef": format!("i{i}")}))
+			.collect();
+		let entries: Vec<_> = (0..ENTRIES)
+			.map(|i| serde_json::json!({"id": format!("i{i}"), "type": "inline", "data": "AQID"}))
+			.collect();
+		let value = serde_json::json!({"version": "draft-01", "tracks": tracks, "initDataList": entries});
+		let json = serde_json::to_string(&value).unwrap();
+		let from_string = Catalog::<()>::from_str(&json).unwrap();
+		let from_value = serde_json::from_value::<Catalog<()>>(value).unwrap();
+		assert_eq!(from_string, from_value);
+		assert_eq!(from_string.tracks.len(), ENTRIES);
+		assert!(
+			from_string
+				.tracks
+				.iter()
+				.all(|track| track.init_data.as_deref() == Some("AQID"))
+		);
+	}
+
+	#[test]
+	fn aggregate_reference_limit_precedes_resolution_errors() {
+		// If reference resolution starts before the complete size preflight, the
+		// first missing reference wins instead of the size error. This also makes
+		// a late/post-expansion guard fail without requiring a huge allocation.
+		let mut tracks = vec![serde_json::json!({"name": "missing", "packaging": "loc", "initRef": "absent"})];
+		tracks.extend(
+			(0..17).map(|i| serde_json::json!({"name": format!("v{i}"), "packaging": "loc", "initRef": "shared"})),
+		);
+		assert_bound_error_both(
+			serde_json::json!({
+				"version": "draft-01",
+				"tracks": tracks,
+				"initDataList": [{"id": "shared", "type": "inline", "data": "A".repeat(2 * 1024 * 1024)}],
+			}),
+			"MSF catalog exceeds 33554432 resolved initData bytes",
+		);
+	}
+
+	#[test]
+	fn aggregate_limit_counts_inline_and_referenced_data() {
+		let mut tracks = vec![serde_json::json!({
+			"name": "inline", "packaging": "loc", "initData": "B".repeat(1024 * 1024),
+		})];
+		tracks.extend(
+			(0..16).map(|i| serde_json::json!({"name": format!("v{i}"), "packaging": "loc", "initRef": "shared"})),
+		);
+		assert_bound_error_both(
+			serde_json::json!({
+				"version": "draft-01",
+				"tracks": tracks,
+				"initDataList": [{"id": "shared", "type": "inline", "data": "A".repeat(2 * 1024 * 1024)}],
+			}),
+			"MSF catalog exceeds 33554432 resolved initData bytes",
+		);
+	}
+
+	#[test]
+	fn shared_references_accept_exact_resolved_byte_limit() {
+		const TRACKS: usize = 64;
+		let payload = "A".repeat(MAX_CATALOG_BYTES / TRACKS);
+		let mut tracks: Vec<_> = (0..TRACKS)
+			.map(|i| serde_json::json!({"name": format!("v{i}"), "packaging": "loc", "initRef": "shared"}))
+			.collect();
+		// Matching inline + reference counts once, preserving upstream semantics.
+		tracks[0]["initData"] = serde_json::json!(payload);
+		let value = serde_json::json!({
+			"version": "draft-01",
+			"tracks": tracks,
+			"initDataList": [{"id": "shared", "type": "inline", "data": payload}],
+		});
+		let json = serde_json::to_string(&value).unwrap();
+		for catalog in [
+			Catalog::<()>::from_str(&json).unwrap(),
+			serde_json::from_value::<Catalog<()>>(value).unwrap(),
+		] {
+			assert_eq!(catalog.tracks.len(), TRACKS);
+			assert_eq!(
+				catalog
+					.tracks
+					.iter()
+					.map(|track| track.init_data.as_ref().unwrap().len())
+					.sum::<usize>(),
+				MAX_CATALOG_BYTES,
+			);
+			assert!(
+				catalog
+					.tracks
+					.iter()
+					.all(|track| track.init_data.as_deref() == Some(payload.as_str()))
+			);
+			assert!(catalog.tracks.iter().all(|track| track.init_ref.is_none()));
+		}
+	}
+
+	#[test]
+	fn serialized_catalog_byte_limit_is_exact_and_precedes_parsing() {
+		let mut json = r#"{"version":"draft-01","tracks":[]}"#.to_string();
+		json.extend(std::iter::repeat_n(' ', MAX_CATALOG_BYTES - json.len()));
+		assert!(Catalog::<()>::from_str(&json).unwrap().tracks.is_empty());
+		// Invalid trailing JSON proves that the byte guard runs before parsing.
+		json.push('!');
+		let error = Catalog::<()>::from_str(&json).unwrap_err();
+		assert_eq!(error.classify(), serde_json::error::Category::Data);
+		assert!(
+			error
+				.to_string()
+				.contains("MSF catalog exceeds 33554432 serialized bytes")
+		);
+	}
 
 	fn video_track() -> Track {
 		Track {
