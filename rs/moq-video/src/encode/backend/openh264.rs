@@ -426,7 +426,7 @@ mod tests {
 	/// generous cap; with it, the scene spends less.
 	#[test]
 	fn lowering_the_qp_floor_spends_more_on_a_calm_scene() {
-		use super::super::test_util::spend;
+		use super::super::test_util::{Scene, spend};
 
 		let at = |qp_floor| Config {
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(4_000_000)),
@@ -434,8 +434,8 @@ mod tests {
 			qp_floor,
 			..config()
 		};
-		let floored = spend(&at(None), false, None).unwrap();
-		let unfloored = spend(&at(Some(0)), false, None).unwrap();
+		let floored = spend(&at(None), Scene::Calm, None).unwrap();
+		let unfloored = spend(&at(Some(0)), Scene::Calm, None).unwrap();
 		assert!(
 			unfloored.mean > floored.mean * 3 / 2,
 			"no floor {unfloored:?} against the default {floored:?}"
