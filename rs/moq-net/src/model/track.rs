@@ -1720,8 +1720,6 @@ impl TrackState {
 		Some(slot)
 	}
 
-	/// [`Self::uncache`] a servable group to free the cache and abort it with `err`, recording
-	/// it for the readers that judged it cached to judge again.
 	/// Evict cached group `key` to pay the pool's debt. A group the live feed delivered is
 	/// lost to the cache, so a reader yet to take it asks again; an expired one is stale for
 	/// every reader instead.
@@ -1734,6 +1732,8 @@ impl TrackState {
 		self.evict_group(key, Error::Evicted);
 	}
 
+	/// [`Self::uncache`] a servable group to free the cache and abort it with `err`, recording
+	/// it for the readers that judged it cached to judge again.
 	fn evict_group(&mut self, key: u64, err: Error) {
 		let slot = self.uncache(key).expect("a cached group");
 		slot.abort(err);
