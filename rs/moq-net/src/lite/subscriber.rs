@@ -10593,7 +10593,6 @@ impl SubStream {
 					if let std::collections::btree_map::Entry::Vacant(entry) = self.join_ticks.entry(id) {
 						let asked = self.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
 						let budget = asked.min(crate::track::budget(max));
-						tracing::warn!(?min, ?start, ?budget, "SCRATCH answer_join");
 						entry.insert(serving.answer_join(min, through(range.end), start, budget));
 					}
 					continue;

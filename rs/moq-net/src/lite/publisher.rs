@@ -6042,7 +6042,6 @@ impl TrackRun {
 					}
 				}
 				Recv::Finished => {
-					tracing::warn!(unresolved = self.start.is_unresolved(), version = ?self.ctx.version, children = self.children.len(), "SCRATCH pub recv finished");
 					// A group waiting for credit is still in flight too.
 					if !self.children.is_empty() || self.opening.is_some() {
 						return Poll::Pending;
@@ -6297,7 +6296,6 @@ impl TrackRun {
 					(None, Some((time, end))) if time <= self.floor => (start, end),
 					(None, _) => return None,
 				};
-				tracing::warn!(id, start, from, ?end, "SCRATCH pub starts");
 				end.is_none_or(|end| end > from).then_some(from)
 			})
 			.collect()
@@ -6973,9 +6971,7 @@ impl GroupServe {
 		// A higher-priority open waiting for credit can reset this stream: the reader fell too
 		// far behind the publisher's streams, and the control stream drops the group.
 		let preempt = self.ctx.version.encode_stream_code(&StreamError::TooFarBehind);
-		let opened = session.poll_open_group(&mut self.open, waiter, options, preempt);
-		tracing::warn!(key = self.key, version = ?self.ctx.version, ready = opened.is_ready(), "SCRATCH group open");
-		let stream = match ready!(opened) {
+		let stream = match ready!(session.poll_open_group(&mut self.open, waiter, options, preempt)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.settle_open(false);
@@ -7323,18 +7319,7 @@ impl kio::Task for GroupServe {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let res = self.poll_serve(waiter);
-		let state = match &self.state {
-			GroupState::Open => "open",
-			GroupState::Serve { frame, chunk, batch, batch_pos, ending, .. } => {
-				tracing::warn!(key = self.key, version = ?self.ctx.version, frame = frame.is_some(), chunk = chunk.is_some(), batch = batch.len(), batch_pos, ?ending, index = self.group.index(), "SCRATCH group serve detail");
-				"serve"
-			}
-			GroupState::Closed { .. } => "closed",
-			GroupState::Done => "done",
-		};
-		tracing::warn!(key = self.key, version = ?self.ctx.version, state, ready = ?match &res { Poll::Pending => None, Poll::Ready(r) => Some(r.as_ref().err().map(|e| e.to_string())) }, "SCRATCH group poll");
-		if let Err(err) = ready!(res) {
+		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			self.settle_failed(&err);
 		}
 		Poll::Ready(())
