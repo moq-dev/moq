@@ -161,41 +161,47 @@ test("a final drop leaves a finished group", async () => {
 	expect(await cached(producer)).toContain(0n);
 });
 
-// A received stale run the pool forgets is accounted for, as an evicted group is: no reader waits
-// on it from the live feed, so a reader that wants it asks a fill. Mirrors Rust
-// `a_reader_asks_a_fill_for_a_forgotten_run_it_judged`.
-test("a forgotten stale run is asked of a fill", async () => {
+// A reader that judged a dropped run before the pool forgot it keeps that verdict as its own, so it
+// asks no fill for the run once the track forgets it; only a reader that never judged it finds it
+// unknown and asks. Mirrors Rust `a_forgotten_run_is_asked_only_by_a_reader_that_never_judged_it`.
+test("a forgotten run is asked only by a reader that never judged it", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(10_000) });
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		const requests = producer.requests();
+		const patient = () =>
+			producer.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: Duration.secs(3600) } }));
+		const asked = async () => {
+			const runs: bigint[][] = [];
+			for (;;) {
+				const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+				if (!fill) return runs;
+				runs.push([fill.start, fill.end]);
+			}
+		};
+		const reader = patient();
 		producer.createGroup(0n).finish();
-		hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
-		producer.createGroup(3n).finish();
-		await clock.advance(2_000);
+		hooks.dropTrackGroups(producer, 1n, 2n, { error: new StreamError(StreamCode.Old) });
+		producer.createGroup(2n).finish();
+		expect((await reader.recvGroup())?.start).toBe(0n);
+		expect((await reader.recvGroup())?.start).toBe(2n);
+		expect(await asked()).toEqual([]);
 
-		const reader = producer.subscribe(
-			withMax({
-				ranges: [{ start: 1n }],
-				delay: { max: Duration.millis(60_000) },
-				order: "ascending",
-			}),
-		);
-		// The live group first, in arrival order; the next read asks for what it misses.
-		expect((await reader.recvGroup())?.start).toBe(3n);
+		await clock.advance(40_000);
+		pool.sweep();
+		expect(dropsHeld(producer)).toEqual([]);
 		const next = reader.recvGroup();
-		const asked: bigint[][] = [];
-		for (;;) {
-			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
-			if (!fill) break;
-			asked.push([fill.start, fill.end]);
-		}
-		expect(asked).toEqual([[1n, 3n]]);
+		expect(await asked()).toEqual([]);
 
-		reader.close();
+		// With group 0, which expired too.
+		const later = patient();
+		const first = later.recvGroup();
+		expect(await asked()).toEqual([[0n, 2n]]);
+
+		for (const sub of [reader, later]) sub.close();
 		requests.close();
-		await next.catch(() => undefined);
+		await Promise.allSettled([next, first]);
 	});
 });
 
