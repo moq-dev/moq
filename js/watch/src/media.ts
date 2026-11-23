@@ -5,10 +5,11 @@ import { type Effect, type Getter, type GetterInit, getter } from "@moq/signals"
 
 /**
  * Open a media subscription, joining live at its min delay, with its priority and delay on the
- * initial request and every update, and its max delay on every update. The serving hop starts the
- * live join that far behind the live edge, so a cold join, a replacement, or a fallback arrives with
- * its buffer full rather than replaying the retained backlog. An update keeps the ranges first
- * subscribed: a changed range resolves again, which would place the join anew and skip media
+ * initial request, and its priority and max on every update. The serving hop starts the live join
+ * that far behind the live edge, so a cold join, a replacement, or a fallback arrives with its buffer
+ * full rather than replaying the retained backlog. An update keeps each live join's lag and retunes
+ * only its max (see `Container.update`): a changed lag resolves again, which would place the join
+ * anew and skip media
  * buffered behind it.
  *
  * @internal
@@ -24,17 +25,15 @@ export function subscribeMedia(
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
 	const priority = getter(props.priority);
-	const { ranges } = Container.subscription(props.delay.peek());
-	const subscription = (level: number, delay: Container.Delay) => ({
-		priority: level,
-		delay: Container.subscription(delay).delay,
-		ranges,
-	});
-	const subscriber = props.broadcast.track(props.track).subscribe(subscription(priority.peek(), props.delay.peek()));
+	const subscriber = props.broadcast
+		.track(props.track)
+		.subscribe(Container.subscription(props.delay.peek(), { priority: priority.peek() }));
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		subscriber.update(subscription(inner.get(priority), inner.get(props.delay)));
+		const asked = { priority: inner.get(priority) };
+		const delay = inner.get(props.delay);
+		subscriber.update(Container.update(delay, subscriber.subscription.peek() ?? {}, asked));
 	});
 
 	return subscriber;

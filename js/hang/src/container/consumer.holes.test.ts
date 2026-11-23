@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
+import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
@@ -10,8 +11,10 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 // A subscription to `track` whose missing groups an unserved fill owes, as a session's feed would, so
 // its ordered read waits `max` for each hole before giving it up.
 function owed(track: Track.Producer, max: Duration): Track.Subscriber {
+	// Accepted, so the live join has a track to place on.
+	track.accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	track.requests();
-	return track.subscribe({ delay: { max } });
+	return track.subscribe(within(max));
 }
 
 test.each([0, 100])("a sequence hole before a paused data marker expires at %sms", async (budget) => {

@@ -11,6 +11,7 @@
 //!
 //! Time is paused, so the one-second grace for a group that never arrives is free.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 use support::AtStart;
@@ -126,9 +127,9 @@ async fn round(version: &str, late: Late, final_key: u64, max_delay: Option<Dura
 	} = connect(version).await;
 
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default()
-			.with_ranges([support::keys(0..)])
-			.with_delay(moq_net::track::Delay::default().with_max(max_delay));
+		// Every group still within `max_delay`: a live join, so a group that never arrives goes
+		// stale, or with none, every group, as history.
+		let subscription = moq_net::track::Subscription::default().with_max(max_delay);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -427,7 +428,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 		let reader = kio::clock::sim::spawn(async move {
 			let subscription = moq_net::track::Subscription::default()
 				.with_ranges([support::keys(0..)])
-				.with_delay(moq_net::track::Delay::default().with_max(TIMEOUT));
+				.with_max(TIMEOUT);
 			let mut sub = remote
 				.track("video")
 				.unwrap()

@@ -5,7 +5,6 @@ use std::{
 	collections::BTreeMap,
 	ops::Range,
 	task::{Poll, ready},
-	time::Duration,
 };
 
 use rangemap::{RangeMap, RangeSet};
@@ -15,7 +14,7 @@ use crate::{
 	Error, StreamError,
 	coding::Recv,
 	group, lite,
-	track::{self, Delay, Order, Position, Subscription},
+	track::{self, Order, Position, Subscription},
 };
 
 /// What a lite-07 copy's held fills ask of its upstream subscription, beside the demand.
@@ -25,8 +24,6 @@ pub(super) struct FillAsk {
 	pub groups: RangeSet<u64>,
 	/// The most urgent priority a held fill asks with.
 	pub priority: i8,
-	/// The most tolerant budget a held fill asks with, `None` for the publisher's max age.
-	pub max_delay: Option<Duration>,
 	pub order: Order,
 }
 
@@ -35,7 +32,6 @@ impl Default for FillAsk {
 		Self {
 			groups: Default::default(),
 			priority: i8::MIN,
-			max_delay: Some(Duration::ZERO),
 			order: Order::Ascending,
 		}
 	}
@@ -49,10 +45,6 @@ impl FillAsk {
 	/// Count `fill`'s preferences in.
 	fn add(&mut self, fill: &track::FillGroups) {
 		self.priority = self.priority.max(fill.priority());
-		self.max_delay = match (self.max_delay, fill.max_delay()) {
-			(Some(ours), Some(theirs)) => Some(ours.max(theirs)),
-			_ => None,
-		};
 		if fill.order() == Order::Descending {
 			self.order = Order::Descending;
 		}
@@ -67,9 +59,9 @@ impl FillAsk {
 		})
 	}
 
-	/// `demand` asked with the fills' priority too. The demand's budget caps every range, so
-	/// the live feed never loosens for a fill: a group it drops as stale is recovered on its
-	/// own (see [`Recovery`]).
+	/// `demand` asked with the fills' priority too. A fill's range is its own, so the demand's
+	/// live joins keep their budgets and the live feed never loosens for a fill: a group it
+	/// drops as stale is recovered on its own (see [`Recovery`]).
 	pub fn merge(&self, demand: Subscription) -> Subscription {
 		let priority = demand.priority.max(self.priority);
 		demand.with_priority(priority)
@@ -80,7 +72,6 @@ impl FillAsk {
 		Subscription::default()
 			.with_ranges([])
 			.with_priority(self.priority)
-			.with_delay(Delay::default().with_max(self.max_delay))
 			.with_order(self.order)
 	}
 }
@@ -507,7 +498,6 @@ impl RangeFills {
 		// What finishes a stream still asks with what its fills asked.
 		if self.held.is_empty() && !groups.is_empty() {
 			ask.priority = self.ask.priority;
-			ask.max_delay = self.ask.max_delay;
 			ask.order = self.ask.order;
 		}
 		ask.groups = groups;
@@ -635,7 +625,6 @@ impl Recovery {
 		let subscription = Subscription::default()
 			.with_ranges(track::Range::span(Some(groups.start), end))
 			.with_priority(priority)
-			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending);
 		let ranges = vec![lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
@@ -646,7 +635,13 @@ impl Recovery {
 			framing: lite::Framing::new(serving.info(), serve.subscriber.version),
 		};
 		tracing::debug!(track = %serve.name, ?groups, "recovering stale groups");
-		let establish = serve.register(subscription, ranges, Some(copy));
+		// No max age: the groups it recovers are the ones a max age dropped.
+		let request = super::Request {
+			subscription,
+			ranges,
+			max_age: None,
+		};
+		let establish = serve.register(request, Some(copy));
 		Self {
 			serve: serve.clone(),
 			serving: serving.clone(),
@@ -1074,11 +1069,7 @@ mod tests {
 	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::FillGroups) {
 		let waiter = kio::Waiter::noop();
 		let mut reader = producer
-			.subscribe(
-				Subscription::default()
-					.with_delay(Delay::default().with_max(None))
-					.with_range(0..3),
-			)
+			.subscribe(Subscription::default().with_max(None).with_range(0..3))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..3 are owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
@@ -1122,11 +1113,7 @@ mod tests {
 		Refusal::dropped(StreamError::NotFound).answer(&fill, 0..3);
 		drop((reader, fill));
 		let mut reader = producer
-			.subscribe(
-				Subscription::default()
-					.with_delay(Delay::default().with_max(None))
-					.with_range(0..3),
-			)
+			.subscribe(Subscription::default().with_max(None).with_range(0..3))
 			.ordered();
 		let _ = reader.poll_next_group(&waiter);
 		assert!(

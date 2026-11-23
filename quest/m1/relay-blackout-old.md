@@ -46,7 +46,3 @@ Check whether its fix is in the bisect range.
 ## Closes
 
 - [#9320](https://github.com/moq-dev/moq/issues/9320) - relay resets a 5.8 s subscriber's groups `Old` after 3–4 s blackouts
-
-## Related
-
-- [Max Age is a Live range's staleness budget](/quest/m1/live-max-age.md) - redefines the budget this expiry judges against

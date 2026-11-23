@@ -10,6 +10,7 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, manual, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Tail } from "./tail.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Ordered } from "./track.ts";
@@ -34,7 +35,7 @@ async function session(protocol: string) {
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote
 		.track("video")
-		.subscribe({ delay: { max: MAX_DELAY } })
+		.subscribe(withMax({ delay: { max: MAX_DELAY } }))
 		.ordered();
 
 	return {

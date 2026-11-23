@@ -218,7 +218,7 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Duration | undefined>(undefined);
 
-	// The subscription's max delay: the shared budget, raised to the delay plus the estimator's ceiling.
+	// The subscription's live join max: the shared budget, raised to the delay plus the estimator's ceiling.
 	#subscribeMaxDelay = new Signal<Duration>(Duration.ZERO);
 	// The subscription's min delay: the playout delay plus the warmup, where the publisher starts a
 	// live join.

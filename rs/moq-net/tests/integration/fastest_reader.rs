@@ -5,6 +5,7 @@
 //! stream receive credit the relay's transport grants, capped at 16 MiB, half the group's
 //! live tail. A slower reader is never waited on: it falls off the group's front.
 
+use crate::WithMax as _;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -63,10 +64,10 @@ async fn relay(version: &str) -> Relay {
 		.unwrap();
 	let subscriber = kio::clock::timeout(
 		TIMEOUT,
-		remote.track("data").unwrap().subscribe(
-			track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600))),
-		),
+		remote
+			.track("data")
+			.unwrap()
+			.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600))),
 	)
 	.await
 	.expect("subscribe timeout")
@@ -326,9 +327,7 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 		let mut subscriber = remote
 			.track("data")
 			.unwrap()
-			.subscribe(
-				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-			)
+			.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)))
 			.await
 			.unwrap();
 		crate::support::harness::subscribed(&track).await;

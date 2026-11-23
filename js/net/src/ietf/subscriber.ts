@@ -40,7 +40,7 @@ import { abandoned as demandAbandoned, isAbandoned, unrequested, unwanted } from
 import { min } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
-import { bounded, wireSpan } from "../window.ts";
+import { bounded, placedAsTimes, wireHeld, wireSpan } from "../window.ts";
 import { wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
@@ -151,16 +151,13 @@ function sees(filter: Filter, path: Path.Valid): boolean {
 }
 
 /**
- * The group a SUBSCRIBE asks from, undefined for a live join. A range from the oldest group whose
- * budget reaches back asks from group 0, so the publisher delivers the backlog it holds: a wire
- * without ranges can't name the oldest any other way. A zero budget keeps only the latest group,
- * which a live join already delivers. Mirrors the Rust `wire_start`.
+ * The group a SUBSCRIBE asks from, undefined for a live join. A range from the oldest group is
+ * history, so it asks from group 0 and the publisher delivers the backlog it holds: a wire without
+ * ranges can't name the oldest any other way. Mirrors the Rust `wire_start`.
  */
-function wireStart(ranges: readonly track.Range[], delay: track.Delay | undefined): bigint | undefined {
-	const max = delay?.max;
-	const reaches = max === null || (max !== undefined && !max.isZero());
+function wireStart(ranges: readonly track.Range[]): bigint | undefined {
 	// Only a time start can be empty, so every range from the oldest group delivers something.
-	if (reaches && ranges.some((range) => range.start === undefined)) return 0n;
+	if (ranges.some((range) => range.start === undefined)) return 0n;
 	return wireSpan(ranges).start;
 }
 
@@ -1603,9 +1600,11 @@ export class Subscriber {
 		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
 		this.#aliases.resubscribe({ broadcast, name: request.name });
-		const ranges = request.subscription.ranges ?? [{}];
+		// A live join already placed starts at its group, as a time start would.
+		const held = wireHeld(request.subscription);
+		const ranges = placedAsTimes(held.ranges, held.placed);
 		const bounds = wireSpan(ranges);
-		const start = wireStart(ranges, request.subscription.delay);
+		const start = wireStart(ranges);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,

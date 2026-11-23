@@ -1,11 +1,10 @@
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import * as Duration from "./duration.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { hasFetchMaxDelay, hasFrameBounds, Version } from "./version.ts";
+import { hasFrameBounds, Version } from "./version.ts";
 
 function guardFetch(version: Version) {
 	switch (version) {
@@ -23,8 +22,6 @@ export class Fetch {
 	instance?: Instance.Valid;
 	track: string;
 	priority: number;
-	/** Reader freshness budget in whole milliseconds. Lite-07+ only; omission leaves the publisher's max age as the only bound. */
-	maxDelay?: number;
 	group: bigint;
 
 	/** Index of the first frame to return; 0 is the start of the group. Lite-06+. */
@@ -41,7 +38,6 @@ export class Fetch {
 		instance,
 		track,
 		priority,
-		maxDelay,
 		group,
 		startFrame = 0,
 		endFrame,
@@ -50,7 +46,6 @@ export class Fetch {
 		instance?: Instance.Valid;
 		track: string;
 		priority: number;
-		maxDelay?: number;
 		group: bigint;
 		startFrame?: number;
 		endFrame?: number;
@@ -59,7 +54,6 @@ export class Fetch {
 		this.instance = instance;
 		this.track = track;
 		this.priority = priority;
-		this.maxDelay = maxDelay;
 		this.group = group;
 		this.startFrame = startFrame;
 		this.endFrame = endFrame;
@@ -71,8 +65,6 @@ export class Fetch {
 		await encodeNode(w, version);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
-		if (hasFetchMaxDelay(version)) await Duration.encodeOptional(w, this.maxDelay);
-		else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
 		await w.u62(this.group);
 
 		if (hasFrameBounds(version)) {
@@ -90,11 +82,10 @@ export class Fetch {
 		await decodeNode(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
-		const maxDelay = hasFetchMaxDelay(version) ? await Duration.decodeOptional(r) : undefined;
 		const group = await r.u62();
 
 		if (!hasFrameBounds(version)) {
-			return new Fetch({ broadcast, instance, track, priority, maxDelay, group });
+			return new Fetch({ broadcast, instance, track, priority, group });
 		}
 
 		const startFrame = await r.u53();
@@ -108,7 +99,6 @@ export class Fetch {
 			instance,
 			track,
 			priority,
-			maxDelay,
 			group,
 			startFrame,
 			endFrame: endFrame > 0 ? endFrame - 1 : undefined,

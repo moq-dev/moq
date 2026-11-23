@@ -16,6 +16,7 @@
 //! Two publishers sharing one stable instance, a redundant pair, are one source the
 //! same way.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 use support::AtStart;
@@ -152,8 +153,7 @@ impl Topology {
 			.await
 			.unwrap()
 			.unwrap();
-		let prefs =
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+		let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
 		let topology = Self {
@@ -727,8 +727,7 @@ async fn lagging_route_dies(version: Version) {
 			.await
 			.unwrap()
 			.unwrap();
-		let preferences =
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+		let preferences = track::Subscription::default().with_max(Duration::from_secs(60));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
 	fn write(group: &mut moq_net::group::Producer, key: u64, frame: u64) {
@@ -846,7 +845,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 		.await
 		.unwrap()
 		.unwrap();
-	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
+	let prefs = track::Subscription::default().with_max(budget);
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
 	settle().await;
@@ -993,7 +992,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 
 	let mut follow = subscriber.consume().follow("live", None).unwrap();
 	let first = follow.available().await.unwrap().unwrap();
-	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+	let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 	let mut rx = read(first.track("video").unwrap().subscribe(prefs.clone()).await.unwrap());
 	let write = |replicas: &mut Vec<Replica>, key: u64| {
 		for replica in replicas.iter_mut() {
@@ -1114,7 +1113,7 @@ async fn replaced_behind_a_relay(version: &str) {
 		.await
 		.unwrap()
 		.unwrap();
-	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+	let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
 	let mut dead = None;
@@ -1227,7 +1226,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 		.await
 		.unwrap()
 		.unwrap();
-	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+	let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
 	let mut dead = None;
@@ -1326,7 +1325,7 @@ async fn producer_replaced(version: &str) {
 		.await
 		.unwrap()
 		.unwrap();
-	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+	let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 	let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 	let mut rx = read(sub);
 

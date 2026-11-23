@@ -80,9 +80,13 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
-	// One budget for both, as the decoder keeps: the container skips at the max delay it subscribes with.
-	const delay = new Signal<Track.Delay>({ max: budget(Duration.ZERO) });
-	const subscriber = track.subscribe({ delay: delay.peek() });
+	// One budget for both, as the decoder keeps: the container skips at the max delay its live join
+	// asks. The join is at the live edge, so it places on the first group written.
+	const delay = new Signal<Container.Delay>({ max: budget(Duration.ZERO) });
+	const joining = (max: Duration): Track.Subscription => ({
+		ranges: [{ start: { live: { min: Duration.ZERO, max } } }],
+	});
+	const subscriber = track.subscribe(joining(budget(Duration.ZERO)));
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
 		delay,
@@ -115,7 +119,7 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 			const current = target({ measured: consumer.spread.peek(), frame: Duration.millis(CHUNK_MS) });
 			result.targets.push(current.asMillis());
 			delay.set({ max: budget(current) });
-			subscriber.update({ delay: delay.peek() });
+			subscriber.update(joining(budget(current)));
 		}
 	} finally {
 		track.finish();

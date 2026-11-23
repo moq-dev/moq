@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Order, Range, Start, Subscription};
+use moq_net::track::{Info, Order, Range, Start, Subscription};
 use moq_net::{Timescale, Timestamp, Version, cache, origin, track};
 use serde_json::Value;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -68,7 +68,10 @@ impl Ask {
 		let start = |range: &Value| match range.get("start") {
 			None => Start::Oldest,
 			Some(start) => match start.get("live") {
-				Some(live) => Start::Live(Duration::from_millis(live.as_u64().expect("a lag"))),
+				Some(live) => Start::Live {
+					min: Duration::from_millis(live.as_u64().expect("a lag")),
+					max: None,
+				},
 				None => Start::Time(start.as_u64().expect("a time")),
 			},
 		};
@@ -82,14 +85,13 @@ impl Ask {
 					end: range.get("end").map(|end| end.as_u64().expect("a time")),
 				})
 				.collect(),
-			None => vec![Range::default()],
+			None => vec![Range::ALL],
 		};
 		Self { ranges }
 	}
 
 	fn subscription(&self) -> Subscription {
 		Subscription::default()
-			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending)
 			.with_ranges(self.ranges.clone())
 	}

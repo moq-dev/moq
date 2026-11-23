@@ -18,6 +18,7 @@ import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Front } from "../resume.ts";
 import { Reader, Readers, Stream, Writer, writeBudget } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
@@ -33,6 +34,7 @@ import {
 	Subscribe,
 	type SubscribeEnd,
 	SubscribeUpdate,
+	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import {
@@ -71,6 +73,12 @@ function keep(version: Version) {
 // A lite-07 update restating its span retires the range it replaces, the one with Range ID `id`.
 function restate(version: Version, id = 0n) {
 	return hasRanges(version) ? { remove: [id] } : {};
+}
+
+// A lite-07 live join reaching back past every group, so it takes every group still within `max`
+// milliseconds of the live edge.
+function within(max: number): WireRange {
+	return { start: { live: { min: NO_MAX_DELAY, max } } };
 }
 
 test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
@@ -986,13 +994,13 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		maxAge: Duration.millis(3_600_000),
 		ranges: [
 			// A live join 1 ms behind the newest frame, at 4 ms.
-			{ start: { live: 1 } },
+			{ start: { live: { min: 1, max: null } } },
 			// Group 1 starts at 1 ms.
 			{ start: { time: 1n }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
 			// Empty only once its join resolves to group 3.
-			{ start: { live: 1 }, end: { absolute: 2n } },
+			{ start: { live: { min: 1, max: null } }, end: { absolute: 2n } },
 		],
 	});
 	try {
@@ -1069,7 +1077,10 @@ test("lite-07 SUBSCRIBE_START reports an added range's start, which later update
 		expect([start.id, start.start]).toEqual([0n, 0n]);
 
 		// A live join 2 ms behind the newest frame, at group 2, which takes Range ID 1.
-		await replayUpdate({ priority: 0, ranges: [{ start: { live: 2 } }] }).encode(sub.client.writer, version);
+		await replayUpdate({ priority: 0, ranges: [{ start: { live: { min: 2, max: null } } }] }).encode(
+			sub.client.writer,
+			version,
+		);
 		const started = await next();
 		expect([started.id, started.start]).toEqual([1n, 2n]);
 
@@ -1079,9 +1090,11 @@ test("lite-07 SUBSCRIBE_START reports an added range's start, which later update
 		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
 		const pinned = await next();
 		expect([pinned.id, pinned.start]).toEqual([2n, 7n]);
+		// The join stays a live join, placed by its Range ID: pinned to a time start, its groups would
+		// turn from live ones that expire past its max into history.
 		const ranges = sub.track.subscription.peek()?.ranges ?? [];
-		expect(ranges.some((range) => range.start === 2n)).toBe(true);
-		expect(ranges.some((range) => typeof range.start === "object")).toBe(false);
+		expect(ranges).toContainEqual({ start: { live: { min: Duration.millis(2), max: null } } });
+		expect(ranges.some((range) => range.start === 2n)).toBe(false);
 	} finally {
 		await sub.close();
 	}
@@ -1112,7 +1125,7 @@ test("lite-07 answers a bounded window that resolves empty and FINs in reply", a
 			prefill: [0n, 1n, 2n, 3n, 4n, 5n],
 			maxAge: Duration.millis(3_600_000),
 			// A live join at the latest group, past its end.
-			ranges: [{ start: { live: 0 }, end: { absolute: 3n } }],
+			ranges: [{ start: { live: { min: 0, max: null } }, end: { absolute: 3n } }],
 		});
 		try {
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
@@ -1291,12 +1304,16 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	// A stale (OLD) drop is final on its subscription, so a group handed out after it, as when a
 	// front switches to a route that delivers what the old route reported stale, is not served.
 	test(`lite ${version}: a group stays dropped after a stale drop`, async () => {
-		const sub = await servedSubscription({ version, startGroup: 0n });
+		// A live join reaching back to the oldest group, whose groups go stale past its max: lite-07
+		// carries it as a range, and lite-06 as no start under its one max age.
+		const live = hasRanges(version) ? { ranges: [within(TEST_MAX_DELAY_MS)] } : {};
+		const sub = await servedSubscription({ version, ...live });
 		try {
 			sub.serve(0n);
 			expect(await sub.servedSequence()).toBe(0n);
 			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 
+			// Judged under a budget at least as wide as the join's max, so the verdict covers it.
 			hooks.dropTrackGroups(sub.track, 1n, 2n, staleHole(60_000));
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
@@ -1671,8 +1688,10 @@ test.each([
 	const clock = new Manual();
 	const installed = clock.install();
 	const budget = 1_000;
-	const update = (maxDelay: number, id: bigint) =>
-		new SubscribeUpdate({ priority: 1, startGroup: 0n, maxDelay, ...restate(Version.DRAFT_07, id) }).encode(
+	// Replaces Range ID `id` with a live join reaching back to the oldest group, whose groups expire
+	// `max` milliseconds behind the live edge.
+	const update = (max: number, id: bigint) =>
+		new SubscribeUpdate({ priority: 1, remove: [id], ranges: [within(max)] }).encode(
 			sub.client.writer,
 			Version.DRAFT_07,
 		);
@@ -1725,12 +1744,10 @@ test("lite draft-07: a stream expiring mid-frame resets at once", async () => {
 		sub.serve(0n);
 		expect(await sub.servedSequence()).toBe(0n);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
-		await new SubscribeUpdate({
-			priority: 1,
-			startGroup: 0n,
-			maxDelay: budget,
-			...restate(Version.DRAFT_07, 0n),
-		}).encode(sub.client.writer, Version.DRAFT_07);
+		await new SubscribeUpdate({ priority: 1, remove: [0n], ranges: [within(budget)] }).encode(
+			sub.client.writer,
+			Version.DRAFT_07,
+		);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
 
 		let reset: unknown;
@@ -1854,7 +1871,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			try {
 				hooks.receiveTrack(sub.track);
 				// A lite-07 source reports where it started the time asked for.
-				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source, NO_MAX_DELAY]]);
+				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]]);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				hooks.answerEdge(sub.track);
 				const first = expected > 6n ? expected : 6n;
@@ -1880,23 +1897,18 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 test("lite draft-07: a time start a copy's oldest range covers waits for an answer of its own", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2n });
 	// The relay's own reader, asking from the oldest group, which the copy's demand then starts at.
-	const local = sub.track.subscribe({ delay: { max: Duration.millis(60_000) } });
+	const local = sub.track.subscribe({ ranges: [{}] });
 	try {
 		hooks.receiveTrack(sub.track);
 		await flush();
-		hooks.timeStarts(sub.track, [[0n, 6n, NO_MAX_DELAY]]);
+		hooks.timeStarts(sub.track, [[0n, 6n]]);
 		hooks.startTrack(sub.track, { start: 6n });
 		hooks.answerEdge(sub.track);
 		await flush();
-		expect(
-			hooks
-				.requested(sub.track)
-				.asks()
-				.map(([time]) => time),
-		).toEqual([2n]);
+		expect(hooks.requested(sub.track).asks()).toEqual([2n]);
 		hooks.timeStarts(sub.track, [
-			[0n, 6n, NO_MAX_DELAY],
-			[2n, 6n, NO_MAX_DELAY],
+			[0n, 6n],
+			[2n, 6n],
 		]);
 		sub.serve(6n);
 		expect(await sub.servedSequence()).toBe(6n);
@@ -1951,7 +1963,7 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 		hooks.receiveTrack(sub.track);
 		// The copy still waits on its upstream's answer for the demand from 1000.
 		hooks.startTrack(sub.track, { requested: 1000n });
-		hooks.timeStarts(sub.track, [[5000n, 5000n, NO_MAX_DELAY]]);
+		hooks.timeStarts(sub.track, [[5000n, 5000n]]);
 		sub.serve(5000n);
 		const placed = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in placed)) throw new Error("expected SUBSCRIBE_START");
@@ -1959,8 +1971,8 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 		expect(await sub.servedSequence()).toBe(5000n);
 
 		hooks.timeStarts(sub.track, [
-			[1000n, 1000n, NO_MAX_DELAY],
-			[5000n, 5000n, NO_MAX_DELAY],
+			[1000n, 1000n],
+			[5000n, 5000n],
 		]);
 		const older = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in older)) throw new Error("expected SUBSCRIBE_START");
@@ -1985,7 +1997,7 @@ test("lite draft-07: a range reaching back waits for the copy's start", async ()
 		hooks.receiveTrack(sub.track);
 		// The copy still waits on its upstream's answer for the demand from the oldest group.
 		hooks.startTrack(sub.track, { requested: 0n });
-		hooks.timeStarts(sub.track, [[5000n, 5000n, NO_MAX_DELAY]]);
+		hooks.timeStarts(sub.track, [[5000n, 5000n]]);
 		sub.serve(5000n);
 		const placed = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in placed)) throw new Error("expected SUBSCRIBE_START");
@@ -2025,7 +2037,7 @@ test("lite draft-07: a range added before the start is answered once placed", as
 		await flush();
 		// The copy still waits on its upstream's answer for the demand from 1000.
 		hooks.startTrack(sub.track, { requested: 1000n });
-		hooks.timeStarts(sub.track, [[5000n, 5000n, NO_MAX_DELAY]]);
+		hooks.timeStarts(sub.track, [[5000n, 5000n]]);
 		sub.serve(5000n);
 		const placed = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in placed)) throw new Error("expected SUBSCRIBE_START");
@@ -2046,7 +2058,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
-			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n, NO_MAX_DELAY]]);
+			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]]);
 			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
 			hooks.answerEdge(sub.track);
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
@@ -2305,6 +2317,7 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 
 		sub.release();
 
+		// Group 0, already popped, is still within the update's max age, so it is served.
 		expect(await sub.servedSequence()).toBe(0n);
 		expect(await sub.servedSequence()).toBe(2n);
 		expect(lastGroups(ranges)).toEqual({ start: { included: 2n }, end: undefined });
@@ -2359,6 +2372,7 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 
 		sub.release();
 
+		// Group 0, already popped, is still within the update's max age, so it is served whole.
 		expect(await sub.servedGroup()).toEqual({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
 		expect(await sub.servedGroup()).toEqual({ key: 1n, frameStart: 2, payloads: ["c"] });
 		expect(lastGroups(ranges)).toEqual({ start: { included: 1n }, end: undefined });
@@ -2652,13 +2666,15 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		await replayUpdate({ priority: 9, endGroup: 5n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 
-		expect(sub.track.subscription.peek()).toEqual({
-			priority: 9,
-			// Lite-06 cannot state a minimum.
-			delay: { max: Duration.millis(TEST_MAX_DELAY_MS) },
-			order: "descending",
-			ranges: [{ end: 5n }],
-		});
+		expect(sub.track.subscription.peek()).toEqual(
+			withMax({
+				priority: 9,
+				// Lite-06 cannot state a minimum.
+				delay: { max: Duration.millis(TEST_MAX_DELAY_MS) },
+				order: "descending",
+				ranges: [{ end: 5n }],
+			}),
+		);
 		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
@@ -3480,10 +3496,11 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 
 test("a version without the latency field serves a non-dropping budget", async () => {
 	for (const version of [Version.DRAFT_01, Version.DRAFT_02]) {
-		// These drafts carry no max age, which decodes as no limit.
+		// These drafts carry no max age, which decodes as no limit: history from the oldest group,
+		// whose groups never go stale, which the cursor floor then raises to the latest group.
 		const sub = await servedSubscription({ version, maxDelay: null });
 		try {
-			expect(sub.track.subscription.peek()?.delay?.max).toEqual(Duration.millis(NO_MAX_DELAY));
+			expect(sub.track.subscription.peek()?.ranges).toEqual([{}]);
 		} finally {
 			await sub.close();
 		}
@@ -3898,12 +3915,12 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 });
 
 // A FIN would tell the requester the prefix it got is the whole group.
-test("lite draft-07: a fetch whose budget gives up partway resets as too old", async () => {
+test("lite draft-07: a fetch whose max age gives up partway resets as too old", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("live"));
-	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	// Left open, so the fetch is still serving when the track runs on.
 	const open = track.createGroup(0n);
@@ -3919,7 +3936,6 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 			broadcast: Path.from("live"),
 			track: "video",
 			priority: 0,
-			maxDelay: 500,
 			group: 0n,
 		});
 		const serving = publisher.runFetch(msg, server);
@@ -3944,13 +3960,13 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 });
 
 // A fetch sent whole whose FIN the requester has yet to acknowledge still holds the connection, so
-// it resets as too old once its budget gives the group up, as the Rust `FetchServe` does.
+// it resets as too old once the publisher's max age gives the group up, as the Rust `FetchServe` does.
 test("lite draft-07: a fetch sent whole resets as too old when it goes stale unacknowledged", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("live"));
-	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	const whole = track.createGroup(0n);
 	whole.writeFrame(frame(0));
@@ -3985,7 +4001,6 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 			broadcast: Path.from("live"),
 			track: "video",
 			priority: 0,
-			maxDelay: 500,
 			group: 0n,
 		});
 		const serving = publisher.runFetch(msg, server);
@@ -4010,14 +4025,14 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 });
 
 // A relay serving a FETCH for a broadcast it consumes over the wire judges the reply by the
-// FETCH's own budget too, against a copy of the track a live reader subscribed, as a Rust relay
+// publisher's max age too, against a copy of the track a live reader subscribed, as a Rust relay
 // judges the fetch it landed in that copy's cache.
 test("lite draft-07: a relayed fetch sent whole resets as too old when it goes stale unacknowledged", async () => {
 	// Upstream: the broadcast's origin, consumed by the relay over a session.
 	const upstream = createMockTransportPair(ALPN_07_WIP);
 	const source = new OriginProducer();
 	const broadcast = publish(source, Path.from("live"));
-	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	const whole = track.createGroup(0n);
 	whole.writeFrame(frame(0));
@@ -4063,10 +4078,10 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 	});
 	const server = new Stream({ readable: accepted.value.readable, writable, version: Version.DRAFT_07 });
 
-	// Another downstream reader, whose own budget is far wider, keeps a copy subscribed.
-	const live = front.consumer.track("video").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	// Another downstream reader, whose own max is far wider, keeps a copy subscribed.
+	const live = front.consumer.track("video").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
 	try {
-		const msg = new Fetch({ broadcast: Path.from("live"), track: "video", priority: 0, maxDelay: 500, group: 0n });
+		const msg = new Fetch({ broadcast: Path.from("live"), track: "video", priority: 0, group: 0n });
 		const serving = publisher.runFetch(msg, server);
 		// The whole group and its FIN go out before any successor arrives.
 		await closing;

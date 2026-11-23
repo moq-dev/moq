@@ -46,11 +46,11 @@ Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
 group skipped for age is never observed, and a frame queued behind a stalled
 group is observed when the stall clears. A missing group, one that has delivered
-no frame, is given up by the subscription's `delay.max` alone, like any stale
-group; `delay.min` only sets where a join starts. Each frame is timed by when it
+no frame, is given up by the live join's `max` alone, like any stale
+group; its `min` only sets where the join starts. Each frame is timed by when it
 landed in the node's cache, not when the read reached it, so the frames a hole
 holds back read as on time rather than as jitter. The browser player leaves the hole to the transport: it reads its audio
-through an ordered track reader whose own `delay.max` is what the ring holds of
+through an ordered track reader whose own live join's `max` is what the ring holds of
 the delay plus the stretch threshold, past which the ring would skip the hole's
 audio anyway, and plays each gap that reader reports as the hole. The reader
 gives up on a missing group by the same two clocks as any stale group: once the
@@ -68,7 +68,7 @@ as packets come and lets the playback buffer hold the target, rather than
 pacing reads to the speaker.
 
 A frame dropped by the relay is never observed, which is correct only while the
-drop is not the receiver's own doing. The subscription's max delay drops groups
+drop is not the receiver's own doing. The live join's max drops groups
 before any container sees them, at the relay and in the receiver's own transport
 subscriber, so a subscription cut to the target hides every frame later than
 the target: the estimate creeps up one bucket at a time while the frames it
