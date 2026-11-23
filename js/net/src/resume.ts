@@ -1148,11 +1148,15 @@ class Reader implements ResumeSource {
 		if (placed.length > 0) this.#resolve(placed);
 		this.#resumed = false;
 		if (resumed === undefined) return;
-		// A group a replaced copy holds under its cap is that copy's to drain: the serving route is
-		// asked from the lowest one none holds. A copy that failed or spent its drain budget delivers
-		// nothing more, even while a read still leases it, and one holding a group without its head
-		// may give that group up, so neither counts.
+		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
+		// drain: the serving route is asked from the lowest one none holds. A copy that failed or
+		// spent its drain budget delivers nothing more, even while a read still leases it, and one
+		// holding a group without its head may give that group up, so neither counts.
 		const cursor = this.#shell.cursor.peek().start;
+		// Each replaced copy's staleness verdict, taken once for the whole walk.
+		const taking = new Map(
+			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.taking(copy.sub)]),
+		);
 		const drains = (key: bigint) =>
 			this.#copies.some(
 				(copy) =>
@@ -1160,6 +1164,7 @@ class Reader implements ResumeSource {
 					this.#feeds(copy) &&
 					(copy.backfill ? cursor : max(cursor, copy.floor ?? 0n)) <= key &&
 					key < (copyEnd(copy) ?? UNBOUNDED) &&
+					taking.get(copy)?.(key) === true &&
 					!copyFailed(copy) &&
 					hooks.holdsGroup(copy.sub, key, true),
 			);

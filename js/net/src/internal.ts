@@ -1016,6 +1016,13 @@ export const hooks: {
 	reportedRuns: (subscriber: Subscriber) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
+	/**
+	 * Which groups the subscriber may still hand out, judged against one staleness verdict taken
+	 * now: a key qualifies when its ranges and floor cover it, nothing skipped or gave it up, it has
+	 * not handed it out or passed it, as an ordered read passes what lies below where it reads next,
+	 * and it is not stale under its budget. Mirrors the Rust crate-private `track::Subscriber::taking`.
+	 */
+	taking: (subscriber: Subscriber) => (key: bigint) => boolean;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
@@ -1449,6 +1456,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {
+		throw new Error("track.ts not loaded");
+	},
+	taking: () => {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
