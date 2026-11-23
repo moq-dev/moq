@@ -191,10 +191,15 @@ export interface Filed<T> {
 const receipts = new WeakMap<object, number>();
 let nextReceipt = 0;
 
+/** Records `identity` as received now, as each announce of a claim is: it ranks as the newest. */
+export function receive(identity: object): void {
+	receipts.set(identity, nextReceipt++);
+}
+
 /**
- * The order `identity` was received in, stamped now if it is new: a later one is larger, so a
- * full tie goes to the most recently received claim wherever each is filed, as Rust's newest
- * route entry. A new identity is stamped where it is made; an update keeps its identity's place.
+ * The order `identity` was last {@link receive}d in, stamped now if it never was: a later one is
+ * larger, so a full tie across filings goes to the most recently received claim, as Rust's newest
+ * route entry. An update keeps its identity's place.
  */
 export function arrival(identity: object): number {
 	let order = receipts.get(identity);
@@ -209,8 +214,9 @@ export function arrival(identity: object): number {
  * The best of the most specific claims among `filed`, which all cover one path: a claim shown
  * above its own prefix counts for the shallower prefix it is really at, and claims of one prefix
  * rank against each other wherever each is filed. Only an instance's highest epoch among them
- * (and `others`, of the same claim when `exact`) is eligible; `compare` ranks the rest, then the
- * most recently {@link arrival}, then the deeper filing, then each prefix's own preference.
+ * (and `others`, of the same claim when `exact`) is eligible; `compare` ranks the rest, then each
+ * prefix's own preference among its candidates, and across prefixes the most recently
+ * {@link arrival}, then the deeper filing.
  * Mirrors `RouteTable::best_route` in rs/moq-net.
  */
 export function bestOfTier<T>(
@@ -234,9 +240,9 @@ export function bestOfTier<T>(
 		}
 		const order =
 			compare(entry, best) ||
-			best.arrival - entry.arrival ||
-			best.depth - entry.depth ||
-			entry.order - best.order;
+			(entry.prefix === best.prefix
+				? entry.order - best.order
+				: best.arrival - entry.arrival || best.depth - entry.depth);
 		if (order < 0) best = entry;
 	}
 	return best;

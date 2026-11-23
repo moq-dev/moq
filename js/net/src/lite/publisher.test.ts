@@ -4682,6 +4682,51 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 	}
 });
 
+// Claims of one prefix filed above and below a handle's root that tie on rank hash on the root,
+// as a request for it resolves, though the handle shows both at its root: the answer carries
+// what the request takes, whichever claim is newer.
+test("a lite-07 rooted answer shows the claim a request for its root takes", async () => {
+	const root = Path.from("src/a/b");
+	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
+		const origin = new OriginProducer();
+		const names = swap ? [`b${i}`, `a${i}`] : [`a${i}`, `b${i}`];
+		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const deep = origin
+			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
+			.claim(Path.from("src"), { instance: instance(names[1]) });
+		const { next, ok, close } = routedAnswer(origin.scope(root, Path.Prefixes.parse([""])));
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const request = origin.consume().request(root);
+			const which = await Promise.race([
+				shallow
+					.requested()
+					.next()
+					.then(() => shallow.instance),
+				deep
+					.requested()
+					.next()
+					.then(() => deep.instance),
+			]);
+			expect(starts).toEqual([which]);
+			request.close();
+		} finally {
+			shallow.close();
+			deep.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
 // Through a handle rooted beneath both filings, a broader claim filed above the root still gives
 // way to a more specific one filed beneath it, as a request there resolves.
 test("a lite-07 rooted answer shows the most specific claim filed on either side of its root", async () => {

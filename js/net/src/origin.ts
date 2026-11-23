@@ -30,6 +30,7 @@ import {
 	hiddenBelow,
 	hooks,
 	mostSpecific,
+	receive,
 	routeHops,
 	scopeCaptures,
 	scopeHead,
@@ -202,8 +203,8 @@ class Scope {
 		}
 		if (covering.length > 0) {
 			// The most specific claim first, as a request beneath the root resolves; claims of one
-			// prefix rank against each other wherever each is filed, then the most recently received,
-			// then the deeper filing, then each filing's own order.
+			// prefix rank against each other wherever each is filed, then by each filing's own order,
+			// and across filings the most recently received, then the deeper filing.
 			const ranked = covering.flatMap(([path, visible], filing) =>
 				visible.map((value, order) => ({ value, path, depth: Path.parts(path).length, filing, order })),
 			);
@@ -213,10 +214,9 @@ class Scope {
 				(a, b) =>
 					Number((a.value.route.above ?? 0n) - (b.value.route.above ?? 0n)) ||
 					compareTier(this.root, tier(a), tier(b)) ||
-					arrival(b.value.identity) - arrival(a.value.identity) ||
-					b.depth - a.depth ||
-					a.filing - b.filing ||
-					a.order - b.order,
+					(a.filing === b.filing
+						? a.order - b.order
+						: arrival(b.value.identity) - arrival(a.value.identity) || b.depth - a.depth),
 			);
 			out.set(
 				Path.empty(),
@@ -1643,7 +1643,6 @@ export class Producer implements Table {
 		// Filed where the scope lets it serve whole subtrees, each place as many segments above
 		// its path as the claim is broader: one claim, with one identity and one server.
 		const identity = {};
-		arrival(identity);
 		let current = route;
 		const lowered = (route: WireRoute, below: bigint): WireRoute =>
 			below === 0n ? route : { ...route, above: (route.above ?? 0n) + below };
@@ -1688,6 +1687,8 @@ export class Producer implements Table {
 					else routes.set(at, [entry]);
 				}
 			});
+			// Newest at each filing, so newest across them too, as Rust files a new entry each time.
+			receive(identity);
 			inserted = true;
 			refresh();
 		};

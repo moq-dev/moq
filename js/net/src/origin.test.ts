@@ -2383,6 +2383,53 @@ test("a tie across filings goes to the most recently received claim", async () =
 	}
 });
 
+// A local broadcast and a claim at the root tie on rank, and a request takes the local broadcast,
+// so a covering stream rooted there shows it too, though the claim came later.
+test("a covering root shows the local broadcast a request takes over an equal claim", async () => {
+	const origin = new Producer();
+	const path = Path.from("live");
+	const local = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
+	const reader = origin.scope(path, Path.Prefixes.all()).consume();
+	const covering = await announcedView(reader, undefined, { covering: true });
+	const claim = origin.claim(path, { cost: 5n });
+	const request = origin.consume().request(path);
+	await settle();
+	expect(request.active.peek()?.instance).toBe(INSTANCE);
+	expect(covering.peek().get(Path.empty())?.instance).toBe(INSTANCE);
+	await covering.close();
+	request.close();
+	claim.close();
+	local.close();
+	origin.close();
+});
+
+// A claim announced after starting hidden, or announced again after a withdrawal, is received then,
+// as Rust files a new entry for each announce, so it wins a full tie across filings from then on.
+test("a claim announced again is the most recently received", async () => {
+	const origin = new Producer();
+	const root = Path.from("src/a/b");
+	const instance = { id: Instance.parse("cam"), epoch: 0n };
+	// Filed at `src` with Above 0, and through a scope at `src/a` with Above 1: one claim prefix.
+	const shallow = origin.claim(Path.from("src"), { hidden: true, instance });
+	const deep = origin.scope(Path.empty(), Path.Prefixes.parse(["src/a"])).claim(Path.from("src"), { instance });
+	const reader = origin.scope(root, Path.Prefixes.all()).consume();
+	const covering = await announcedView(reader, undefined, { covering: true });
+	const shown = async () => {
+		await settle();
+		return covering.peek().get(Path.empty())?.above ?? 0n;
+	};
+	expect(await shown()).toBe(1n);
+	shallow.announce();
+	expect(await shown()).toBe(0n);
+	deep.withdraw();
+	deep.announce();
+	expect(await shown()).toBe(1n);
+	await covering.close();
+	shallow.close();
+	deep.close();
+	origin.close();
+});
+
 // A draining route still reaches its origin, so it outranks one held unavailable, however cheap.
 test("a draining route outranks an unavailable one", () => {
 	const draining = { ...WireRoute.default, draining: true, cost: 5n };
