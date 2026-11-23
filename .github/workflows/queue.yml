@@ -79,7 +79,7 @@ jobs:
           HEAD_REF: ${{ github.event.merge_group.head_ref }}
         run: |
           rm -rf target/cargo-timings
-          pr=$(sed -nE 's#^refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]+$#\1#p' <<<"$HEAD_REF")
+          pr=$(sed -nE 's#^(refs/heads/)?gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]+$#\2#p' <<<"$HEAD_REF")
           if [ -z "$pr" ]; then
             echo "::error::no PR number in the merge group ref $HEAD_REF"
             exit 1
