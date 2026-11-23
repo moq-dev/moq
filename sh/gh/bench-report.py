@@ -361,36 +361,40 @@ def nightly_metrics(directory):
 
 def callgrind(path):
     """Each benchmark's instruction count in one Callgrind profile, as CodSpeed's instrumented Criterion dumps it."""
-    entries, trigger, events = [], None, None
+    parts, events = [], None
     with path.open("rb") as stream:
         if stream.readline().rstrip(b"\n") != b"# callgrind format":
             raise ValueError(f"not a Callgrind profile: {path}")
         # Only a part's header lines begin with these keys; its cost lines begin with positions or `key=`.
         for line in stream:
             if line.startswith(b"part:"):
-                trigger = None
+                parts.append({"trigger": None, "events": events, "totals": None})
+            elif not parts:
+                continue
             elif line.startswith(b"desc: Trigger: "):
-                trigger = line[len(b"desc: Trigger: ") :].rstrip(b"\n").decode()
+                parts[-1]["trigger"] = line[len(b"desc: Trigger: ") :].rstrip(b"\n").decode()
             elif line.startswith(b"events:"):
-                events = line.split()[1:]
-                if b"Ir" not in events:
-                    raise ValueError(f"Callgrind profile counts no instructions: {path}")
-            elif line.startswith(b"summary:"):
-                if trigger is None or events is None:
-                    raise ValueError(f"Callgrind part without a trigger or events: {path}")
-                # Each benchmark dumps its own part; codspeed-rust also dumps its version, and Valgrind dumps at exit.
-                request = trigger.removeprefix("Client Request: ")
-                if trigger == "Program termination" or request.startswith("Metadata: "):
-                    continue
-                if request == trigger:
-                    raise ValueError(f"unexpected Callgrind dump {trigger!r}: {path}")
-                costs = line.split()[1:]
-                # Callgrind drops trailing zero costs.
-                index = events.index(b"Ir")
-                instructions = int(costs[index]) if index < len(costs) else 0
-                if instructions == 0:
-                    raise ValueError(f"{request} ran no simulated instructions: {path}")
-                entries.append({"name": request, "unit": "instructions", "value": instructions})
+                events = parts[-1]["events"] = line.split()[1:]
+            # CodSpeed's Callgrind leaves each part's `summary` 0 and closes it with its `totals`; the file's own follow.
+            elif line.startswith(b"totals:") and parts[-1]["totals"] is None:
+                parts[-1]["totals"] = line.split()[1:]
+    entries = []
+    for part in parts:
+        trigger = part["trigger"]
+        # Each benchmark dumps its own part; codspeed-rust also dumps its version, and Valgrind dumps at exit.
+        request = (trigger or "").removeprefix("Client Request: ")
+        if trigger == "Program termination" or request.startswith("Metadata: "):
+            continue
+        if request == (trigger or ""):
+            raise ValueError(f"unexpected Callgrind dump {trigger!r}: {path}")
+        if part["events"] is None or b"Ir" not in part["events"] or part["totals"] is None:
+            raise ValueError(f"Callgrind part {request} counts no instructions: {path}")
+        # Callgrind drops trailing zero costs.
+        index, totals = part["events"].index(b"Ir"), part["totals"]
+        instructions = int(totals[index]) if index < len(totals) else 0
+        if instructions == 0:
+            raise ValueError(f"{request} ran no simulated instructions: {path}")
+        entries.append({"name": request, "unit": "instructions", "value": instructions})
     return entries
 
 

@@ -77,21 +77,6 @@ jobs:
           mode: simulation
           run: env PATH="$DEV_PATH" cargo codspeed run
 
-      - name: DEBUG profile headers
-        if: ${{ !cancelled() }}
-        run: |
-          mkdir -p debug
-          for f in "$RUNNER_TEMP"/codspeed/profile.*.out/*.out; do
-            grep -a -E '^(part|desc|events|summary|totals|positions|thread|pid|cmd|version|creator):' "$f" > "debug/$(basename "$f").head" || true
-          done
-          f=$(grep -l -a 'bandwidth/update\[1\]\|wake_16_of_1000::kio_tasks\|distinct\[1\]' "$RUNNER_TEMP"/codspeed/profile.*.out/*.out | head -1)
-          [ -n "$f" ] && cp "$f" debug/full.out
-          ls -la "$RUNNER_TEMP"/codspeed/profile.*.out/ > debug/ls.txt
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: ${{ !cancelled() }}
-        with:
-          name: debug-${{ matrix.shard }}
-          path: debug
       - name: Write Kixel Quest metrics
         run: nix develop --command just gh benchmark-report codspeed-metrics "$RUNNER_TEMP/codspeed" kixel-metrics/metrics.json
 
