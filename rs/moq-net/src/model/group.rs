@@ -4804,12 +4804,19 @@ impl Consumer {
 	/// rather than failing. Ordinals stand for frames only on a dense group, so only one
 	/// boards a flight. A plain read of a compressed copy also loses a frame its inflated copy
 	/// shed, which the decoder, already past it, cannot inflate again. A group handed out
-	/// from a front recovers a frame its copy started past from a route instead.
+	/// from a front recovers a frame its copy started past from a route instead. A copy the
+	/// pool evicted with a frame still arriving lacks every frame from the reader's on, as if
+	/// shed: the reader is owed the rest of the group, which a flight brings.
 	fn shed_next(&self) -> bool {
 		let state = self.cursor.state.read();
 		let index = self.cursor.index;
-		if state.outcome.error().is_some() || state.sparse() {
+		if state.sparse() {
 			return false;
+		}
+		match state.outcome.error() {
+			Some(Error::Evicted) => return true,
+			Some(_) => return false,
+			None => {}
 		}
 		if index < state.offset {
 			return self.recover().is_none();

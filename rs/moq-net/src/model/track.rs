@@ -33175,6 +33175,38 @@ mod test {
 		Some(u32::from_le_bytes(frame.payload[..4].try_into().unwrap()))
 	}
 
+	/// A reader partway through a live group the pool evicted with a frame still arriving is
+	/// owed the rest: it boards a flight from the frame it reached, as after a shed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_of_a_group_evicted_while_arriving_boards_a_flight() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		live.write_frame(crate::Timestamp::unscaled(live.start), numbered(0))
+			.unwrap();
+		assert_eq!(read_numbered(&mut reader), Some(0));
+		let handle = live.handle();
+		let payload = numbered(1);
+		let mut arriving = live.create_frame(frame_info(&payload)).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		handle.shed_all();
+
+		assert_eq!(read_numbered(&mut reader), None, "aboard, waiting on the handler");
+		let fill = match requests.poll_requested_fill(&kio::Waiter::noop()) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("a flight is asked"),
+		};
+		assert_eq!(fill.start(), Position { group: 0, frame: 1 });
+		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		flight
+			.write_frame(crate::Timestamp::unscaled(flight.start), numbered(1))
+			.unwrap();
+		assert_eq!(read_numbered(&mut reader), Some(1), "the rest of the group");
+		drop(arriving);
+	}
+
 	/// A late joiner of a live group that shed its front boards a flight from frame 0,
 	/// served by the track's handler, reads it as the handler writes it, and hands over to
 	/// the live copy once that copy holds its frame within reach of the live reader. The
