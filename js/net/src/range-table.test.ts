@@ -173,14 +173,14 @@ class Got {
 	}
 
 	// The groups in order, failing a group received twice, one missing any of its frames, or an
-	// error.
-	async delivered(clock: Manual): Promise<number[]> {
+	// error. A group in `open` never ends, so it is read only through its frames.
+	async delivered(clock: Manual, open: number[] = []): Promise<number[]> {
 		const starts = this.starts();
 		if (this.error !== undefined) throw new Error(`failed after ${starts}: ${this.error}`);
 		for (const group of this.groups) {
 			const start = Number(group.start);
 			const got: number[] = [];
-			for (;;) {
+			while (!(open.includes(start) && got.length === table.frames)) {
 				const frame = await clock.drive(timeout(ARRIVAL, group.readFrame()));
 				if (!frame) break;
 				got.push(frame.timestamp.value);
@@ -336,9 +336,9 @@ async function run(c: Case, mode: Mode): Promise<boolean> {
 			}
 		}
 
-		const delivered = await got.delivered(clock);
+		const delivered = await got.delivered(clock, c.open);
 		expect(delivered, `${mode}: delivered`).toEqual(c.deliver);
-		if (after) expect(await after.delivered(clock), `${mode}: delivered after the switch`).toEqual(c.deliver);
+		if (after) expect(await after.delivered(clock, c.open), `${mode}: delivered after the switch`).toEqual(c.deliver);
 		if (c.asks !== undefined && cached !== undefined) {
 			// Delivering nothing is answered alone only if the reader ended before upstream could answer.
 			const answered = cached === want && (want > 0 || endedWarm);

@@ -302,8 +302,9 @@ impl Got {
 	}
 
 	/// The groups in order, failing a group received twice, one missing any of its
-	/// `frames` frames, or an error.
-	async fn delivered(&mut self, frames: u64) -> Result<Vec<u64>, String> {
+	/// `frames` frames, or an error. A group in `open` never ends, so it is read only
+	/// through its frames.
+	async fn delivered(&mut self, frames: u64, open: &[u64]) -> Result<Vec<u64>, String> {
 		let starts = self.starts();
 		if let Some(error) = &self.error {
 			return Err(format!("failed after {starts:?}: {error}"));
@@ -311,7 +312,7 @@ impl Got {
 		for group in &mut self.groups {
 			let want: Vec<u64> = (group.start..group.start + frames).collect();
 			let mut got = Vec::new();
-			loop {
+			while !(open.contains(&group.start) && got.len() == want.len()) {
 				match kio::clock::timeout(ARRIVAL, group.read_frame()).await {
 					Ok(Ok(Some(frame))) => got.push(frame.timestamp.value()),
 					Ok(Ok(None)) => break,
@@ -478,7 +479,7 @@ async fn run(case: &Case, mode: Mode) -> Result<bool, String> {
 		}
 	}
 
-	let delivered = got.delivered(case.frames).await?;
+	let delivered = got.delivered(case.frames, &case.open).await?;
 	if delivered != case.deliver {
 		return Err(format!("delivered {delivered:?}, ended: {}", got.ended));
 	}
@@ -486,7 +487,7 @@ async fn run(case: &Case, mode: Mode) -> Result<bool, String> {
 	if let Some(mut after) = after {
 		ended &= after.ended;
 		let delivered = after
-			.delivered(case.frames)
+			.delivered(case.frames, &case.open)
 			.await
 			.map_err(|err| format!("after the switch: {err}"))?;
 		if delivered != case.deliver {

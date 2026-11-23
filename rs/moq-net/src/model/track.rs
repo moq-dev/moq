@@ -624,8 +624,10 @@ struct JoinAnswer {
 ///
 /// The publisher starts a range at the oldest group its budget has not expired from the one
 /// containing the time, so a start at or before the time is that group, for every reader. A
-/// start past the time, or no group to deliver, says only that no group at or before it is
-/// left within the budget the range was answered under: a wider reader may still get one.
+/// start past the time is where a range from it starts within the budget it was answered
+/// under: the time lies in the pause past a whole group, or the groups before it expired. No
+/// group to deliver says none at or before it is left within that budget. A wider reader may
+/// still get an older group either way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TimeStart {
 	/// The lowest group a range asked from the time started at.
@@ -640,7 +642,10 @@ impl TimeStart {
 	fn containing(&self, time: u64, budget: Duration) -> Option<Containing> {
 		match (self.start, self.past) {
 			(Some(start), _) if start <= time => Some(Containing::At(start)),
-			(_, Some(past)) if budget <= past => Some(Containing::Before),
+			// Not before every group: a whole one before the time may end short of it, and the
+			// oldest group this copy holds says nothing of the range.
+			(Some(start), Some(past)) if budget <= past => Some(Containing::At(start)),
+			(None, Some(past)) if budget <= past => Some(Containing::Before),
 			_ => None,
 		}
 	}
@@ -17130,7 +17135,7 @@ mod test {
 		// too, past it: nothing at or before 500 is served.
 		producer.time_starts([(1700, Some(1000), Duration::MAX), (500, Some(1000), Duration::MAX)]);
 		assert_eq!(placed(&mut answered), Some((1000, true)));
-		assert_eq!(placed(&mut before), Some((0, false)));
+		assert_eq!(placed(&mut before), Some((1000, true)), "where its range started");
 		assert_eq!(placed(&mut later), None);
 		assert_eq!(asks(&producer), [1500, 1800]);
 
@@ -17275,11 +17280,11 @@ mod test {
 			// The publisher started the range asked from 1500 past it, under the narrow budget.
 			producer.time_starts([(1500, Some(2000), narrow)]);
 			match bound {
-				Some(_) => assert_eq!(placed(&mut reader), Some((0, false)), "the cache bounds it"),
+				Some(_) => assert_eq!(placed(&mut reader), Some((2000, true)), "the cache bounds it"),
 				None => {
 					assert_eq!(placed(&mut reader), None, "a wider reader may still get a group");
 					reader.update(from(Some(narrow))).unwrap();
-					assert_eq!(placed(&mut reader), Some((0, false)));
+					assert_eq!(placed(&mut reader), Some((2000, true)));
 				}
 			}
 		}
@@ -17961,7 +17966,7 @@ mod test {
 		assert_eq!(asks, Some(vec![(500, Duration::MAX)]));
 
 		producer.time_starts([(500, Some(1000), Duration::MAX)]);
-		assert_eq!(placed(&mut before), Some((0, false)));
+		assert_eq!(placed(&mut before), Some((1000, true)));
 		assert!(before.poll_start(&kio::Waiter::noop()).is_ready());
 		assert_eq!(drain(&mut before), vec![1000]);
 		assert_eq!(

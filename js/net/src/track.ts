@@ -1105,9 +1105,10 @@ function joinKey(min: number, end: bigint | undefined): string {
  * group one started at, and `past`, the widest budget in milliseconds one was answered under with
  * no group at or before the time. The publisher starts a range at the oldest group its budget has
  * not expired from the one containing the time, so a start at or before the time is that group,
- * for every reader. A start past it, or no group to deliver, says only that no group at or before
- * it is left within the budget the range was answered under: a wider reader may still get one.
- * Mirrors the Rust `TimeStart`.
+ * for every reader. A start past it is where a range from it starts within the budget the range was
+ * answered under: the time lies in the pause past a whole group, or the groups before it expired. No
+ * group to deliver says none at or before it is left within that budget. A wider reader may still
+ * get an older group either way. Mirrors the Rust `TimeStart`.
  */
 type TimeStart = { start?: bigint; past?: number };
 
@@ -1115,8 +1116,10 @@ type TimeStart = { start?: bigint; past?: number };
 // when no answer proves it. Mirrors the Rust `TimeStart::containing`.
 function timeStartContaining(reported: TimeStart | undefined, time: bigint, budget: number): Containing | undefined {
 	if (reported?.start !== undefined && reported.start <= time) return { at: reported.start };
-	if (reported?.past !== undefined && budget <= reported.past) return "before";
-	return undefined;
+	if (reported?.past === undefined || budget > reported.past) return undefined;
+	// A start past the time is where a range from it starts: not before every group, since a whole
+	// one before the time may end short of it, and the oldest group this copy holds says nothing.
+	return reported.start === undefined ? "before" : { at: reported.start };
 }
 
 // Whether a received copy's range asked from `time` had no group at or before it for a reader

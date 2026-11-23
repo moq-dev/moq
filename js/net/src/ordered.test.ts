@@ -460,7 +460,7 @@ test("a waiting time start places once the reader narrows to the budget it was a
 	hooks.timeStarts(producer, [[1500n, 2000n, 100]]);
 	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
 	subscriber.update(from(Duration.millis(100)));
-	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 2000n, end: undefined, floored: true }]);
 	subscriber.close();
 });
 
@@ -498,9 +498,9 @@ test("a time start no answer for its own time places asks upstream for it", () =
 		[1000n, 1000n, NO_MAX_DELAY],
 	]);
 	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
-	// Its own range started past it: no group at or before it.
+	// Its own range started past it, there.
 	hooks.timeStarts(producer, [[1500n, 2000n, NO_MAX_DELAY]]);
-	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 2000n, end: undefined, floored: true }]);
 	expect(hooks.requested(producer).asks()).toEqual([]);
 	subscriber.close();
 });
