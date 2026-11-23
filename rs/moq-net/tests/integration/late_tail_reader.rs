@@ -282,3 +282,36 @@ async fn an_empty_history_read_leaves_the_group_to_readers_joining_meanwhile() {
 		}
 	}
 }
+
+/// A reader joining at the latest group of a finished untimed track whose publisher keeps no
+/// superseded group reads that group through a relay, on every version: the latest group is
+/// never stale, even once its track ends.
+#[kio::test]
+async fn a_latest_reader_reads_a_finished_untimed_group() {
+	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-lite-05"] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut track = broadcast
+			.broadcast()
+			.create_track("video", moq_net::track::Info::default())
+			.unwrap();
+		let start = moq_net::Timestamp::unscaled(0);
+		let mut group = track.append_group(start).unwrap();
+		group.write_frame(start, &b"frame"[..]).unwrap();
+		group.finish().unwrap();
+		let finished = track.finish().unwrap();
+		broadcast.announce().unwrap();
+
+		let relay = produce_origin(2);
+		let mut options = MockConnectOptions::new("moq-lite-07-wip".parse().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(relay.clone());
+		let upstream = connect_mock(options).await;
+
+		let (frames, end) = read(&relay, version.parse().unwrap(), Subscription::default()).await;
+		assert_eq!((frames, end.is_ok()), (vec![0], true), "{version}");
+		drop((finished, broadcast, upstream, publisher, relay));
+	}
+}
