@@ -9,7 +9,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use super::StreamId;
 use super::recv::{Error, Reader, Stream};
-use super::{StreamsState, state::get_or_insert_recv};
+use super::{StreamsState, state::Holder, state::get_or_insert_recv};
 use crate::connection::assembler::Assembler;
 use crate::connection::waits::Wait;
 
@@ -689,6 +689,7 @@ impl StreamsState {
 	/// freed; each evicted stream's reader wakes.
 	pub(super) fn evict_if_stuck(&mut self) -> Option<bool> {
 		self.stuck_waiting = false;
+		self.holds.by = None;
 		// The window, not the credit a rate cap paces, says whether memory is stuck: a capped
 		// peer out of credit is waiting on time, not on a reader.
 		if self.window_max_data > self.data_recvd {
@@ -696,10 +697,12 @@ impl StreamsState {
 		}
 		// An evicted reader has yet to stop its stream, which returns the credit of what it took.
 		if self.evicted_held > 0 {
+			self.holds.by = Some(Holder::Evicted);
 			return None;
 		}
 		// Checked before any eviction, so a reader about to free the window is waited for.
 		if self.trim_unlooked() {
+			self.holds.by = Some(Holder::Readers);
 			return None;
 		}
 
@@ -727,6 +730,10 @@ impl StreamsState {
 				"{id} has data its reader has not looked at"
 			);
 			transmit = Some(self.evict(id));
+		}
+		// A victim's reader took bytes whose credit returns only at its stop.
+		if self.window_max_data <= self.data_recvd && self.evicted_held > 0 {
+			self.holds.by = Some(Holder::Evicted);
 		}
 		transmit
 	}

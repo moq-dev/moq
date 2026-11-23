@@ -155,7 +155,7 @@ impl Version {
 
 	/// Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices
 	/// alongside their group keys, so a subscription or fetch can start partway through a
-	/// group. Added in lite-06; lite-07 bounds only a range's start.
+	/// group. Added in lite-06; lite-07 bounds a range's start or end at a Position.
 	///
 	/// Older versions only address whole groups, so a route change has to wait for the
 	/// next group before it can resume.
@@ -179,15 +179,6 @@ impl Version {
 	/// relative to the latest group, or at a presentation time. Added in lite-07; an earlier
 	/// subscription carries one span with absolute ends.
 	pub(crate) fn has_ranges(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
-	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
-	pub(crate) fn has_min_delay(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

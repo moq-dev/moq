@@ -155,6 +155,16 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # The import killed 10 s into a live UDP feed and restarted 0.5 s later, a new instance,
+      # under a running `export ts --passthrough --stitch`: one gap, no longer than the
+      # downtime plus the restarted import's first group.
+      - name: TS passthrough across a restarted import
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --restart 10
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
       # so the export has to spread it over the slots before its DTS and still keep
       # the constant-rate schedule.

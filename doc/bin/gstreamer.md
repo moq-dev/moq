@@ -88,7 +88,7 @@ Caps that only change what the bitstream already carries (a video resolution)
 keep the track live. A run never publishes a track name it ended again: new
 codec config, a pad requested again, or a stream resumed after EOS publishes as
 `<track>/<n>`, which `track` reads back. Element properties:
-`url`, `broadcast`, `linger`, `connect-version`, `connect-websocket-enabled`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
+`url`, `broadcast`, `linger`, `connect-version`, `connect-websocket-enabled`, `connect-tls-insecure`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. Once the relay has accepted a session (on moq-lite 03/04, which never answer, once
@@ -181,7 +181,7 @@ publisher ended with an application code posts an error. A media track its
 publisher ended with an application code logs a warning and leaves its pad idle;
 it posts no error. Properties: `url`,
 `broadcast`, `max-delay`, `connect-version` (comma-separated protocol versions to offer, most
-preferred first; every stable version by default), `tls-disable-verify`,
+preferred first; every stable version by default), `connect-tls-insecure`,
 `quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
 
 `max-delay` is how many milliseconds (default 1000) a group may trail the live
