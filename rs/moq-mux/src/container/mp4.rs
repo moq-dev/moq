@@ -2609,30 +2609,37 @@ mod tests {
 		let languages = NSArray::from_retained_slice(&[NSString::from_str("und")]);
 		let (tx, rx) = std::sync::mpsc::channel();
 		let handler = block2::RcBlock::new(move |groups: *mut NSArray<AVTimedMetadataGroup>, error: *mut NSError| {
-			// SAFETY: AVFoundation passes the groups, or the error when there are none.
-			let Some(groups) = (unsafe { groups.as_ref() }) else {
-				let error = unsafe { error.as_ref() }.map(|error| error.to_string());
-				tx.send(Err(error)).unwrap();
-				return;
-			};
-			let title = unsafe { AVMetadataCommonKeyTitle }.expect("a title key");
-			let listed = groups
-				.iter()
-				.map(|group| {
-					let start = unsafe { group.timeRange() }.start;
-					let millis = start.value as u64 * 1000 / start.timescale as u64;
-					let item = unsafe { group.items() }
-						.iter()
-						.find(|item| unsafe { item.commonKey() }.is_some_and(|key| *key == *title))
-						.expect("a chapter title");
-					(millis, unsafe { item.stringValue() }.expect("a string").to_string())
-				})
-				.collect();
-			tx.send(Ok(listed)).unwrap();
+			// A panic must not unwind into AVFoundation's frames, so it travels to the test thread.
+			let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				// SAFETY: AVFoundation passes the groups, or the error when there are none.
+				let Some(groups) = (unsafe { groups.as_ref() }) else {
+					return Err(unsafe { error.as_ref() }.map(|error| error.to_string()));
+				};
+				let title = unsafe { AVMetadataCommonKeyTitle }.expect("a title key");
+				let listed = groups
+					.iter()
+					.map(|group| {
+						let start = unsafe { group.timeRange() }.start;
+						let value = u64::try_from(start.value).expect("a start at or after zero");
+						let timescale = u64::try_from(start.timescale).ok().filter(|t| *t > 0);
+						let millis = value * 1000 / timescale.expect("a valid start time");
+						let item = unsafe { group.items() }
+							.iter()
+							.find(|item| unsafe { item.commonKey() }.is_some_and(|key| *key == *title))
+							.expect("a chapter title");
+						(millis, unsafe { item.stringValue() }.expect("a string").to_string())
+					})
+					.collect();
+				Ok(listed)
+			}));
+			// Nor may a failed send unwind; the test thread waits on the receiver until this runs.
+			let _ = tx.send(read);
 		});
 		unsafe {
 			asset.loadChapterMetadataGroupsBestMatchingPreferredLanguages_completionHandler(&languages, &handler)
 		};
-		rx.recv().unwrap().expect("AVFoundation read the chapters")
+		let read = rx.recv().expect("AVFoundation calls the completion handler");
+		read.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+			.expect("AVFoundation read the chapters")
 	}
 }
