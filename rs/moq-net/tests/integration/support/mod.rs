@@ -66,6 +66,10 @@ pub fn keys(keys: impl RangeBounds<u64>) -> track::Range {
 		Bound::Excluded(&end) => Some(end.checked_sub(1).expect("an empty range")),
 		Bound::Unbounded => None,
 	};
+	let start = match start {
+		Some(start) => track::Start::Time(start),
+		None => track::Start::Oldest,
+	};
 	track::Range { start, end }
 }
 

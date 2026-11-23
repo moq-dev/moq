@@ -20,10 +20,11 @@ const FILLED: u64 = 67;
 const LIVE: u64 = 66;
 
 fn origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(from: &moq_net::origin::Producer, to: &moq_net::origin::Producer) -> MockPair {
@@ -122,7 +123,7 @@ impl Fixture {
 			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending)
 			.with_ranges([Range {
-				start: Some(LIVE),
+				start: moq_net::track::Start::Time(LIVE),
 				end: None,
 			}]);
 		kio::clock::timeout(
@@ -205,11 +206,11 @@ async fn a_range_before_every_group_reads_past_it() {
 		.with_order(Order::Ascending)
 		.with_ranges([
 			Range {
-				start: Some(10),
+				start: moq_net::track::Start::Time(10),
 				end: Some(20),
 			},
 			Range {
-				start: Some(LIVE),
+				start: moq_net::track::Start::Time(LIVE),
 				end: None,
 			},
 		]);
@@ -261,7 +262,7 @@ async fn a_wider_reader_reads_what_a_narrower_one_expired() {
 			.with_delay(Delay::default().with_max(budget))
 			.with_order(Order::Ascending)
 			.with_ranges([Range {
-				start: Some(10),
+				start: moq_net::track::Start::Time(10),
 				end: None,
 			}])
 	};
@@ -346,7 +347,7 @@ async fn a_time_between_held_groups_starts_where_the_publisher_would() {
 		.with_delay(Delay::default().with_max(None))
 		.with_order(Order::Ascending)
 		.with_ranges([Range {
-			start: Some(18),
+			start: moq_net::track::Start::Time(18),
 			end: None,
 		}]);
 	let mut direct = track.subscribe(from.clone()).ordered();

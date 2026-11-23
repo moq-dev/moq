@@ -12,8 +12,7 @@ complete it before cutting main into release.
 Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId
 drops Start ([node-id-drop-start](/quest/m2/node-id-drop-start.md)),
-whether an origin forwards moves into its config
-([origin-proxy-config](/quest/m2/origin-proxy-config.md)), and moq-relay's
+whether an origin forwards moves into its config, and moq-relay's
 cluster peers lose `egress` ([relay-peer-egress](/quest/m2/relay-peer-egress.md)).
 [lite07-finalize](/quest/m2/lite07-finalize.md) also requires three m1 fixes
 from [lite07-routing](/quest/m1/lite07-routing/README.md), whose Plan
@@ -33,11 +32,6 @@ native crates, and public APIs:
   [moq-v4l](/quest/m2/v4l-arena-soundness.md) and
   [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md) before `0.22.0`
   publishes them (moq-nvenc's are fixed).
-- **Public API freezes.** Rename `moq-gst`'s retired `tls-disable-verify` property to
-  `connect-tls-insecure` ([gst-tls-insecure-prop](/quest/m2/gst-tls-insecure-prop.md)),
-  and open
-  `moq-ffi`'s 5 closed extensible enums while deriving `Debug`/`Eq`/`Hash` on
-  its codec types ([ffi-open-enums](/quest/m2/ffi-open-enums.md)).
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),

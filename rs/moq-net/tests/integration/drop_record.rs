@@ -25,9 +25,10 @@ const LITE07: &str = "moq-lite-07-wip";
 fn origin(hop: u64, pool: cache::Pool) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = pool;
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// A millisecond track with no publisher max age, so only a reader's budget skips its groups.

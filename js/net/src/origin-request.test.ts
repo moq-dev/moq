@@ -1347,3 +1347,130 @@ test("a claim moving on keeps its held answers", async () => {
 	held.close();
 	origin.close();
 });
+
+// Whether `request` reported that nobody waits on it, by the next turn.
+function unwanted(request: { unwanted(): Promise<void> }): () => boolean {
+	let done = false;
+	void request.unwanted().then(() => {
+		done = true;
+	});
+	return () => done;
+}
+
+test("a held request is unwanted once its requester leaves, and stays so", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.claim(Path.from("room"));
+	const requested = claim.requested();
+	const requester = origin.request(path);
+	const held = defined((await requested.next()).value);
+	const left = unwanted(held);
+	await settle();
+	expect(left()).toBe(false);
+
+	requester.close();
+	await settle();
+	expect(left()).toBe(true);
+
+	// A new requester gets a new request rather than reviving the skipped one.
+	const again = origin.request(path);
+	const fresh = defined((await requested.next()).value);
+	expect(fresh).not.toBe(held);
+	const freshLeft = unwanted(fresh);
+	await settle();
+	expect(freshLeft()).toBe(false);
+	again.close();
+	claim.close();
+	origin.close();
+});
+
+test("a coalesced request is unwanted only once the last requester leaves", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.claim(Path.from("room"));
+	const requested = claim.requested();
+	const first = origin.request(path);
+	const held = defined((await requested.next()).value);
+	const hold = new AbortController();
+	const second = wireOf(origin.consume())
+		.demand(path, undefined, hold.signal)
+		.catch(() => undefined);
+	const left = unwanted(held);
+
+	first.close();
+	await settle();
+	expect(left()).toBe(false);
+
+	hold.abort();
+	await second;
+	await settle();
+	expect(left()).toBe(true);
+	claim.close();
+	origin.close();
+});
+
+test("a held request is unwanted once its requester moves to a cheaper route", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const pool = origin.claim(Path.from("room"), { cost: 5n });
+	const requester = origin.request(path);
+	const held = defined((await pool.requested().next()).value);
+	const left = unwanted(held);
+
+	const node = origin.claim(Path.from("room"), { cost: 1n });
+	const moved = defined((await node.requested().next()).value);
+	await settle();
+	expect(left()).toBe(true);
+	const source = new BroadcastProducer();
+	moved.serve(source.consume());
+	expect((await requester.broadcast()).closed.peek()).toBeUndefined();
+	requester.close();
+	source.close();
+	node.close();
+	pool.close();
+	origin.close();
+});
+
+test("a held request is unwanted once a direct route takes over", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const pool = origin.claim(Path.from("room"), { cost: 5n });
+	const requester = origin.request(path);
+	const held = defined((await pool.requested().next()).value);
+	const left = unwanted(held);
+
+	const direct = origin.route(path, { cost: 1n });
+	await settle();
+	expect(left()).toBe(true);
+	expect((await requester.broadcast()).closed.peek()).toBeUndefined();
+	requester.close();
+	direct.close();
+	pool.close();
+	origin.close();
+});
+
+test("a held request is unwanted once its requester gives up the switch", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const id = Instance.random();
+	const serving = origin.claim(Path.from("room"), { instance: { id, epoch: 0n }, cost: 5n });
+	const requester = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await serving.requested().next()).value).serve(source.consume());
+	await requester.broadcast();
+
+	const cheaper = origin.claim(Path.from("room"), { instance: { id, epoch: 0n }, cost: 1n });
+	const held = defined((await cheaper.requested().next()).value);
+	const left = unwanted(held);
+	await settle();
+	expect(left()).toBe(false);
+
+	cheaper.setCost(10n);
+	await settle();
+	expect(left()).toBe(true);
+	requester.close();
+	source.close();
+	cheaper.close();
+	serving.close();
+	origin.close();
+});

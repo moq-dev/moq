@@ -72,8 +72,8 @@ async function subscribed(version: IetfVersion = VERSION, subscription: Partial<
 		.track("video")
 		.subscribe({
 			...track.Subscription.default(),
-			delay: { min: Duration.ZERO, max: Duration.ZERO },
-			ranges: [{}],
+			delay: { max: Duration.ZERO },
+			ranges: [{ start: { live: Duration.ZERO } }],
 			...subscription,
 		});
 	onTestFinished(() => {

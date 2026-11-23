@@ -102,7 +102,7 @@ def test_whole_media_frames_require_the_callers_timestamp():
         + bytes([0])
     )
     producer = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=head)
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=head)
     )
     with pytest.raises(moq.Error.Codec, match="timestamp"):
         producer._inner.write_frame(

@@ -59,7 +59,7 @@ fn land(track: &track::Producer, key: u64) {
 /// The groups from the one containing `start` through the one containing `end`.
 fn span(start: u64, end: u64) -> track::Range {
 	track::Range {
-		start: Some(start),
+		start: track::Start::Time(start),
 		end: Some(end),
 	}
 }
@@ -170,7 +170,7 @@ impl FillsOut {
 		let subscription = track::Subscription::default()
 			.with_delay(track::Delay::default().with_max(BUDGET))
 			.with_ranges((0..ranges).map(|i| span(i * 2, i * 2)).chain([track::Range {
-				start: Some(start),
+				start: track::Start::Time(start),
 				end: None,
 			}]));
 		let mut reader = track.subscribe(subscription);

@@ -99,14 +99,15 @@ func AacAudioCodec() *AudioCodec {
 	return ffi.MoqAudioCodecAac()
 }
 
-// VideoPixelFormat values: the raw pixel layout fed to the in-process encoder,
-// and the one the in-process decoder delivers.
-const (
-	// VideoPixelFormatI420 is tightly-packed planar I420: Y, then U, then V.
-	VideoPixelFormatI420 = ffi.MoqVideoPixelFormatI420
-	// VideoPixelFormatRgba is tightly-packed RGBA, four bytes per pixel.
-	VideoPixelFormatRgba = ffi.MoqVideoPixelFormatRgba
-)
+// I420VideoPixelFormat is tightly-packed planar I420: Y, then U, then V.
+func I420VideoPixelFormat() *VideoPixelFormat {
+	return ffi.MoqVideoPixelFormatI420()
+}
+
+// RgbaVideoPixelFormat is tightly-packed RGBA, four bytes per pixel.
+func RgbaVideoPixelFormat() *VideoPixelFormat {
+	return ffi.MoqVideoPixelFormatRgba()
+}
 
 // H264VideoCodec publishes H.264 / AVC as an avc3 track.
 func H264VideoCodec() *VideoCodec {

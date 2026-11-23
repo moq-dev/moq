@@ -203,6 +203,8 @@ impl Future for ConnectionDriver {
 			this.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
 			let credit = stats.send_credit;
 			this.conn.shared.wire.set_credit_stalls(credit.stalls, credit.stalled);
+			let held = stats.credit.held;
+			this.conn.shared.wire.set_credit_held(held.readers, held.evicted);
 		}
 
 		// A local close still reaches a driver whose socket holds output back, which skips

@@ -837,6 +837,16 @@ impl Scrape {
 				"Time connections spent with a write blocked on the peer's connection-level credit (MAX_DATA).",
 				|p| p.credit_stalled_us,
 			),
+			(
+				"moq_relay_credit_held_readers_microseconds",
+				"Time peers had a connection's whole receive window spent while a reader behind held eviction off.",
+				|p| p.credit_held_readers_us,
+			),
+			(
+				"moq_relay_credit_held_evicted_microseconds",
+				"Time peers had a connection's whole receive window spent while an evicted reader had yet to stop its stream.",
+				|p| p.credit_held_evicted_us,
+			),
 			("moq_relay_requests", "Admitted request/response exchanges.", |p| {
 				p.requests
 			}),
@@ -1739,7 +1749,7 @@ mod tests {
 		drop(
 			stats
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
-				.request(moq_net::Path::from_static("root")),
+				.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))),
 		);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1758,7 +1768,7 @@ mod tests {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let request = stats
 			.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("http")))
-			.request(moq_net::Path::from_static("root"));
+			.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root")));
 		drop(request);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(body.contains("# TYPE moq_relay_requests counter"), "{body}");
@@ -2100,7 +2110,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn()
 			.with_stats(edge.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let _broadcast = origin.route("demo", moq_net::origin::RouteOptions::default()).unwrap();
-		drop(edge.request(moq_net::Path::from_static("root")));
+		drop(edge.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let refusals = crate::refusals::Refusals::default();
 		refusals.record(crate::refusals::RefusalKind::Unavailable);
 		let (_trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(1));
@@ -2148,6 +2158,8 @@ mod tests {
 # TYPE moq_relay_control_rx_messages_total counter
 # TYPE moq_relay_control_tx_bytes_total counter
 # TYPE moq_relay_control_tx_messages_total counter
+# TYPE moq_relay_credit_held_evicted_microseconds_total counter
+# TYPE moq_relay_credit_held_readers_microseconds_total counter
 # TYPE moq_relay_credit_stalled_microseconds_total counter
 # TYPE moq_relay_credit_stalls_total counter
 # TYPE moq_relay_datagrams_total counter
@@ -2186,6 +2198,8 @@ counter moq_relay_announces_started_total{role="publisher",tier="edge"} 0
 counter moq_relay_announces_started_total{role="subscriber",tier="edge"} 1
 counter moq_relay_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_bytes_total{role="subscriber",tier="edge"} 0
+counter moq_relay_credit_held_evicted_microseconds_total{tier="edge"} 0
+counter moq_relay_credit_held_readers_microseconds_total{tier="edge"} 0
 counter moq_relay_credit_stalled_microseconds_total{tier="edge"} 0
 counter moq_relay_credit_stalls_total{tier="edge"} 0
 counter moq_relay_datagrams_total{role="publisher",tier="edge"} 0

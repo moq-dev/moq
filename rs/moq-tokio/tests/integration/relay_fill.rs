@@ -10,7 +10,7 @@
 use std::{collections::BTreeMap, process::Stdio, time::Duration};
 
 use anyhow::Context;
-use moq_net::track::{Delay, Info, Range, Subscription};
+use moq_net::track::{Delay, Info, Range, Start, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -270,10 +270,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	let wide = Subscription::default()
 		.with_delay(Delay::default().with_max(None))
 		.with_ranges([match version.alpn() {
-			"moq-lite-05" => Range {
-				start: Some(0),
-				end: None,
-			},
+			"moq-lite-05" => Range::from(Start::Time(0)),
 			_ => Range::default(),
 		}]);
 	let mut below = relay.subscribe(wide.clone()).await?;
@@ -332,23 +329,25 @@ async fn relay_fill_javascript() {
 
 /// One reader of the range table, as `rs/moq-net/tests/range-table.json` states it.
 fn table_subscription(ask: &serde_json::Value) -> Subscription {
-	let time = |range: &serde_json::Value, key| range.get(key).and_then(serde_json::Value::as_u64);
+	let start = |range: &serde_json::Value| match range.get("start") {
+		None => Start::Oldest,
+		Some(start) => match start.get("live") {
+			Some(live) => Start::Live(Duration::from_millis(live.as_u64().expect("a lag"))),
+			None => Start::Time(start.as_u64().expect("a time")),
+		},
+	};
 	let ranges = match ask.get("ranges").and_then(serde_json::Value::as_array) {
 		Some(ranges) => ranges
 			.iter()
 			.map(|range| Range {
-				start: time(range, "start"),
-				end: time(range, "end"),
+				start: start(range),
+				end: range.get("end").and_then(serde_json::Value::as_u64),
 			})
 			.collect(),
 		None => vec![Range::default()],
 	};
-	let min = ask
-		.get("minAge")
-		.and_then(serde_json::Value::as_u64)
-		.map(Duration::from_millis);
 	Subscription::default()
-		.with_delay(Delay::default().with_min(min).with_max(None))
+		.with_delay(Delay::default().with_max(None))
 		.with_order(moq_net::track::Order::Ascending)
 		.with_ranges(ranges)
 }
@@ -374,7 +373,7 @@ async fn table_read(subscriber: &mut moq_net::track::Subscriber, want: usize) ->
 
 /// Run one case of the range table through the relay's copy: cold, or `warm` with the case's
 /// copy readers subscribed first, each behind a downstream session of its own.
-async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> anyhow::Result<Vec<u64>> {
+async fn table_case(case: &serde_json::Value, groups: &[u64], frames: u64, warm: bool) -> anyhow::Result<Vec<u64>> {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.route("history", moq_net::origin::RouteOptions::hidden())?;
 	let track = broadcast
@@ -395,7 +394,9 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> any
 			true => track.append_group(time)?,
 			false => track.create_group(moq_net::group::Info { start })?,
 		};
-		group.write_frame(time, b"x".to_vec())?;
+		for frame in 0..frames {
+			group.write_frame(Timestamp::from_millis(start + frame)?, b"x".to_vec())?;
+		}
 		group.finish()?;
 	}
 	broadcast.announce()?;
@@ -436,6 +437,7 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> any
 async fn relay_fill_range_table() {
 	let table: serde_json::Value =
 		serde_json::from_str(include_str!("../../../moq-net/tests/range-table.json")).expect("the range table parses");
+	let frames = table["frames"].as_u64().expect("frames per group");
 	let groups: Vec<u64> = table["groups"]
 		.as_array()
 		.expect("groups")
@@ -469,7 +471,7 @@ async fn relay_fill_range_table() {
 			if known {
 				continue;
 			}
-			match kio::clock::timeout(TIMEOUT, table_case(case, &groups, warm)).await {
+			match kio::clock::timeout(TIMEOUT, table_case(case, &groups, frames, warm)).await {
 				Ok(Ok(got)) if got == want => {}
 				Ok(Ok(got)) => failures.push(format!("{mode}: {name}: delivered {got:?}")),
 				Ok(Err(err)) => failures.push(format!("{mode}: {name}: {err:#}")),

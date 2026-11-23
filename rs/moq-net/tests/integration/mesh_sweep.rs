@@ -258,9 +258,10 @@ impl Mesh {
 		let mut config = origin::Config::new(std::num::NonZeroU64::new(self.next_hop).unwrap());
 		// Nothing expires, so no expiry sweep keeps a timer armed and the mesh can go idle.
 		config.pool = cache::Pool::unbounded();
+		config.proxy = proxy;
 		let (origin, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
-		origin.with_proxy(proxy)
+		origin
 	}
 
 	fn stats(&self) -> moq_net::stats::Session {
