@@ -80,3 +80,73 @@ test("alert coverage excludes CI-only workflows and retains release and nightly 
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("a landing failure posts once per streak", () => {
+	const root = mkdtempSync(join(tmpdir(), "moq-alert-"));
+	try {
+		mkdirSync(join(root, "bin"));
+		// `gh` prints the runs file, or fails when it is missing; `curl` records each post.
+		writeFileSync(join(root, "bin/gh"), `#!/usr/bin/env bash\nexec cat "${root}/runs.json"\n`, { mode: 0o755 });
+		writeFileSync(join(root, "bin/curl"), `#!/usr/bin/env bash\necho post >> "${root}/posts"\n`, { mode: 0o755 });
+		const post = (once: boolean, runs?: [number, string][]) => {
+			rmSync(join(root, "posts"), { force: true });
+			rmSync(join(root, "runs.json"), { force: true });
+			if (runs) {
+				const workflow_runs = runs.map(([run_number, conclusion]) => ({ run_number, conclusion }));
+				writeFileSync(join(root, "runs.json"), JSON.stringify({ workflow_runs }));
+			}
+			const result = Bun.spawnSync(["bash", "sh/gh/alert.sh", "discord"], {
+				env: {
+					...process.env,
+					PATH: `${join(root, "bin")}:${process.env.PATH}`,
+					DISCORD_WEBHOOK: "https://discord.invalid/webhook",
+					ALERT_ONCE: String(once),
+					GITHUB_REPOSITORY: "moq-dev/moq",
+					RUN_WORKFLOW_ID: "7",
+					RUN_NUMBER: "10",
+					RUN_NAME: "CodSpeed",
+					RUN_EVENT: "push",
+					RUN_REF: "main",
+				},
+			});
+			expect(result.exitCode).toBe(0);
+			return Bun.file(join(root, "posts")).size > 0;
+		};
+
+		// The latest earlier verdict decides; cancelled (coalesced) runs and later runs are passed over.
+		expect(post(true, [[9, "failure"]])).toBe(false);
+		expect(post(true, [[9, "timed_out"]])).toBe(false);
+		expect(post(true, [[9, "success"]])).toBe(true);
+		expect(
+			post(true, [
+				[11, "success"],
+				[9, "cancelled"],
+				[8, "skipped"],
+				[7, "failure"],
+				[6, "success"],
+			]),
+		).toBe(false);
+		expect(
+			post(true, [
+				[11, "failure"],
+				[9, "cancelled"],
+				[7, "success"],
+				[6, "failure"],
+			]),
+		).toBe(true);
+		// Unsorted pages still pick the latest earlier run.
+		expect(
+			post(true, [
+				[3, "failure"],
+				[8, "success"],
+			]),
+		).toBe(true);
+		// No earlier verdict, or no way to read one, posts rather than risk a lost alert.
+		expect(post(true, [])).toBe(true);
+		expect(post(true)).toBe(true);
+		// Without ALERT_ONCE every failure posts, and earlier runs are never read.
+		expect(post(false, [[9, "failure"]])).toBe(true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
