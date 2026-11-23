@@ -10139,19 +10139,24 @@ impl Cursor {
 			if floor >= groups.end {
 				return Poll::Ready(Ok(()));
 			}
-			let Some(owed) = state.owed(floor..groups.end, window) else {
-				return Poll::Ready(Ok(()));
-			};
-			if state.poll_drifted(owed, &drift.edge.servable, drift.budget.at(owed), None, waiter) {
-				return Poll::Ready(Ok(()));
+			// The gap's first owed group stands for the rest only under its own budget, so each
+			// stretch under another is judged by its own first.
+			for (run, budget) in drift.budget.runs(floor..groups.end) {
+				let Some(owed) = state.owed(run, window) else {
+					continue;
+				};
+				if state.poll_drifted(owed, &drift.edge.servable, budget, None, waiter) {
+					continue;
+				}
+				// The ledger may stop owing it before the budget gives up on it.
+				if let Some(folds) = state.arrivals.folds_at(owed, state.arrival_grace()) {
+					state.cache.watch_wall(folds, waiter);
+				}
+				// Parked on the track too: the group landing, its drop, or a group landing
+				// between it and the candidate, which can convict it sooner.
+				return Poll::Pending;
 			}
-			// The ledger may stop owing it before the budget gives up on it.
-			if let Some(folds) = state.arrivals.folds_at(owed, state.arrival_grace()) {
-				state.cache.watch_wall(folds, waiter);
-			}
-			// Parked on the track too: the group landing, its drop, or a group landing
-			// between it and the candidate, which can convict it sooner.
-			Poll::Pending
+			Poll::Ready(Ok(()))
 		})
 	}
 
@@ -10274,7 +10279,10 @@ impl Cursor {
 		let edge = state.drift_edge(&self.servable);
 		let now = state.cache.pool().now_wall();
 		while let Some(oldest) = delivered.above_gap() {
-			let budget = budgets.at(oldest);
+			// The gap below takes this verdict only judged under a budget at least as wide as its own.
+			let budget = (budgets.runs(delivered.floor()..oldest + 1).into_iter())
+				.map(|(_, budget)| budget)
+				.fold(Duration::ZERO, Duration::max);
 			// Either clock, as `drifted` judges a group: without a successor, neither.
 			let Some(arrival) = state.arrival(oldest, &edge.servable) else {
 				break;
@@ -10289,6 +10297,10 @@ impl Cursor {
 			} else {
 				break;
 			};
+			// Nor does a group above it under a wider budget, nor any after.
+			let shared = (budgets.runs(oldest..shared).into_iter())
+				.find(|(_, wider)| *wider > budget)
+				.map_or(shared, |(run, _)| run.start);
 			// Every delivered run below this successor shares its verdict. Retire
 			// them in one split, including the highest run, rather than once per gap.
 			let last = delivered
@@ -22711,6 +22723,73 @@ mod test {
 		assert_eq!(drain_ordered(&mut consumer), [0], "group 1 is still owed");
 		put(&producer, 1, None);
 		assert_eq!(drain_ordered(&mut consumer), [1, 2]);
+	}
+
+	/// A gap's first owed group speaks for the rest only under its own budget: one a finite
+	/// live join alone covers going stale leaves one an unlimited join covers still owed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_judges_each_budget_of_a_gap_on_its_own() {
+		let budget = Duration::from_millis(50);
+		let mut both = Subscription::default().with_ranges([
+			Range::from(Start::Live {
+				min: Duration::ZERO,
+				max: Some(budget),
+			}),
+			Range::from(Start::Live {
+				min: Duration::from_secs(1),
+				max: None,
+			}),
+		]);
+		both.placed = [(0, 0), (1, 2)].into();
+		let producer = received_producer(None);
+		let mut consumer = producer.subscribe(both).ordered();
+		put(&producer, 0, None);
+		put(&producer, 3, None);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		elapse(&producer, budget);
+		assert_eq!(
+			drain_ordered(&mut consumer),
+			[0u64; 0],
+			"group 2 is owed without a limit"
+		);
+		// Group 1 is judged again against group 2, its successor now.
+		put(&producer, 2, None);
+		elapse(&producer, budget);
+		assert_eq!(drain_ordered(&mut consumer), [2, 3]);
+	}
+
+	/// A group handed out going stale under its budget says nothing of a gap below it under a
+	/// wider one: the gap stays owed, so the group landing late is still handed out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_group_forgets_no_gap_a_wider_budget_owes() {
+		let budget = Duration::from_millis(50);
+		let mut both = Subscription::default().with_ranges([
+			Range::from(Start::Live {
+				min: Duration::ZERO,
+				max: Some(budget),
+			}),
+			Range {
+				start: Start::Live {
+					min: Duration::from_secs(1),
+					max: None,
+				},
+				end: Some(2),
+			},
+		]);
+		both.placed = [(0, 0), (1, 2)].into();
+		let producer = received_producer(None);
+		let mut subscriber = producer.subscribe(both);
+		put(&producer, 0, None);
+		put(&producer, 3, None);
+		put(&producer, 4, None);
+		assert_eq!(drain(&mut subscriber), [0, 3, 4]);
+		elapse(&producer, budget);
+		put(&producer, 5, None);
+		assert_eq!(drain(&mut subscriber), [5]);
+		put(&producer, 2, None);
+		assert_eq!(drain(&mut subscriber), [2], "group 2 is owed without a limit");
 	}
 
 	/// A local track owes nothing: a gap costs nothing, as before.

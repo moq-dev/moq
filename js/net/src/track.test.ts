@@ -132,6 +132,95 @@ test("ordered reads wait only for subscription-owed groups", () => {
 	}
 });
 
+// A finite live join from group 0 and an unlimited one placed at group 2 alone: group 2 is owed
+// without a limit, whatever the finite budget gives up below or above it.
+function finiteAndUnlimited(): Subscription {
+	return {
+		ranges: [
+			{ start: { live: { min: Duration.ZERO, max: Duration.millis(50) } } },
+			{ start: { live: { min: Duration.secs(1), max: null } }, end: 2n },
+		],
+		placed: new Map([
+			[0, 0n],
+			[1, 2n],
+		]),
+	};
+}
+
+// A gap's first owed group speaks for the rest only under its own budget: one a finite live join
+// alone covers going stale leaves one an unlimited join covers still owed. Mirrors the Rust
+// `an_ordered_read_judges_each_budget_of_a_gap_on_its_own`.
+test("an ordered read judges each budget of a gap on its own", () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack();
+	const reader = producer.subscribe(finiteAndUnlimited()).ordered();
+	try {
+		putGroup(producer, 0n);
+		putGroup(producer, 3n);
+		expect(drainOrdered(reader)).toEqual([0n]);
+		clock.set(50);
+		expect(drainOrdered(reader)).toEqual([]);
+		// Group 1 is judged again against group 2, its successor now.
+		putGroup(producer, 2n);
+		clock.set(100);
+		expect(drainOrdered(reader)).toEqual([2n, 3n]);
+	} finally {
+		reader.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// A stale group passes the owed groups below it only where its own budget gives them up: one an
+// unlimited join owes still holds the read.
+test("an ordered read skipping a stale group keeps waiting on a hole a wider budget owes", () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack();
+	const reader = producer.subscribe(finiteAndUnlimited()).ordered();
+	try {
+		putGroup(producer, 0n);
+		putGroup(producer, 3n);
+		putGroup(producer, 4n);
+		expect(drainOrdered(reader)).toEqual([0n]);
+		clock.set(50);
+		expect(drainOrdered(reader)).toEqual([]);
+		putGroup(producer, 2n);
+		clock.set(100);
+		expect(drainOrdered(reader)).toEqual([2n, 4n]);
+	} finally {
+		reader.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// A group handed out going stale under its budget says nothing of a gap below it under a wider
+// one: the gap stays owed, so the group landing late is still handed out. Mirrors the Rust
+// `a_stale_group_forgets_no_gap_a_wider_budget_owes`.
+test("a stale group forgets no gap a wider budget owes", () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack();
+	const reader = producer.subscribe(finiteAndUnlimited());
+	try {
+		putGroup(producer, 0n);
+		putGroup(producer, 3n);
+		putGroup(producer, 4n);
+		expect(drain(reader)).toEqual([0n, 3n, 4n]);
+		clock.set(50);
+		putGroup(producer, 5n);
+		expect(drain(reader)).toEqual([5n]);
+		putGroup(producer, 2n);
+		expect(drain(reader)).toEqual([2n]);
+	} finally {
+		reader.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
 test("an ordered owed hole wakes exactly at its wall budget", async () => {
 	const clock = manualTime(0);
 	const producer = receivedTrack();

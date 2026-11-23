@@ -3780,7 +3780,12 @@ export class Subscriber {
 		let scanned = false;
 		let forgot: bigint | undefined;
 		for (let oldest = delivered.aboveGap(); oldest !== undefined; oldest = delivered.aboveGap()) {
-			if (!this.#staleAt(oldest, drift)) break;
+			// The gap below takes this verdict only judged under a budget at least as wide as its own.
+			let widest = drift.budget.at(oldest);
+			for (const gap of delivered.gaps(0n, oldest)) {
+				for (const [, budget] of drift.budget.runs(gap.start, gap.end)) widest = Math.max(widest, budget);
+			}
+			if (!this.#staleAt(oldest, { ...drift, budget: Budget.uniform(widest) })) break;
 			if (!scanned) {
 				scanned = true;
 				const producer = this.#state.producer;
@@ -5975,19 +5980,50 @@ export class Subscriber {
 	#waitOwed(start: bigint, end: bigint, drift: Drift): boolean {
 		const producer = this.#state.producer;
 		if (start >= end || !producer) return false;
-		// Only a hole in this reader's ranges is owed to it.
-		let owed: { key: bigint; folds?: Instant } | undefined;
+		let owes = false;
+		// The gap's first owed group stands for the rest only under its own budget, so each stretch
+		// under another is judged by its own first.
+		for (const [part] of drift.budget.runs(start, end)) {
+			const owed = this.#firstOwed(producer, part.start, part.end);
+			if (!owed) continue;
+			owes = true;
+			if (this.#holdsOrder(owed, drift)) return true;
+		}
+		if (owes) return false;
+		// A fill still owes a group below, which lands as a group does. Its staleness deadline wakes
+		// the cursor too, so a fill that never answers cannot pin it.
+		if (this.#askFills(start, end, drift) === undefined) return false;
+		this.#state.waitingOrdered = true;
+		return true;
+	}
+
+	// Whether a missing group the subscription owes in `[start, end)` under a budget wider than
+	// `than` still holds sequence order: a stale group above it passes only the owed groups its own
+	// budget gives up.
+	#waitWider(start: bigint, end: bigint, drift: Drift, than: number): boolean {
+		const producer = this.#state.producer;
+		if (!producer) return false;
+		for (const [part, budget] of drift.budget.runs(start, end)) {
+			if (budget <= than) continue;
+			const owed = this.#firstOwed(producer, part.start, part.end);
+			if (owed && this.#holdsOrder(owed, drift)) return true;
+		}
+		return false;
+	}
+
+	// The first missing group in `[start, end)` the live feed still owes this reader: only a hole in
+	// its ranges is owed to it.
+	#firstOwed(producer: Producer, start: bigint, end: bigint): { key: bigint; folds?: Instant } | undefined {
 		for (const run of this.#window.runs(start, end)) {
-			owed = owedGroup(producer, run.start, run.end);
-			if (owed) break;
+			const owed = owedGroup(producer, run.start, run.end);
+			if (owed) return owed;
 		}
-		if (!owed) {
-			// A fill still owes a group below, which lands as a group does. Its staleness deadline
-			// wakes the cursor too, so a fill that never answers cannot pin it.
-			if (this.#askFills(start, end, drift) === undefined) return false;
-			this.#state.waitingOrdered = true;
-			return true;
-		}
+		return undefined;
+	}
+
+	// Whether the owed group `owed` still holds sequence order within its budget, waking the read
+	// when that may change.
+	#holdsOrder(owed: { key: bigint; folds?: Instant }, drift: Drift): boolean {
 		if (this.#staleAt(owed.key, drift, true)) return false;
 		if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 		this.#state.waitingOrdered = true;
@@ -6054,7 +6090,9 @@ export class Subscriber {
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.start, drift)) {
-				// Passing it passes the owed keys below it too, which the budget gives up with it.
+				// Passing it passes the owed keys below it too, which the budget gives up with it, but
+				// for one a wider budget still holds.
+				if (this.#waitWider(start, group.start, drift, drift.budget.at(group.start))) return { kind: "idle" };
 				this.#passOwed(start, group.start, drift);
 				this.#giveUp({ start: group.start, end: group.start + 1n }, staleHole(drift.budget.at(group.start)));
 				const passed = this.#nextKey;

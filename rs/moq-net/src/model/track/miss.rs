@@ -1254,15 +1254,19 @@ impl Misses {
 			.map(|run| run.start.max(floor));
 		while let Some(from) = next {
 			let bound = state.arrival(from, servable).map(|slot| slot.group.start);
-			let drifted = state.poll_drifted(from, servable, drift.budget.at(from), None, waiter);
-			next = self.stretches(state, from, bound, drifted, &mut stale, &mut arrived);
+			// A verdict holds only as far as the budget it was judged under.
+			let (budget, edge) = drift.budget.stretch(from);
+			let drifted = state.poll_drifted(from, servable, budget, None, waiter);
+			let keys = from..edge.unwrap_or(u64::MAX);
+			next = self.stretches(state, keys, bound, drifted, &mut stale, &mut arrived);
 		}
 		(stale, arrived)
 	}
 
-	/// Visit the stretches of the wanted runs starting at `from` and below `bound`, all judged
+	/// Visit the stretches of the wanted runs in `keys` starting below `bound`, all judged
 	/// `drifted`, putting them in `stale` if so, and the groups the live feed cached inside a
-	/// run in `arrived`. Returns where the next stretch starts, at or past `bound`.
+	/// run in `arrived`. Returns where the next stretch starts, at or past `bound` or the end
+	/// of `keys`.
 	///
 	/// Groups arrive out of order, so a fresh late group keeps the stretch below it owed while
 	/// the ones around it go stale. Only the live feed's arrivals split a run: an aborted
@@ -1272,7 +1276,7 @@ impl Misses {
 	fn stretches(
 		&self,
 		state: &TrackState,
-		from: u64,
+		keys: ops::Range<u64>,
 		bound: Option<u64>,
 		drifted: bool,
 		stale: &mut RangeSet<u64>,
@@ -1286,15 +1290,17 @@ impl Misses {
 				.find(|key| state.lookup.get(key).is_some_and(|slot| slot.serves_end()))
 		};
 		// Where the visit is, and whether a stretch started below it is still running there.
-		let (mut at, mut within) = (from, false);
+		let (mut at, mut within) = (keys.start, false);
 		loop {
 			let run = self.wanted.overlapping(&(at..u64::MAX)).next()?.clone();
 			if run.start > at {
 				(at, within) = (run.start, false);
 			}
-			if !within && bound.is_some_and(|bound| at >= bound) {
+			// Past the end of `keys` the budget differs, so no stretch runs on across it.
+			if at >= keys.end || (!within && bound.is_some_and(|bound| at >= bound)) {
 				return Some(at);
 			}
+			let run = run.start..run.end.min(keys.end);
 			match walked(at, run.end) {
 				// What arrived live is the feed's to serve, as the reader serves any cached group.
 				Some(group) => {
@@ -1314,10 +1320,7 @@ impl Misses {
 					// Fresh up to the next group the live feed holds, or the bound: every stretch
 					// starting below either is fresh too, holding no arrival.
 					let next = state.visible.range(run.end..).next().copied();
-					let leap = match (next, bound) {
-						(Some(next), Some(bound)) => next.min(bound),
-						(next, bound) => next.or(bound)?,
-					};
+					let leap = next.into_iter().chain(bound).fold(keys.end, u64::min);
 					// A run holding the leap from below it is a stretch already running there.
 					within = self.wanted.get(&leap).is_some_and(|held| held.start < leap);
 					at = leap;
@@ -2230,14 +2233,16 @@ mod tests {
 
 	/// Judging the stretches a fill still owes by their shared successor gives up exactly
 	/// what judging each stretch alone would, as groups arrive, start, abort, or leave the
-	/// cache in any order, on either clock, against a window of one run or several.
+	/// cache in any order, on either clock, against a window of one run or several, under one
+	/// budget or several.
 	#[test]
 	fn expiring_by_successor_matches_each_stretch_judged_alone() {
-		use super::super::super::subscription::Cover;
+		use super::super::super::subscription::{Cover, Joining, Unheld, Window};
 		use crate::Timestamp;
+		use crate::track::{Range, Start};
 
-		/// The old judgement: each stretch between the live groups cached in a wanted run, by
-		/// its own start.
+		/// The old judgement: each stretch between the live groups cached in a wanted run, cut
+		/// where the budget changes, by its own start.
 		fn each(misses: &Misses, state: &TrackState, drift: &Drift) -> (RangeSet<u64>, RangeSet<u64>) {
 			let waiter = kio::Waiter::noop();
 			let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
@@ -2249,9 +2254,10 @@ mod tests {
 					.filter(|(_, slot)| slot.is_walked())
 					.map(|(&key, _)| key);
 				for at in cached.chain(std::iter::once(run.end)) {
-					if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget.at(from), None, &waiter)
-					{
-						stale.insert(from..at);
+					for (part, budget) in drift.budget.runs(from..at) {
+						if state.poll_drifted(part.start, &drift.edge.servable, budget, None, &waiter) {
+							stale.insert(part);
+						}
 					}
 					if at < run.end {
 						arrived.insert(at..at + 1);
@@ -2283,7 +2289,30 @@ mod tests {
 				)
 				.unwrap();
 			let mut groups = Vec::new();
-			let budget = Duration::from_millis(50 + next(200));
+			let millis = || Duration::from_millis(50 + next(200));
+			let budget = match next(2) {
+				0 => Budget::uniform(millis()),
+				// Two live joins placed anywhere, one maybe unlimited, beside history.
+				_ => {
+					let join = |max| {
+						Range::from(Start::Live {
+							min: Duration::from_millis(1 + next(100)),
+							max,
+						})
+					};
+					let mut ranges = vec![(0, join(Some(millis()))), (1, join((next(2) == 0).then(millis)))];
+					if next(2) == 0 {
+						let history = Range {
+							start: Start::Oldest,
+							end: Some(next(KEYS)),
+						};
+						ranges.push((2, history));
+					}
+					let placed = [next(KEYS), next(KEYS)];
+					let joining = |key: u64| Joining::At(placed[key as usize]);
+					Window::keyed_since(ranges, joining, None, &Unheld).budget()
+				}
+			};
 			let runs = |count: u64| -> Vec<_> {
 				(0..1 + next(count))
 					.map(|_| {
@@ -2334,7 +2363,7 @@ mod tests {
 				}
 				let state = track.state.read();
 				let drift = Drift {
-					budget: Budget::uniform(budget),
+					budget: budget.clone(),
 					bound: None,
 					edge: state.drift_edge(&servable),
 					coverage: None,
