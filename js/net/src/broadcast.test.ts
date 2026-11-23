@@ -4,9 +4,10 @@ import { Manual } from "@moq/clock/test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as cache from "./cache.ts";
 import { defined } from "./defined.test-util.ts";
-import { NotFound, StreamCode, TooFarBehind, toStreamCode } from "./error.ts";
+import { NotFound, StreamCode, TooFarBehind } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
@@ -324,24 +325,30 @@ test("closing a broadcast rejects a dequeued request", async () => {
 test("a request exposes the aggregate subscription options", async () => {
 	const consumer = new TestConsumer();
 
-	consumer.track("video").subscribe({
-		priority: 3,
-		delay: { max: Duration.millis(100) },
-		ranges: [{ start: 10n, end: 19n }],
-	});
-	consumer.track("video").subscribe({
-		priority: 7,
-		delay: { max: Duration.millis(250) },
-		ranges: [{ start: 0n, end: 29n }],
-	});
+	consumer.track("video").subscribe(
+		withMax({
+			priority: 3,
+			delay: { max: Duration.millis(100) },
+			ranges: [{ start: 10n, end: 19n }],
+		}),
+	);
+	consumer.track("video").subscribe(
+		withMax({
+			priority: 7,
+			delay: { max: Duration.millis(250) },
+			ranges: [{ start: 0n, end: 29n }],
+		}),
+	);
 
 	const request = await pendingRequest(consumer);
-	expect(request?.subscription).toEqual({
-		priority: 7,
-		delay: { max: Duration.millis(250) },
-		order: "descending",
-		ranges: [{ start: 0n, end: 29n }],
-	});
+	expect(request?.subscription).toEqual(
+		withMax({
+			priority: 7,
+			delay: { max: Duration.millis(250) },
+			order: "descending",
+			ranges: [{ start: 0n, end: 29n }],
+		}),
+	);
 	expect(request?.priority).toBe(7);
 });
 
@@ -450,11 +457,11 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 
 	const a = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(5000) } })
+		.subscribe(withMax({ delay: { max: Duration.millis(5000) } }))
 		.ordered();
 	const b = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(5000) } })
+		.subscribe(withMax({ delay: { max: Duration.millis(5000) } }))
 		.ordered();
 
 	producer.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
@@ -486,7 +493,7 @@ test("a read throws Evicted at a shed front, then resyncs to the next group", as
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const sub = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(5000) } })
+		.subscribe(withMax({ delay: { max: Duration.millis(5000) } }))
 		.ordered();
 
 	// Group 0 sheds its front without aborting the writer.
@@ -516,7 +523,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 
 		// A subscriber that never reads. Its sink must not grow without bound. No max delay,
 		// so only eviction (not a skip of a superseded group) can drop the old group.
-		const stalled = broadcast.track("video").subscribe({ delay: { max: null } });
+		const stalled = broadcast.track("video").subscribe(withMax({ delay: { max: null } }));
 
 		producer.writeFrame(textFrame("old"));
 
@@ -573,7 +580,7 @@ test("a finished track is still served from its cache", async () => {
 	const late = broadcast
 		.consume()
 		.track("track1")
-		.subscribe({ delay: { max: Duration.millis(5000) } })
+		.subscribe(withMax({ delay: { max: Duration.millis(5000) } }))
 		.ordered();
 	expect(await late.readString()).toBe("last");
 	expect(await late.nextGroup()).toBeUndefined();
@@ -655,34 +662,6 @@ test("a fetch of a group still to come asks the request handler, and the write a
 	expect(await group.readString()).toBe("1");
 
 	requests.close();
-	broadcast.close();
-});
-
-test("fetch maxDelay tightens the publisher's maxAge without changing omission", async () => {
-	const broadcast = new BroadcastProducer();
-	const track = defined(
-		broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(2000) }),
-	);
-
-	for (const millis of [0, 1000]) {
-		const group = hooks.appendNext(track);
-		group.writeFrame({
-			payload: new TextEncoder().encode(String(millis)),
-			timestamp: Timestamp.fromMillis(millis),
-		});
-		group.finish();
-	}
-
-	const omitted = await wireOf(broadcast).fetchGroup("video", 0n);
-	expect(omitted.start).toBe(0n);
-	omitted.close();
-
-	// Stale under its own budget, which says OLD as the Rust `fetch_group` does, so a relay asking
-	// for a narrow reader refuses it to that reader alone.
-	const stale = await wireOf(broadcast)
-		.fetchGroup("video", 0n, { maxDelay: Duration.millis(0) })
-		.catch((err: unknown) => err);
-	expect(toStreamCode(stale)).toBe(StreamCode.Old);
 	broadcast.close();
 });
 

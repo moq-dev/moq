@@ -55,7 +55,7 @@ export class Peak {
 const REACH = Duration.secs(2);
 
 /**
- * The audio subscription's max delay, less warmup: the shared `maxDelay`, raised to the delay plus the
+ * The audio subscription's live join max, less warmup: the shared `maxDelay`, raised to the delay plus the
  * estimator's 2 s ceiling, so every frame late enough to move the target is still observed. The
  * `stretch` setting does not size it.
  */

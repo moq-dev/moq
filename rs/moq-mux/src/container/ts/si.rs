@@ -815,10 +815,15 @@ mod tests {
 					.write_frame(Timestamp::from_millis(revision * 100).unwrap(), vec![revision as u8])
 					.unwrap();
 			}
-			// As the export subscribes: in order, with the CLI's default 500 ms delay.
-			let delay = moq_net::track::Delay::default().with_max(Duration::from_millis(500));
+			// As the export subscribes: in order, joining live the CLI's default 500 ms back and
+			// keeping each group that long.
+			let delay = Duration::from_millis(500);
+			let join = moq_net::track::Start::Live {
+				min: delay,
+				max: Some(delay),
+			};
 			let mut reader = track
-				.subscribe(moq_net::track::Subscription::default().with_delay(delay))
+				.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(join)]))
 				.ordered();
 			let waiter = kio::Waiter::noop();
 			let mut read = Vec::new();

@@ -9,9 +9,10 @@
 //! publisher never reports where a range from that time starts, and the group containing
 //! it never arrives: the subscription must still start, at the oldest group the copy holds.
 
+use crate::WithMax as _;
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Range, Subscription};
+use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timescale, Timestamp, Version, origin};
 
 use crate::route_change::{link, produce_origin, settle};
@@ -79,11 +80,11 @@ async fn read_from_expired(version: &str) -> Vec<u64> {
 		.unwrap()
 		.unwrap();
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(Duration::from_secs(60)))
 		.with_ranges([Range {
 			start: moq_net::track::Start::Time(500),
 			end: None,
-		}]);
+		}])
+		.with_max(Duration::from_secs(60));
 	let mut sub = remote.track("video").unwrap().subscribe(subscription).await.unwrap();
 	play(&track, 2000..3000).await;
 	settle().await;

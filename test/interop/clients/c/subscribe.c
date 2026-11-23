@@ -513,8 +513,13 @@ static void finish(ctx_t *c, const struct timespec *deadline) {
     }
     ok = !c->finish.failed && !c->done_status && c->finish.done_health &&
          c->finish.health_end == 0 && c->finish.health_frames == 1;
+    unsigned health_frames = c->finish.health_frames;
+    int32_t health_end = c->finish.health_end;
+    int health_done = c->finish.done_health;
     pthread_mutex_unlock(&c->mu);
-    if (!ok) fail("error: session health failed after broadcast finish\n");
+    if (!ok)
+        fail("error: session health failed after broadcast finish (frames=%u end=%d done=%d)\n", health_frames,
+             health_end, health_done);
     fprintf(stderr, "finish clean frames=%u catalog=eof announce=end health=ok\n", frames);
 }
 

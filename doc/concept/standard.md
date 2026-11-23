@@ -125,7 +125,7 @@ choices. They follow the product model.
   a redundant draft-18 `PUBLISH` answering our own `SUBSCRIBE_TRACKS` gets
   `DUPLICATE_SUBSCRIPTION`.
 
-- **No subscriber max age.** moq-transport carries no subscriber `delay.max`, so a
+- **No subscriber max age.** moq-transport carries no live join's `max`, so a
   publisher serving a moq-transport subscriber preserves its retained backlog, and
   a relay asks upstream for none on its behalf. `OBJECT_DELIVERY_TIMEOUT` and
   `SUBGROUP_DELIVERY_TIMEOUT` are accepted and ignored: their per-object and

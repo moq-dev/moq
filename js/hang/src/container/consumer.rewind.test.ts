@@ -22,7 +22,7 @@ function micro(): Track.Producer {
 
 function setup() {
 	const track = micro();
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 		format: new Format("video"),
 		delay: { max: Duration.millis(30_000) },
 	});

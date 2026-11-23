@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { defined } from "../defined.test-util.ts";
 import { ProtocolViolation, StreamCode, StreamError, toTransport } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -8,6 +9,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale } from "../time.ts";
 import type { Range } from "../track.ts";
 import { Group as GroupMessage } from "./group.ts";
@@ -24,7 +26,7 @@ import {
 } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, hasLengthFirst, hasRanges, resolvesStart, Version } from "./version.ts";
+import { ALPN_05, fillsFromStart, hasLengthFirst, hasRanges, resolvesStart, Version } from "./version.ts";
 
 // The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Duration.millis(100);
@@ -42,14 +44,15 @@ function frame(payload: string, version: Version, delta = 0): Uint8Array {
 }
 
 /**
- * A group stream the test writes by hand, handed to the subscriber as if it arrived. Its first
- * frame starts at `sequence` milliseconds, so group starts strictly increase with their keys.
+ * A group stream the test writes by hand for subscription `subscribe`, handed to the subscriber as
+ * if it arrived. Its first frame starts at `sequence` milliseconds, so group starts strictly
+ * increase with their keys.
  */
-function groupStream(subscriber: Subscriber, key: bigint) {
+function groupStream(subscriber: Subscriber, key: bigint, subscribe = 0n) {
 	let controller!: ReadableStreamDefaultController<Uint8Array>;
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
 	const handled = subscriber.runGroup(
-		new GroupMessage({ subscribe: 0n, key: key }),
+		new GroupMessage({ subscribe, key: key }),
 		new Reader(readable, undefined, subscriber.version),
 	);
 	let first = true;
@@ -70,13 +73,13 @@ function groupStream(subscriber: Subscriber, key: bigint) {
  * it answers TRACK_INFO, then writes whatever responses the test asks for on the subscribe
  * stream and FINs it when told.
  */
-async function subscribed(version: Version, maxDelay = GRACE, range?: Range) {
+async function subscribed(version: Version, maxDelay: Duration | null = GRACE, range?: Range) {
 	const pair = createMockTransportPair(ALPN_05);
 	const subscriber = new Subscriber(pair.client, version, randomHop());
 	const reader = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: maxDelay }, ranges: range && [range] });
+		.subscribe(withMax({ delay: { max: maxDelay }, ranges: range && [range] }));
 
 	const info = await Stream.accept(pair.server, version);
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
@@ -98,6 +101,8 @@ async function subscribed(version: Version, maxDelay = GRACE, range?: Range) {
 		fin: () => sub.writer.close(),
 		subscriberFin: () => sub.reader.done(),
 		reset: (error: Error) => sub.writer.reset(error),
+		// The next stream the subscriber opens, such as a recovery's SUBSCRIBE.
+		accept: () => Stream.accept(pair.server, version),
 	};
 }
 
@@ -199,7 +204,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const sub = await subscribed(version);
 			subscriber = sub.subscriber;
 			const { reader, respond, fin } = sub;
-			const ordered = reader.fork({ delay: { max: GRACE } }).ordered();
+			// History from the oldest group, which owes group 0 until the subscription settles.
+			const ordered = reader.fork({ ranges: [{}] }).ordered();
 			await respond({ start: new SubscribeStart([0n]) });
 			const group = groupStream(subscriber, 1n);
 			group.write("1.0");
@@ -210,7 +216,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 			// Group 0 has no header, so accounting still waits, and its stream may yet
 			// land behind group 1's. Both readers wait, with the ordered reader holding
-			// group 1 until its budget gives up on the owed hole.
+			// group 1 until the grace gives up on the owed hole.
 			expect((await reader.recvGroup())?.start).toBe(1n);
 			let ended = false;
 			const held = reader.recvGroup().finally(() => (ended = true));
@@ -239,7 +245,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	// QUIC does not order streams, so a lower group's stream can land after a higher one and
 	// after SUBSCRIBE_FINISH. The reader receives it before its end, which then comes at once.
 	test("a lower group that lands after SUBSCRIBE_FINISH reaches the reader", async () => {
-		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000));
+		// History from the oldest group, which reaches group 0 whenever it lands.
+		const { subscriber, reader, respond, fin } = await subscribed(version, null);
 		await respond({ start: new SubscribeStart([0n]) });
 		const high = groupStream(subscriber, 1n);
 		high.finish();
@@ -347,18 +354,34 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 	test("a floor below SUBSCRIBE_START owes nothing below it", async () => {
 		using clock = manual();
-		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000), {
+		const { subscriber, reader, respond, fin, accept } = await subscribed(version, Duration.millis(60_000), {
 			start: 1n,
 		});
 		await respond({ start: new SubscribeStart([3n]) });
 		const group = groupStream(subscriber, 3n);
 		group.finish();
 		await group.handled;
+		expect((await reader.recvGroup())?.start).toBe(3n);
+		// The reader still asks for the groups below. Unless its fills stop at the start, the copy asks
+		// upstream for them on a SUBSCRIBE of its own, and stays open past the track's end while it is out.
+		// Lite-07 asks its range from a time, which the start lands at group 3, so nothing below is owed.
+		const ended = reader.recvGroup();
+		const recovery = fillsFromStart(version) || hasRanges(version) ? undefined : defined(await accept());
 		await respond({ finish: new SubscribeFinish(4n) });
 		await fin();
-
-		expect((await reader.recvGroup())?.start).toBe(3n);
-		expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
+		if (recovery) {
+			expect(await recovery.reader.u53()).toBe(StreamId.Subscribe);
+			await Subscribe.decode(recovery.reader, version);
+			// Once the reader's miss is answered otherwise, the copy may cancel it first, which stops
+			// these writes: the reader ends either way.
+			const answered = async () => {
+				await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([3n]) }, version);
+				await encodeSubscribeResponse(recovery.writer, { finish: new SubscribeFinish(4n) }, version);
+				recovery.writer.close();
+			};
+			await answered().catch(() => undefined);
+		}
+		expect(await settlesWithin(ended, clock, Duration.millis(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 	});
 
@@ -378,7 +401,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const lower = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ delay: { max: maxDelay }, ranges: [{ start: 1n }] });
+			.subscribe(withMax({ delay: { max: maxDelay }, ranges: [{ start: 1n }] }));
 		// Lite-07 retires the range and adds the lowered one, whose start SUBSCRIBE_STARTED reports.
 		const lowered = await update();
 		if (hasRanges(version)) {
@@ -516,4 +539,122 @@ test("draft-07's SUBSCRIBE_START says the largest before any group arrives", asy
 	await respond({ start: new SubscribeStart([4n], { position: { group: 4n, frame: 2 }, ended: false }) });
 	expect(await reader.largest()).toEqual({ group: 4n, frame: 2 });
 	reader.close();
+});
+
+// TEMPORARY MIGRATION, delete with `RecoveryHandle.walk`: a relay of the previous release starts a
+// recovery at its floor, sends the next group it holds, and never accounts for the keys between.
+// Once the grace passes with no progress, the copy FETCHes them a key at a time instead. Mirrors the Rust
+// `a_stalled_recovery_walks_its_keys`, on lite-05, where a floor below the start is recovered.
+test("a recovery stalled behind a relay of the previous release is fetched", async () => {
+	using clock = manual();
+	const version = Version.DRAFT_05;
+	const { subscriber, reader, respond, fin, accept } = await subscribed(version, Duration.millis(60_000), {
+		start: 1n,
+	});
+	await respond({ start: new SubscribeStart([4n]) });
+	const group = groupStream(subscriber, 4n);
+	group.finish();
+	await group.handled;
+	expect((await reader.recvGroup())?.start).toBe(4n);
+	// The reader still owes 1..4, which the copy recovers on a SUBSCRIBE of its own.
+	void reader.recvGroup().catch(() => undefined);
+	const recovery = defined(await accept());
+	expect(await recovery.reader.u53()).toBe(StreamId.Subscribe);
+	await Subscribe.decode(recovery.reader, version);
+	await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([1n]) }, version);
+	const held = groupStream(subscriber, 3n, 1n);
+	held.write("3.0");
+
+	// The grace passes while group 3 is still being read, which is waited on rather than spun on.
+	const fetched = accept();
+	expect(await settlesWithin(fetched, clock, Duration.millis(2000))).toBe(false);
+	// Its finishing is progress too, so the grace starts over from there.
+	held.finish();
+	await held.handled;
+	expect(await settlesWithin(fetched, clock, Duration.millis(900))).toBe(false);
+	expect(await settlesWithin(fetched, clock, Duration.millis(200))).toBe(true);
+	const fetch = defined(await fetched);
+	expect(await fetch.reader.u53()).toBe(StreamId.Fetch);
+
+	// The subscription ends while the walk is still out, which the copy waits for. Upstream answers
+	// keys 1 and 2 not found, and then the reader ends cleanly.
+	await respond({ finish: new SubscribeFinish(5n) });
+	await fin();
+	const closed = reader.closed;
+	expect(await settlesWithin(closed, clock, Duration.millis(100))).toBe(false);
+	fetch.abort(new StreamError(StreamCode.NotFound));
+	const second = defined(await accept());
+	expect(await second.reader.u53()).toBe(StreamId.Fetch);
+	second.abort(new StreamError(StreamCode.NotFound));
+	expect(await settlesWithin(closed, clock, Duration.millis(100))).toBe(true);
+});
+
+// A current relay answers the keys below the first group once its own upstream does, which may
+// take longer than the grace in all: each answer restarts the grace, so the copy waits on a relay
+// still answering rather than fetching the run a key at a time. Mirrors the Rust
+// `a_slow_relay_still_answering_is_not_walked`.
+test("a recovery behind a slow relay still answering is not fetched", async () => {
+	using clock = manual();
+	const version = Version.DRAFT_05;
+	const { subscriber, reader, respond, accept } = await subscribed(version, Duration.millis(60_000), {
+		start: 1n,
+	});
+	await respond({ start: new SubscribeStart([4n]) });
+	const group = groupStream(subscriber, 4n);
+	group.finish();
+	await group.handled;
+	expect((await reader.recvGroup())?.start).toBe(4n);
+	void reader.recvGroup().catch(() => undefined);
+	const recovery = defined(await accept());
+	expect(await recovery.reader.u53()).toBe(StreamId.Subscribe);
+	await Subscribe.decode(recovery.reader, version);
+	await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([1n]) }, version);
+	const first = groupStream(subscriber, 3n, 1n);
+	first.finish();
+	await first.handled;
+
+	// Keys 1 and 2 are answered 800 ms apart, 1.6 s in all.
+	const fetched = accept();
+	expect(await settlesWithin(fetched, clock, Duration.millis(800))).toBe(false);
+	await encodeSubscribeResponse(
+		recovery.writer,
+		{ drop: new SubscribeDrop({ start: 1n, end: 2n, error: 0 }) },
+		version,
+	);
+	expect(await settlesWithin(fetched, clock, Duration.millis(800))).toBe(false);
+	await encodeSubscribeResponse(
+		recovery.writer,
+		{ drop: new SubscribeDrop({ start: 2n, end: 3n, error: 0 }) },
+		version,
+	);
+	expect(await settlesWithin(fetched, clock, Duration.millis(2000))).toBe(false);
+});
+
+// A lite-05 publisher that finished the track FINs a recovery before the group streams it opened
+// land. Nothing names a key after that FIN, so one that never lands is given up after the grace,
+// not the reader's max delay. Mirrors the Rust `a_drained_recovery_gives_up_a_missing_key`.
+test("a drained recovery gives up a missing key after the grace", async () => {
+	using clock = manual();
+	const version = Version.DRAFT_05;
+	const { subscriber, reader, respond, accept } = await subscribed(version, Duration.millis(60_000), {
+		start: 1n,
+	});
+	await respond({ start: new SubscribeStart([4n]) });
+	const group = groupStream(subscriber, 4n);
+	group.finish();
+	await group.handled;
+	expect((await reader.recvGroup())?.start).toBe(4n);
+	// The reader still owes 1..4, which the copy recovers on a SUBSCRIBE of its own.
+	void reader.recvGroup().catch(() => undefined);
+	const recovery = defined(await accept());
+	expect(await recovery.reader.u53()).toBe(StreamId.Subscribe);
+	await Subscribe.decode(recovery.reader, version);
+	await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([1n]) }, version);
+	await encodeSubscribeResponse(recovery.writer, { finish: new SubscribeFinish(5n) }, version);
+	recovery.writer.close();
+
+	// The copy closes its side once it gives up.
+	const ended = recovery.reader.done();
+	expect(await settlesWithin(ended, clock, Duration.millis(900))).toBe(false);
+	expect(await settlesWithin(ended, clock, Duration.millis(200))).toBe(true);
 });

@@ -311,6 +311,27 @@ jobs:
           fi
           just token --generators "$impls" --verifiers "$impls"
 
+  # The Kotlin cells resolve from Google's Maven Central mirror, since Central
+  # rate-limits shared runner IPs. This one job asks Central, so a lagging mirror
+  # fails loudly here, and a block on this runner leaves the matrix alone.
+  maven-mirror:
+    name: Maven mirror is current
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - name: Compare dev.moq:moq on the mirror and Central
+        run: just maven-mirror
+
   relays:
     name: External relay interop
     runs-on: ubuntu-latest

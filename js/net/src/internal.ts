@@ -20,11 +20,11 @@ import * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type {
-	Delay,
 	Demand,
 	Groups,
 	Info,
 	InfoInit,
+	Live,
 	Position,
 	Producer,
 	Request,
@@ -34,11 +34,17 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Holdings, Resolved } from "./window.ts";
+import type { Budget, Holdings, Resolved } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** A null {@link Delay.max} in milliseconds, which the model holds as the largest value every peer can read. */
+/** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
 export const NO_MAX_DELAY = Varint.MAX_U53;
+
+/**
+ * A lag long past any group, so a join this far behind takes every group still within its max: the
+ * largest every implementation carries losslessly. Mirrors the Rust `PAST_EVERY_GROUP`.
+ */
+export const PAST_EVERY_GROUP = Duration.millis(NO_MAX_DELAY);
 
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
 export function datagramTrackInfo(info: datagram.Info): Info {
@@ -57,19 +63,6 @@ export function datagramTrackInfo(info: datagram.Info): Info {
  * the largest, or a reader of the newest group reaching a frame its copy shed.
  */
 export type Ask = "join" | "refresh" | "shed";
-
-/** A subscription's {@link Delay.max} in milliseconds as the wire carries it: null for no limit, omitted for zero. */
-export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
-	const max = subscription.delay?.max;
-	if (max === null) return NO_MAX_DELAY;
-	return max?.asMillis() ?? 0;
-}
-
-/** A subscription's {@link Delay.max} in milliseconds as SUBSCRIBE carries it: null for no limit. */
-export function wireMaxDelay(subscription: Pick<Subscription, "delay">): number | null {
-	const max = maxDelayOf(subscription);
-	return max < NO_MAX_DELAY ? max : null;
-}
 
 /**
  * `value` rounded up to a whole millisecond, as the wire carries it: callers derive one from
@@ -434,6 +427,8 @@ export interface ReadGroupFrame {
 export interface Within {
 	contains: (key: bigint) => boolean;
 	end: () => bigint | undefined;
+	/** How long each group stays worth delivering, as the logical reader's own ranges set it. */
+	budget: () => Budget;
 	/** What can change either. */
 	changed: readonly Getter<unknown>[];
 }
@@ -447,6 +442,12 @@ export interface ResumeShell {
 	 * live: each copy it asks takes an answer recorded since (see `hooks.stampSubscriber`).
 	 */
 	since(): readonly number[];
+	/**
+	 * Whether the reader's ranges last changed by a retune alone, each live join kept where it joined
+	 * under another max: each copy then retunes its own in place, and otherwise is asked whole,
+	 * restated. Mirrors the Rust `Change::Edit` against `Change::All`.
+	 */
+	retuned(): boolean;
 	/** The reader's group cursor: an inclusive start and an exclusive end. */
 	readonly cursor: Getter<{ start: bigint; end?: bigint }>;
 	/** Settles once the logical track ends. */
@@ -572,6 +573,11 @@ export interface ResumeSource {
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
 	forgetPastBudget(delivered: Delivered): void;
+	/**
+	 * Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
+	 * `delivered` this is, judged on the newest copy. Mirrors the Rust `Subscriber::forget_past`.
+	 */
+	forgetPast(delivered: Delivered, budget: Budget): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -586,6 +592,8 @@ export interface ResumeSource {
 	starts(from: bigint): (bigint | undefined)[] | undefined;
 	/** Each range as the reader's window resolved it, whichever copy serves. */
 	resolved(): (Resolved | undefined)[];
+	/** Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the serving copy. */
+	joinStart(placed: bigint, budget: number): bigint;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
@@ -810,9 +818,19 @@ export const hooks: {
 	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
 	 * waits on its START, as the Rust `request_start`. Only after {@link receiveTrack}: the start
 	 * is that subscription's, and ends with it. `resolved` marks a start the publisher placed
-	 * itself, as the Rust `start_resolved`: every older group stays fillable.
+	 * itself, as the Rust `start_resolved`: every older group stays fillable. `restated` marks a
+	 * start its publisher has since placed afresh, as {@link restateTrack} does.
 	 */
-	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint; resolved?: boolean }) => void;
+	startTrack: (
+		producer: Producer,
+		served: { start?: bigint | null; requested?: bigint; resolved?: boolean; restated?: boolean },
+	) => void;
+	/**
+	 * Mark the start a pre-07 copy's wire subscription declared as placed afresh by an update since:
+	 * it still bounds fills, since the publisher's re-offer brings the groups below it, but no longer
+	 * a reader's live join, which may reach lower. Assigned by `track.ts`.
+	 */
+	restateTrack: (producer: Producer) => void;
 	/**
 	 * Mark a track as a copy received over a wire without ranges, whose publisher placed its live
 	 * join already, so its readers start one among the groups held by when each presented rather
@@ -833,22 +851,21 @@ export const hooks: {
 	 */
 	answersJoins: (producer: Producer) => void;
 	/**
-	 * Record where the upstream publisher started each of a lite-07 copy's live wire ranges, as
-	 * `[time, start, budget]` by the time each asked from (0 for the oldest group), `start`
-	 * undefined for one with no group to deliver at or before its time, answered under at most
-	 * `budget`, the max delay in milliseconds, replacing the last set. A reader's time start the
-	 * copy cannot place among its own groups resolves to the range asked from it: a start at or
-	 * before the time names the group containing it, one past the time starts the range there
-	 * within the budget, and no start says no group at or before the time is left within it.
+	 * Record where the upstream publisher started each of a lite-07 copy's live history ranges, as
+	 * `[time, start]` by the time each asked from (0 for the oldest group), `start` undefined for one
+	 * with no group to deliver at or before its time, replacing the last set. A reader's time start
+	 * the copy cannot place among its own groups resolves to the range asked from it: a start at or
+	 * before the time names the group containing it, one past the time starts the range there, and
+	 * no start says no group at or before the time is left.
 	 * Mirrors the Rust `track::Producer::time_starts`; assigned by `track.ts`.
 	 */
-	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined, number]>) => void;
+	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined]>) => void;
 	/**
 	 * Record how the upstream publisher answered a range of a lite-07 copy asking the live join `min`
 	 * milliseconds behind the live edge through the time `end`: at group `start`, or undefined for
-	 * nothing to deliver, asked under at most `budget`, the max delay in milliseconds. It replaces the
-	 * join's earlier answer, and places every reader of that join that began waiting before now,
-	 * within the budget. Returns the tick it was recorded at. Mirrors the Rust
+	 * nothing to deliver, asked under at most `budget` milliseconds ({@link NO_MAX_DELAY} for no
+	 * limit). It replaces the join's earlier answer, and places every reader of that join that began
+	 * waiting before now, within the budget. Returns the tick it was recorded at. Mirrors the Rust
 	 * `track::Producer::answer_join`; assigned by `track.ts`.
 	 */
 	answerJoin: (
@@ -956,11 +973,24 @@ export const hooks: {
 	 */
 	servingResolvedKeys: (subscriber: Subscriber, keys: readonly bigint[]) => (Resolved | undefined)[];
 	/**
+	 * Where a live join a subscriber placed at `placed` starts under `budget` milliseconds, as a
+	 * publisher reports it: past the groups the budget expired, unless an upstream's answer placed
+	 * it. Mirrors the Rust `Subscriber::join_start`; assigned by `track.ts`.
+	 */
+	joinStart: (subscriber: Subscriber, placed: bigint, budget: number) => bigint;
+	/**
 	 * Edit a subscriber's preferences by key, costing the ranges the edit names rather than every
 	 * range: lite-07's SUBSCRIBE_UPDATE, by Range ID. Mirrors the Rust `Subscriber::edit`. Assigned
 	 * by `track.ts`.
 	 */
 	editSubscriber: (subscriber: Subscriber, edit: Edit) => void;
+	/**
+	 * Replace a subscriber's preferences as a subscription restated whole, as a SUBSCRIBE_UPDATE
+	 * before lite-07 restates it: every range is placed afresh, a live join whose max alone changed
+	 * included, since that wire names no range to retune. What the reader already handed out stays
+	 * settled. Mirrors the Rust `Subscriber::restate`. Assigned by `track.ts`.
+	 */
+	restateSubscriber: (subscriber: Subscriber, subscription: Subscription) => void;
 	/**
 	 * Note each of a subscriber's live join ranges keyed in `since` as added at its tick instead: a
 	 * front's reader stamps each copy it asks with the tick it added the range at, so an answer the
@@ -1028,8 +1058,12 @@ export const hooks: {
 	 * and it is not stale under its budget. Mirrors the Rust crate-private `track::Subscriber::taking`.
 	 */
 	taking: (subscriber: Subscriber) => (key: bigint) => boolean;
-	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
-	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
+	/**
+	 * Forget the gaps in another reader's `delivered` below each group past `budget`, the budget of
+	 * the reader whose `delivered` this is, which a front's copy, its ranges raised to a resume point,
+	 * cannot judge by its own. Mirrors the Rust `Subscriber::forget_past_budget`.
+	 */
+	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget) => void;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/**
@@ -1038,11 +1072,11 @@ export const hooks: {
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
-	 * Whether this subscriber's budget, or `budget` in milliseconds when given, gives up on `key`,
-	 * judged by its successor; see {@link expireGroup}. Successors count within `within` when
-	 * given, else within this subscriber's window below its cursor's cap.
+	 * Whether this subscriber's budget gives up on `key`, or the publisher's max age alone for a
+	 * `fetched` group, judged by its successor; see {@link expireGroup}. Successors count within
+	 * `within` when given, else within this subscriber's window below its cursor's cap.
 	 */
-	staleAt: (subscriber: Subscriber, key: bigint, budget?: number, within?: Within) => Expiry;
+	staleAt: (subscriber: Subscriber, key: bigint, fetched?: boolean, within?: Within) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
 	/**
@@ -1103,8 +1137,8 @@ export const hooks: {
 	) => Subscriber;
 	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default, and the frame it asks from. */
-	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined, frameStart?: number) => void;
+	/** Read one group for a FETCH, bounded by the publisher's max age alone, from the frame it asks from. */
+	fetchFrom: (subscriber: Subscriber, frameStart?: number) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
@@ -1343,6 +1377,9 @@ export const hooks: {
 	startTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
+	restateTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	dropAnchors: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1379,7 +1416,13 @@ export const hooks: {
 	servingResolvedKeys: () => {
 		throw new Error("track.ts not loaded");
 	},
+	joinStart: () => {
+		throw new Error("track.ts not loaded");
+	},
 	editSubscriber: () => {
+		throw new Error("track.ts not loaded");
+	},
+	restateSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	stampSubscriber: () => {
@@ -1550,7 +1593,7 @@ export const hooks: {
 	requested: () => {
 		throw new Error("track.ts not loaded");
 	},
-	fetchBudget: () => {
+	fetchFrom: () => {
 		throw new Error("track.ts not loaded");
 	},
 	askFetch: () => {

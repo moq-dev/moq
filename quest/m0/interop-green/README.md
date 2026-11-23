@@ -10,10 +10,13 @@ so it only needs to stay green.
 
 ## Waiting
 
-- moq-dev/moq: the next scheduled Interop run on `main` passes, now that
-  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) (max age,
-  2026-11-12) and [moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)
-  (resumed audio, 2026-11-14) have landed. Check
+- moq-dev/moq: the next scheduled Interop run on `main` passes, now that the
+  catalog fix ([moq-dev/moq#9333](https://github.com/moq-dev/moq/pull/9333)),
+  the open-GOP fixture ([moq-dev/moq#9306](https://github.com/moq-dev/moq/pull/9306)),
+  the datagram assertion ([moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)),
+  and the range table's `relay-warm` marker
+  ([moq-dev/moq#9408](https://github.com/moq-dev/moq/pull/9408)) have landed. The
+  Chromium `reattach reaches live` failure of 2026-11-22 has its own child quest. Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
@@ -77,10 +80,22 @@ Scheduled runs 2026-11-15 to 2026-11-21 (every one red) failed three causes, non
 The 2026-11-22 scheduled run
 [45041226494](https://github.com/moq-dev/moq/actions/runs/45041226494), at 040a566d40 with
 both of those merged and before the catalog fix, passed the matrix and failed two other
-steps. `Relay fills`: `relay_fill::relay_fill_range_table` took over 30 s on the runner and
-failed with `publish error ... remote error: 1`; it passes here in 22 s on the same code, so
-the cause is not found. `Media output and lifecycle`: the chromium `replacement` case, which
-stays with the epic's replacement child.
+steps, as its own triage on 2026-11-23 found:
+
+- `Relay fills`: `relay_fill::relay_fill_range_table` failed one case, `warm: a time range
+  and a live join in one subscription: delivered [1000, 2000]` (the JavaScript relay's warm
+  copy drops the live join). The `publish error ... remote error: 1` lines are every case's
+  teardown. [moq-dev/moq#9408](https://github.com/moq-dev/moq/pull/9408) has since marked
+  that case known for `relay-warm`, owned by
+  [relayed live join start](/quest/m2/time-addressing/relayed-live-join-start.md).
+- `Media output and lifecycle`: Chromium's `reattach reaches live` on `moq-lite-06`, not
+  `replacement`: the relay aborted the reattached player's live groups `Old`, so it got no
+  audio and 14 video frames. A child quest owns it.
+
+The Nightly's `Media (firefox player)` failed the `replacement` case on 11-20, 11-21, and
+11-22, after [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) and
+[moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300). Each time an unrelated page
+underflowed with it, so the ARM runner starved; a child quest owns it.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

@@ -103,8 +103,12 @@ async fn import_onto(
 	let mut track = consumer
 		.track(&name)?
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING_MAX_DELAY,
+					max: Some(RECORDING_MAX_DELAY),
+				},
+			)]),
 		)
 		.await?
 		.ordered();

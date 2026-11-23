@@ -53,9 +53,8 @@ async function measure(tracks: number, viewers: number, clock: Manual) {
 			const root = (await viewer.catalog.latest())?.value;
 			for (let index = 0; index < media.length; index++) {
 				// Model the player's changed latency floor with real subscription handles.
-				viewer.media[index].update({
-					delay: { max: Duration.millis(root?.video?.renditions[media[index].name].jitter ?? 0) },
-				});
+				const max = Duration.millis(root?.video?.renditions[media[index].name].jitter ?? 0);
+				viewer.media[index].update({ ranges: [{ start: { live: { min: Duration.ZERO, max } } }] });
 				updates++;
 			}
 		}

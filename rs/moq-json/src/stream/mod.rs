@@ -375,11 +375,9 @@ mod test {
 			.create_track("test", timed().with_max_age(None))
 			.unwrap();
 
-		// Ask for a replay window, so the first group is delivered rather than skipped by the
-		// subscriber's default max delay budget once a newer group exists. The track keeps it
-		// fresh with an unlimited max age.
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
+		// Ask for history, so the first group is delivered rather than skipped by the default live
+		// join once a newer group exists. The track keeps it fresh with an unlimited max age.
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
 		let subscriber = track.subscribe(subscription);
 
 		// Both groups stay open, the way a publisher writing to two at once leaves them.

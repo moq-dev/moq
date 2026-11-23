@@ -255,8 +255,12 @@ async fn import_opus_frames() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING_MAX_AGE,
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -537,8 +541,12 @@ async fn survives_midstream_join() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING_MAX_AGE,
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -595,8 +603,12 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: RECORDING_MAX_AGE,
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();

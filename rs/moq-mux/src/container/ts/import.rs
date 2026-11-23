@@ -5471,8 +5471,12 @@ pub(super) mod test {
 			.track(&name)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: RECORDING_MAX_AGE,
+						max: Some(RECORDING_MAX_AGE),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -6156,8 +6160,12 @@ pub(super) mod test {
 			.track(&name)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: RECORDING_MAX_AGE,
+						max: Some(RECORDING_MAX_AGE),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -7380,8 +7388,12 @@ pub(super) mod test {
 			.track(hang::catalog::Catalog::DEFAULT_NAME)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: RECORDING_MAX_AGE,
+						max: Some(RECORDING_MAX_AGE),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -7775,8 +7787,12 @@ pub(super) mod test {
 			.track(&name)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: RECORDING_MAX_AGE,
+						max: Some(RECORDING_MAX_AGE),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -8073,8 +8089,12 @@ pub(super) mod test {
 		// A generous max delay: the default of zero would shed every non-latest group, the
 		// declared breaks among them, and the subscribe start is resolved from it too, so
 		// it has to reach back past a 30 s leap to the first frame.
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: std::time::Duration::from_secs(3600),
+				max: Some(std::time::Duration::from_secs(3600)),
+			},
+		)]);
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
@@ -9390,8 +9410,12 @@ pub(super) mod test {
 		name: &str,
 		kind: crate::container::Kind,
 	) -> Vec<crate::container::Frame> {
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Duration::from_secs(3600),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]);
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
@@ -10209,8 +10233,12 @@ pub(super) mod test {
 
 		// Each group as published, its empty end marker included.
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Duration::from_secs(3600),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Some(mut group) = track.recv_group().await.unwrap() {
@@ -10451,8 +10479,12 @@ pub(super) mod test {
 		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
 
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Duration::from_secs(3600),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
@@ -10495,8 +10527,12 @@ pub(super) mod test {
 		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
 
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Duration::from_secs(3600),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
@@ -11370,8 +11406,12 @@ pub(super) mod test {
 				.track(&name)
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: RECORDING_MAX_AGE,
+							max: Some(RECORDING_MAX_AGE),
+						},
+					)]),
 				)
 				.await
 				.unwrap();

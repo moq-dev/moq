@@ -263,7 +263,13 @@ impl Consumer {
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
 		// slow to take its first, and the publisher should never see a stated zero min first.
 		let mut subscriber = track
-			.subscribe(playout.subscription(moq_net::track::Subscription::default().with_priority(options.priority)))
+			.subscribe(
+				playout.subscription(
+					moq_net::track::Subscription::default()
+						.with_priority(options.priority)
+						.with_ranges([moq_net::track::Range::ALL]),
+				),
+			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
 		// start, like any other join. Move the local cursor, not Subscription::ranges: the
@@ -1059,6 +1065,19 @@ mod tests {
 	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
 
+	/// The staleness budget of `subscription`'s one live join.
+	fn live_max(subscription: &moq_net::track::Subscription) -> Option<Duration> {
+		match subscription.ranges.as_slice() {
+			[
+				moq_net::track::Range {
+					start: moq_net::track::Start::Live { max, .. },
+					..
+				},
+			] => *max,
+			ranges => panic!("expected one live join, got {ranges:?}"),
+		}
+	}
+
 	/// The first request already states the min and max delay, each plus the warmup: a latest
 	/// start waits for the live edge with its subscription open, before the container could
 	/// update it.
@@ -1092,13 +1111,11 @@ mod tests {
 			first = track.subscription_changed() => first.unwrap(),
 		};
 		assert_eq!(
-			first.map(|sub| (sub.delay, sub.ranges)),
-			Some((
-				moq_net::track::Delay::default().with_max(Duration::from_millis(600)),
-				vec![moq_net::track::Range::from(moq_net::track::Start::Live(
-					Duration::from_millis(400)
-				))],
-			))
+			first.map(|sub| sub.ranges),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Duration::from_millis(400),
+				max: Some(Duration::from_millis(600)),
+			})])
 		);
 	}
 
@@ -1127,7 +1144,7 @@ mod tests {
 		consumer.set_max_delay(Duration::from_secs(2));
 		let subscription = track.subscription().unwrap();
 		assert_eq!(subscription.priority, -20);
-		assert_eq!(subscription.delay.max, Some(Duration::from_secs(2)));
+		assert_eq!(live_max(&subscription), Some(Duration::from_secs(2)));
 	}
 
 	/// A moved max delay reaches the subscription, plus the warmup, clamped to the max age.
@@ -1161,7 +1178,7 @@ mod tests {
 		consumer.set_max_delay(Duration::from_secs(2));
 		assert_eq!(consumer.max_delay(), Duration::from_secs(2));
 		assert_eq!(
-			track.subscription().unwrap().delay.max,
+			live_max(&track.subscription().unwrap()),
 			Some(Duration::from_millis(2_100))
 		);
 
@@ -1426,8 +1443,12 @@ mod tests {
 
 		// A first reader warms the relay's copy with every group.
 		{
-			let subscription = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+			let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Duration::from_secs(10),
+					max: Some(Duration::from_secs(10)),
+				},
+			)]);
 			let mut warm = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 			let mut groups = 0;
 			while groups < 4 {
@@ -1680,7 +1701,7 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(
-			track.subscription().unwrap().delay.max,
+			live_max(&track.subscription().unwrap()),
 			Some(Duration::from_millis(10_080))
 		);
 
@@ -2991,6 +3012,131 @@ mod tests {
 		}
 	}
 
+	/// Paced packets for the first minute of `budget`'s trace: long enough to spend the
+	/// prior and settle the target at its floor.
+	const PACED: usize = 3000;
+
+	/// `@moq/watch`'s `playout.test.ts` "subscription budget" trace, `(arrival, media)` in ms
+	/// per packet: a minute of 20 ms packets over a 50 ms path, then six seconds of them
+	/// flushed six at a time.
+	fn flushes() -> Vec<(u64, u64)> {
+		let base = 20 * PACED as u64;
+		(0..PACED as u64)
+			.map(|i| (50 + 20 * i, 20 * i))
+			.chain((0..300).map(|i| (base + 50 + 20 * (i / 6 * 6 + 5), base + 20 * i)))
+			.collect()
+	}
+
+	/// [`flushes`] through the whole decode path, one PCM packet per group. Every packet
+	/// sharing an arrival lands before any is read, so the oldest of a flush trails the newest by
+	/// 100 ms. After each arrival, `budget` turns the consumer's delay into its max delay.
+	/// Returns the delay after each arrival in milliseconds, and how many packets were decoded
+	/// rather than skipped.
+	async fn budget(budget: impl Fn(Duration) -> Duration) -> (Vec<f64>, usize) {
+		use moq_mux::container::Container as _;
+
+		let events = flushes();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let options = Options {
+			delay: Delay {
+				max: Some(budget(Duration::ZERO)),
+				..Delay::default()
+			},
+			estimate: true,
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", options).await.unwrap();
+
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let start = kio::clock::now();
+		let mut series = Vec::new();
+		let mut delivered = 0;
+		let mut next = 0;
+		while next < events.len() {
+			let at = events[next].0;
+			tokio::time::advance(Duration::from_millis(at).saturating_sub(start.elapsed())).await;
+			let mut newest = 0;
+			for (sequence, &(_, media)) in events.iter().enumerate().skip(next) {
+				if events[sequence].0 != at {
+					break;
+				}
+				let mut group = track
+					.create_group(moq_net::group::Info { start: sequence as u64 })
+					.unwrap();
+				let frame = moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(media * 1000).unwrap(),
+					duration: None,
+					payload: payload.clone(),
+					keyframe: true,
+				};
+				container.write(&mut group, &[frame]).unwrap();
+				group.finish().unwrap();
+				newest = media;
+				next = sequence + 1;
+			}
+			// Read through the newest packet, which the max delay never gives up; what it gives
+			// up below that reads as a gap.
+			loop {
+				let frame = next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
+				delivered += 1;
+				if frame.timestamp == Timestamp::from_micros(newest * 1000).unwrap() {
+					break;
+				}
+			}
+			series.push(crate::jitter::millis(consumer.delay()));
+			consumer.set_max_delay(budget(consumer.delay()));
+		}
+		(series, delivered)
+	}
+
+	/// The targets across the first twenty flushes, 2.4 s of them.
+	fn onset(series: &[f64]) -> f64 {
+		series[PACED..PACED + 20].iter().copied().fold(f64::MIN, f64::max)
+	}
+
+	/// `moq play`'s subscription reaches the estimator's 2 s ceiling past its delay, never below
+	/// the 2 s it opened with (`rs/moq-cli/src/play/media.rs`, here with audio's delay as the
+	/// shared one), so a flush that starts after the target settled at its floor still lands
+	/// whole and moves it, as the browser's does.
+	#[tokio::test(start_paused = true)]
+	async fn the_subscription_reaches_a_flush_that_starts_after_the_target_settled() {
+		let reach = Duration::from_secs(2);
+		let (series, delivered) = budget(|delay| (delay + reach).max(reach)).await;
+		assert_eq!(series[PACED - 1], 40.0);
+		assert_eq!(delivered, PACED + 300);
+
+		// Every packet observed: the estimator fed the same arrivals directly, after each one.
+		let mut target = crate::jitter::Target::new(Duration::ZERO, true, None);
+		target.set_frame(20.0);
+		let mut direct = Vec::new();
+		let events = flushes();
+		for (index, &(at, media)) in events.iter().enumerate() {
+			target.observe(at as f64, media as f64);
+			if events.get(index + 1).is_none_or(|next| next.0 != at) {
+				direct.push(target.millis());
+			}
+		}
+		assert_eq!(series, direct);
+		// Every flush lands whole, so its 100 ms reaches the 95th percentile within a few intervals.
+		assert!(onset(&series) >= 120.0, "{:?}", &series[PACED..PACED + 20]);
+	}
+
+	/// The counter-case: a max delay that only follows the delay gives up the oldest of each
+	/// flush before the consumer observes it, so the estimate only ever sees what the delay it
+	/// already holds allows.
+	#[tokio::test(start_paused = true)]
+	async fn a_budget_following_the_delay_drops_the_flush_it_should_measure() {
+		let (series, delivered) = budget(|delay| delay).await;
+		assert!(delivered < PACED + 300, "{delivered} delivered");
+		assert!(onset(&series) < 120.0, "{:?}", &series[PACED..PACED + 20]);
+	}
+
 	/// Write `events`, `(arrival, group, media)` in ms in arrival order, through the whole
 	/// decode path, one PCM packet per group, reading each one `read` admits as it lands.
 	/// The publisher answers that its feed starts at the first event's group, as a session's
@@ -3052,56 +3198,6 @@ mod tests {
 				(at, 200 + k, 100_000 + 20 * k)
 			})
 			.collect()
-	}
-
-	/// A join's backlog that arrives below the cursor is dropped unread, yet the target
-	/// still learns when it arrived: the live packets queued behind it measured the join,
-	/// not the path, so they fold nothing rather than a 300 ms stall. The publisher stood at
-	/// group 200 as the subscription began; its backlog lands behind it, 41 groups over the
-	/// first 400 ms and 15 more 1.0 to 1.3 s in, with the live packets produced meanwhile
-	/// queued behind them. Without `delivered`, that backlog never reaches this node, though
-	/// the live packets still queue behind it.
-	async fn join_delay(delivered: bool) -> f64 {
-		let mut events = live(|produced| match produced + 40 {
-			at if at <= 400 => 400 + produced / 10,
-			at if (1000..1300).contains(&at) => 1300 + (produced - 960) / 10,
-			at => at,
-		});
-		// Group 200 lands first, so the publisher's largest names it.
-		events[0].0 = 0;
-		if delivered {
-			for i in 0..41 {
-				events.push((5 + 10 * i, 100 + i, 90_000 + 20 * i));
-			}
-			for s in 0..15 {
-				events.push((1000 + 20 * s, 141 + s, 99_700 + 20 * s));
-			}
-		}
-		events.sort_by_key(|&(at, sequence, _)| (at, sequence));
-		let (delay, backlog) = play(&events, |sequence| sequence >= 200).await;
-		assert_eq!(backlog, delivered);
-
-		// The estimator fed the same arrivals directly, each skipped group reported.
-		let mut target = crate::jitter::Target::new(Duration::ZERO, true, None);
-		target.set_frame(20.0);
-		for &(at, sequence, media) in &events {
-			match sequence >= 200 {
-				true => target.observe(at as f64, media as f64),
-				false => target.backlog(at as f64),
-			}
-		}
-		assert_eq!(delay, target.millis());
-		delay
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn a_join_backlog_skipped_below_the_cursor_folds_nothing() {
-		let skipped = join_delay(true).await;
-		let unseen = join_delay(false).await;
-		assert!(
-			skipped <= 100.0 && unseen >= 300.0,
-			"{skipped} ms skipped, {unseen} ms unseen"
-		);
 	}
 
 	/// A path that delivers every fifth packet 300 ms late from the start: each lands after
@@ -3498,7 +3594,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().delay.max, Some(max_delay));
+		assert_eq!(live_max(&observed.subscription().unwrap()), Some(max_delay));
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

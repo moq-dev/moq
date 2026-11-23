@@ -14564,11 +14564,9 @@ fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireB
 			false => (Some(start), end),
 		};
 	}
-	let first = subscription
-		.ranges
-		.iter()
-		.filter(|range| !range.is_empty())
-		.filter_map(|range| range.time())
+	let first = (subscription.times())
+		.filter(|(range, _)| !range.is_empty())
+		.filter_map(|(_, time)| time)
 		.min();
 	let covered = joined.is_some_and(|joined| first.is_none_or(|first| first >= joined));
 	let start = match covered {
@@ -14579,13 +14577,11 @@ fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireB
 }
 
 /// The start group a SUBSCRIBE asks from before it knows the live edge, `None` for a live join.
-/// A range from the oldest group whose budget reaches back asks from group zero, so the
-/// publisher delivers the backlog it holds: a wire without ranges can't name the oldest any other
-/// way. A zero budget keeps only the latest group, which a live join already delivers.
+/// A range from the oldest group is history, so it asks from group zero and the publisher
+/// delivers the backlog it holds: a wire without ranges can't name the oldest any other way.
 fn wire_start(subscription: &track::Subscription) -> Option<u64> {
-	let reaches = subscription.delay.max != Some(Duration::ZERO);
 	// Only a time start can be empty, so every Oldest range delivers something.
-	let oldest = reaches && (subscription.ranges.iter()).any(|range| range.start == track::Start::Oldest);
+	let oldest = (subscription.ranges.iter()).any(|range| range.start == track::Start::Oldest);
 	match oldest {
 		true => Some(0),
 		false => subscription.start(),
@@ -14712,14 +14708,16 @@ mod filter_tests {
 
 	/// A live join with a range starting at or after the group it joined keeps its bounds, so
 	/// the copy sends no update widening it from group zero; a range below that group, or one
-	/// beside a range reaching back to the oldest group under a budget that keeps it, widens the
-	/// span to group zero.
+	/// beside a range from the oldest group, widens the span to group zero.
 	#[test]
 	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
 		let live = |min: Option<Duration>, start: u64| {
 			let first = match min {
-				Some(min) => track::Range::from(track::Start::Live(min)),
-				None => track::Range::default(),
+				Some(min) => track::Range::from(track::Start::Live {
+					min,
+					max: Some(std::time::Duration::ZERO),
+				}),
+				None => track::Range::ALL,
 			};
 			track::Subscription::default().with_ranges([
 				first,
@@ -14734,48 +14732,39 @@ mod filter_tests {
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), joined), (None, None));
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 9), joined), (Some(0), None));
 		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), None), (Some(0), None));
-		// The oldest group reaches back only under a budget that keeps more than the latest.
-		let patient = track::Delay::default().with_max(None);
-		assert_eq!(
-			wire_bounds(&live(None, 19).with_delay(patient), joined),
-			(Some(0), None)
-		);
-		assert_eq!(wire_bounds(&live(None, 19), joined), (None, None));
+		// A range from the oldest group is history, which reaches back to group zero.
+		assert_eq!(wire_bounds(&live(None, 19), joined), (Some(0), None));
 	}
 
-	/// A range from the oldest group whose budget reaches back asks from group zero, alone or
-	/// beside a live join, before and after the join is placed, so the publisher delivers the
-	/// backlog it holds.
+	/// A range from the oldest group, history, asks from group zero, alone or beside a live
+	/// join, before and after the join is placed, so the publisher delivers the backlog it holds.
 	#[test]
 	fn an_oldest_range_asks_from_group_zero() {
 		let oldest = track::Range::from(track::Start::Oldest);
-		let live = track::Range::from(track::Start::Live(Duration::ZERO));
-		let reaching = |ranges: &[track::Range], max: Option<Duration>| {
-			track::Subscription::default()
-				.with_ranges(ranges.iter().copied())
-				.with_delay(track::Delay::default().with_max(max))
-		};
+		let live = track::Range::from(track::Start::LATEST);
+		let asking = |ranges: &[track::Range]| track::Subscription::default().with_ranges(ranges.iter().copied());
 		for ranges in [vec![oldest], vec![oldest, live], vec![live, oldest]] {
-			for max in [None, Some(Duration::from_secs(10))] {
-				let subscription = reaching(&ranges, max);
-				assert_eq!(wire_start(&subscription), Some(0), "{ranges:?} {max:?}");
-				for joined in [None, Some(10)] {
-					assert_eq!(
-						wire_bounds(&subscription, joined),
-						(Some(0), None),
-						"{ranges:?} {joined:?}"
-					);
-				}
+			let subscription = asking(&ranges);
+			assert_eq!(wire_start(&subscription), Some(0), "{ranges:?}");
+			for joined in [None, Some(10)] {
+				assert_eq!(
+					wire_bounds(&subscription, joined),
+					(Some(0), None),
+					"{ranges:?} {joined:?}"
+				);
 			}
 		}
 		let bounded = [track::Range {
 			start: track::Start::Oldest,
 			end: Some(4),
 		}];
-		assert_eq!(wire_bounds(&reaching(&bounded, None), None), (Some(0), Some(5)));
-		// A zero budget keeps only the latest group, which a live join delivers, as does a live
-		// join alone.
-		for subscription in [reaching(&[oldest], Some(Duration::ZERO)), reaching(&[live], None)] {
+		assert_eq!(wire_bounds(&asking(&bounded), None), (Some(0), Some(5)));
+		// A live join alone asks from the live edge, whatever its max.
+		let patient = track::Range::from(track::Start::Live {
+			min: Duration::ZERO,
+			max: Some(Duration::from_secs(10)),
+		});
+		for subscription in [asking(&[live]), asking(&[patient])] {
 			assert_eq!(wire_start(&subscription), None, "{subscription:?}");
 			assert_eq!(wire_bounds(&subscription, Some(10)), (None, None), "{subscription:?}");
 		}
@@ -14795,7 +14784,7 @@ mod filter_tests {
 		// A range from the oldest group reaches no further back than a join that began at group 0.
 		let oldest = track::Subscription::default()
 			.with_ranges([track::Range::from(track::Start::Oldest)])
-			.with_delay(track::Delay::default().with_max(None));
+			.with_max(None);
 		assert_eq!(wire_bounds(&oldest, Some(0)), (None, None));
 		assert_eq!(wire_bounds(&oldest, Some(10)), (Some(0), None));
 	}
@@ -15295,7 +15284,7 @@ mod stitch_tests {
 			.subscribe(Some(
 				track::Subscription::default()
 					.with_order(crate::track::Order::Ascending)
-					.with_delay(track::Delay::default().with_max(None)),
+					.with_max(None),
 			))
 			.with_range(..);
 		let mut fill = h.stream().await;
@@ -16727,7 +16716,7 @@ mod stitch_tests {
 			.subscribe(Some(
 				track::Subscription::default()
 					.with_order(crate::track::Order::Ascending)
-					.with_delay(track::Delay::default().with_max(None)),
+					.with_max(None),
 			))
 			.with_range(0..)
 			.ordered();
@@ -17422,7 +17411,7 @@ mod stitch_tests {
 						track::Subscription::default()
 							.with_range(0..last + 1)
 							.with_order(crate::track::Order::Ascending)
-							.with_delay(track::Delay::default().with_max(None)),
+							.with_max(None),
 					))
 					.await
 					.unwrap();
@@ -17516,11 +17505,9 @@ mod stitch_tests {
 			run.track.create_group(3u64.into()).unwrap().finish().unwrap();
 			let requests = run.track.requests();
 			// From group 0, which a time start names whatever is held.
-			let mut reader = run.track.subscribe(
-				track::Subscription::default()
-					.with_range(0..3)
-					.with_delay(track::Delay::default().with_max(None)),
-			);
+			let mut reader = run
+				.track
+				.subscribe(track::Subscription::default().with_range(0..3).with_max(None));
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_drop(&waiter).is_pending());
 			assert!(reader.poll_recv_group(&waiter).is_pending());
@@ -17570,7 +17557,7 @@ mod stitch_tests {
 					track::Subscription::default()
 						.with_range(0..7)
 						.with_order(crate::track::Order::Ascending)
-						.with_delay(track::Delay::default().with_max(None)),
+						.with_max(None),
 				))
 				.await
 				.unwrap();
@@ -18441,9 +18428,7 @@ mod joining_fetch_tests {
 		let version = Version::Draft22;
 		let largest = Some(ietf::Location { group: 9, object: 0 });
 		for start in [track::Start::Time(0), track::Start::Oldest] {
-			let subscription = track::Subscription::default()
-				.with_ranges([track::Range::from(start)])
-				.with_delay(track::Delay::default().with_max(None));
+			let subscription = track::Subscription::default().with_ranges([track::Range::from(start)]);
 			let session = ScriptedSession::per_stream(vec![
 				subscribe_ok(version, largest),
 				super::stitch_tests::tail_stream(10, 0, &[b"live"]),
@@ -19075,7 +19060,7 @@ mod joining_fetch_tests {
 			);
 			assert!(subscriber.state.lock().group_fetches.is_empty());
 			assert!(matches!(
-				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
+				outcome.read().refused(GROUP).cloned(),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 			return;
@@ -19093,7 +19078,7 @@ mod joining_fetch_tests {
 				"{version:?}: unanswered FETCH stays alive"
 			);
 			assert!(matches!(
-				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
+				outcome.read().refused(GROUP).cloned(),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 		} else {
@@ -19980,11 +19965,11 @@ mod new_group_tests {
 			let _ = read(&mut stream).await;
 			answer(&mut stream).await;
 
-			let wanted = track::Subscription::default();
-			let wanted = match end {
-				Some(end) => wanted.with_range(..end),
-				None => wanted,
-			};
+			// A live join, ending before group `end` when one is given.
+			let wanted = track::Subscription::default().with_ranges([track::Range {
+				start: track::Start::LATEST,
+				end: end.map(|end| end - 1),
+			}]);
 			first.update(wanted).unwrap();
 			let (id, body) = read(&mut stream).await;
 			assert_eq!(id, ietf::SubscribeUpdate::ID);
