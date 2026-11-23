@@ -5062,12 +5062,19 @@ impl Consumer {
 				next
 			}
 			_ => {
-				let Some(copy) = ready!(self.poll_successor_at(waiter, drained))? else {
-					return failed;
-				};
+				let copy = ready!(self.poll_successor_at(waiter, drained))?;
 				let mut next = self.clone();
-				next.adopt_copy(copy);
 				next.cursor.index = drained;
+				match copy {
+					Some(copy) => {
+						next.adopt_copy(copy);
+						next.cursor.index = drained;
+					}
+					// Nothing replaced the copy, so the frames past the prefetch come on a
+					// flight, as they would for the reader once it drains that far.
+					None if next.board(&mut false) => {}
+					None => return failed,
+				}
 				next
 			}
 		};

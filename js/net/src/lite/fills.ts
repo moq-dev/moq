@@ -200,7 +200,8 @@ export class RangeFills {
 	poll(tail: Tail, read: boolean): boolean {
 		const empty = this.isEmpty();
 		// The groups the subscription already accounted for, which it never sends again, are
-		// recovered on their own, once.
+		// recovered on their own, as often as the cache evicts them before a reader takes them: a key
+		// a reader is owed is never lost to the cache. Mirrors the Rust `RangeFills::poll`.
 		const asked: Run[] = [];
 		for (const fill of this.#held) {
 			const run = nextRun(fill);
@@ -208,18 +209,8 @@ export class RangeFills {
 		}
 		for (const run of asked) {
 			for (const gone of tail.accounted(run.start, run.end)) {
-				for (const gap of runGaps(this.#recovering, gone.start, gone.end)) {
-					const done = clip(this.#recovered, gap.start, gap.end);
-					for (const again of done) {
-						// Recovered once for these fills; a later request may recover it again.
-						for (const owed of this.#unrefused(again.start, again.end))
-							this.#setRefused(owed.start, owed.end, passing(new NotFound(`group ${owed.start}`)));
-					}
-					for (const fresh of runGaps(done, gap.start, gap.end)) {
-						for (const owed of this.#unrefused(fresh.start, fresh.end))
-							insertRun(this.#toRecover, owed.start, owed.end);
-					}
-				}
+				for (const gap of runGaps(this.#recovering, gone.start, gone.end))
+					for (const owed of this.#unrefused(gap.start, gap.end)) insertRun(this.#toRecover, owed.start, owed.end);
 			}
 		}
 		// Each stale run goes out on its own subscription with no max delay, once, with the priority

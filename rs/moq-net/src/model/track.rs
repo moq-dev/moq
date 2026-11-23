@@ -33386,6 +33386,53 @@ mod test {
 		drop(arriving);
 	}
 
+	/// The end of a group evicted while it arrives waits on a flight from past the frames
+	/// the reader already prefetched, rather than failing the group with them in hand.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_end_past_a_prefetch_of_a_group_evicted_while_arriving_waits_on_its_flight() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		for index in 0..3 {
+			live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
+				.unwrap();
+		}
+		// Reading frame 0 prefetches 1 and 2.
+		assert_eq!(read_numbered(&mut reader), Some(0));
+		let handle = live.handle();
+		let payload = numbered(3);
+		let mut arriving = live.create_frame(frame_info(&payload)).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		handle.shed_all();
+
+		let (flag, waiter) = Flag::waiter();
+		assert!(
+			reader.poll_finished(&waiter).is_pending(),
+			"the copy's eviction past the prefetch is not the group's end"
+		);
+		let fill = match requests.poll_requested_fill(&kio::Waiter::noop()) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("the end asks a flight"),
+		};
+		assert_eq!(fill.start(), Position { group: 0, frame: 3 });
+		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		flight
+			.write_frame(crate::Timestamp::unscaled(flight.start), numbered(3))
+			.unwrap();
+		flight.finish().unwrap();
+		assert!(flag.take(), "the flight's finish woke the end");
+		assert!(
+			matches!(reader.poll_finished(&waiter), Poll::Ready(Ok(1))),
+			"the flight's end"
+		);
+		for index in 1..4 {
+			assert_eq!(read_numbered(&mut reader), Some(index));
+		}
+		drop(arriving);
+	}
+
 	/// A late joiner of a live group that shed its front boards a flight from frame 0,
 	/// served by the track's handler, reads it as the handler writes it, and hands over to
 	/// the live copy once that copy holds its frame within reach of the live reader. The
