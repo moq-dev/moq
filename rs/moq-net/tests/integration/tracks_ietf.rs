@@ -19,7 +19,12 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every draft that has SUBSCRIBE_TRACKS.
-const DRAFTS: [&str; 3] = ["moq-transport-18", "moq-transport-20", "moq-transport-22"];
+const DRAFTS: [&str; 4] = [
+	"moq-transport-18",
+	"moq-transport-20",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 /// SUBSCRIBE (0x03), as the first byte of a request stream.
 const SUBSCRIBE: u8 = 0x03;
@@ -28,10 +33,11 @@ const SUBSCRIBE: u8 = 0x03;
 const SUBSCRIBE_TRACKS: u8 = 0x51;
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// The next event as `+name`, `-name`, `synced`, `end`, or `error: ..`.

@@ -11,9 +11,11 @@ use moq_net::{Instance, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
@@ -103,7 +105,7 @@ async fn older_lite_mints_per_announcement() {
 
 #[kio::test]
 async fn moq_transport_mints_per_announcement() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		job_reannounced(version).await;
 	}
 }

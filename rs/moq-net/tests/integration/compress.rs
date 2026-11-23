@@ -31,10 +31,11 @@ fn compressed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A repetitive payload, which DEFLATE shrinks, distinct per frame.
@@ -125,7 +126,12 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 }
 
 /// Hops that carry a start group and negotiate compression: lite-07 and moq-transport.
-const RANGED: &[&str] = &["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
+const RANGED: &[&str] = &[
+	"moq-lite-07-wip",
+	"moq-transport-18",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 /// A subscription starting at a group delivers it whole from its first frame across every
 /// pair of hops, compressed or not, whether the group began before it subscribed or after.
@@ -243,8 +249,8 @@ async fn relay_serves_every_version() {
 /// Negotiated IETF ingress stays compressed across a relay to IETF or lite-07 egress.
 #[kio::test]
 async fn ietf_ingress_stays_compressed_across_protocols() {
-	for upstream in ["moq-transport-18", "moq-transport-22"] {
-		for downstream in ["moq-lite-07-wip", "moq-transport-22"] {
+	for upstream in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
+		for downstream in ["moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 			kio::clock::timeout(TIMEOUT, async {
 				let mut fixture = connect(upstream, downstream).await;
 				assert!(
@@ -276,7 +282,7 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 /// A finished compressed track remains fetchable without subscribing to its live feed.
 #[kio::test]
 async fn ietf_fetch_keeps_the_stored_form() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher

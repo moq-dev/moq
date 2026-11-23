@@ -77,12 +77,14 @@ export namespace Local {
 	}
 	export interface Microphone {
 		readonly enabled: Signal<boolean>;
+		readonly join: Signal<Clock.Duration>;
 		readonly root: Getter<AudioNode | undefined>;
 		readonly source: Source.Microphone;
 		readonly volume: Signal<number>;
 	}
 	export interface Screen {
 		readonly audio: {
+			readonly join: Signal<Clock.Duration>;
 			readonly root: Getter<AudioNode | undefined>;
 		};
 		readonly broadcast: import("@moq/publish").Broadcast;
@@ -115,8 +117,12 @@ export interface LocalProps {
 	identity: GetterInit<Path.Valid>;
 	microphone?: {
 		enabled?: GetterInit<boolean>;
+		join?: Clock.Duration | Signal<Clock.Duration>;
 	};
 	screen?: {
+		audio?: {
+			join?: Clock.Duration | Signal<Clock.Duration>;
+		};
 		enabled?: GetterInit<boolean>;
 	};
 	user?: UserProps;

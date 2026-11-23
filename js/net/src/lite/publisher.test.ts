@@ -1839,12 +1839,13 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 // A relay receives the newest group first while its source still promises older groups.
 // START must preserve that promise, bounded by the downstream floor and first served group.
 // Lite-07 asks for the group containing time 2, which the source's start places, so no floor
-// raises it: a source starting at group 0 contains time 2.
+// raises it: a source starting at group 0 contains time 2, and one starting past it starts the
+// range there, so a group below that never goes out.
 for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	for (const [source, expected] of [
 		[0n, hasRanges(version) ? 0n : 2n],
 		[3n, 3n],
-		[9n, 6n],
+		[9n, hasRanges(version) ? 9n : 6n],
 	]) {
 		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
 			const sub = await servedSubscription({ version, startGroup: 2n });
@@ -1853,12 +1854,13 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 				// A lite-07 source reports where it started the time asked for.
 				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source, NO_MAX_DELAY]]);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
-				sub.serve(6n);
-				expect(await sub.servedSequence()).toBe(6n);
+				const first = expected > 6n ? expected : 6n;
+				sub.serve(first);
+				expect(await sub.servedSequence()).toBe(first);
 				const response = await decodeSubscribeResponse(sub.client.reader, version);
 				if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 				expect(response.start.starts[0]).toBe(expected);
-				if (expected < 6n) {
+				if (expected < first) {
 					sub.serve(expected);
 					expect(await sub.servedSequence()).toBe(expected);
 				}
@@ -2272,6 +2274,92 @@ test("lite-07 an update moves frame starts with the live ranges", async () => {
 		expect(await sub.servedGroup()).toMatchObject({ key: 2n, frameStart: 0, payloads: ["a", "b", "c"] });
 	} finally {
 		await sub.close();
+	}
+});
+
+test("lite-07 a Position end parks the group, the stream open, until an update moves it", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		sub.serve(0n);
+		let served: Served | undefined;
+		const serving = sub.servedGroup().then((group) => {
+			served = group;
+		});
+		await flush();
+		expect(served).toBeUndefined();
+
+		// Moved past the group, the rest goes out on the same stream, which then ends.
+		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
+			sub.client.writer,
+			version,
+		);
+		await serving;
+		expect(served).toMatchObject({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+	} finally {
+		await sub.close();
+	}
+
+	// A group ending at the end ends its stream as usual.
+	const ending = await servedSubscription({
+		version,
+		frames: ["a", "b"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		ending.serve(0n);
+		expect(await ending.servedGroup()).toMatchObject({ key: 0n, payloads: ["a", "b"] });
+	} finally {
+		await ending.close();
+	}
+
+	// A track that ends while a group is parked still applies the update that moves its stop.
+	const ended = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		ended.serve(0n);
+		let served: Served | undefined;
+		const serving = ended.servedGroup().then((group) => {
+			served = group;
+		});
+		ended.track.finish();
+		await flush();
+		expect(served).toBeUndefined();
+		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
+			ended.client.writer,
+			version,
+		);
+		await serving;
+		expect(served).toMatchObject({ key: 0n, payloads: ["a", "b", "c"] });
+	} finally {
+		await ended.close();
+	}
+
+	// The subscriber leaving resets a parked stream: no update will move its stop.
+	const leaving = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		const reset = leaving.stall();
+		leaving.serve(0n);
+		expect(await leaving.servedHeader()).toBe(0n);
+		leaving.client.close();
+		expect(await reset).toBeDefined();
+	} finally {
+		await leaving.close();
 	}
 });
 

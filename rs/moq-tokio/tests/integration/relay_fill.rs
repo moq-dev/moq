@@ -373,7 +373,7 @@ async fn table_read(subscriber: &mut moq_net::track::Subscriber, want: usize) ->
 
 /// Run one case of the range table through the relay's copy: cold, or `warm` with the case's
 /// copy readers subscribed first, each behind a downstream session of its own.
-async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> anyhow::Result<Vec<u64>> {
+async fn table_case(case: &serde_json::Value, groups: &[u64], frames: u64, warm: bool) -> anyhow::Result<Vec<u64>> {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.route("history", moq_net::origin::RouteOptions::hidden())?;
 	let track = broadcast
@@ -388,14 +388,30 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> any
 		None => groups.to_vec(),
 	};
 	let append = case.get("append").and_then(serde_json::Value::as_bool) != Some(false);
+	let span = case.get("span").and_then(serde_json::Value::as_u64);
+	let open: Vec<u64> = (case
+		.get("open")
+		.and_then(serde_json::Value::as_array)
+		.into_iter()
+		.flatten())
+	.filter_map(serde_json::Value::as_u64)
+	.collect();
+	// The groups the case leaves unfinished, held so they stay open.
+	let mut unfinished = Vec::new();
 	for start in starts {
 		let time = Timestamp::from_millis(start)?;
 		let mut group = match append {
 			true => track.append_group(time)?,
 			false => track.create_group(moq_net::group::Info { start })?,
 		};
-		group.write_frame(time, b"x".to_vec())?;
-		group.finish()?;
+		for frame in 0..frames {
+			group.write_frame(Timestamp::from_millis(start + frame)?, b"x".to_vec())?;
+		}
+		match span {
+			_ if open.contains(&start) => unfinished.push(group),
+			Some(span) => drop(group.finish_at(start + span)?),
+			None => drop(group.finish()?),
+		}
 	}
 	broadcast.announce()?;
 	let version = "moq-lite-07-wip".parse().map_err(anyhow::Error::msg)?;
@@ -435,6 +451,7 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> any
 async fn relay_fill_range_table() {
 	let table: serde_json::Value =
 		serde_json::from_str(include_str!("../../../moq-net/tests/range-table.json")).expect("the range table parses");
+	let frames = table["frames"].as_u64().expect("frames per group");
 	let groups: Vec<u64> = table["groups"]
 		.as_array()
 		.expect("groups")
@@ -468,7 +485,7 @@ async fn relay_fill_range_table() {
 			if known {
 				continue;
 			}
-			match kio::clock::timeout(TIMEOUT, table_case(case, &groups, warm)).await {
+			match kio::clock::timeout(TIMEOUT, table_case(case, &groups, frames, warm)).await {
 				Ok(Ok(got)) if got == want => {}
 				Ok(Ok(got)) => failures.push(format!("{mode}: {name}: delivered {got:?}")),
 				Ok(Err(err)) => failures.push(format!("{mode}: {name}: {err:#}")),

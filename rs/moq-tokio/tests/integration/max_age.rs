@@ -10,10 +10,10 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 	let mut cache = moq_net::origin::Config::default();
 	cache.cache_duration = Some(Duration::from_secs(1));
 	// A relay carries what it learned on to its other peers (moq-lite-07).
-	let relay = moq_tokio::origin::spawn_config(cache).with_proxy(true);
-	let ws = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?)
-		.await?
-		.with_protocols([version.alpn()])?;
+	cache.proxy = true;
+	let relay = moq_tokio::origin::spawn_config(cache);
+	// The listener takes `listen.version` from the server, opt-in versions included.
+	let ws = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?).await?;
 	let addr = ws.local_addr()?;
 	let mut config = moq_tokio::server::Config::default();
 	config.listen.version = vec![version];
@@ -133,7 +133,12 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 
 #[tokio::test]
 async fn max_age_relay_rust() {
-	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	for version in [
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap(), None))
 			.await
 			.unwrap()
@@ -144,7 +149,12 @@ async fn max_age_relay_rust() {
 #[tokio::test]
 #[ignore = "requires Bun; run by just test max-age in the interop workflow"]
 async fn max_age_relay_javascript() {
-	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	for version in [
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		for publish in [false, true] {
 			kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap(), Some(publish)))
 				.await

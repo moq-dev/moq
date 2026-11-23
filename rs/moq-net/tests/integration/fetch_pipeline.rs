@@ -16,17 +16,24 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
+const VERSIONS: &[&str] = &[
+	"moq-lite-05",
+	"moq-lite-07-wip",
+	"moq-transport-18",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &moq_net::origin::Producer, to: &moq_net::origin::Producer) -> MockPair {

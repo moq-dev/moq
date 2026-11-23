@@ -29,8 +29,11 @@ target_root="${CARGO_TARGET_DIR:-$WORKSPACE_DIR/target}"
 [[ "$target_root" = /* ]] || target_root="$WORKSPACE_DIR/$target_root"
 testing_target_dir="$target_root/ffi-testing"
 
+# The debug build is the one `maturin develop` runs for py, a cdylib alone, so
+# after py's build Cargo finds it fresh. Any other crate type would compile
+# moq-ffi again, a crate mbx cannot cache.
 case "$profile" in
-    debug) build=(cargo build-ffi --features testing --target-dir "$testing_target_dir") ;;
+    debug) build=(cargo rustc --locked --package moq-ffi --features "testing,openh264" --lib --crate-type cdylib --target-dir "$testing_target_dir") ;;
     release) build=(cargo build-ffi --release) ;;
     *)
         echo "error: unsupported MOQ_FFI_PROFILE: $profile" >&2

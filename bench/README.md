@@ -714,7 +714,7 @@ Rust counterpart is `cargo bench -p moq-net --features fuzz --bench bandwidth`, 
 `BANDWIDTH_COUNTS=<iterations>` mode prints allocations and wakes per operation.
 `pattern` runs `js/pattern/bench/algebra.ts` against every checkout's `@moq/pattern`:
 the same peer grant shapes as the Rust `pattern-algebra` sweep below, reduced and
-compared against a previous grant, up to a whole `AUTH_OK`.
+compared against a previous grant, up to a whole `AUTH_OK`, plus the prefix grant `AUTH_OK` carries now.
 The drift sweep includes untimed controls and timed groups with decode-order
 B-frames, independently varying publisher and reader counts and retained history.
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2

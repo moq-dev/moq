@@ -37,7 +37,9 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: [native]
-    if: ${{ always() && !cancelled() }}
+    # `native` runs only for the prebuilt-test dispatch and is skipped otherwise,
+    # which must not skip the build; a failed one must.
+    if: ${{ always() && !cancelled() && needs.native.result != 'failure' }}
     runs-on: ${{ matrix.os }}
 
     strategy:

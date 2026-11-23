@@ -35,7 +35,7 @@ A `Producer` writes and any number of `Consumer`s read, sharing state via `kio`.
 
 # Semver
 
-- `#[non_exhaustive]` only on error enums, enums that will gain variants, and `Config`-style structs with `pub` fields.
+- `#[non_exhaustive]` only on error enums, enums that will gain variants, `Config`-style structs with `pub` fields, and the event and item types a crate returns, including their struct variants.
 - Append variants to the end of a public fieldless enum; inserting reorders `as` values.
 - A renamed flag or env var stays as a hidden arg reported through `deprecated()` into `moq_tokio::cli::Deprecated`, which fails startup naming the replacement. Never advertise the old name.
 

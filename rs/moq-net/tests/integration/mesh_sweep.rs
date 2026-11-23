@@ -28,14 +28,14 @@ use crate::support::AppendNext;
 use crate::support::AtStart;
 use crate::support::{self, Rng};
 
-const VERSION: &str = "moq-lite-07-wip";
-
 /// The only track each broadcast carries, holding one frame.
 const TRACK: &str = "t";
 
 /// What one case runs.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
+	/// The version every session negotiates.
+	version: &'static str,
 	/// Relays in the mesh.
 	relays: usize,
 	/// External changes applied, one per quiet point.
@@ -204,10 +204,11 @@ struct Mesh {
 }
 
 impl Mesh {
-	async fn new(rng: Rng, relays: usize) -> Self {
+	async fn new(rng: Rng, shape: Shape) -> Self {
+		let relays = shape.relays;
 		let mut mesh = Self {
 			rng,
-			version: VERSION.parse().unwrap(),
+			version: shape.version.parse().unwrap(),
 			registry: stats::Registry::new(Default::default()),
 			next_hop: 0,
 			relays: Vec::new(),
@@ -258,9 +259,10 @@ impl Mesh {
 		let mut config = origin::Config::new(std::num::NonZeroU64::new(self.next_hop).unwrap());
 		// Nothing expires, so no expiry sweep keeps a timer armed and the mesh can go idle.
 		config.pool = cache::Pool::unbounded();
+		config.proxy = proxy;
 		let (origin, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
-		origin.with_proxy(proxy)
+		origin
 	}
 
 	fn stats(&self) -> moq_net::stats::Session {
@@ -567,7 +569,11 @@ impl Mesh {
 			let shown: BTreeMap<&str, &Instance> = (reader.shown.iter())
 				.map(|(path, shown)| (path.as_str(), &shown.instance))
 				.collect();
-			if shown != expected {
+			// A minted instance names only the session that showed it, so only its path counts.
+			let matches = shown.len() == expected.len()
+				&& (shown.iter().zip(&expected))
+					.all(|((path, shown), (want, instance))| path == want && (shown.is_minted() || shown == instance));
+			if !matches {
 				failures.push(format!("{name}: not settled: shows {shown:?}, reaches {expected:?}"));
 			}
 			for (path, shown) in &reader.shown {
@@ -636,15 +642,15 @@ fn close(pair: MockPair) {
 fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, seen: &Seen) -> Result<(), String> {
 	use origin::RouteKind::*;
 
-	// Truthful: every instance shown is one some client published at that path.
-	let publication = publications.get(&seen.instance).ok_or("an instance nobody published")?;
-	if publication.path != seen.path {
-		return Err(format!("the instance of {}", publication.path));
-	}
+	// An UPDATE names the instance shown and a RESTART another. A session keeps the instance
+	// it minted for a path while it holds the path, so this holds on a moq-lite-06 wire too.
+	// A retraction names the last route advertised, which may be a minted RESTART the update
+	// hold kept back and the retraction overtook (see `RouteEvent::announce`).
 	let current = reader.shown.get(&seen.path);
 	match (seen.kind, current) {
 		(Start, Some(_)) => return Err("START for a shown broadcast".into()),
 		(Update | Restart | End | Offline, None) => return Err("an event for a broadcast not shown".into()),
+		(End | Offline, Some(_)) if seen.instance.is_minted() => {}
 		(Update | End | Offline, Some(shown)) if shown.instance != seen.instance => {
 			return Err(format!("the event names another instance than {:?}", shown.instance));
 		}
@@ -652,6 +658,34 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 			return Err("RESTART to the same instance".into());
 		}
 		_ => {}
+	}
+
+	// A moq-lite-06 wire carries no instance, so each session mints one per path, and a
+	// reader can hold only the path to what was published: the settled check below still
+	// requires exactly the paths it reaches.
+	if seen.instance.is_minted() {
+		if !publications.values().any(|publication| publication.path == seen.path) {
+			return Err("a path nobody published".into());
+		}
+		match seen.kind {
+			Start | Update | Restart => {
+				let shown = Shown {
+					instance: seen.instance.clone(),
+					available: seen.available,
+				};
+				reader.shown.insert(seen.path.clone(), shown);
+			}
+			End | Offline => {
+				reader.shown.remove(&seen.path);
+			}
+		}
+		return Ok(());
+	}
+
+	// Truthful: every instance shown is one some client published at that path.
+	let publication = publications.get(&seen.instance).ok_or("an instance nobody published")?;
+	if publication.path != seen.path {
+		return Err(format!("the instance of {}", publication.path));
 	}
 	match seen.kind {
 		Start | Update | Restart => {
@@ -711,7 +745,7 @@ fn budget(before: Size, after: Size) -> u64 {
 
 /// What one case found: each change's announce-message count, or the failure.
 async fn run_case(rng: Rng, shape: Shape) -> Result<Counts, String> {
-	let mut mesh = Mesh::new(rng, shape.relays).await;
+	let mut mesh = Mesh::new(rng, shape).await;
 	kio::clock::sim::idle().await;
 	mesh.check().map_err(|err| format!("after building the mesh:\n{err}"))?;
 	let mut counts = Counts::new();
@@ -741,11 +775,17 @@ async fn run_case(rng: Rng, shape: Shape) -> Result<Counts, String> {
 	Ok(counts)
 }
 
-/// The case `index` of a sweep from `seed`: its own rng and simulator seed, and a shape.
-fn case(seed: u64, index: u64) -> (u64, Shape) {
+/// The versions every case runs under: lite-07's route layer, and moq-lite-06's hop chains,
+/// which relays speak to a peer that offers nothing newer.
+const VERSIONS: [&str; 2] = ["moq-lite-07-wip", "moq-lite-06"];
+
+/// The case `index` of a sweep from `seed` under `version`: its own rng and simulator seed,
+/// and a shape.
+fn case(seed: u64, index: u64, version: &'static str) -> (u64, Shape) {
 	let case_seed = Rng(seed ^ index.wrapping_mul(0xA24B_AED4_963E_E407)).next();
 	let mut rng = Rng(case_seed);
 	let shape = Shape {
+		version,
 		relays: rng.range(2, 10) as usize,
 		changes: rng.range(5, 30) as usize,
 	};
@@ -756,7 +796,7 @@ fn setting(name: &str, fallback: u64) -> u64 {
 	std::env::var(name).map_or(fallback, |value| value.parse().expect(name))
 }
 
-/// Runs the cases `MOQ_ROUTE_SEED` and `MOQ_ROUTE_CASES` pick.
+/// Runs the cases `MOQ_ROUTE_SEED` and `MOQ_ROUTE_CASES` pick, each under every version.
 #[test]
 fn seeded_meshes_hold_the_route_rules() {
 	let seed = setting("MOQ_ROUTE_SEED", 0x6d6f71);
@@ -764,14 +804,16 @@ fn seeded_meshes_hold_the_route_rules() {
 	let first = setting("MOQ_ROUTE_CASE", 0);
 	eprintln!("MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASES={cases}");
 	for index in first..first + cases {
-		let (case_seed, shape) = case(seed, index);
-		// A mesh that never goes quiet hangs rather than fails; the last of these names it.
-		eprintln!("MOQ_ROUTE_CASE={index} {shape:?}");
-		let result = kio::clock::sim::run_seeded(case_seed, run_case(Rng(case_seed), shape));
-		if let Err(err) = result {
-			panic!(
-				"{shape:?} failed; replay it with MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASE={index} MOQ_ROUTE_CASES=1\n{err}"
-			);
+		for version in VERSIONS {
+			let (case_seed, shape) = case(seed, index, version);
+			// A mesh that never goes quiet hangs rather than fails; the last of these names it.
+			eprintln!("MOQ_ROUTE_CASE={index} {shape:?}");
+			let result = kio::clock::sim::run_seeded(case_seed, run_case(Rng(case_seed), shape));
+			if let Err(err) = result {
+				panic!(
+					"{shape:?} failed; replay it with MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASE={index} MOQ_ROUTE_CASES=1\n{err}"
+				);
+			}
 		}
 	}
 }
@@ -780,12 +822,16 @@ fn seeded_meshes_hold_the_route_rules() {
 #[test]
 #[ignore = "a benchmark; Nightly reports it"]
 fn benchmark_route_mesh() {
-	println!("relays,change,mean_messages,max_messages");
-	for relays in [3, 6, 12, 24] {
+	println!("version,relays,change,mean_messages,max_messages");
+	for (version, relays) in VERSIONS.into_iter().flat_map(|v| [3, 6, 12, 24].map(|r| (v, r))) {
 		let mut all = Counts::new();
 		for index in 0..16 {
-			let (case_seed, _) = case(0x6d6f71, index);
-			let shape = Shape { relays, changes: 24 };
+			let (case_seed, _) = case(0x6d6f71, index, version);
+			let shape = Shape {
+				version,
+				relays,
+				changes: 24,
+			};
 			let counts = kio::clock::sim::run_seeded(case_seed, run_case(Rng(case_seed), shape))
 				.unwrap_or_else(|err| panic!("{shape:?} case {index}: {err}"));
 			for (change, sent) in counts {
@@ -795,7 +841,7 @@ fn benchmark_route_mesh() {
 		for (change, sent) in all {
 			let mean = sent.iter().sum::<u64>() as f64 / sent.len() as f64;
 			let max = sent.iter().max().unwrap();
-			println!("{relays},{},{mean:.1},{max}", change.as_str());
+			println!("{version},{relays},{},{mean:.1},{max}", change.as_str());
 		}
 	}
 }

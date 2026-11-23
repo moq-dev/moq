@@ -123,7 +123,7 @@ async def publish(
         producer = route.broadcast
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
-            producer, moq.media.VideoInit(format=moq.media.VideoFormat.H264, data=b"")
+            producer, moq.media.VideoInit(format=moq.media.VideoFormat.h264(), data=b"")
         )
         audio = moq.audio.Producer(
             catalog,

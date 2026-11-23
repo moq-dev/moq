@@ -25,10 +25,11 @@ fn millis(ms: u64) -> moq_net::Timestamp {
 const BUDGET: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A group starting at `key` milliseconds.
@@ -128,8 +129,8 @@ async fn relay(upstream: &str, downstream: &str) -> (Option<moq_net::Timescale>,
 #[kio::test]
 async fn a_timed_track_keeps_its_timestamps_through_a_relay() {
 	let mut failures = Vec::new();
-	for upstream in ["moq-lite-06", "moq-transport-22"] {
-		for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for upstream in ["moq-lite-06", "moq-transport-22", "moq-transport-23"] {
+		for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 			let (timescale, got) = relay(upstream, downstream).await;
 			let ok = timescale == Some(moq_net::Timescale::MILLI)
 				&& matches!(

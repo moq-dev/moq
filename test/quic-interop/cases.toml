@@ -124,13 +124,6 @@ why = "moq-quic's client never moves to a server's preferred address (quest/m4/q
 
 [[known]]
 client = "moq-quic"
-server = "moq-quic"
-case = "handshakecorruption"
-result = "failed"
-why = "About one run in ten: the server's Handshake flight lands before the client has the ServerHello, and both sides then probe only on a PTO backed off past 16 s, so a side hears nothing for the 30 s handshake timeout (quest/m4/quic-handshake-speedup.md)."
-
-[[known]]
-client = "moq-quic"
 server = "quiche"
 case = "rebind-port"
 result = "failed"

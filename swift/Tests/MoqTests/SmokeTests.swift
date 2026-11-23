@@ -65,7 +65,7 @@ final class SmokeTests: XCTestCase {
         let timebase = try Media.Timebase(broadcast: owner)
         XCTAssertThrowsError(
             try Media.ContainerProducer(
-                broadcast: other, initData: Media.ContainerInit(format: .fmp4, data: Data(), timebase: timebase)))
+                broadcast: other, initData: Media.ContainerInit(format: .fmp4(), data: Data(), timebase: timebase)))
         try owner.close()
         XCTAssertThrowsError(try Media.Timebase(broadcast: owner))
         try other.close()
@@ -216,7 +216,7 @@ final class SmokeTests: XCTestCase {
                 {
                     _ = try Video.Encoder(
                         input: VideoEncoderInput(
-                            format: .rgba, width: 64, height: 64,
+                            format: .rgba(), width: 64, height: 64,
                             framerate: Video.FrameRate(numerator: 30, denominator: 1)),
                         output: VideoEncoderOutput(codec: VideoCodec.h264(), join: bad, kind: .software))
                 }, "video join \(bad)")
@@ -622,7 +622,7 @@ final class SmokeTests: XCTestCase {
             optimizeForLatency: true
         )
         let media = try Media.TrackProducer.video(
-            broadcast: broadcast, initData: Media.VideoInit(format: .h264, data: Data(), hint: hint))
+            broadcast: broadcast, initData: Media.VideoInit(format: .h264(), data: Data(), hint: hint))
         try media.finish()
         try broadcast.close()
     }
@@ -1142,7 +1142,8 @@ final class SmokeTests: XCTestCase {
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(
-                format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+                format: .rgba(), width: 320, height: 240,
+                framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
             output: VideoEncoderOutput(codec: VideoCodec.h264(), kind: .software),
             track: "camera"
         )
@@ -1176,10 +1177,10 @@ final class SmokeTests: XCTestCase {
         decoder.cancel()
         XCTAssertNil(frame.surface())
 
-        let planar = try frame.pixels(format: .i420)
+        let planar = try frame.pixels(format: .i420())
         XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)
 
-        let packed = try frame.pixels(format: .rgba)
+        let packed = try frame.pixels(format: .rgba())
         XCTAssertEqual(packed.count, Int(frame.width()) * Int(frame.height()) * 4)
         XCTAssertTrue(stride(from: 3, to: packed.count, by: 4).allSatisfy { packed[$0] == 0xFF })
 

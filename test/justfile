@@ -213,7 +213,8 @@ mesh-replay *args:
 # the pipe instead, which a capture cannot carry; nightly runs this arm),
 # `--open-gop` (an open-GOP clip whose orphan leading pictures are trimmed), `--hrd`
 # (1080p video filling a broadcast-sized CPB), `--mpeg2` (MPEG-2 video carried whole,
-# decoded from the capture), `--delay 2s` (the exporter's). See
+# decoded from the capture), `--delay 2s` (the exporter's), `--passthrough
+# --restart 10` (the import killed and restarted under the export). See
 # ts/README.md.
 
 # Check the subscriber's MPEG-TS output for IRD compliance.
@@ -229,6 +230,7 @@ ts *args:
     python3 ./ts/klv.test.py
     python3 ./ts/revision.test.py
     python3 ./ts/clockless.test.py
+    python3 ./ts/splice.test.py
     ./ts/run.sh "$@"
 
 # Carry a hardware encoder's capture, which the T-STD model passes, whole through the round-trip.

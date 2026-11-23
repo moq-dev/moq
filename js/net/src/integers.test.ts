@@ -36,7 +36,7 @@ function fields(version: Lite | Version, ...values: (number | bigint)[]): Uint8A
 	return concat(values.map((value) => encodeVarint(value, version)));
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	for (const [name, decode] of [
 		["request error code", RequestError.decode],
 		["publish status code", PublishDone.decode],
@@ -70,7 +70,7 @@ test("time anchors round-trip beyond 2^53 and resolve adjacent times exactly", a
 	// Every group from 0 through the latest held, so a time names the group starting there.
 	const contiguous: Holdings = {
 		resolves: () => true,
-		containing: (time) => ({ group: time }),
+		containing: (time) => ({ at: time }),
 		nextStart: (from) => from,
 		complete: () => false,
 	};
@@ -80,7 +80,7 @@ test("time anchors round-trip beyond 2^53 and resolve adjacent times exactly", a
 	expect(() => rangesOf([{ start: 1 as never }])).toThrow(TypeError);
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	test(`${version}: subgroup and datagram object IDs round-trip beyond 2^53`, async () => {
 		await expect(
 			Group.decode(new Reader(undefined, fields(version, 2 ** 32 + 0x14, 0, 0, 0, 0), version), version),
