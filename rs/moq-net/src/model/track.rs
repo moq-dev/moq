@@ -3070,6 +3070,7 @@ impl TrackState {
 
 	/// Attach the publisher's immutable metadata without replacing it with local cache policy.
 	fn install(&mut self, info: Info) {
+		self.cache.set_publisher(info.priority);
 		// A replaced max age moves every parked read's budget.
 		if self.info.replace(info).is_some() {
 			self.cache.wakes().wake_all();
@@ -3096,6 +3097,7 @@ impl TrackState {
 		let mut new = state.write().ok().expect("a new track is open");
 		new.drops_bill = cache.extra();
 		new.arrivals_bill = cache.extra();
+		new.subscriptions.lock().account = Some(cache.clone());
 		new.cache = cache;
 		drop(new);
 		state
@@ -3457,27 +3459,36 @@ impl TrackState {
 		paid
 	}
 
-	/// Shed every frame of the live edge its session queued at its `moves`th move, if it is
-	/// still the edge: the session holds more live edges than its budget, and this one moved
-	/// longest ago.
+	/// Shed the frames each copy's fastest reader took of the live edge its session queued at
+	/// its `moves`th move, if it is still the edge: the session holds more live edges than its
+	/// budget, and this one moved longest ago.
 	///
 	/// The group stays cached, its timeline intact, so it still marks where the live edge is:
 	/// a live join is placed and staleness is judged as before, and a reader reaching a shed
 	/// frame reads [`Error::Evicted`], as after any shed.
-	pub(super) fn shed_edge_all(&mut self, moves: u64) {
-		if !self.cache.edge_is(moves) {
-			return;
+	pub(super) fn shed_edge_taken(&mut self, moves: u64) {
+		for group in self.edge_copies(moves) {
+			group.shed_taken();
 		}
-		let Some(slot) = self
-			.latest_group
-			.filter(|latest| self.protects(*latest))
-			.and_then(|latest| self.lookup.get(&latest))
-		else {
-			return;
-		};
-		for group in slot.copies() {
+	}
+
+	/// Shed every frame of the live edge queued at its `moves`th move, read or not, and abort
+	/// each copy still receiving a frame, which cannot be shed: the session is past its budget
+	/// with no frame its readers took left to shed.
+	pub(super) fn shed_edge_all(&mut self, moves: u64) {
+		for group in self.edge_copies(moves) {
 			group.shed_all();
 		}
+	}
+
+	/// The copies of the live edge its session queued at its `moves`th move, if it is still
+	/// the edge.
+	fn edge_copies(&self, moves: u64) -> impl Iterator<Item = &group::Handle> {
+		self.latest_group
+			.filter(|latest| self.cache.edge_is(moves) && self.protects(*latest))
+			.and_then(|latest| self.lookup.get(&latest))
+			.into_iter()
+			.flat_map(Slot::copies)
 	}
 
 	/// Shed up to `excess` bytes of the live edge's older frames, keeping the newest of an
@@ -25919,6 +25930,74 @@ mod test {
 		drop(open);
 	}
 
+	/// A session past its live-edge budget sheds in delivery's order: the lowest-priority
+	/// edge first even when it is newer, a subscriber's priority over the publisher's, and
+	/// the older of two equal edges.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_session_sheds_its_lowest_priority_edge_first() {
+		const FRAME: usize = 10_000;
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(25_000));
+		let track = |name: &str, priority| Producer::new(broadcast.clone(), name, Info::timed().with_priority(priority));
+		let (mut old, mut low, mut mid, mut new) = (track("old", 0), track("low", -5), track("mid", 0), track("new", 0));
+		let kept = |producer: &Producer| {
+			let mut group = producer.consume().peek_group(0).expect("the edge stays cached");
+			matches!(group.read_frame().now_or_never(), Some(Ok(Some(_))))
+		};
+
+		finished_group(&mut old, FRAME);
+		finished_group(&mut low, FRAME);
+		// Past the budget: `low` moved after `old`, but the publisher ranks it lower.
+		finished_group(&mut mid, FRAME);
+		assert!(broadcast.edges.used() <= 25_000, "{:?}", broadcast.edges);
+		assert!(!kept(&low), "the lowest-priority edge kept its frame");
+		assert!(kept(&old), "the older equal edge paid");
+		assert!(kept(&mid), "the writer paid");
+
+		// A subscriber's priority outranks any publisher's: `old` now pays after `mid`, the
+		// older of the two equals left.
+		let _urgent = old.subscribe(Subscription::default().with_priority(1));
+		finished_group(&mut new, FRAME);
+		assert!(broadcast.edges.used() <= 25_000, "{:?}", broadcast.edges);
+		assert!(!kept(&mid), "the older of two equal edges kept its frame");
+		assert!(kept(&old) && kept(&new), "a subscribed or newer edge paid");
+	}
+
+	/// Frames a reader took pay before any frame a reader is owed, whatever their priority:
+	/// a higher-priority edge whose reader caught up sheds what it read, and a lower one
+	/// whose reader lags keeps its frame.
+	#[test]
+	#[cfg(feature = "async")]
+	fn taken_frames_pay_before_owed_ones() {
+		const FRAME: usize = 10_000;
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(25_000));
+		let track = |name: &str, priority| Producer::new(broadcast.clone(), name, Info::timed().with_priority(priority));
+		let (mut low, mut high, mut new) = (track("low", -5), track("high", 5), track("new", 0));
+		let write = |producer: &mut Producer| {
+			let mut group = producer.append_next().unwrap();
+			let reader = producer.consume().peek_group(group.start).expect("cached");
+			group.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; FRAME])).unwrap();
+			(group, reader)
+		};
+
+		let (_low_group, mut lagging) = write(&mut low);
+		let (_high_group, mut caught_up) = write(&mut high);
+		assert!(matches!(caught_up.read_frame().now_or_never(), Some(Ok(Some(_)))));
+		let _new = write(&mut new);
+		assert!(broadcast.edges.used() <= 25_000, "{:?}", broadcast.edges);
+		assert!(
+			matches!(lagging.read_frame().now_or_never(), Some(Ok(Some(_)))),
+			"an owed frame paid while a taken one was left"
+		);
+		let mut late = high.consume().peek_group(0).expect("the edge stays cached");
+		assert!(
+			matches!(late.read_frame().now_or_never(), Some(Err(Error::Evicted))),
+			"the taken frame was kept"
+		);
+	}
+
 	/// Shedding a received compressed edge whose plain copy a reader started inflates nothing
 	/// just to drop it: the plain copy goes with the slices, decoder included, a plain read of
 	/// them is evicted, and the edge bills only its fixed bookkeeping after.
@@ -26064,7 +26143,10 @@ mod test {
 			})
 			.unwrap();
 		partial.write(bytes::Bytes::from(vec![0u8; 10_000])).unwrap();
-		finished_group(&mut b, 10_000);
+		// b's reader is owed its frame, so no frame a reader took can pay instead.
+		let mut written = b.append_next().unwrap();
+		let _reader = b.consume().peek_group(written.start).expect("cached");
+		written.write_frame(written.key_time(), bytes::Bytes::from(vec![0u8; 10_000])).unwrap();
 		assert!(broadcast.edges.used() <= 15_000, "{:?}", broadcast.edges);
 		// The rest of the frame lands in an aborted copy, which finishing reports.
 		let _ = partial.write(bytes::Bytes::from(vec![0u8; 10_000]));

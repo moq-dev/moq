@@ -26,7 +26,7 @@ credit for bytes the model already counts. It is a design change of its own,
 as [unbounded groups](/quest/m3/unbounded-groups/README.md) made the release
 per segment.
 
-Reproduce with `quic_sim::many_groups_carry_bulk_transfers_losslessly` at 200
+Reproduce with `quic_sim::many_groups_carry_their_highest_priorities_losslessly` at 200
 groups instead of `MANY`. The fix raises `MANY` until a frame's worth of
 credit per stream no longer bounds it, or says what bounds it instead.
 

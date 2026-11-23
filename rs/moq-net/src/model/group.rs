@@ -1120,6 +1120,31 @@ impl GroupState {
 		}
 	}
 
+	/// Shed the front frames the fastest reader took, those ending at or below `read` on the
+	/// pace scale: a reader on the group loses nothing it has yet to take, though a slower one
+	/// falls off as after any shed. Frames adopted from a head are off that scale, so the shed
+	/// stops at them.
+	fn shed_taken(&mut self, read: u64) {
+		if self.outcome.error().is_some() {
+			return;
+		}
+		let mut end = self.held();
+		while let Some(entry) = self.entry(end)
+			&& entry.end != 0
+			&& entry.end <= read
+		{
+			end += 1;
+		}
+		self.shed_to(end);
+	}
+
+	/// Whether a frame still arriving bills the session: its payload or its header's fields.
+	fn arriving(&self) -> bool {
+		self.partial
+			.as_ref()
+			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
+	}
+
 	/// Whether this copy holds no committed frame.
 	fn is_empty(&self) -> bool {
 		self.front.is_empty() && self.log.base() == self.log.end()
@@ -2801,13 +2826,20 @@ impl Handle {
 			return;
 		};
 		state.shed_all();
-		// Its payload and its header's fields both bill the session.
-		if state
-			.partial
-			.as_ref()
-			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
-		{
+		if state.arriving() {
 			self.commit_abort(state, Error::Evicted);
+		}
+	}
+
+	/// Shed the frames this copy's fastest reader took, see [`GroupState::shed_taken`], or
+	/// every committed frame while no reader holds the copy, which no reader is owed.
+	pub(super) fn shed_taken(&self) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		match self.state.wanted() {
+			true => state.shed_taken(self.alive.pace.read()),
+			false => state.shed_all(),
 		}
 	}
 
