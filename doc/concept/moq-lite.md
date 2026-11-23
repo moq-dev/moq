@@ -353,6 +353,8 @@ A group is addressed by its start: where it starts in the track's timescale,
 or a bare number that grows with each group on a track without one. A time
 start is the group containing that time, the newest starting at or before it,
 and a time end includes the group containing it, so neither waits on a frame.
+A group that ended whole at a declared end contains no time past it: a time
+start in the pause before the next group starts at that next group.
 Older moq-lite versions and moq-transport carry a group ID equal to the start,
 so a time goes upstream as that ID, where a start selects the first group at or
 after it rather than the one containing it. A live join goes to a moq-transport

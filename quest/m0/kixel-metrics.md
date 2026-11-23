@@ -23,9 +23,11 @@ Recommendations for the implementer:
 - Write the artifact from what `just gh benchmark-report` already collects, rather than a second converter per source.
 - Until CodSpeed's `mux` shard passes (it panics at `rs/moq-mux/benches/export.rs:172` on every run since 2026-11-14), its series are missing, not zero.
 
+The Kixel Quest App is installed on moq-dev (checked 2026-11-22): it was installed on selected repositories, moq-dev/moq among them, not all repositories, with read access to commit statuses, issues, and metadata, and read and write access to actions, administration, checks, code, organization self-hosted runners, pull requests, and workflows.
+https://kixel.quest/repos lists moq-dev/moq, though its index then failed on the installation's GitHub API rate limit.
+
 Public API: none. Wire: none.
 
 ## Waiting
 
 - kixel-ai/kixel.quest: its [metrics](https://github.com/kixel-ai/kixel.quest/blob/main/quest/m0/optimize/metrics.md) quest ships the `kixel-metrics` format and ingest; check that `quest/m0/optimize/metrics.md` is gone from kixel.quest's `main`.
-- Maintainer: install the Kixel Quest App on moq-dev/moq, as kixel.quest's `quest/m0/factory-try.md` asks. Granting an App access to a repository is the owner's call; done when https://kixel.quest lists moq-dev/moq.

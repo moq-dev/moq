@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { fromRequestCode, type RequestCondition, type RequestKind, toRequestCode } from "./error.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
+const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23];
 
 const KINDS: RequestKind[] = [
 	"subscribe",
@@ -32,11 +32,23 @@ const CONDITIONS: RequestCondition[] = [
 /**
  * Every code we put in a rejection has to be one the drafts register. The table is
  * transcribed from draft-20 section 15.11.2, not derived from the mapping, so a mistake in
- * the mapping cannot talk the assertion into agreeing with it.
+ * the mapping cannot talk the assertion into agreeing with it. Draft-23's is its own (section
+ * 16.12.2): it adds UNAVAILABLE (0xA) and no longer has PREFIX_OVERLAP (0x30), nor the 0x19
+ * and 0x32 that earlier drafts retired.
  */
-const REGISTERED = [
-	0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-];
+function registered(version: IetfVersion): number[] {
+	switch (version) {
+		case Version.DRAFT_18:
+		case Version.DRAFT_20:
+		case Version.DRAFT_22:
+			return [
+				0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33, 0x34,
+				0x35, 0x36,
+			];
+		default:
+			return [0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0xa, 0x10, 0x11, 0x12, 0x20, 0x31, 0x33, 0x34, 0x35, 0x36];
+	}
+}
 
 test("fetch refusal codes follow each draft registry", () => {
 	for (const version of ALL) {
@@ -57,7 +69,7 @@ test("only registered codes reach the wire", () => {
 			// Sent but never read back as itself, so it stays out of the round trip.
 			for (const condition of [...CONDITIONS, "malformed_auth_token" as const]) {
 				const code = toRequestCode(condition, kind, version);
-				expect(REGISTERED).toContain(code);
+				expect(registered(version)).toContain(code);
 			}
 		}
 	}

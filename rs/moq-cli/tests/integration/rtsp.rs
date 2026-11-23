@@ -75,6 +75,7 @@ async fn next_broadcast(
 					| moq_net::origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	let broadcast = running(child, "the broadcast", consumer.request("camera", None))

@@ -246,7 +246,7 @@ test("ietf: requests open on the draining session until the replacement wins", a
 });
 
 test("announcing and subscribing after GOAWAY still open streams", async () => {
-	for (const version of [IetfVersion.DRAFT_18, IetfVersion.DRAFT_22]) {
+	for (const version of [IetfVersion.DRAFT_18, IetfVersion.DRAFT_22, IetfVersion.DRAFT_23]) {
 		const goaway = new Once<Received>();
 		goaway.set({ uri: "" });
 		let opened = false;

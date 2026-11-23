@@ -35,6 +35,14 @@
 //! | `main_64x64_yellow_5f.h264` | Main | 5 (I P P P I) | 64x64 | CABAC rather than CAVLC entropy coding |
 //! | `seq_100x66_pattern_5f.h264` | Constrained Baseline | 5 (I P P P I) | 100x66 | Non-square and not macroblock-aligned, so the SPS crops 112x80 down and a decoder that ignores that returns the wrong picture |
 //!
+//! `main_poc0_64x64_pattern_5f.h264` is no conformance fixture: the openh264
+//! backend's output-order tests use it. It is moq-vaapi's encoder output rather
+//! than libx264's, captured from a VA-API encode of a 64x64 test pattern, and
+//! it is the one fixture whose SPS rules reordering out with picture order
+//! count type 0 and a VUI `max_num_reorder_frames` of 0 rather than with type 2.
+//! Main, CABAC, one reference frame, 5 pictures (I P P P P), its parameter sets
+//! sent twice ahead of the IDR.
+//!
 //! Every fixture ends on an IDR, which is what keeps the picture counts
 //! assertable. [`Backend`] has no drain, and a decoder that bumps its DPB only
 //! when the buffer fills rather than at the reorder depth the VUI declares would

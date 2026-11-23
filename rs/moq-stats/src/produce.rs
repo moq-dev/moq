@@ -940,26 +940,15 @@ struct PresenceTrack {
 	sums: Cumulative<Presence>,
 	/// Wire collection starts at the current reading on every hold. Other presence
 	/// fields keep their existing live-session seeding behavior.
-	wire_start: HashMap<Path, [u64; WIRE.len()]>,
+	wire_start: HashMap<Path, [u64; Presence::WIRE_FIELDS]>,
 }
-
-/// The presence fields read from connections' wire counters.
-const WIRE: [fn(&mut Presence) -> &mut u64; 6] = [
-	|presence| &mut presence.wire_tx,
-	|presence| &mut presence.wire_rx,
-	|presence| &mut presence.credit_stalls,
-	|presence| &mut presence.credit_stalled_us,
-	|presence| &mut presence.credit_held_readers_us,
-	|presence| &mut presence.credit_held_evicted_us,
-];
 
 impl PresenceTrack {
 	fn publish(&mut self, stamp: Stamp) {
 		self.sums.fill(&mut self.output.frame);
 		for (tier, presence) in &mut self.output.frame.entries {
 			if let Some(start) = self.wire_start.get(tier) {
-				for (field, start) in WIRE.iter().zip(start) {
-					let value = field(presence);
+				for (value, start) in presence.wire_mut().into_iter().zip(start) {
 					*value = value.saturating_sub(*start);
 				}
 			}
@@ -1509,8 +1498,8 @@ impl NodePublisher {
 			track.sums.add(&entry.tier, entry.closed, |sum| sum.add(entry.presence));
 			let start = track.wire_start.entry(entry.tier.label().clone()).or_default();
 			let mut presence = entry.presence;
-			for (start, field) in start.iter_mut().zip(WIRE) {
-				*start += *field(&mut presence);
+			for (start, field) in start.iter_mut().zip(presence.wire_mut()) {
+				*start += *field;
 			}
 		}
 		track.publish(stamp);
@@ -1938,6 +1927,7 @@ mod tests {
 			match ordered.next_item().await.unwrap().unwrap() {
 				track::Item::Group(group) => assert_eq!(group.start, second.start, "{version}"),
 				track::Item::Gap { range, error, .. } => panic!("{version}: groups {range:?} given up: {error}"),
+				_ => panic!("{version}: unexpected item"),
 			}
 		}
 	}
@@ -2007,11 +1997,14 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 
@@ -3512,14 +3505,17 @@ mod tests {
 				broadcast::TracksEvent::Added {
 					name,
 					info: broadcast::Listed::Track(_),
+					..
 				} => (name, true),
 				broadcast::TracksEvent::Removed {
 					kind: broadcast::Kind::Track,
 					name,
+					..
 				}
 				| broadcast::TracksEvent::Finished {
 					kind: broadcast::Kind::Track,
 					name,
+					..
 				} => (name, false),
 				_ => continue,
 			};

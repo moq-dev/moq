@@ -203,6 +203,124 @@ class LegacyTimestamps(unittest.TestCase):
         self.assertEqual(self.grade("h264", source, [t - 1 for t in source]), 1)
 
 
+class Tables(unittest.TestCase):
+    SOURCE = {1: holes.Program(0x1000, 0x100, ["0x100", "0x101"]), 2: holes.Program(0x1001, 0x102, ["0x102", "0x103"])}
+
+    def test_one_program_as_the_source_carries_it(self):
+        # The export may write its own PMT PID: the PAT entry is what names it.
+        capture = {2: holes.Program(0x1000, 0x102, ["0x102", "0x103"])}
+        self.assertEqual(holes.tables(capture, self.SOURCE, 2), [])
+
+    def test_the_other_program_too(self):
+        self.assertEqual(len(holes.tables(self.SOURCE, self.SOURCE, 2)), 1)
+
+    def test_another_program(self):
+        self.assertEqual(len(holes.tables({1: self.SOURCE[1]}, self.SOURCE, 2)), 1)
+
+    def test_another_pcr_pid(self):
+        capture = {2: holes.Program(0x1001, 0x103, ["0x102", "0x103"])}
+        self.assertEqual(len(holes.tables(capture, self.SOURCE, 2)), 1)
+
+    def test_a_lost_stream(self):
+        capture = {2: holes.Program(0x1001, 0x102, ["0x102"])}
+        self.assertEqual(len(holes.tables(capture, self.SOURCE, 2)), 1)
+
+
+class Join(unittest.TestCase):
+    def grade(self, first: int, *flags: str) -> int:
+        def stream(pts):
+            return holes.Stream(
+                {"codec_name": "h264", "codec_type": "video", "time_base": "1/90000"},
+                pts,
+                pts,
+                [True] * len(pts),
+                tuple(Fraction(t, 90_000) for t in (pts[0], pts[-1], pts[-1])),
+            )
+
+        source = [i * 3600 for i in range(500)]
+        with (
+            patch.object(holes, "probe", side_effect=[{"0x102": stream(source[first:])}, {"0x102": stream(source)}]),
+            patch.object(holes, "programs", return_value={2: holes.Program(0x1001, 0x102, ["0x102"])}),
+            patch.object(sys, "argv", ["holes.py", "capture.ts", "source.ts", *flags]),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as exit,
+        ):
+            holes.main()
+        return exit.exception.code
+
+    def test_a_late_export_starts_by_its_join(self):
+        # 10 s in, at 25 frames a second.
+        self.assertEqual(self.grade(250, "--program", "2"), 1)
+        self.assertEqual(self.grade(250, "--program", "2", "--join", "8"), 0)
+        self.assertEqual(self.grade(250, "--program", "2", "--join", "6"), 1)
+
+    def test_a_late_export_replaying_from_the_start_fails(self):
+        self.assertEqual(self.grade(0, "--program", "2", "--join", "8"), 1)
+
+    def test_join_needs_a_program(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.grade(0, "--join", "8"), 2)
+
+
+class Starts(unittest.TestCase):
+    # Program 2's shape: 25 fps video in 1.6 s groups, and 48 kHz audio of 1,920-tick frames.
+    VIDEO = [i * 3600 for i in range(500)]
+    AUDIO = [i * 1920 for i in range(940)]
+
+    @staticmethod
+    def stream(kind: str, pts: list[int], sync: list[bool]) -> holes.Stream:
+        return holes.Stream(
+            {"codec_type": kind, "time_base": "1/90000"},
+            pts,
+            pts,
+            sync,
+            tuple(Fraction(t, 90_000) for t in (pts[0], pts[-1], pts[-1])),
+        )
+
+    def grade(self, video: int, audio: int, join: int, late: int = 0) -> dict[str, list[str]]:
+        """The reasons for a capture whose video starts at frame `video` and audio at `audio`, the
+        source's audio starting `late` seconds after its video."""
+        keys = [i % 40 == 0 for i in range(len(self.VIDEO))]
+        sound = [t + late * 90_000 for t in self.AUDIO]
+        source = {
+            "0x102": self.stream("video", self.VIDEO, keys),
+            "0x103": self.stream("audio", sound, [True] * len(sound)),
+        }
+        capture = {
+            "0x102": self.stream("video", self.VIDEO[video:], keys[video:]),
+            "0x103": self.stream("audio", sound[audio:], [True] * (len(sound) - audio)),
+        }
+        return {pid: reasons for pid, reasons in holes.starts(source, capture, Fraction(join)).items() if reasons}
+
+    def test_a_join_starts_on_the_group_before_it(self):
+        # Video from its keyframe at 6.4 s, audio from 6.83 s, joined 8 s in.
+        self.assertEqual(self.grade(160, 320, 8), {})
+        # A group earlier, on the keyframe at 4.8 s, for a publisher that started late.
+        self.assertEqual(self.grade(120, 240, 8), {})
+
+    def test_a_replay_from_before_the_join_fails(self):
+        # Both from the start, with no group before 8 s reaching that far back.
+        self.assertEqual(set(self.grade(0, 0, 8)), {"0x102", "0x103"})
+        # One group further back than allowed, on the keyframe at 3.2 s.
+        self.assertEqual(set(self.grade(80, 160, 8)), {"0x102", "0x103"})
+
+    def test_a_join_counts_from_the_program_start_when_audio_starts_late(self):
+        # The source's audio from 3 s; the capture's from 6.84 s, beside video from 6.4 s.
+        self.assertEqual(self.grade(160, 180, 8, late=3), {})
+        # Both from the start of the source is still a replay.
+        self.assertEqual(set(self.grade(0, 0, 8, late=3)), {"0x102", "0x103"})
+
+    def test_a_stream_the_source_starts_late_may_start_as_late(self):
+        # The source's audio from 3 s, past the first group: the whole capture keeps that delay.
+        self.assertEqual(self.grade(0, 0, 0, late=3), {})
+        # Audio from 5.13 s, after both the first group and the source's own start, is missing.
+        self.assertEqual(set(self.grade(0, 100, 0, late=3)), {"0x103"})
+
+    def test_audio_missing_after_the_first_keyframe_fails(self):
+        # Video from 6.4 s, audio only from 8.53 s: over a group late, though inside the join.
+        self.assertEqual(set(self.grade(160, 400, 8)), {"0x103"})
+
+
 class Probe(unittest.TestCase):
     def test_audio_starting_past_the_default_probe(self):
         # Intra-only video ahead of an MP2 stream that starts 3 s in, past FFmpeg's default 5 MB

@@ -346,14 +346,9 @@ impl Inner {
 			if let Some(conn) = conn {
 				// Once per receive rather than per datagram: `stats` copies the
 				// whole struct and queries the congestion controller.
-				let stats = conn.conn.borrow().stats();
-				conn.wire.set_received_bytes(stats.udp_rx.bytes);
-				// The peer's MAX_DATA ends a blocked write's wait, and its data may spend the
-				// receive window.
-				let credit = stats.send_credit;
-				conn.wire.set_credit_stalls(credit.stalls, credit.stalled);
-				let held = stats.credit.held;
-				conn.wire.set_credit_held(held.readers, held.evicted);
+				// The peer's MAX_DATA or ACK ends a wait and may declare losses, and its data
+				// may spend the receive window.
+				super::connection::record(&conn.wire, &conn.conn.borrow().stats());
 				conn.kick();
 			}
 		}

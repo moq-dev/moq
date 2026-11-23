@@ -55,6 +55,8 @@ class QueryTests(unittest.TestCase):
             "mkdir",
             "mv",
             "realpath",
+            "ps",
+            "tail",
         ):
             (self.bin / command).symlink_to(shutil.which(command))
         self.env = dispatch_env(
@@ -718,7 +720,7 @@ class QueryTests(unittest.TestCase):
         os.mkfifo(started)
         pid = self.root / "pid"
         self.stub_ci(f'''case "$*" in
-    "rs lint-changed "*) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;
+    "rs lint-changed "*) echo $$ >"{pid}"; echo "waiting for a lock"; echo >"{started}"; exec sleep 600 ;;
 esac
 ''')
         self.change("rs/kio/src/clock/mod.rs")
@@ -728,10 +730,17 @@ esac
                     ["bash", "sh/dispatch.sh", "ci", "origin/main"],
                     cwd=self.repo,
                     env=dict(self.env, CHECK_JOBS=jobs),
-                    stdout=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
                 started.read_text()
+                # The stub announces itself before it execs sleep, which the
+                # process tree below must show, so wait for that exec.
+                stub = ["ps", "-o", "args=", "-p", pid.read_text().strip()]
+                deadline = time.monotonic() + 60
+                while subprocess.run(stub, text=True, capture_output=True).stdout.strip() != "sleep 600":
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
                 # A job timeout can kill the run without a signal it traps, so
                 # a buffered lane names its running phase before the phase ends.
                 live = b""
@@ -746,11 +755,18 @@ esac
                             live += chunk
                 finally:
                     run.terminate()
-                    stderr = (live + run.communicate(timeout=60)[1]).decode()
+                    stdout, rest = run.communicate(timeout=60)
+                    stdout, stderr = stdout.decode(), (live + rest).decode()
                 self.assertEqual(run.returncode, 143, stderr)
                 self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
                 with self.assertRaises(ProcessLookupError):
                     os.kill(int(pid.read_text()), 0)
+                if jobs != "1":
+                    # A buffered lane cut off by TERM prints what it waits on:
+                    # its processes, then the output it had buffered.
+                    self.assertIn("ci: lane rs was still running", stderr)
+                    self.assertRegex(stdout, rf"(?m)^ +{pid.read_text().strip()} [0-9:]+ sleep 600$")
+                    self.assertIn("waiting for a lock", stdout)
 
     def test_terminating_just_before_a_phase_forks_its_command_stops_it(self):
         # PS4 expands in the phase's shell after its last pending-trap check and

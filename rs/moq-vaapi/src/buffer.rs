@@ -365,19 +365,26 @@ impl<'p> MappedCodedBuffer<'p> {
 	/// Map a 'VAEncCodedBufferType' buffer.
 	pub fn new(buffer: &'p EncCodedBuffer) -> Result<Self, VaError> {
 		let mut addr = std::ptr::null_mut();
-		let mut segments = Vec::new();
 
 		va_check(unsafe { bindings::va().vaMapBuffer(buffer.0.context.display().handle(), buffer.id(), &mut addr) })?;
+		// From here on, drop unmaps the buffer, an early return included.
+		let mut mapped = Self {
+			segments: Vec::new(),
+			buffer,
+		};
 
 		while !addr.is_null() {
+			// Safe since a non-null `addr` is a segment libva mapped, valid while the buffer stays mapped.
 			let segment: &bindings::VACodedBufferSegment = unsafe { &*(addr as *const bindings::VACodedBufferSegment) };
 
-			let size = segment.size;
-			let buf = segment.buf;
+			let buf = match (segment.buf.is_null(), segment.size) {
+				(_, 0) => &[][..],
+				(true, _) => return Err(VaError::status(bindings::VA_STATUS_ERROR_INVALID_BUFFER)),
+				// Safe since libva maps `size` bytes at a non-null `buf` while the buffer stays mapped.
+				(false, size) => unsafe { std::slice::from_raw_parts(segment.buf as *const u8, size as usize) },
+			};
 
-			let buf = unsafe { std::slice::from_raw_parts(buf as *mut u8, size as usize) };
-
-			segments.push(MappedCodedSegment {
+			mapped.segments.push(MappedCodedSegment {
 				bit_offset: segment.bit_offset,
 				status: segment.status,
 				buf,
@@ -386,7 +393,7 @@ impl<'p> MappedCodedBuffer<'p> {
 			addr = segment.next;
 		}
 
-		Ok(Self { segments, buffer })
+		Ok(mapped)
 	}
 
 	/// Returns the iterator over segments

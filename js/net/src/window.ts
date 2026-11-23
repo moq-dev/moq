@@ -261,8 +261,12 @@ export function clamped(
 
 /** Where a time falls among the groups a hop holds. Mirrors the Rust `Containing`. */
 export type Containing =
-	/** The newest group starting at or before it. */
-	| { group: bigint }
+	/**
+	 * A range from it starts at this key: the newest group starting at or before it, or, once that
+	 * group ended whole at or before the time, its End, so the range starts at the next group: a time
+	 * past a whole group's span lies in a span no group contains.
+	 */
+	| { at: bigint }
 	/** Every group held starts after it. */
 	| "before"
 	/** No group is held. */
@@ -370,7 +374,7 @@ export const UNHELD: Holdings = Object.freeze({
 export const AT_KEYS: Holdings = Object.freeze({
 	...UNHELD,
 	defers: () => false,
-	containing: (time: bigint) => ({ group: time }),
+	containing: (time: bigint) => ({ at: time }),
 });
 
 /** One non-empty range, resolved. */
@@ -642,7 +646,7 @@ export class Window {
 			const containing = holdings.containing(entry.time, this.budget);
 			let start: bigint;
 			let floored: boolean;
-			if (typeof containing === "object") [start, floored] = [containing.group, true];
+			if (typeof containing === "object") [start, floored] = [containing.at, true];
 			// The group holding it is older than any held, or nothing can arrive.
 			else if (containing === "before" || complete) [start, floored] = [0n, false];
 			else {
@@ -833,7 +837,7 @@ export class Window {
 				span.floored = true;
 			} else {
 				const containing = holdings.containing(at, this.budget);
-				span.start = typeof containing === "object" ? containing.group : 0n;
+				span.start = typeof containing === "object" ? containing.at : 0n;
 				span.floored = typeof containing === "object";
 				if (asked !== undefined) {
 					// Nothing held at or before the time any more, maybe nothing at all: the group containing
@@ -1134,7 +1138,7 @@ function startOf(
 	// No group starts before 0, so time 0 names group 0 whatever is held.
 	if (at === 0n) return { group: 0n, floored: true };
 	const containing = holdings.containing(at, budget);
-	if (typeof containing === "object") return { group: containing.group, floored: true };
+	if (typeof containing === "object") return { group: containing.at, floored: true };
 	// The group holding it is older than any held, so reach back to the oldest.
 	if (containing === "before") return { group: 0n, floored: false };
 	// Before any group, which a hop that holds none (such as a reader following route copies)
@@ -1157,7 +1161,10 @@ function startOf(
 function unresolved(at: bigint, start: bigint, floored: boolean, holdings: Holdings): bigint | undefined {
 	if (!holdings.looksUp?.()) return undefined;
 	if (!floored) return holdings.nextStart(0n) === undefined ? undefined : 0n;
-	const next = start + 1n;
+	// Past a group held at the start, or one starting at the time, which contains it whatever its End.
+	// A start below the time no group holds is a whole group's End, where a group the cache let go may
+	// start and end before the time, so the search takes it in. Mirrors the Rust `unresolved`.
+	const next = holdings.nextStart(start) === start || start >= at ? start + 1n : start;
 	const after = holdings.nextStart(next);
 	if (after === undefined) return undefined;
 	const gap = min(after, at + 1n);
