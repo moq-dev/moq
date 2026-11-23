@@ -3885,8 +3885,8 @@ struct Established {
 	priority: i8,
 	sent_bounds: WireBounds,
 	wanted_bounds: WireBounds,
-	/// The group a live join started at: the Largest its SUBSCRIBE_OK named. `None` for a
-	/// SUBSCRIBE with a start, or one answered with no Largest.
+	/// The group a live join started at: the Largest its SUBSCRIBE_OK named, or group 0 when
+	/// it named none, since the publisher had nothing yet. `None` for a SUBSCRIBE with a start.
 	joined: Option<u64>,
 	/// REQUEST_UPDATEs sent and not yet answered.
 	unanswered: u64,
@@ -4646,9 +4646,7 @@ impl SubscribeOnce {
 			false => None,
 		};
 
-		let joined = largest
-			.filter(|_| plan.live && plan.start.is_none())
-			.map(|largest| largest.group);
+		let joined = (plan.live && plan.start.is_none()).then(|| largest.map_or(0, |largest| largest.group));
 		let sent_bounds = (
 			plan.start,
 			plan.subscription.as_ref().and_then(|subscription| subscription.end()),
@@ -14473,11 +14471,15 @@ type WireBounds = (Option<u64>, Option<u64>);
 
 /// The single wire span covering `subscription`'s ranges: mixed starts and ranges without one
 /// from group zero. A live join started at the group it `joined`: one that holds every start
-/// keeps the live join, so a reader adding a range the join already delivers widens nothing.
+/// keeps the live join, so a reader adding a range the join already delivers widens nothing. So
+/// does a start at that group, as a from-oldest start on a join that began at group 0.
 fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireBounds {
 	let end = subscription.end();
 	if let Some(start) = wire_start(subscription) {
-		return (Some(start), end);
+		return match joined == Some(start) {
+			true => (None, end),
+			false => (Some(start), end),
+		};
 	}
 	let first = subscription
 		.ranges
@@ -14694,6 +14696,25 @@ mod filter_tests {
 			assert_eq!(wire_start(&subscription), None, "{subscription:?}");
 			assert_eq!(wire_bounds(&subscription, Some(10)), (None, None), "{subscription:?}");
 		}
+	}
+
+	/// A start at the group the live join began keeps the join: a from-oldest reader on a join
+	/// answered with no Largest, which began at group 0, sends no update. Any other start still
+	/// bounds the span.
+	#[test]
+	fn a_start_at_the_joined_group_keeps_the_live_join() {
+		let from = |start: u64| track::Subscription::default().with_start(Some(start));
+		assert_eq!(wire_bounds(&from(0), Some(0)), (None, None));
+		assert_eq!(wire_bounds(&from(10), Some(10)), (None, None));
+		assert_eq!(wire_bounds(&from(0), Some(10)), (Some(0), None));
+		assert_eq!(wire_bounds(&from(12), Some(10)), (Some(12), None));
+		assert_eq!(wire_bounds(&from(0), None), (Some(0), None));
+		// A range from the oldest group reaches no further back than a join that began at group 0.
+		let oldest = track::Subscription::default()
+			.with_ranges([track::Range::from(track::Start::Oldest)])
+			.with_delay(track::Delay::default().with_max(None));
+		assert_eq!(wire_bounds(&oldest, Some(0)), (None, None));
+		assert_eq!(wire_bounds(&oldest, Some(10)), (Some(0), None));
 	}
 
 	/// The live join is the draft's own: the subscription starts after the live edge and a
@@ -19673,6 +19694,33 @@ mod new_group_tests {
 			.unwrap();
 		settle().await;
 		assert_eq!(resumed.retry(), Some(Duration::from_millis(5000)));
+		relay.serving.abort();
+	}
+
+	/// A live join answered with no Largest began at group 0, so a reader that then asks from
+	/// the oldest group, as a moq-transport SUBSCRIBE on an empty copy does once it finds no
+	/// group, sends no REQUEST_UPDATE. A publisher without REQUEST_UPDATE support would end
+	/// the subscription over it.
+	#[kio::test]
+	async fn a_from_oldest_reader_on_an_empty_join_sends_no_update() {
+		let (mut relay, mut first) = relay().await;
+		let (mut stream, _) = relay.accept().await;
+		stream.writer.varint(ietf::SubscribeOk::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::SubscribeOk {
+				track_alias: 7,
+				largest: None,
+				properties: Default::default(),
+			})
+			.await
+			.unwrap();
+		settle().await;
+
+		first
+			.update(track::Subscription::default().with_start(Some(0)))
+			.unwrap();
+		quiet(&mut stream).await;
 		relay.serving.abort();
 	}
 
