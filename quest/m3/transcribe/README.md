@@ -7,7 +7,9 @@ and programs read as structure. `moq-transcribe` consumes a broadcast's audio
 and publishes a derivative broadcast beside it, as `moq-transcode` does for
 video. Its catalog references a text rendition in a new structured transcript
 format, produced just in time while subscribed. The language is detected
-automatically, from the text when the backend reports none. A translator later adds one rendition per target language.
+automatically, from the text when the backend reports none. A translator
+adds one rendition per target language, translated from the transcript's
+text.
 
 Captions a source carries in band reach players the same way: the importer
 takes CEA-608/708 out of the video and publishes them as text tracks, and the
@@ -70,7 +72,8 @@ Decided 2026-11-23 (maintainer, `/quest-run`):
   [captions in the video](/quest/m3/transcribe/caption-export.md).
 - ✅ Caption import is planned here (rejected: leaving it to
   [moq-dev/moq#9443](https://github.com/moq-dev/moq/pull/9443)'s author).
-- ✅ The translator starts on OpenAI's live translation
+- ✅ The translator starts on a hosted OpenAI model: `gpt-realtime-2` in a
+  text-only session translating the transcript's segments
   ([translate](/quest/m3/transcribe/translate.md)), and the self-hosted
   transcriber on whisper.cpp through `whisper-rs`
   ([transcribe-local](/quest/m4/transcribe-local.md)).

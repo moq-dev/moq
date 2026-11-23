@@ -42,6 +42,14 @@ release delay (`--delay`) is the caption budget: a cue inside it lands on
 time, and an export that wants every caption aligned raises it past the
 transcript's lag. A cue that missed its frame starts from the next one,
 ahead of later cues, so lateness shifts captions but never reorders them.
+At the end of the video, the sink already holds its last frames for the
+release delay, so it keeps them until each caption rendition's open group
+finishes or that delay runs out, then writes pending finals and queued text
+over those frames at the pacing budget. Text that no remaining frame can
+carry, and a cue arriving after the last frame went out, has no access unit
+to ride and is lost, as when a broadcast chain cuts mid-caption. The exporter
+reports the lost cues in its result rather than ending as if every caption
+was written.
 Do this in the exporter's codec layer (`rs/moq-mux/src/codec/h264/export.rs`,
 `rs/moq-mux/src/codec/h265/export.rs`), reusing the SEI writer
 [caption import](/quest/m3/transcribe/caption-import.md) adds to rewrite

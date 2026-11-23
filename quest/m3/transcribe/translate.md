@@ -4,8 +4,9 @@
 
 `moq-transcribe` can be configured with target languages. Each becomes
 another transcript rendition in the derivative catalog, translated from the
-source's speech, on demand like the source transcript. The first runtime is
-OpenAI's live translation.
+source transcript's text segment by segment, on demand like the source
+transcript. The first runtime is OpenAI's `gpt-realtime-2` in a text-only
+Realtime session.
 
 ## Plan
 
@@ -13,43 +14,87 @@ Decided 2026-11-17 (maintainer, `/quest-plan`): ✅ one rendition per target
 language (rejected: English-only translation; deferring translation). Why:
 viewers pick a language the way they pick a rendition.
 
-Decided 2026-11-23 (maintainer, `/quest-run`): ✅ OpenAI's live translation
-first (`GPT-Realtime-Translate`, about $0.034/min, hosted like the first
-transcription backend) (rejected: a local model first, such as an open
-multilingual LLM through llama.cpp or NLLB through CTranslate2; defining
-the interface only). A self-hosted runtime can follow as its own quest, as
+Decided 2026-11-23 (maintainer, `/quest-run`): ✅ a hosted OpenAI runtime
+first (rejected: a local model first, such as an open multilingual LLM
+through llama.cpp or NLLB through CTranslate2; defining the interface only).
+A self-hosted runtime can follow as its own quest, as
 [transcribe-local](/quest/m4/transcribe-local.md) does for transcription.
+
+Decided 2026-11-23 (maintainer, `/quest-run`): ✅ `gpt-realtime-2` in a
+text-only Realtime session (`wss://api.openai.com/v1/realtime?model=gpt-realtime-2`,
+text in and text out), translating the transcript's text segment by segment
+over one persistent session per target language, keeping context across
+segments, and appending to stable partials so published text never changes
+(rejected: `GPT-Realtime-Translate` fed the source audio, since it accepts
+only audio and so can't translate the transcript; DeepL on final segments; a
+local LLM continuing an append-only translation, the AlignAtt pattern; local
+NMT such as NLLB or MADLAD). Pricing: $4 per million text tokens in, $24 per
+million out.
 
 A translation takes `role: "subtitle"`: the source-language transcript is the
 `caption` ([crate](/quest/m3/transcribe/crate.md)), and a translation of
 speech is a subtitle for viewers who hear the audio but not the language.
 
-`GPT-Realtime-Translate` takes audio, not text, and streams translated text
-and audio while the source speaks, so the translator feeds it the decoded
-source audio the transcriber hears, one session per target language, and
-discards the translated audio. Each translation mirrors the source
-transcript's groups, one per utterance, opening and finishing a group at the
-utterance's bounds; the model's deltas become interim revisions and each
-completed turn a final segment. A segment is timed on the source clock by the
-audio it was fed, so it lags the speech by the model's delay, which watch
-absorbs as it does any late text ([the format](/quest/m3/transcribe/format.md)).
-Its text is the model's own translation of the speech, not of the source
-transcript, so the two can word things differently.
+**One translated segment per source segment.** The translator reads the
+transcript the crate itself produces, in process, so no remote frame reaches
+the model. Each translation track mirrors the source transcript's groups: one
+group per source utterance, at the same start. Each of its frames revises the
+segment with the source segment's `id`, `start`, and `end`, and the target
+`lang`, so a translated segment and its source map one to one and line up
+with the same audio. It carries no `words` or `confidence`, since word timing
+and scores don't carry across languages. A source segment already in the
+target language is copied rather than sent to the model.
 
-## Waiting
+**Append-only revisions.** Each revision's text extends the previous one's,
+and the last is marked final, so a viewer never sees translated text change
+or vanish. Source interims follow the backend's deltas
+([crate](/quest/m3/transcribe/crate.md)), so the translator treats a source
+interim's text up to its last clause boundary as stable. It asks the model to
+translate only the stable text past what it already translated, continuing
+the segment's translation, and publishes the result appended as the next
+interim. When the source's final arrives, the translator translates the rest
+and publishes the final. If the backend's final rewrote text the translator
+already translated, the translation keeps its published words and continues
+from the last clause boundary the two share. A rewritten phrase may then read
+twice; the rule that published text never changes accepts that, as the
+crate accepts a word straddling a kept group. Measure how often finals rewrite
+translated text, and record it in the crate's README.
 
-- Maintainer: keep `GPT-Realtime-Translate`, found in review to take audio
-  input only, or translate the source transcript's text instead? Options:
-  (a) keep it, fed the source audio as above (recommended): translated text
-  streams with the speech, about as late as the source transcript, and its
-  translated audio could later become a dubbed audio rendition; it costs a
-  hosted audio session per language ($0.034/min each), times segments only
-  as closely as the model's delay, and can word things differently from the
-  source transcript. (b) Translate each final source segment with a hosted
-  text model: one translated segment per source segment, never interim
-  text, but each lands a pause plus a model round trip after the speech. An
-  agent cannot take this: it chooses the decided runtime. Done when the
-  answer is in this Plan and this item is removed.
+**Late text in watch.** Translated text lands after the source text by the
+model's round trip. Its times are the source segment's, so
+[the format](/quest/m3/transcribe/format.md)'s rule for late text applies
+unchanged. Watch shows a segment's newest revision as soon as it arrives,
+even after its `start`, and keeps one that arrives after its `end` up for its
+own duration from arrival. Each appended revision is a newer revision, so
+one arriving after `end` restarts that window.
+
+**Order and backlog.** One session per language translates segments in source
+order, so a translation finishes an utterance's group, once its last segment's
+final is out, before it opens the next. Its open group therefore stays the
+newest, which max delay never skips, as the format requires. When the
+translation falls behind the live source transcript by more than the track's
+max age (30 s), it skips to the newest source group, so a stalled model costs
+a gap, not an unbounded queue. A fetch or time start into a past span
+translates the source transcript's kept groups there, with the segments
+before it as context. Like the transcriber, the translator keeps each group
+it published for as long as the source transcript keeps the group it
+translated, and answers later requests from those.
+
+**Session.** Open the session with `output_modalities: ["text"]`, the lowest
+reasoning effort, and instructions to return only the continuation of the
+translation into the target language. Send each stable span as a text
+conversation item, and read the response's text deltas into the interim. The
+session keeps recent source and translation pairs as conversation items, so
+the model translates with context. Trim the oldest in batches, not one per
+segment, so the input per response stays bounded and the cached prompt prefix
+survives between trims. A Realtime session lasts at most 60 minutes, so open
+its replacement before then, seeded with the recent pairs. Sessions count
+toward the crate's session budget. Measure the latency from a source final to
+its translated final, and the cost per hour of speech in each language, and
+record both in the crate's README.
+
+Public API: target languages in the crate's config. Wire: none beyond the
+format.
 
 ## Required
 
