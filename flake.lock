@@ -65,13 +65,13 @@
       "locked": {
         "lastModified": 1795451030,
         "narHash": "sha256-NOyyzkGemOFJE1YmEE0+3VCh1yNaCtU88gpag6ytozQ=",
-        "owner": "moq-dev",
+        "owner": "kixel-ai",
         "repo": "quest",
         "rev": "59b106e06d3b698ee82f942a5366e254bf9d39e4",
         "type": "github"
       },
       "original": {
-        "owner": "moq-dev",
+        "owner": "kixel-ai",
         "repo": "quest",
         "type": "github"
       }
