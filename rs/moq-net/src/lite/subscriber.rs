@@ -3254,6 +3254,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
@@ -3472,6 +3473,7 @@ mod tests {
 				fill_groups: Default::default(),
 				tail: Default::default(),
 				started: None,
+				went_live: false,
 				finishing: None,
 				parked: false,
 				starts: Default::default(),
@@ -3950,6 +3952,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
@@ -4012,6 +4015,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
@@ -4132,6 +4136,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4))].into(),
@@ -4207,6 +4212,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4))].into(),
@@ -5820,6 +5826,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
@@ -10428,6 +10435,8 @@ struct SubStream {
 	/// The first group the publisher serves, once SUBSCRIBE_START says: `Some(None)` when it
 	/// starts no range.
 	started: Option<Option<u64>>,
+	/// Whether a lite-07 SUBSCRIBE_START took the copy live: later ones only move its edge.
+	went_live: bool,
 	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_END: once it
 	/// settles the copy finishes and FINs, while demand and responses keep flowing meanwhile.
 	finishing: Option<Settle>,
@@ -11902,6 +11911,7 @@ impl Establish {
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: self.parked,
 			starts: Default::default(),
@@ -13157,7 +13167,7 @@ impl ServeLoop {
 		// The copy goes live at the first answer saying where the live feed is, or at the first
 		// answer at all when the demand never follows it; a later one only moves the edge above.
 		// An answer behind the copy's cache fails it.
-		if active.demand.is_some() && self.serving.is_idle() {
+		if active.demand.is_some() && !active.went_live {
 			let follows = active.live.iter().any(|(id, range)| active.feeds(id) && range.follows_live());
 			match (largest, active.never_serves(position)) {
 				(lite::Edge::Unknown, _) if follows => Ok(()),
@@ -13166,6 +13176,7 @@ impl ServeLoop {
 				(_, None) => self.serving.set_live(position, ended, served),
 			}
 			.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
+			active.went_live = largest != lite::Edge::Unknown || !follows;
 		}
 		// Only a live fill's or probe's Range ID matters from here.
 		let live = &active.live;

@@ -5606,13 +5606,6 @@ impl Producer {
 		self.state.read().feed.is_live()
 	}
 
-	/// Whether the copy waits for its route's answer to go live, which [`Self::set_live`] and
-	/// its kin give it; read without the write lock that wakes every reader.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn is_idle(&self) -> bool {
-		matches!(self.state.read().feed, Feed::Idle { .. })
-	}
-
 	/// While idle, the newest group cached when the track went idle: a route asked from
 	/// its head sends it again, and its first frame says whether the cache is current.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
