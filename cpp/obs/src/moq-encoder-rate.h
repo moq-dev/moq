@@ -174,9 +174,10 @@ struct MoQCap {
 //    the user wrote them, and the options in them that set a rate are reported in `overridden`.
 //  - NVENC keeps CBR and VBR, with `max_bitrate` at the cap and the average under it, and
 //    otherwise runs CQVBR (constant quality under `max_bitrate`).
-//  - Everything else runs CBR at the cap: its quality modes carry no hard peak. VA-API's
-//    QVBR was measured past the cap on Mesa and Intel drivers, and OBS 32.2.2 hands
-//    VideoToolbox an empty limit (its `max_bitrate` never reaches the encoder).
+//  - Everything else runs CBR at the cap, for good: its quality modes carry no hard peak.
+//    VA-API's QVBR was measured past the cap on Mesa and Intel drivers, and OBS's
+//    VideoToolbox encoder builds its `DataRateLimits` with the wrong number types, so
+//    macOS stores an empty limit and CRF runs with no peak (measured on OBS 32.2.2).
 // The quality level is the encoder's own default. An unset rate mode (a fresh dock profile)
 // takes the quality mode where there is one without being reported as replaced.
 inline MoQCap EnforceCap(const std::string &id, obs_data_t *read, obs_data_t *write, long long cap_kbps)
