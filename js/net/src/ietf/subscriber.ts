@@ -1697,6 +1697,8 @@ export class Subscriber {
 			requested: bounds.start,
 			resolved: live && ok.largest !== undefined,
 		});
+		// Its Largest, or none for a track with nothing yet, says where the live feed is.
+		hooks.answerEdge(producer);
 		const source = this.#streamSources.get(request);
 		if (source)
 			subscription.datagrams = this.#bindDatagrams(source, producer, {

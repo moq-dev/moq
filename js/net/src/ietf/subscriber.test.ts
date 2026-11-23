@@ -983,6 +983,30 @@ test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
 	track.close();
 });
 
+// A relay serving this copy onward over lite-07 answers a range following the live edge only once
+// the copy knows where the edge is, which SUBSCRIBE_OK says with its Largest or none.
+test.each([
+	["a Largest", { groupId: 7n, objectId: 3n }],
+	["no Largest", undefined],
+] as const)("SUBSCRIBE_OK with %s says where the live feed is", async (_, largest) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		const peer = await nextStream(pair.client);
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		await Subscribe.decode(peer.reader, VERSION);
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ trackAlias: ALIAS, largest }).encode(peer.writer, VERSION);
+		await track.info();
+		expect(hooks.knowsEdge(track)).toBe(true);
+	} finally {
+		track.close();
+		session.close();
+	}
+});
+
 test.each(["acceptance", "refusal"])("returning demand preserves pending setup until %s", async (outcome) => {
 	const clock = new Manual();
 	const installed = clock.install();

@@ -3437,6 +3437,28 @@ test.each(
 	}
 });
 
+// A relay serving this copy onward over lite-07 answers a range following the live edge only once
+// the copy knows where the edge is. Before lite-05 SUBSCRIBE_OK is the only answer, so it says so.
+test.each(
+	[Version.DRAFT_01, Version.DRAFT_02, Version.DRAFT_03, Version.DRAFT_04].map((v) => [versionName(v), v] as const),
+)("a %s SUBSCRIBE_OK says where the live feed is", async (_, version) => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		const stream = await opened(0);
+		await stream.reading;
+		await respond(streams[0], version, [{ ok: new SubscribeOk({}) }]);
+		await drainReactions();
+		expect(hooks.knowsEdge(track)).toBe(true);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A session that dies once the publisher ended the track, but before the tail settled, cuts it
 // off: the track ends with the session's error unless the declared end settled first. That end
 // is SUBSCRIBE_END on lite-05+, and the FIN before it.

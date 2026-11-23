@@ -1581,6 +1581,8 @@ export class Subscriber {
 			if (!("ok" in resp)) {
 				throw new Error("first subscribe response must be SUBSCRIBE_OK");
 			}
+			// It is the only answer: the feed is live from here, so the cache says where its edge is.
+			hooks.answerEdge(entry.track);
 			return { stream, entry };
 		}
 
