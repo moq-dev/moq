@@ -1380,6 +1380,44 @@ impl Misses {
 		}
 	}
 
+	/// Ask fills for `asks`, which [`Self::judge`] returned, take in what the fills answered,
+	/// asking again what came back stale under a tighter budget than `asking`'s, and give up
+	/// what a fill still owes past `drift`'s budget, parking `waiter` on the rest. Costs nothing
+	/// with nothing to ask, no fill to hear from, and no gap to time, when no answer can arrive.
+	pub fn chase(
+		&mut self,
+		state: &kio::Consumer<TrackState>,
+		asks: &RangeSet<u64>,
+		asking: impl FnOnce() -> Asking,
+		drift: &Drift,
+		given_up: &mut GivenUp,
+		waiter: &kio::Waiter,
+	) {
+		if !asks.is_empty() || !self.is_idle() {
+			let asking = asking();
+			match asks.is_empty() {
+				false => {
+					let fills = state.read().fills.clone();
+					self.ask(state, &fills, asks, &asking, given_up);
+				}
+				// What the reader asks with still reaches the fills it joined.
+				true => self.update(&asking),
+			}
+			loop {
+				let retry = self.resolve(state, asking.max_delay, given_up, waiter);
+				if retry.is_empty() {
+					break;
+				}
+				let fills = state.read().fills.clone();
+				self.ask(state, &fills, &retry, &asking, given_up);
+			}
+		}
+		// Only what a fill still owes can expire.
+		if self.is_waiting() {
+			self.expire(&state.read(), drift, given_up, waiter);
+		}
+	}
+
 	/// The part of `hole` nobody has a verdict on yet: a received stale run that does not
 	/// settle this reader is no verdict for it (see `Drift::settles`).
 	fn unclaimed(&self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> Vec<ops::Range<u64>> {

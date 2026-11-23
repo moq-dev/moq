@@ -4782,8 +4782,11 @@ export class Subscriber {
 		kept.unproven = unproven;
 		// A fill nobody wants any more is withdrawn.
 		if (moved) fills.moved(kept.asker);
+		const drift = this.#drift();
 		for (const run of unproven) {
 			for (const gap of runGaps(kept.asked, run.start, run.end)) {
+				// Starts never rewind, so a run whose newest group is stale is given up whole, unasked.
+				if (this.#staleAt(gap.end - 1n, drift, true)) continue;
 				for (const asked of fills.ask(gap.start, gap.end, kept.asker))
 					insertRun(kept.asked, asked.start, asked.end);
 			}

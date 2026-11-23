@@ -10023,7 +10023,10 @@ impl Cursor {
 		}
 		let mut kept = self.kept_out.take().unwrap_or_default();
 		let settled = self.judge_unproven(&mut kept, unproven, waiter);
-		self.kept_out = Some(kept);
+		// Nothing left to prove holds nothing to remember.
+		if !(settled && kept.unproven.is_empty()) {
+			self.kept_out = Some(kept);
+		}
 		settled
 	}
 
@@ -10049,42 +10052,20 @@ impl Cursor {
 		misses.retain(id, None, || target(0..=u64::MAX - 1));
 		// What it gives up is never read, so never reported as dropped.
 		let mut given_up = Vec::new();
-		let (asks, fills) = {
-			let state = self.state.read();
-			let window = &self.filter.window;
-			let asks = misses.judge(
-				&state,
-				id,
-				None,
-				window.named(),
-				window.end(),
-				target,
-				&self.record.delivered,
-				&drift,
-				&mut given_up,
-				waiter,
-			);
-			let fills = (!asks.is_empty()).then(|| state.fills.clone());
-			(asks, fills)
-		};
-		if fills.is_some() || !misses.is_idle() {
-			let asking = asking(&self.subscription);
-			match &fills {
-				Some(fills) => misses.ask(&self.state, fills, &asks, &asking, &mut given_up),
-				None => misses.update(&asking),
-			}
-			loop {
-				let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
-				if retry.is_empty() {
-					break;
-				}
-				let fills = self.state.read().fills.clone();
-				misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
-			}
-		}
-		if misses.is_waiting() {
-			misses.expire(&self.state.read(), &drift, &mut given_up, waiter);
-		}
+		let window = &self.filter.window;
+		let asks = misses.judge(
+			&self.state.read(),
+			id,
+			None,
+			window.named(),
+			window.end(),
+			target,
+			&self.record.delivered,
+			&drift,
+			&mut given_up,
+			waiter,
+		);
+		misses.chase(&self.state, &asks, || asking(&self.subscription), &drift, &mut given_up, waiter);
 		// A group answered is held by the cache, where it stays owed, not by this reader.
 		misses.let_go_filled();
 		!misses.is_waiting() && owed.iter().all(|run| misses.given_up().gaps(run).next().is_none())
@@ -10744,11 +10725,10 @@ impl Cursor {
 		misses.retain((from, revision, cap), window.missable_groups(), || {
 			below(window.missable(from), cap)
 		});
-		// One lock for the judgement and the fills it asks, since every subscriber of the
-		// track probes through it.
-		let (asks, fills) = {
+		// One lock for the judgement, since every subscriber of the track probes through it.
+		let asks = {
 			let state = self.state.read();
-			let asks = misses.judge(
+			misses.judge(
 				&state,
 				(from, revision, cap),
 				window.missable_groups(),
@@ -10769,32 +10749,9 @@ impl Cursor {
 				drift,
 				&mut given_up,
 				waiter,
-			);
-			// Only an ask needs the fills.
-			let fills = (!asks.is_empty()).then(|| state.fills.clone());
-			(asks, fills)
+			)
 		};
-		// Nothing to ask, no fill to hear from, and no gap to time: no answer can arrive.
-		if fills.is_some() || !misses.is_idle() {
-			let asking = asking(&self.subscription);
-			match &fills {
-				Some(fills) => misses.ask(&self.state, fills, &asks, &asking, &mut given_up),
-				// What the reader asks with still reaches the fills it joined.
-				None => misses.update(&asking),
-			}
-			loop {
-				let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
-				if retry.is_empty() {
-					break;
-				}
-				let fills = self.state.read().fills.clone();
-				misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
-			}
-		}
-		// Only what a fill still owes can expire.
-		if misses.is_waiting() {
-			misses.expire(&self.state.read(), drift, &mut given_up, waiter);
-		}
+		misses.chase(&self.state, &asks, || asking(&self.subscription), drift, &mut given_up, waiter);
 		if self.drops.is_some() {
 			for (run, stale) in given_up {
 				DropCursor::give_up(&mut self.record, run.clone(), Hole::missed(stale));
