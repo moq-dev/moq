@@ -33194,6 +33194,10 @@ mod test {
 		handle.shed_all();
 
 		assert_eq!(read_numbered(&mut reader), None, "aboard, waiting on the handler");
+		assert!(
+			reader.poll_finished(&kio::Waiter::noop()).is_pending(),
+			"the copy's eviction is not the group's end"
+		);
 		let fill = match requests.poll_requested_fill(&kio::Waiter::noop()) {
 			Poll::Ready(fill) => fill.unwrap(),
 			Poll::Pending => panic!("a flight is asked"),
@@ -33204,6 +33208,11 @@ mod test {
 			.write_frame(crate::Timestamp::unscaled(flight.start), numbered(1))
 			.unwrap();
 		assert_eq!(read_numbered(&mut reader), Some(1), "the rest of the group");
+		flight.finish().unwrap();
+		assert!(
+			matches!(reader.poll_finished(&kio::Waiter::noop()), Poll::Ready(Ok(2))),
+			"the flight's end"
+		);
 		drop(arriving);
 	}
 

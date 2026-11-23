@@ -4991,6 +4991,11 @@ impl Consumer {
 			if !matches!(res, Poll::Ready(Err(_))) {
 				return res;
 			}
+			// Boarding a flight for the frames the copy lost, whose read wakes this one: the
+			// copy's failure is not the group's end.
+			if self.ride_mut().is_some_and(|ride| ride.boarding.is_some()) {
+				return Poll::Pending;
+			}
 			// Frames this reader already prefetched, and those a copy cut short of its cap
 			// still holds up to the cut, are read before a successor is needed, so the end is
 			// judged past them, without leaving them behind.
