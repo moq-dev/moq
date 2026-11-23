@@ -9164,6 +9164,9 @@ struct KeptOut {
 	unproven: RangeSet<u64>,
 	/// Bumped whenever `unproven` changes, so `misses` judges them again.
 	revision: u64,
+	/// The window revision and local bounds `unproven` was found under: once they move, what it
+	/// asked may no longer be owed (see [`Cursor::let_go_kept_out`]).
+	terms: (u64, u64, Option<u64>),
 	misses: miss::Misses,
 }
 
@@ -10030,12 +10033,30 @@ impl Cursor {
 		settled
 	}
 
+	/// Let go of the kept-out keys asked about under a window or local bounds that have moved
+	/// since, withdrawing the fills nobody else waits on: what is still owed is found and asked
+	/// again once the read would otherwise end, and a window no longer bounded owes none.
+	fn let_go_kept_out(&mut self) {
+		let terms = self.kept_terms();
+		for slot in [&mut self.kept_out, &mut self.routed_out] {
+			if slot.as_ref().is_some_and(|kept| kept.terms != terms) {
+				*slot = None;
+			}
+		}
+	}
+
+	/// What [`KeptOut::terms`] records.
+	fn kept_terms(&self) -> (u64, u64, Option<u64>) {
+		(self.filter.revision, self.min_key, self.end_key)
+	}
+
 	/// Judge `unproven` as misses of `kept`, asking fills for what the feed no longer
 	/// delivers, and return whether `kept` gave up every key of it with nothing still asked.
 	fn judge_unproven(&mut self, kept: &mut KeptOut, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> bool {
 		let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter) else {
 			return false;
 		};
+		kept.terms = self.kept_terms();
 		if kept.unproven != unproven {
 			kept.unproven = unproven;
 			kept.revision += 1;
@@ -10049,6 +10070,10 @@ impl Cursor {
 				.collect()
 		};
 		let misses = &mut kept.misses;
+		// A wider budget asks again what a narrower one gave up as stale.
+		for run in misses.widen(drift.budget).iter() {
+			misses.reopen(run.clone());
+		}
 		misses.retain(id, None, || target(0..=u64::MAX - 1));
 		// What it gives up is never read, so never reported as dropped.
 		let mut given_up = Vec::new();
@@ -10723,6 +10748,7 @@ impl Cursor {
 	/// find nothing to ask and hold no fill: those skip the fills, the subscription, and
 	/// the answers entirely, paying only for the judgement that the new groups arrived.
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
+		self.let_go_kept_out();
 		self.look_up(waiter);
 		self.rejudge(drift.budget);
 		let taken = &self.record.delivered;
@@ -32335,6 +32361,37 @@ mod test {
 		// The upstream's answer, which a session records as the subscription's own skip.
 		producer.skip_groups(3..6);
 		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	/// A fill asked for a kept-out key is withdrawn once the reader's range moves: what the
+	/// new range still owes is asked again only once that read would otherwise end.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_kept_out_fill_is_withdrawn_when_the_range_moves() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 6);
+		let budget = Delay::default().with_max(Duration::from_secs(10 * 3600));
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..7).with_delay(budget));
+		assert_eq!(drain_groups(&mut subscriber), [0, 6]);
+		let mut subscriber = subscriber.with_range(6..7);
+		let waiter = kio::Waiter::noop();
+		producer.skip_groups(3..6);
+		elapse(&producer, Duration::from_secs(60));
+		pool.sweep();
+		producer.skip_groups(1..3);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the forgotten skip is asked of a fill");
+		};
+		assert!(fill.is_wanted(3));
+
+		let mut subscriber = subscriber.with_range(7..8);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "7 has yet to arrive");
+		assert!(!fill.is_wanted(3), "nobody waits on the kept-out fill");
 	}
 
 	/// A source refusing a fill in disjoint groups pays for the runs it records, as a drop does.

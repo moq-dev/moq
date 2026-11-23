@@ -649,8 +649,24 @@ export class Consumer {
 
 // The parts of sorted, disjoint `runs` inside `[start, end)`.
 // What a subscriber asks fills about keys its reader owes but does not read: the keys asked about
-// last, the part of them a fill took, and the asker its fills know it by.
-type KeptOut = { asker: Asker; unproven: Run[]; asked: Run[] };
+// last, the part of them a fill took, the part given up as stale with the budget each was judged
+// under, and the asker its fills know it by.
+type KeptOut = { asker: Asker; unproven: Run[]; asked: Run[]; stale: (Run & { budget: number })[] };
+
+// Record `[start, end)` as given up under `budget` in sorted, disjoint `stale`, replacing what it
+// overlaps.
+function insertStale(stale: (Run & { budget: number })[], start: bigint, end: bigint, budget: number): void {
+	const kept = removeRun(stale, start, end);
+	kept.splice(runsFrom(kept, start), 0, { start, end, budget });
+	stale.splice(0, stale.length, ...kept);
+}
+
+// What `kept` needs not ask again: what a fill took, and what it gave up as stale.
+function keptDone(kept: KeptOut): Run[] {
+	const done = [...kept.asked];
+	for (const run of kept.stale) insertRun(done, run.start, run.end);
+	return done;
+}
 
 function intersect(runs: readonly Run[], start: bigint, end: bigint): Run[] {
 	const found: Run[] = [];
@@ -4289,6 +4305,7 @@ export class Subscriber {
 		this.#judgedAt = undefined;
 		// A fill this reader alone waited on for a group it no longer reads is withdrawn.
 		this.#fillsMoved();
+		this.#letGoKeptOut();
 	}
 
 	// The parts of `[start, end)` this reader still reads: inside its cursor and window, not
@@ -4774,24 +4791,58 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (!producer) return true;
 		const fills = fillsOf(producer);
+		const drift = this.#drift();
+		// A wider budget asks again what a narrower one gave up as stale.
+		const stale = kept.stale.length;
+		kept.stale = kept.stale.filter((run) => drift.budget <= run.budget);
 		// What was proved since leaves what was asked, so a key forgotten again asks afresh.
 		const moved =
+			stale !== kept.stale.length ||
 			unproven.length !== kept.unproven.length ||
 			unproven.some((run, i) => run.start !== kept.unproven[i].start || run.end !== kept.unproven[i].end);
 		kept.asked = unproven.flatMap((run) => intersect(kept.asked, run.start, run.end));
 		kept.unproven = unproven;
 		// A fill nobody wants any more is withdrawn.
 		if (moved) fills.moved(kept.asker);
-		const drift = this.#drift();
+		// Starts never rewind, so a run whose newest group is stale is given up whole: unasked, or
+		// withdrawn from the fill still out for it, as `#askFills` gives up an owed run.
+		const giveUp = (run: Run) => {
+			insertStale(kept.stale, run.start, run.end, drift.budget);
+			fills.moved(kept.asker, run.start, run.end);
+		};
 		for (const run of unproven) {
-			for (const gap of runGaps(kept.asked, run.start, run.end)) {
-				// Starts never rewind, so a run whose newest group is stale is given up whole, unasked.
-				if (this.#staleAt(gap.end - 1n, drift, true)) continue;
+			for (const gap of runGaps(keptDone(kept), run.start, run.end)) {
+				if (this.#staleAt(gap.end - 1n, drift, true)) {
+					giveUp(gap);
+					continue;
+				}
 				for (const asked of fills.ask(gap.start, gap.end, kept.asker))
 					insertRun(kept.asked, asked.start, asked.end);
 			}
 		}
-		return unproven.every((run) => fills.covered(run.start, run.end, kept.asker).next().done);
+		let out = false;
+		for (const run of unproven) {
+			for (const covered of [...fills.covered(run.start, run.end, kept.asker)]) {
+				if (this.#staleAt(covered.end - 1n, drift, true)) giveUp(covered);
+				else out = true;
+			}
+		}
+		return !out;
+	}
+
+	// Let go of the kept-out keys asked about, withdrawing the fills nobody else waits on, once what
+	// this reader reads moved: what is still owed is found and asked again once the read would
+	// otherwise end, and a window no longer bounded owes none. Mirrors the Rust
+	// `Cursor::let_go_kept_out`.
+	#letGoKeptOut(): void {
+		const producer = this.#state.producer;
+		for (const kept of [this.#keptOut, this.#routedOut]) {
+			if (!kept || !producer) continue;
+			kept.unproven = [];
+			kept.asked = [];
+			kept.stale = [];
+			fillsOf(producer).moved(kept.asker);
+		}
 	}
 
 	// The parts of `runs` the cache holds nothing for and the feed no longer waits for, waking this
@@ -4810,20 +4861,29 @@ export class Subscriber {
 		return unfed;
 	}
 
-	// A `KeptOut` whose asker wants only the keys it was asked about last, and whose refusal wakes
-	// the read to give them up.
+	// A `KeptOut` whose asker wants only the keys it was asked about last that it has not given up
+	// as stale, and whose refusal wakes the read to give them up: one judged stale under a budget
+	// only while this reader's is no wider.
 	#keptOutOf(): KeptOut {
 		const main = this.#askerOf();
 		const kept: KeptOut = {
 			asker: {
-				wants: (start, end) => intersect(kept.unproven, start, end),
+				wants: (start, end) =>
+					intersect(kept.unproven, start, end).flatMap((run) => runGaps(kept.stale, run.start, run.end)),
 				priority: () => main.priority(),
 				maxDelay: () => main.maxDelay(),
 				order: () => main.order(),
-				refuse: () => this.#fillMoves.update((moves) => moves + 1),
+				refuse: (start, end, _error, stale) => {
+					if (stale !== undefined) {
+						kept.asked = removeRun(kept.asked, start, end);
+						insertStale(kept.stale, start, end, stale);
+					}
+					this.#fillMoves.update((moves) => moves + 1);
+				},
 			},
 			unproven: [],
 			asked: [],
+			stale: [],
 		};
 		this.#state.keptOut.push(kept.asker);
 		return kept;

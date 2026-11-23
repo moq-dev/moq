@@ -6327,6 +6327,54 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 // track forgot once the pool's idle window passed is unknown again, so the read asks a fill for it
 // rather than wait for good, and ends on the upstream's answer. Mirrors the Rust
 // `a_bounded_read_asks_again_for_a_kept_out_skip_its_track_forgot`.
+test("a kept-out fill is withdrawn when the range moves", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	try {
+		for (const key of [0n, 6n]) {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		const sub = producer.subscribe({
+			delay: { max: Duration.millis(36_000_000) },
+			ranges: [{ start: 0n, end: 6n }],
+		});
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });
+		const ended = sub.recvGroup();
+		producer.skipGroups(3n, 6n);
+		await clock.advance(Duration.millis(60_000));
+		producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[3n, 6n]]);
+		expect(fills[0].isWanted(3n)).toBe(true);
+
+		sub.withRange({ start: { included: 7n }, end: { excluded: 8n } });
+		await clock.advance(Duration.ZERO);
+		// 7 has yet to arrive, and nobody waits on the kept-out fill.
+		expect(await isPending(ended)).toBe(true);
+		expect(fills[0].isWanted(3n)).toBe(false);
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
 test("a bounded read asks again for a kept-out skip its track forgot", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
