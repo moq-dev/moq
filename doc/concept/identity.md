@@ -84,9 +84,9 @@ A route resolving a path is chosen in this order:
    this origin, then the shortest hop chain, then a hash of the full requested
    path with the instance, which spreads a pool's paths over its hosts. Relays
    agree on the hash only where every hop carries the instance, which takes
-   moq-lite 07: a relay does not hash an instance it minted for an older-wire
-   route, and the route in use keeps the tie. A route that entered a node for
-   exactly the
+   moq-lite 07. A route a relay learned over an older wire, and holds as no
+   moq-lite 07 claim, is not hashed, since that relay minted its instance: the
+   route in use keeps the tie. A route that entered a node for exactly the
    requested path is not hashed: the newest one wins, so a restarted publisher
    takes over from its lingering session at once.
 

@@ -205,10 +205,11 @@ Routing prefers the longest covering prefix, then a fully identified hop list
 over one holding an anonymous hop (0), then the lowest cost, then the shortest
 hop list. Remaining ties hash the requested path with the publisher's
 instance, so equal-cost advertisers of one prefix, such as a transcode pool,
-split its paths, and every relay picks the same one for a given path. That
-takes instances the publishers name, which only moq-lite-07-wip carries: an
-instance a relay minted for an older-version announcement is not hashed, and
-the route already in use keeps the tie. A publisher connected straight to the
+split its paths, and every relay picks the same one for a given path. Relays
+agree on that hash only where moq-lite-07-wip carries the instance. A route
+learned over an older version, and held as no moq-lite-07-wip claim, is not
+hashed, since the relay minted its instance on receipt: the route already in
+use keeps the tie. A publisher connected straight to the
 relay is not hashed at its own path: its newest session wins, so a publisher
 that restarts takes over from its lingering old session at once.
 
