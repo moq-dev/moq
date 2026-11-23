@@ -305,6 +305,19 @@ export function legacyStart(version: Version, maxDelay: number | null): Start | 
 	return { live: { min: PAST_EVERY_GROUP, max: ClockDuration.millis(maxDelay) } };
 }
 
+/**
+ * The group each live join already placed among lite-07 `ranges` starts at, by its index: see
+ * {@link WireJoined} and `Subscription.placed`.
+ */
+export function requestedPlaced(ranges: readonly WireRange[]): Map<number, bigint> {
+	const placed = new Map<number, bigint>();
+	for (const [index, range] of ranges.entries()) {
+		const joined = range.start?.joined;
+		if (joined !== undefined) placed.set(index, joined.absolute);
+	}
+	return placed;
+}
+
 /** The model range one lite-07 range asks for; see {@link requestedRanges}. */
 export function requestedRange(range: WireRange): Range {
 	// Empty, as group bounds say it: keep its place, covering no group.
@@ -314,10 +327,13 @@ export function requestedRange(range: WireRange): Range {
 	if (end === 0n) return { ...EMPTY };
 	const out: Range = {};
 	const live = range.start?.live;
-	if (live !== undefined) {
-		const max = live.max === null || live.max >= NO_MAX_DELAY ? null : ClockDuration.millis(live.max);
-		out.start = { live: { min: ClockDuration.millis(live.min), max } };
-	} else if (range.start) out.start = start ?? range.start.time;
+	const joined = range.start?.joined;
+	const maxOf = (max: number | null) => (max === null || max >= NO_MAX_DELAY ? null : ClockDuration.millis(max));
+	if (live !== undefined) out.start = { live: { min: ClockDuration.millis(live.min), max: maxOf(live.max) } };
+	// Placed already, so its lag places nothing: it starts where it was placed (see
+	// {@link requestedPlaced}) and expires as a live join under its max.
+	else if (joined !== undefined) out.start = { live: { min: ClockDuration.ZERO, max: maxOf(joined.max) } };
+	else if (range.start) out.start = start ?? range.start.time;
 	// An absolute end is exclusive; every model end includes its group.
 	if (range.end) out.end = end === undefined ? range.end.time : end - 1n;
 	return out;
@@ -403,7 +419,7 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
  * when it has none: a time is the start of the group it names, inclusive as an end.
  */
 export function rangeBounds(range: WireRange): [bigint | undefined, bigint | undefined] {
-	const from = range.start?.absolute ?? range.start?.time;
+	const from = range.start?.absolute ?? range.start?.time ?? range.start?.joined?.absolute;
 	const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
 	return [from, to];
 }
@@ -437,7 +453,8 @@ export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number
 	const frames = new Map<bigint, number>();
 	const positions: [bigint, number][] = [];
 	for (const range of ranges) {
-		const start = range.start;
+		// A Position start, or a placed join's, partway through its group.
+		const start = range.start?.joined ?? range.start;
 		// One ending at or before the group it starts partway through covers nothing.
 		const [, to] = rangeBounds(range);
 		if (start?.absolute !== undefined && start.frame && (to === undefined || to > start.absolute))
@@ -451,9 +468,8 @@ export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number
 	const ends: bigint[] = [];
 	let count = 0;
 	for (const range of ranges) {
-		const from = range.start?.absolute ?? range.start?.time;
 		// No start, or no end, may cover it.
-		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+		const [from, to] = rangeBounds(range);
 		if (from !== undefined && to !== undefined && from >= to) continue;
 		count++;
 		if (from !== undefined) starts.push(from);

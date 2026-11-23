@@ -68,6 +68,7 @@ import {
 	positionFrames,
 	rangeBounds,
 	rangesOf,
+	requestedPlaced,
 	requestedRange,
 	requestedRanges,
 	type Subscribe,
@@ -625,14 +626,21 @@ class Unpinned {
  * keeps it placed by its Range ID. Mirrors the Rust `due`.
  */
 function due(range: WireRange, started: boolean): bigint | undefined {
-	if (range.start?.live !== undefined || isEmpty(requestedRange(range))) return undefined;
+	if (range.start?.live !== undefined || range.start?.joined !== undefined || isEmpty(requestedRange(range)))
+		return undefined;
 	if (!started && range.start !== undefined && range.start.absolute === undefined) return 0n;
 	if (range.end?.time !== undefined) return range.end.time + 1n;
 	return undefined;
 }
 
-// A live join's staleness budget in milliseconds, undefined for any other range. Mirrors the Rust
-// `join_budget`.
+// Whether `range` starts partway through its group: a Position start, or a placed join's.
+function framed(range: WireRange): boolean {
+	const start = range.start?.joined ?? range.start;
+	return start?.absolute !== undefined && !!start.frame;
+}
+
+// A live join's staleness budget in milliseconds, undefined for any other range, one already placed
+// included: it answers no join. Mirrors the Rust `join_budget`.
 function joinBudget(range: WireRange): number | undefined {
 	const live = range.start?.live;
 	return live && (live.max ?? NO_MAX_DELAY);
@@ -1121,11 +1129,13 @@ export class Publisher {
 		}
 
 		const consumer = front.track(msg.track);
-		const subscription = (ranges: track.Range[]): track.Subscription => ({
-			priority: msg.priority,
-			order: msg.order,
-			ranges,
-		});
+		// Lite-07: the live joins already placed, which start where they were placed.
+		const placed = requestedPlaced(msg.ranges ?? []);
+		const subscription = (ranges: track.Range[]): track.Subscription => {
+			const out: track.Subscription = { priority: msg.priority, order: msg.order, ranges };
+			if (placed.size > 0) out.placed = placed;
+			return out;
+		};
 		let ranges: track.Range[];
 		try {
 			ranges = requestedRanges(msg, legacyStart(this.version, msg.maxDelay));
@@ -1250,8 +1260,7 @@ export class Publisher {
 			// Lite-07: the Range IDs of the live ranges that start partway through a group, so an
 			// edit recomputes the frame starts only while one is live.
 			const positions = new Set<bigint>();
-			for (const [id, range] of asked.entries())
-				if (range.start?.absolute !== undefined && range.start.frame) positions.add(BigInt(id));
+			for (const [id, range] of asked.entries()) if (framed(range)) positions.add(BigInt(id));
 			// Lite-07: the ranges whose starts or time ends may still resolve.
 			const unpinned = new Unpinned();
 			if (hasRanges(this.version))
@@ -1323,8 +1332,7 @@ export class Publisher {
 					for (const [id, range] of [...replaced, ...added]) requested.insert(id, range);
 					for (const [id, range] of added) unpinned.insert(id, due(range, false));
 					for (const id of retired) positions.delete(id);
-					for (const [id, range] of added)
-						if (range.start?.absolute !== undefined && range.start.frame) positions.add(id);
+					for (const [id, range] of added) if (framed(range)) positions.add(id);
 					bounds.startsAfter.set(
 						update,
 						positions.size > 0 ? positionFrames([...requested.values()]) : new Map(),
@@ -1332,9 +1340,16 @@ export class Publisher {
 					// Refused before the model moves, as one SUBSCRIBE asking for nothing is.
 					Object.assign(update, spanBetween(this.version, requested.start(), requested.end()));
 					const add = [...replaced, ...added].map(([id, range]) => [id, requestedRange(range)] as const);
+					// A placed join, added or retuned, stays placed where it was.
+					const placed = new Map<bigint, bigint>();
+					for (const [id, range] of [...replaced, ...added]) {
+						const at = range.start?.joined?.absolute;
+						if (at !== undefined) placed.set(id, at);
+					}
 					hooks.editSubscriber(track, {
 						retire: [...retired, ...replaced.map(([id]) => id)],
 						add,
+						placed,
 						priority: update.priority,
 						order: update.order,
 					});
