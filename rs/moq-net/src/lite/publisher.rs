@@ -5834,7 +5834,11 @@ impl TrackRun {
 					continue;
 				}
 			};
-			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart { id, start, largest }))?;
+			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+				id,
+				start,
+				largest,
+			}))?;
 			reported = true;
 		}
 		self.unstarted = waiting;
@@ -6277,7 +6281,10 @@ impl TrackRun {
 			.filter(|(_, resolved)| resolved.is_none())
 			.map(|(id, _)| *id)
 			.collect();
-		let mut waiting = unresolved.iter().copied().zip(self.track.waiting_keys(unresolved.iter().copied()));
+		let mut waiting = unresolved
+			.iter()
+			.copied()
+			.zip(self.track.waiting_keys(unresolved.iter().copied()));
 		let mut starts = Vec::new();
 		for (id, resolved) in ids.into_iter().zip(resolved) {
 			let (from, end) = match resolved {
@@ -8749,7 +8756,10 @@ mod serve_group_test {
 	fn asked(run: &mut TrackRun, ranges: &[crate::track::Range]) {
 		run.initial = ranges.len() as u64;
 		run.requested = Requested::new((0..).zip(ranges.iter().copied()));
-		run.unstarted = (0..).zip(ranges).map(|(id, range)| (id, Unstarted::new(range))).collect();
+		run.unstarted = (0..)
+			.zip(ranges)
+			.map(|(id, range)| (id, Unstarted::new(range)))
+			.collect();
 		run.unpinned = Unpinned::default();
 		for (id, range) in (0..).zip(ranges) {
 			run.unpinned.insert(id, due(range, false));
@@ -9081,10 +9091,7 @@ mod serve_group_test {
 			buf = &buf[size..];
 			sent.push(msg);
 		}
-		assert_eq!(
-			starts(&sent),
-			[(0, Some(3000)), (1, Some(1000)), (2, None), (3, None)]
-		);
+		assert_eq!(starts(&sent), [(0, Some(3000)), (1, Some(1000)), (2, None), (3, None)]);
 	}
 
 	/// Every response a run loop's subscribe stream carried, once flushed.

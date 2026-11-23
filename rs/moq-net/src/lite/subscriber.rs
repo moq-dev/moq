@@ -5529,11 +5529,11 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut responses = Vec::new();
 			lite::SubscribeResponse::Start(start_answer(version, None))
-			.encode(
-				&mut crate::coding::Encoder::new(&mut responses, version.into()),
-				version,
-			)
-			.unwrap();
+				.encode(
+					&mut crate::coding::Encoder::new(&mut responses, version.into()),
+					version,
+				)
+				.unwrap();
 			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2, error: None })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
@@ -5661,8 +5661,8 @@ mod tests {
 		let mut answer = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut answer, version.into());
 		lite::SubscribeResponse::Start(start_answer(version, None))
-		.encode(&mut encoder, version)
-		.unwrap();
+			.encode(&mut encoder, version)
+			.unwrap();
 		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, error: None })
 			.encode(&mut encoder, version)
 			.unwrap();
@@ -6340,11 +6340,11 @@ mod tests {
 		let mut responses = Vec::new();
 		if started {
 			lite::SubscribeResponse::Start(start_answer(version, None))
-			.encode(
-				&mut crate::coding::Encoder::new(&mut responses, version.into()),
-				version,
-			)
-			.unwrap();
+				.encode(
+					&mut crate::coding::Encoder::new(&mut responses, version.into()),
+					version,
+				)
+				.unwrap();
 		}
 		if clean {
 			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, error: None })
@@ -6385,8 +6385,8 @@ mod tests {
 		let mut responses = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut responses, version.into());
 		lite::SubscribeResponse::Start(start_answer(version, None))
-		.encode(&mut encoder, version)
-		.unwrap();
+			.encode(&mut encoder, version)
+			.unwrap();
 		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 1, error: None })
 			.encode(&mut encoder, version)
 			.unwrap();
@@ -6462,11 +6462,11 @@ mod tests {
 			let version = Version::Lite06;
 			let mut responses = Vec::new();
 			lite::SubscribeResponse::Start(start_answer(version, None))
-			.encode(
-				&mut crate::coding::Encoder::new(&mut responses, version.into()),
-				version,
-			)
-			.unwrap();
+				.encode(
+					&mut crate::coding::Encoder::new(&mut responses, version.into()),
+					version,
+				)
+				.unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(responses);
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
@@ -13168,7 +13168,10 @@ impl ServeLoop {
 		// answer at all when the demand never follows it; a later one only moves the edge above.
 		// An answer behind the copy's cache fails it.
 		if active.demand.is_some() && !active.went_live {
-			let follows = active.live.iter().any(|(id, range)| active.feeds(id) && range.follows_live());
+			let follows = active
+				.live
+				.iter()
+				.any(|(id, range)| active.feeds(id) && range.follows_live());
 			match (largest, active.never_serves(position)) {
 				(lite::Edge::Unknown, _) if follows => Ok(()),
 				(lite::Edge::Unknown, _) => self.serving.set_live_ahead(None, None, served),
@@ -13701,7 +13704,9 @@ impl ServeLoop {
 						let mut next = Some(res);
 						while let Some(res) = next.take() {
 							match res {
-								Recv::Message(lite::SubscribeResponse::Start(first)) if serve.subscriber.version.has_ranges() => {
+								Recv::Message(lite::SubscribeResponse::Start(first))
+									if serve.subscriber.version.has_ranges() =>
+								{
 									let mut dirty = match self.record_start(serve, &first) {
 										Ok(changed) => changed,
 										Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),

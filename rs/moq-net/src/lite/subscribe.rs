@@ -1388,7 +1388,9 @@ mod test {
 		] {
 			for start in [None, Some(4)] {
 				let msg = SubscribeStart { id: 5, start, largest };
-				let buf = SubscribeResponse::Start(msg.clone()).encode_bytes(Version::Lite07).unwrap();
+				let buf = SubscribeResponse::Start(msg.clone())
+					.encode_bytes(Version::Lite07)
+					.unwrap();
 				let head = [4, 2 + tail.len() as u8, 5, start.map_or(0, |start| start as u8 + 1)];
 				assert_eq!(buf.as_ref(), [&head[..], tail].concat());
 				match SubscribeResponse::decode_slice(&buf, Version::Lite07).unwrap().0 {

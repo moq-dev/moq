@@ -3994,12 +3994,7 @@ impl TrackState {
 	/// alone makes it current, and live joins measure from that group. `None` for an answer
 	/// that did not know the largest, which says nothing to judge the cache against.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn set_live_ahead(
-		&mut self,
-		largest: Option<Position>,
-		finished: Option<bool>,
-		start: Option<u64>,
-	) -> Result<()> {
+	fn set_live_ahead(&mut self, largest: Option<Position>, finished: Option<bool>, start: Option<u64>) -> Result<()> {
 		if largest.is_some() {
 			self.judge(largest)?;
 		}
