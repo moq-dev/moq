@@ -210,9 +210,9 @@ impl Default for Config {
 impl Config {
 	/// Config for the given origin node with no byte target and the default idle expiry.
 	///
-	/// Behind the `test-support` feature: a test's door, not an API. A Node ID kept across
+	/// Behind the `test-support` or `fuzz` feature: a test's door, not an API. A Node ID kept across
 	/// runs would merge them on lite-07.
-	#[cfg(any(test, feature = "test-support"))]
+	#[cfg(any(test, feature = "test-support", feature = "fuzz"))]
 	pub fn new(node: NonZeroU64) -> Self {
 		Self {
 			node: Some(node),
@@ -9171,11 +9171,6 @@ impl Routes {
 	/// The next update must be a retraction at `expected`.
 	pub fn assert_next_ended(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
 		self.assert_next_gone(RouteKind::End, expected);
-	}
-
-	/// The next update must be `expected` let go of here, not retracted by its origin.
-	pub fn assert_next_offline(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
-		self.assert_next_gone(RouteKind::Offline, expected);
 	}
 
 	fn assert_next_gone(&mut self, kind: RouteKind, expected: impl TryInto<Path, Error: std::fmt::Debug>) {

@@ -212,3 +212,12 @@ holds it makes the lagging stream's older batch a real change, which marks the c
 so the relay works its ways out again, a constant cost per step. The bench's comment now
 says so. Nightly compares against a base that already carries the cost, so it will not
 flag it again.
+
+Decided 2026-11-23 (maintainer, pre-0.22 recurring audits), from run
+[45242597151](https://github.com/moq-dev/moq/actions/runs/45242597151) (`b29b90be29`):
+three more children: [resume-model-panic](/quest/m0/nightly/resume-model-panic.md),
+[js-widened-max-age](/quest/m0/nightly/js-widened-max-age.md), and
+[ffi-windows-size-jump](/quest/m0/nightly/ffi-windows-size-jump.md). Already owned:
+`Tests (rs quic-sim)`'s `many_groups_carry_bulk_transfers_losslessly` by
+[moq-dev/moq#9439](https://github.com/moq-dev/moq/pull/9439), and the 18 paired
+benchmark regressions by [perf-recheck](/quest/m3/release/perf-recheck.md).
