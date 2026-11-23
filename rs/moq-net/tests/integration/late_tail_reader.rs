@@ -323,7 +323,7 @@ async fn a_latest_reader_reads_a_finished_untimed_group() {
 async fn late_readers_read_a_finished_track_in_any_order() {
 	use crate::WithMax as _;
 	for round in 0..32u64 {
-		for timed in [false, true] {
+		for (timed, warm) in [(false, false), (true, false), (false, true), (true, true)] {
 			for version in ["moq-lite-07-wip", "moq-lite-06"] {
 				let publisher = produce_origin(1);
 				let broadcast = publisher
@@ -355,6 +355,12 @@ async fn late_readers_read_a_finished_track_in_any_order() {
 				options.client_subscribe = Some(relay.clone());
 				let upstream = connect_mock(options).await;
 				kio::clock::sleep(Duration::from_millis(round % 4)).await;
+				// A reader before it, whose copy the relay keeps once its upstream subscription ends.
+				if warm {
+					let (got, end) = read(&relay, "moq-lite-07-wip".parse().unwrap(), Subscription::default()).await;
+					assert!(!got.is_empty() && end.is_ok(), "the first reader reads the track");
+					kio::clock::sleep(Duration::from_millis(1 + round % 8)).await;
+				}
 
 				let subscription = match timed {
 					true => Subscription::default().with_max(Duration::from_secs(20)),
@@ -362,7 +368,7 @@ async fn late_readers_read_a_finished_track_in_any_order() {
 				};
 				let (got, end) = read(&relay, version.parse().unwrap(), subscription).await;
 				let want = if timed { vec![START; FRAMES as usize] } else { vec![0] };
-				assert_eq!((got, end.is_ok()), (want, true), "{version}, timed {timed}, round {round}");
+				assert_eq!((got, end.is_ok()), (want, true), "{version}, timed {timed}, warm {warm}, round {round}");
 				drop((finished, broadcast, upstream, publisher, relay));
 			}
 		}
