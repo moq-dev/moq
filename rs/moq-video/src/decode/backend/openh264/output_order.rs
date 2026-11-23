@@ -108,17 +108,18 @@ impl Sequences {
 				}
 				// Data partitions, and the slice extensions of SVC (20) and MVC (21).
 				2..=4 | 20 | 21 => break,
+				// An SPS that does not parse is no sequence openh264 would start.
 				SPS => {
-					let output = match sps(nal) {
-						Some(sps) => {
-							relabelled.push((start..end, sps));
-							true
-						}
-						// openh264 outputs by `profile_idc`, the first payload byte.
-						None => matches!(nal.get(1), Some(&(BASELINE | SCALABLE_BASELINE))),
-					};
-					if let Some(id) = sps_id(nal) {
-						self.sps[usize::from(id)] = Some(output);
+					if let Some(parsed) = parse_sps(nal) {
+						let output = match relabel_sps(nal, &parsed) {
+							Some(sps) => {
+								relabelled.push((start..end, sps));
+								true
+							}
+							// openh264 outputs by `profile_idc` alone.
+							None => matches!(u8::from(parsed.profile_idc), BASELINE | SCALABLE_BASELINE),
+						};
+						self.sps[usize::from(parsed.seq_parameter_set_id.id())] = Some(output);
 					}
 				}
 				PPS => {
@@ -157,18 +158,6 @@ impl Sequences {
 	}
 }
 
-/// The `seq_parameter_set_id` of an SPS NAL unit, after its profile,
-/// constraint flags, and level.
-fn sps_id(nal: &[u8]) -> Option<u8> {
-	let mut bits = RefNal::new(nal, &[], true).rbsp_bits();
-	for _ in 0..24 {
-		bits.read_bit("profile, constraints, level").ok()?;
-	}
-	u8::try_from(bits.read_ue("seq_parameter_set_id").ok()?)
-		.ok()
-		.filter(|&id| id < 32)
-}
-
 /// A PPS NAL unit's own ID and the ID of the SPS it uses.
 fn pps_ids(nal: &[u8]) -> Option<(u8, u8)> {
 	let mut bits = RefNal::new(nal, &[], true).rbsp_bits();
@@ -187,14 +176,18 @@ fn slice_pps(nal: &[u8]) -> Option<u8> {
 	u8::try_from(bits.read_ue("pic_parameter_set_id").ok()?).ok()
 }
 
-/// Returns the NAL unit `nal` relabelled, when it is an SPS of a Main or High
-/// stream whose pictures come out in decoding order.
-fn sps(nal: &[u8]) -> Option<Vec<u8>> {
+/// Parses an SPS NAL unit, or `None` when it is malformed.
+fn parse_sps(nal: &[u8]) -> Option<SeqParameterSet> {
 	let parsed = RefNal::new(nal, &[], true);
 	if parsed.header().ok()?.nal_unit_type() != UnitType::SeqParameterSet {
 		return None;
 	}
-	let sps = SeqParameterSet::from_bits(parsed.rbsp_bits()).ok()?;
+	SeqParameterSet::from_bits(parsed.rbsp_bits()).ok()
+}
+
+/// Returns the SPS NAL unit `nal` relabelled, when it is one of a Main or High
+/// stream whose pictures come out in decoding order.
+fn relabel_sps(nal: &[u8], sps: &SeqParameterSet) -> Option<Vec<u8>> {
 	let reorder = sps
 		.vui_parameters
 		.as_ref()
@@ -341,6 +334,10 @@ mod tests {
 		0x78, 0x1e, 0x24, 0x4b, 0x2c,
 	];
 
+	fn sps(nal: &[u8]) -> Option<Vec<u8>> {
+		relabel_sps(nal, &parse_sps(nal)?)
+	}
+
 	fn parse(nal: &[u8]) -> SeqParameterSet {
 		SeqParameterSet::from_bits(RefNal::new(nal, &[], true).rbsp_bits()).expect("a valid SPS")
 	}
@@ -444,9 +441,10 @@ mod tests {
 	/// through its PPS, and stays known for the access units after it.
 	#[test]
 	fn the_output_order_follows_the_slice_s_sps() {
-		// High (reorders) as SPS 0, and Baseline (outputs immediately) as SPS 1.
-		let high = [0x67, HIGH, 0, 30, 0b1000_0000];
-		let baseline = [0x67, BASELINE, 0, 30, 0b0100_0000];
+		// Main with B-frames (reorders) as SPS 0, and a 64x64 Baseline
+		// (outputs immediately) as SPS 1.
+		let main = X264_MAIN_BFRAMES;
+		let baseline = [0x67, BASELINE, 0, 30, 0x56, 0x84, 0x26, 0x40];
 		// PPS 0 uses SPS 0, PPS 1 uses SPS 1.
 		let pps0 = [0x68, 0b1100_0000];
 		let pps1 = [0x68, 0b0100_1000];
@@ -463,9 +461,9 @@ mod tests {
 		};
 
 		let mut sequences = Sequences::default();
-		let first = sequences.relabel(&unit(&[&high, &baseline, &pps0, &pps1, &slice0]));
-		assert_eq!(first.immediate, Some(false), "the slice uses the High SPS");
-		let switched = sequences.relabel(&unit(&[&high, &baseline, &pps0, &pps1, &slice1]));
+		let first = sequences.relabel(&unit(&[main, &baseline, &pps0, &pps1, &slice0]));
+		assert_eq!(first.immediate, Some(false), "the slice uses the Main SPS");
+		let switched = sequences.relabel(&unit(&[main, &baseline, &pps0, &pps1, &slice1]));
 		assert_eq!(switched.immediate, Some(true), "the slice uses the Baseline SPS");
 		let later = sequences.relabel(&unit(&[&[0x41, 0b1011_1000]]));
 		assert_eq!(later.immediate, Some(false), "a later picture uses PPS 0 again");
@@ -474,5 +472,9 @@ mod tests {
 			None,
 			"a slice whose parameter sets are unknown"
 		);
+
+		// A malformed SPS under ID 0, here one cut short, leaves its output order as it was.
+		let malformed = sequences.relabel(&unit(&[&[0x67, BASELINE, 0, 30, 0x80], &slice0]));
+		assert_eq!(malformed.immediate, Some(false), "a malformed SPS replaced a valid one");
 	}
 }
