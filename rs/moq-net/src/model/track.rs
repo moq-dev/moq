@@ -5590,7 +5590,7 @@ impl Producer {
 	/// The source reported its largest frame, which [`Self::largest`] follows before the
 	/// frame itself arrives, and whether its group ended there, which a relay forwards. A
 	/// hint about the edge: it never makes the frame readable.
-	#[cfg(test)]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_largest(&self, largest: Position, finished: bool) {
 		self.state.read().cache.report_largest(largest, finished);
 	}

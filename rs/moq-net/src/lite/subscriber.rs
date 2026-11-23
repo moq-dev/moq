@@ -5774,6 +5774,37 @@ mod tests {
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
 	}
 
+	/// Every lite-07 SUBSCRIBE_START says where the track is, so one answering a range after
+	/// the copy went live still moves its largest, and whether its group ended there, which a
+	/// relay serving the copy forwards in its own SUBSCRIBE_STARTs.
+	#[kio::test]
+	async fn a_later_subscribe_start_moves_the_largest() {
+		let (serve, mut serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let bounded = |start, end| lite::Range {
+			start: Some(lite::Anchor::Time(start)),
+			end: Some(lite::Anchor::Time(end)),
+		};
+		let Sub::Active(active) = &mut serving.sub else {
+			unreachable!("the helper opens a subscription");
+		};
+		active.live = lite::LiveRanges::new(Version::Lite07, &[bounded(0, 1000), bounded(1000, 2000)]);
+		let reader = serving.serving.subscribe(track::Subscription::default());
+		for (id, position, ended) in [
+			(0, track::Position { group: 4, frame: 2 }, false),
+			(1, track::Position { group: 6, frame: 1 }, true),
+		] {
+			let start = lite::SubscribeStart {
+				id,
+				start: Some(position.group),
+				largest: lite::Edge::Largest(lite::Largest { position, ended }),
+			};
+			let moved = serving.record_start(&serve, &start).unwrap();
+			serving.apply_starts(&serve, start.largest, moved).unwrap();
+			assert_eq!(serving.serving.largest(), Some(position), "range {id}");
+			assert_eq!(reader.largest_finished(position), ended, "range {id}");
+		}
+	}
+
 	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under the max age `budget`,
 	/// its broadcast, and the tail it accounts on.
 	async fn lite07_serving(
@@ -13165,8 +13196,8 @@ impl ServeLoop {
 			lite::Edge::Empty | lite::Edge::Unknown => (None, None),
 		};
 		// The copy goes live at the first answer saying where the live feed is, or at the first
-		// answer at all when the demand never follows it; a later one only moves the edge above.
-		// An answer behind the copy's cache fails it.
+		// answer at all when the demand never follows it; a later one only moves the edge above
+		// and the largest below. An answer behind the copy's cache fails it.
 		if active.demand.is_some() && !active.went_live {
 			let follows = active
 				.live
@@ -13180,6 +13211,9 @@ impl ServeLoop {
 			}
 			.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
 			active.went_live = largest != lite::Edge::Unknown || !follows;
+		} else if let lite::Edge::Largest(largest) = largest {
+			// Recorded whole, as going live did, so this copy's own answers forward it.
+			self.serving.report_largest(largest.position, largest.ended);
 		}
 		// Only a live fill's or probe's Range ID matters from here.
 		let live = &active.live;
