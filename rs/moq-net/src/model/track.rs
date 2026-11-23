@@ -17738,13 +17738,18 @@ mod test {
 			min: Duration::from_millis(10),
 			max: None,
 		})]);
-		let mut producer = track_producer("test", Info::default().with_timescale(Timescale::MICRO).with_max_age(None));
+		let mut producer = track_producer(
+			"test",
+			Info::default().with_timescale(Timescale::MICRO).with_max_age(None),
+		);
 		producer.received();
 		producer.anchored();
 		producer.answers_joins();
 		let mut reader = producer.subscribe(join);
 		let mut group = producer.create_group(group::Info { start: at }).unwrap();
-		group.write_frame(Timestamp::from_micros(at).unwrap(), &b"x"[..]).unwrap();
+		group
+			.write_frame(Timestamp::from_micros(at).unwrap(), &b"x"[..])
+			.unwrap();
 		producer.finish_at(Position::group(at + 1)).unwrap();
 		assert_eq!(drain_groups(&mut reader), vec![at]);
 		group.finish().unwrap();
@@ -17760,13 +17765,18 @@ mod test {
 			min: Duration::from_secs(40),
 			max: Some(Duration::from_secs(40)),
 		})]);
-		let mut producer = track_producer("test", Info::default().with_timescale(Timescale::MICRO).with_max_age(None));
+		let mut producer = track_producer(
+			"test",
+			Info::default().with_timescale(Timescale::MICRO).with_max_age(None),
+		);
 		producer.received();
 		let mut reader = producer.subscribe(join);
 		let mut group = producer.create_group(group::Info { start: 2 }).unwrap();
 		producer.finish_at(Position::group(3)).unwrap();
 		assert_eq!(drain_groups(&mut reader), vec![2]);
-		group.write_frame(Timestamp::from_micros(2).unwrap(), &b"x"[..]).unwrap();
+		group
+			.write_frame(Timestamp::from_micros(2).unwrap(), &b"x"[..])
+			.unwrap();
 		group.finish().unwrap();
 	}
 

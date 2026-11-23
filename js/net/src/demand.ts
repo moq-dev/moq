@@ -223,11 +223,6 @@ export class Prefs implements Getter<Subscription | undefined> {
 		return this.#scalars && contribution(this.#scalars);
 	}
 
-	/** Every range, in key order. */
-	ranges(): IterableIterator<Range> {
-		return this.#ranges.values();
-	}
-
 	/** Every range with its key, in key order. */
 	entries(): IterableIterator<[bigint, Range]> {
 		return this.#ranges.entries();
@@ -239,11 +234,6 @@ export class Prefs implements Getter<Subscription | undefined> {
 			const placed = this.#placed.get(key);
 			return placed === undefined ? { range } : { range, placed };
 		});
-	}
-
-	/** The group the live join range keyed `key` was placed at, if it was. Mirrors the Rust `Prefs::placed`. */
-	placed(key: bigint): bigint | undefined {
-		return this.#placed.get(key);
 	}
 
 	/**

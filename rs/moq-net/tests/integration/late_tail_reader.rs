@@ -343,7 +343,9 @@ async fn late_readers_read_a_finished_track_in_any_order() {
 				};
 				let mut group = track.append_group(at(0)).unwrap();
 				for frame in 0..frames {
-					group.write_frame(at(if timed { frame } else { 0 }), &b"frame"[..]).unwrap();
+					group
+						.write_frame(at(if timed { frame } else { 0 }), &b"frame"[..])
+						.unwrap();
 				}
 				group.finish().unwrap();
 				let finished = track.finish().unwrap();
@@ -368,7 +370,11 @@ async fn late_readers_read_a_finished_track_in_any_order() {
 				};
 				let (got, end) = read(&relay, version.parse().unwrap(), subscription).await;
 				let want = if timed { vec![START; FRAMES as usize] } else { vec![0] };
-				assert_eq!((got, end.is_ok()), (want, true), "{version}, timed {timed}, warm {warm}, round {round}");
+				assert_eq!(
+					(got, end.is_ok()),
+					(want, true),
+					"{version}, timed {timed}, warm {warm}, round {round}"
+				);
 				drop((finished, broadcast, upstream, publisher, relay));
 			}
 		}

@@ -85,7 +85,7 @@ export function liveMillis(range: Range): number | undefined {
  * A live join's max as a budget in milliseconds, rounded up: {@link NO_MAX_DELAY} for none, and
  * zero when omitted. Mirrors the Rust `budget`.
  */
-export function budgetOf(max: Duration | null | undefined): number {
+function budgetOf(max: Duration | null | undefined): number {
 	if (max === null) return NO_MAX_DELAY;
 	return max === undefined ? 0 : Math.min(Math.ceil(max.asMillis()), NO_MAX_DELAY);
 }
@@ -1297,17 +1297,6 @@ export class Budget {
 		}
 		if (at < end) runs.push([{ start: at, end }, this.live]);
 		return runs;
-	}
-
-	/**
-	 * The lowest key a cache whose drift reaches back only to `liveFloor` judges: every key below it
-	 * with a finite budget is past judging.
-	 */
-	floor(liveFloor: bigint | undefined): bigint {
-		if (liveFloor === undefined) return 0n;
-		const live = this.live >= NO_MAX_DELAY ? 0n : liveFloor;
-		const history = this.history >= NO_MAX_DELAY ? (this.covered[0]?.start ?? liveFloor) : liveFloor;
-		return min(liveFloor, min(live, history));
 	}
 }
 
