@@ -290,7 +290,7 @@ describe("Window", () => {
 			expect(window.joins()).toEqual([]);
 			expect(window.start()).toBe(33n);
 			const budget = window.budget();
-			expect([budget.at(66n), budget.asked]).toEqual([2000, false]);
+			expect([budget.at(66n), budget.widest()]).toEqual([2000, 2000]);
 		}
 		expect(covered(Window.keyed([[0n, join]], 99n, held, placed), held.held)).toEqual([33n, 66n, 99n]);
 
@@ -300,7 +300,42 @@ describe("Window", () => {
 		expect(window.start()).toBe(66n);
 		const wider: Range = { start: { live: { min: Duration.millis(40), max: null } } };
 		window.edit([0n], [[0n, wider]], 99n, held, () => ({ at: 66n }));
-		expect([window.start(), window.budget().at(33n)]).toEqual([66n, NO_MAX_DELAY]);
+		expect([window.start(), window.budget().at(66n)]).toEqual([66n, NO_MAX_DELAY]);
+	});
+
+	// A group takes the widest budget among the ranges covering it, not among every range: a finite
+	// live join alone keeps its max beside an unlimited one placed later, and a join still reaching
+	// may cover any group up to its end. Mirrors the Rust `a_group_takes_the_widest_budget_covering_it`.
+	test("a group takes the widest budget covering it", () => {
+		const held = new Keys(keys(0n, 100n));
+		held.answered = 0;
+		const join = (min: number, max: Duration | null, end?: bigint): Range => ({
+			start: { live: { min: Duration.millis(min), max } },
+			...(end === undefined ? {} : { end }),
+		});
+		const ranges = new Map<bigint, Range>([
+			[0n, join(40, Duration.millis(100))],
+			[1n, join(20, null, 59n)],
+			[2n, range(80n, 89n)],
+			[3n, join(60, Duration.millis(500), 20n)],
+		]);
+		const placed = (key: bigint) => (key === 0n ? { at: 10n } : key === 1n ? { at: 50n } : { since: 0 });
+		const window = Window.keyed(ranges, 99n, held, placed);
+		expect(window.reaching).toBe(true);
+		for (const budget of [window.budget(), window.budgetOf(ranges)]) {
+			expect(budget.runs(0n, 100n)).toEqual([
+				[{ start: 0n, end: 21n }, 500],
+				[{ start: 21n, end: 50n }, 100],
+				[{ start: 50n, end: 60n }, NO_MAX_DELAY],
+				[{ start: 60n, end: 80n }, 100],
+				[{ start: 80n, end: 90n }, NO_MAX_DELAY],
+				[{ start: 90n, end: 100n }, 100],
+			]);
+			expect(budget.stretch(30n)).toEqual([100, 50n]);
+			expect([budget.widest(), budget.isUniform()]).toEqual([NO_MAX_DELAY, false]);
+			const clamped = budget.clamped(200);
+			expect([clamped.at(55n), clamped.at(30n)]).toEqual([200, 100]);
+		}
 	});
 
 	// A history range a hop holding nothing leaves to its copies keeps every group it may cover from

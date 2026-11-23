@@ -197,85 +197,136 @@ impl Holdings for Unheld {
 }
 
 /// How long each group stays worth delivering once superseded, as a reader's ranges set it:
-/// forever, or for as long as the publisher keeps it, while a history range covers it, and
-/// otherwise the widest `max` among its live joins, which costs nothing to judge whatever
-/// placed them.
+/// the widest budget among the ranges covering it, a live join's being its `max`, and a
+/// history range's forever, or for as long as the publisher keeps it. A range not yet placed
+/// may cover any group up to its end. A group none covers, such as one handed out before the
+/// ranges moved, gets the widest `max`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::model) struct Budget {
-	/// A group no history range covers.
-	live: Duration,
-	/// A group a history range covers: unlimited, unless clamped to a bound.
-	history: Duration,
-	/// The groups history ranges cover.
-	covered: Cover,
-	/// Whether a history range is asked for, placed or not: wherever it lands, its groups get
-	/// the history budget.
-	asked: bool,
+	/// The groups the placed ranges cover, by the budget they give, widest first.
+	layers: Vec<(Duration, Cover)>,
+	/// The ranges not yet placed, each as the last group it may cover and its budget: by last
+	/// group ascending, budget descending, leaving out any another covers at least as widely.
+	unplaced: Vec<(u64, Duration)>,
+	/// A group no range covers: the widest live join's `max`.
+	rest: Duration,
+	/// The widest budget any range asks, placed or not.
+	widest: Duration,
 }
 
 impl Budget {
 	/// The same budget for every group.
 	pub fn uniform(budget: Duration) -> Self {
 		Self {
-			live: budget,
-			history: budget,
-			covered: Cover::default(),
-			asked: false,
+			layers: Vec::new(),
+			unplaced: Vec::new(),
+			rest: budget,
+			widest: budget,
+		}
+	}
+
+	/// The budget `layers` and `unplaced` give, in any order, with every other budget zero.
+	fn new(mut layers: Vec<(Duration, Cover)>, mut unplaced: Vec<(u64, Duration)>) -> Self {
+		layers.retain(|(_, cover)| !cover.is_empty());
+		layers.sort_by_key(|(budget, _)| std::cmp::Reverse(*budget));
+		// A range covering through a later group at least as widely hides one through an earlier.
+		unplaced.sort_unstable();
+		let mut kept: Vec<(u64, Duration)> = Vec::new();
+		for (last, budget) in unplaced.into_iter().rev() {
+			if kept.last().is_none_or(|(_, wider)| budget > *wider) {
+				kept.push((last, budget));
+			}
+		}
+		kept.reverse();
+		Self {
+			layers,
+			unplaced: kept,
+			rest: Duration::ZERO,
+			widest: Duration::ZERO,
 		}
 	}
 
 	/// This budget, each group's no wider than `bound`.
 	pub fn clamped(mut self, bound: Option<Duration>) -> Self {
 		if let Some(bound) = bound {
-			self.live = self.live.min(bound);
-			self.history = self.history.min(bound);
+			for (budget, _) in &mut self.layers {
+				*budget = (*budget).min(bound);
+			}
+			for (_, budget) in &mut self.unplaced {
+				*budget = (*budget).min(bound);
+			}
+			self.rest = self.rest.min(bound);
+			self.widest = self.widest.min(bound);
 		}
 		self
 	}
 
 	/// How long group `key` stays worth delivering once superseded.
 	pub fn at(&self, key: u64) -> Duration {
-		match self.covered.contains(key) {
-			true => self.history,
-			false => self.live,
-		}
+		let placed = (self.layers.iter())
+			.find(|(_, cover)| cover.contains(key))
+			.map(|(budget, _)| *budget);
+		let unplaced = (self.unplaced)
+			.get(self.unplaced.partition_point(|(last, _)| *last < key))
+			.map(|(_, budget)| *budget);
+		placed.max(unplaced).unwrap_or(self.rest)
 	}
 
-	/// The widest budget any group gets, counting a history range not yet placed.
+	/// The widest budget any group gets, counting a range not yet placed.
 	pub fn widest(&self) -> Duration {
-		match self.asked {
-			true => self.live.max(self.history),
-			false => self.live,
-		}
+		self.widest
 	}
 
 	/// Whether every group gets the same budget.
 	pub fn is_uniform(&self) -> bool {
-		self.covered.is_empty() || self.live == self.history
+		(self.layers.iter().map(|(budget, _)| budget))
+			.chain(self.unplaced.iter().map(|(_, budget)| budget))
+			.all(|budget| *budget == self.rest)
 	}
 
 	/// `keys` cut where the budget changes, each stretch with its budget, lowest first.
 	pub fn runs(&self, keys: ops::Range<u64>) -> Vec<(ops::Range<u64>, Duration)> {
-		if keys.is_empty() {
-			return Vec::new();
-		}
-		if self.is_uniform() {
-			return vec![(keys.clone(), self.at(keys.start))];
-		}
 		let mut runs = Vec::new();
 		let mut at = keys.start;
-		for run in self.covered.within(keys.start, keys.end - 1) {
-			let (start, end) = ((*run.start()).max(keys.start), (*run.end()).min(keys.end - 1) + 1);
-			if at < start {
-				runs.push((at..start, self.live));
-			}
-			runs.push((start..end, self.history));
+		while at < keys.end {
+			let (budget, end) = self.stretch(at);
+			let end = end.map_or(keys.end, |end| end.min(keys.end));
+			runs.push((at..end, budget));
 			at = end;
 		}
-		if at < keys.end {
-			runs.push((at..keys.end, self.live));
-		}
 		runs
+	}
+
+	/// The budget of group `key`, and the next key whose budget differs, `None` for none.
+	pub fn stretch(&self, key: u64) -> (Duration, Option<u64>) {
+		let budget = self.at(key);
+		if self.is_uniform() {
+			return (budget, None);
+		}
+		let mut at = key;
+		while let Some(cut) = self.cut_after(at) {
+			if self.at(cut) != budget {
+				return (budget, Some(cut));
+			}
+			at = cut;
+		}
+		(budget, None)
+	}
+
+	/// The next key past `key` where a layer's run or an unplaced range starts or ends, so the
+	/// budget may change.
+	fn cut_after(&self, key: u64) -> Option<u64> {
+		let layers = self.layers.iter().filter_map(|(_, cover)| {
+			let run = cover.first(key, u64::MAX)?;
+			match *run.start() == key {
+				true => run.end().checked_add(1),
+				false => Some(*run.start()),
+			}
+		});
+		let unplaced = (self.unplaced)
+			.get(self.unplaced.partition_point(|(last, _)| *last < key))
+			.and_then(|(last, _)| last.checked_add(1));
+		layers.chain(unplaced).min()
 	}
 
 	/// The lowest key a cache whose drift reaches back only to `live_floor` judges: every key
@@ -284,15 +335,14 @@ impl Budget {
 		let Some(floor) = live_floor else {
 			return 0;
 		};
-		let live = match self.live {
-			Duration::MAX => 0,
-			_ => floor,
-		};
-		let history = match self.history {
-			Duration::MAX => self.covered.lowest().unwrap_or(floor),
-			_ => floor,
-		};
-		floor.min(live).min(history)
+		// An unplaced range may cover every group from the first.
+		if self.rest == Duration::MAX || self.unplaced.iter().any(|(_, budget)| *budget == Duration::MAX) {
+			return 0;
+		}
+		(self.layers.iter())
+			.filter(|(budget, _)| *budget == Duration::MAX)
+			.filter_map(|(_, cover)| cover.lowest())
+			.fold(floor, u64::min)
 	}
 }
 
@@ -320,13 +370,12 @@ impl Default for Joining {
 pub(in crate::model) struct Window {
 	/// What these were resolved from, by key, in the order given.
 	ranges: BTreeMap<u64, Range>,
-	/// The budgets of the live joins among [`Self::ranges`], counted: a group no history range
-	/// covers goes stale past the widest.
+	/// The budgets of the live joins among [`Self::ranges`], counted, for the widest asked.
 	budgets: BTreeMap<Duration, usize>,
 	/// The non-empty history ranges among [`Self::ranges`], placed or not.
 	histories: usize,
-	/// The groups the history ranges' spans read, which never go stale.
-	history: Cover,
+	/// The groups the spans read, by the budget of their ranges.
+	layers: BTreeMap<Duration, Cover>,
 	/// Each non-empty range placed, by key.
 	spans: BTreeMap<u64, Span>,
 	/// The ranges waiting on a first group, by key: a live join with nothing to reach back
@@ -376,8 +425,8 @@ struct Span {
 	end: Option<u64>,
 	/// Whether the start names a group, rather than reaching back to the oldest one.
 	floored: bool,
-	/// Whether its range is history, so the groups it reads never go stale.
-	history: bool,
+	/// Its range's budget, which the groups it reads get.
+	budget: Duration,
 	/// A time start the groups held can't place, whose group a fill asks the track's history
 	/// for: the span reads nothing until it answers.
 	looking: Option<Looking>,
@@ -432,7 +481,7 @@ impl Window {
 			ranges: BTreeMap::new(),
 			budgets: BTreeMap::new(),
 			histories: 0,
-			history: Cover::default(),
+			layers: BTreeMap::new(),
 			spans: BTreeMap::new(),
 			pending: BTreeSet::new(),
 			looking: BTreeSet::new(),
@@ -501,6 +550,17 @@ impl Window {
 				let old = self.ranges.insert(key, range).expect("a retuned range");
 				self.uncount_budget(&old);
 				self.count_budget(&range);
+				// Its groups take the new budget where it stands.
+				if let Some(span) = self.spans.remove(&key) {
+					self.uncount(key, &span);
+					self.count(
+						key,
+						Span {
+							budget: range.budget(),
+							..span
+						},
+					);
+				}
 				continue;
 			}
 			self.retire(key);
@@ -543,51 +603,50 @@ impl Window {
 
 	/// How long each group stays worth delivering once superseded, as these ranges set it.
 	pub fn budget(&self) -> Budget {
-		let mut covered = self.history.clone();
-		self.cover_pending(&mut covered, |key| self.ranges.get(&key));
+		let rest = self
+			.budgets
+			.last_key_value()
+			.map_or(Duration::ZERO, |(budget, _)| *budget);
+		let layers = self.layers.iter().map(|(budget, cover)| (*budget, cover.clone()));
 		Budget {
-			live: self
-				.budgets
-				.last_key_value()
-				.map_or(Duration::ZERO, |(budget, _)| *budget),
-			history: Duration::MAX,
-			covered,
-			asked: self.histories > 0,
+			rest,
+			widest: if self.histories > 0 { Duration::MAX } else { rest },
+			..Budget::new(layers.collect(), self.unplaced_budgets(|key| self.ranges.get(&key)))
 		}
 	}
 
-	/// Add to `covered` every group a pending history range, as `range` of its key says, may
-	/// cover: any up to its end, since the copies it waits on place it, and every group is in
-	/// range meanwhile.
-	fn cover_pending<'a>(&self, covered: &mut Cover, range: impl Fn(u64) -> Option<&'a Range>) {
-		for key in &self.pending {
-			if let Some(range) = range(*key).filter(|range| range.start.is_history()) {
-				covered.add(0..=range.end.unwrap_or(u64::MAX), 1);
-			}
-		}
+	/// Each range not yet placed, as `range` of its key says, as the last group it may cover
+	/// and its budget: a pending one may cover any up to its end, since every group is in
+	/// range meanwhile, and a live join still reaching may start at any.
+	fn unplaced_budgets<'a>(&self, range: impl Fn(u64) -> Option<&'a Range>) -> Vec<(u64, Duration)> {
+		(self.pending.iter().chain(&self.reaching))
+			.filter_map(|key| range(*key))
+			.filter(|range| !range.is_empty())
+			.map(|range| (range.end.unwrap_or(u64::MAX), range.budget()))
+			.collect()
 	}
 
 	/// [`Self::budget`] with each range's staleness taken from `ranges`, by key, rather than
 	/// from the range it was placed as: a front's reader places a live join where a copy
 	/// resolved it, as a time start, and the join's groups still go stale past its `max`.
 	pub fn budget_of(&self, ranges: &BTreeMap<u64, Range>) -> Budget {
-		let asked = || ranges.values().filter(|range| !range.is_empty());
-		let mut covered = Cover::default();
+		let mut layers: BTreeMap<Duration, Cover> = BTreeMap::new();
 		for (key, span) in &self.spans {
-			if let Some(run) = &span.groups
-				&& ranges.get(key).is_some_and(|range| range.start.is_history())
-			{
-				covered.add(run.clone(), 1);
+			if let (Some(run), Some(range)) = (&span.groups, ranges.get(key)) {
+				layers.entry(range.budget()).or_default().add(run.clone(), 1);
 			}
 		}
-		self.cover_pending(&mut covered, |key| ranges.get(&key));
+		let asked = || ranges.values().filter(|range| !range.is_empty());
+		let rest = (asked().filter(|range| range.join().is_some()).map(Range::budget))
+			.max()
+			.unwrap_or(Duration::ZERO);
 		Budget {
-			live: (asked().filter_map(|range| range.join().map(|_| range.budget())))
-				.max()
-				.unwrap_or(Duration::ZERO),
-			history: Duration::MAX,
-			covered,
-			asked: asked().any(|range| range.join().is_none()),
+			rest,
+			widest: asked().map(Range::budget).fold(rest, Duration::max),
+			..Budget::new(
+				layers.into_iter().collect(),
+				self.unplaced_budgets(|key| ranges.get(&key)),
+			)
 		}
 	}
 
@@ -993,7 +1052,7 @@ impl Window {
 		self.waiting.clear();
 		self.groups = Cover::default();
 		self.missable = Cover::default();
-		self.history = Cover::default();
+		self.layers.clear();
 		self.named.clear();
 		self.unnamed = 0;
 		let keys: Vec<u64> = self
@@ -1013,7 +1072,6 @@ impl Window {
 	fn place_range(&mut self, key: u64, latest: Option<u64>, holdings: &impl Holdings) {
 		let range = self.ranges[&key];
 		let budget = range.budget();
-		let history = range.start.is_history();
 		// Every end includes its group.
 		let end = range.end.and_then(|end| end.checked_add(1));
 		let (anchor, asks) = match range.start {
@@ -1099,7 +1157,7 @@ impl Window {
 			// Reads only the groups from its time until the groups held place it; see
 			// [`Self::start_waiting`].
 			Placed::Waiting => {
-				let span = Span::new(anchor, asks, 0, end, false, history, None);
+				let span = Span::new(anchor, asks, 0, end, false, budget, None);
 				self.count(key, Span { waiting: true, ..span });
 				return;
 			}
@@ -1110,7 +1168,7 @@ impl Window {
 			Some(time) => unresolved(time, start, floored, holdings).map(|floor| Looking { time, floor }),
 			None => None,
 		};
-		self.count(key, Span::new(anchor, asks, start, end, floored, history, looking));
+		self.count(key, Span::new(anchor, asks, start, end, floored, budget, looking));
 	}
 
 	/// Whether a time start or a join's reach back waits on the groups held to place it.
@@ -1123,9 +1181,7 @@ impl Window {
 		(span.groups, span.missable) = span.reads();
 		if let Some(run) = &span.groups {
 			self.groups.add(run.clone(), 1);
-			if span.history {
-				self.history.add(run.clone(), 1);
-			}
+			self.layers.entry(span.budget).or_default().add(run.clone(), 1);
 		}
 		if let Some(run) = &span.missable {
 			self.missable.add(run.clone(), 1);
@@ -1147,8 +1203,10 @@ impl Window {
 	fn uncount(&mut self, key: u64, span: &Span) {
 		if let Some(run) = &span.groups {
 			self.groups.add(run.clone(), -1);
-			if span.history {
-				self.history.add(run.clone(), -1);
+			let layer = self.layers.get_mut(&span.budget).expect("a counted layer");
+			layer.add(run.clone(), -1);
+			if layer.is_empty() {
+				self.layers.remove(&span.budget);
 			}
 		}
 		if let Some(run) = &span.missable {
@@ -1185,7 +1243,7 @@ impl Span {
 		start: u64,
 		end: Option<u64>,
 		floored: bool,
-		history: bool,
+		budget: Duration,
 		looking: Option<Looking>,
 	) -> Self {
 		Self {
@@ -1194,7 +1252,7 @@ impl Span {
 			start,
 			end,
 			floored,
-			history,
+			budget,
 			looking,
 			waiting: false,
 			groups: None,
@@ -1736,7 +1794,7 @@ mod tests {
 			assert_eq!(window.joins().count(), 0);
 			assert_eq!(window.start(), Some(33));
 			let budget = window.budget();
-			assert_eq!((budget.at(66), budget.asked), (max, false));
+			assert_eq!((budget.at(66), budget.widest()), (max, max));
 		}
 		let window = Window::keyed_since([(0, join)], placed, Some(99), &keys);
 		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![33, 66, 99]);
@@ -1750,7 +1808,61 @@ mod tests {
 			max: None,
 		});
 		window.edit_since([0], &[(0, wider)], |_| Joining::At(66), Some(99), &keys);
-		assert_eq!((window.start(), window.budget().at(33)), (Some(66), Duration::MAX));
+		assert_eq!((window.start(), window.budget().at(66)), (Some(66), Duration::MAX));
+	}
+
+	/// A group takes the widest budget among the ranges covering it, not among every range: a
+	/// finite live join alone keeps its `max` beside an unlimited one placed later, and a join
+	/// still reaching may cover any group up to its end.
+	#[test]
+	fn a_group_takes_the_widest_budget_covering_it() {
+		let keys = Keys {
+			answered: Some(0),
+			..Keys::new(0..100)
+		};
+		let (narrow, reach) = (Duration::from_millis(100), Duration::from_millis(500));
+		let join = |min, max, end| Range {
+			start: Start::Live {
+				min: Duration::from_millis(min),
+				max,
+			},
+			end,
+		};
+		let ranges: BTreeMap<u64, Range> = [
+			(0, join(40, Some(narrow), None)),
+			(1, join(20, None, Some(59))),
+			(2, range(time(80), time(89))),
+			(3, join(60, Some(reach), Some(20))),
+		]
+		.into();
+		let placed = |key| match key {
+			0 => Joining::At(10),
+			1 => Joining::At(50),
+			_ => Joining::default(),
+		};
+		let window = Window::keyed_since(ranges.clone(), placed, Some(99), &keys);
+		assert!(window.is_reaching());
+		for budget in [window.budget(), window.budget_of(&ranges)] {
+			assert_eq!(
+				budget.runs(0..100),
+				vec![
+					(0..21, reach),
+					(21..50, narrow),
+					(50..60, Duration::MAX),
+					(60..80, narrow),
+					(80..90, Duration::MAX),
+					(90..100, narrow),
+				],
+				"{budget:?}"
+			);
+			assert_eq!(budget.stretch(30), (narrow, Some(50)));
+			assert_eq!((budget.widest(), budget.is_uniform()), (Duration::MAX, false));
+			// A group none covers would get the widest `max`, which is unlimited, so all are judged.
+			assert_eq!(budget.floor(Some(70)), 0);
+			let clamped = budget.clamped(Some(Duration::from_millis(200)));
+			assert_eq!(clamped.at(55), Duration::from_millis(200));
+			assert_eq!(clamped.at(30), narrow);
+		}
 	}
 
 	/// A history range a hop holding nothing leaves to its copies keeps every group it may

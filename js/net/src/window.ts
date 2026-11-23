@@ -550,8 +550,8 @@ type Span = {
 	looking?: Lookup;
 	/** A time start the groups held can't place yet: the span reads only the groups from that time until it can. */
 	waiting: boolean;
-	/** Whether its range is history, so the groups it reads never go stale. */
-	history: boolean;
+	/** Its range's budget in milliseconds, which the groups it reads get. */
+	budget: number;
 	/** What it counts in the window's groups and missable groups, so taking it out uncounts exactly that. */
 	reads?: Run;
 	asks?: Run;
@@ -617,14 +617,13 @@ export class Window {
 	// How many spans name each start, and how many name none: see {@link start}.
 	#named = new Counts<bigint>();
 	#unnamed = 0;
-	// The budgets of the live joins among the ranges, counted: a group no history range covers goes
-	// stale past the widest.
+	// The budgets of the live joins among the ranges, counted, for the widest asked.
 	#budgets = new Counts<number>();
 	// The non-empty history ranges among the ranges, placed or not.
 	#histories = 0;
-	// The groups the history ranges' spans read, which never go stale.
-	#history = new Cover();
-	// {@link budget} as last read, until the budgets or the history move.
+	// The groups the spans read, by the budget of their ranges.
+	#layers = new Map<number, Cover>();
+	// {@link budget} as last read, until the budgets, the layers, or the ranges not yet placed move.
 	#budget?: Budget;
 
 	/**
@@ -661,34 +660,34 @@ export class Window {
 
 	/**
 	 * How long each group stays worth delivering once superseded, as these ranges set it: the same
-	 * value until the budgets or the groups history covers move. Mirrors the Rust `Window::budget`.
+	 * value until the ranges or where they are placed move. Mirrors the Rust `Window::budget`.
 	 */
 	budget(): Budget {
-		this.#budget ??= new Budget(
-			this.#budgets.last() ?? 0,
-			NO_MAX_DELAY,
-			this.#withPending(this.#history.runs(), (key) => this.#ranges.get(key)),
-			this.#histories > 0,
-		);
+		if (this.#budget) return this.#budget;
+		const rest = this.#budgets.last() ?? 0;
+		this.#budget = new Budget({
+			layers: [...this.#layers].map(([budget, cover]) => [budget, cover.runs()] as const),
+			unplaced: this.#unplacedBudgets((key) => this.#ranges.get(key)),
+			rest,
+			widest: this.#histories > 0 ? NO_MAX_DELAY : rest,
+		});
 		return this.#budget;
 	}
 
 	/**
-	 * `runs` with every group a pending history range, as `rangeOf` its key says, may cover: any up to
-	 * its end, since the copies it waits on place it, and every group is in range meanwhile. Mirrors
-	 * the Rust `Window::cover_pending`.
+	 * Each range not yet placed, as `rangeOf` its key says, as the exclusive end of the groups it may
+	 * cover and its budget: a pending one may cover any up to its end, since every group is in range
+	 * meanwhile, and a live join still reaching may start at any. Mirrors the Rust
+	 * `Window::unplaced_budgets`.
 	 */
-	#withPending(runs: readonly Run[], rangeOf: (key: bigint) => Range | undefined): readonly Run[] {
-		const pending: Range[] = [];
-		for (const key of this.#pending) {
+	#unplacedBudgets(rangeOf: (key: bigint) => Range | undefined): [bigint, number][] {
+		const unplaced: [bigint, number][] = [];
+		for (const key of [...this.#pending, ...this.#reaching]) {
 			const range = rangeOf(key);
-			if (range !== undefined && liveMillis(range) === undefined) pending.push(range);
+			if (range === undefined || isEmpty(range)) continue;
+			unplaced.push([range.end === undefined ? UNBOUNDED : range.end + 1n, rangeBudget(range)]);
 		}
-		if (pending.length === 0) return runs;
-		const covered = new Cover();
-		for (const run of runs) covered.add(run.start, run.end, 1);
-		for (const range of pending) covered.add(0n, range.end === undefined ? UNBOUNDED : range.end + 1n, 1);
-		return covered.runs();
+		return unplaced;
 	}
 
 	/**
@@ -697,25 +696,28 @@ export class Window {
 	 * start, and the join's groups still go stale past its max. Mirrors the Rust `Window::budget_of`.
 	 */
 	budgetOf(ranges: ReadonlyMap<bigint, Range>): Budget {
-		const covered = new Cover();
+		const layers = new Map<number, Cover>();
 		for (const [key, span] of this.#spans) {
 			const range = ranges.get(key);
-			if (span.reads && range !== undefined && liveMillis(range) === undefined)
-				covered.add(span.reads.start, span.reads.end, 1);
+			if (!span.reads || range === undefined) continue;
+			const budget = rangeBudget(range);
+			const layer = layers.get(budget) ?? new Cover();
+			layers.set(budget, layer);
+			layer.add(span.reads.start, span.reads.end, 1);
 		}
-		let live = 0;
-		let asked = false;
+		let rest = 0;
+		let widest = 0;
 		for (const range of ranges.values()) {
 			if (isEmpty(range)) continue;
-			if (liveMillis(range) === undefined) asked = true;
-			else live = Math.max(live, rangeBudget(range));
+			widest = Math.max(widest, rangeBudget(range));
+			if (liveMillis(range) !== undefined) rest = Math.max(rest, rangeBudget(range));
 		}
-		return new Budget(
-			live,
-			NO_MAX_DELAY,
-			this.#withPending(covered.runs(), (key) => ranges.get(key)),
-			asked,
-		);
+		return new Budget({
+			layers: [...layers].map(([budget, cover]) => [budget, cover.runs()] as const),
+			unplaced: this.#unplacedBudgets((key) => ranges.get(key)),
+			rest,
+			widest,
+		});
 	}
 
 	// Count a live join's budget among {@link #budgets}, or a history range among {@link #histories},
@@ -778,6 +780,12 @@ export class Window {
 			this.#countBudget(range, 1);
 			if (retuned.has(key)) {
 				this.#ranges.set(key, range);
+				// Its groups take the new budget where it stands.
+				const span = this.#spans.get(key);
+				if (span) {
+					this.#uncount(key, span);
+					this.#count(key, { ...span, budget: rangeBudget(range) });
+				}
 				continue;
 			}
 			this.#retire(key);
@@ -804,6 +812,7 @@ export class Window {
 			if (!(this.#joining.get(key)?.since !== undefined)) continue;
 			this.#joining.set(key, { since: tick });
 			if (!this.#reaching.delete(key)) continue;
+			this.#budget = undefined;
 			this.#placeRange(key, latest, holdings);
 		}
 		return this.#spans.size > placed;
@@ -811,8 +820,8 @@ export class Window {
 
 	// Take out what the range keyed `key` placed, leaving the range itself.
 	#retire(key: bigint): void {
-		if (this.#pending.delete(key)) this.#budget = undefined;
-		this.#reaching.delete(key);
+		const pending = this.#pending.delete(key);
+		if (this.#reaching.delete(key) || pending) this.#budget = undefined;
 		const span = this.#spans.get(key);
 		if (span) this.#uncount(key, span);
 	}
@@ -863,6 +872,7 @@ export class Window {
 			const placed = this.#spans.size;
 			const reaching = [...this.#reaching];
 			this.#reaching.clear();
+			this.#budget = undefined;
 			for (const key of reaching) this.#placeRange(key, latest, holdings);
 			moved = this.#spans.size > placed;
 		}
@@ -1150,7 +1160,7 @@ export class Window {
 		this.#looking = new ByTime();
 		this.#groups = new Cover();
 		this.#missable = new Cover();
-		this.#history = new Cover();
+		this.#layers.clear();
 		this.#budget = undefined;
 		this.#named = new Counts();
 		this.#unnamed = 0;
@@ -1169,11 +1179,10 @@ export class Window {
 		let at = rangeTime(range);
 		const live = typeof range.start === "object" ? range.start.live.min : undefined;
 		const budget = rangeBudget(range);
-		const history = live === undefined;
 		// Placed already, where an earlier copy resolved it: its lag places nothing.
 		const placed = live === undefined ? undefined : this.#joining.get(key)?.at;
 		if (placed !== undefined) {
-			this.#count(key, { at: undefined, start: placed, end, floored: true, waiting: false, history });
+			this.#count(key, { at: undefined, start: placed, end, floored: true, waiting: false, budget });
 			return;
 		}
 		// A hop whose copies place the join waits on them, as one with no group yet does.
@@ -1193,6 +1202,7 @@ export class Window {
 				if (join === "empty" && range.end !== undefined) join = { group: range.end + 1n };
 				if (join === undefined || join === "empty") {
 					this.#reaching.add(key);
+					this.#budget = undefined;
 					return;
 				}
 			} else {
@@ -1218,6 +1228,7 @@ export class Window {
 					// Nothing to measure the live edge by yet: read none of the groups held until it resolves.
 					if (join === undefined || join === "empty") {
 						this.#reaching.add(key);
+						this.#budget = undefined;
 						return;
 					}
 				}
@@ -1226,7 +1237,7 @@ export class Window {
 			// every group starts as a range from the oldest group does.
 			if (join === "oldest") at = undefined;
 			else if (join.group !== undefined) {
-				this.#count(key, { at: undefined, start: join.group, end, floored: true, waiting: false, history });
+				this.#count(key, { at: undefined, start: join.group, end, floored: true, waiting: false, budget });
 				return;
 			} else at = join.time;
 		}
@@ -1238,21 +1249,23 @@ export class Window {
 		}
 		if (start === "waiting") {
 			// Reads only the groups from its time until the groups held place it; see #startWaiting.
-			this.#count(key, { at, start: 0n, end, floored: false, waiting: true, history });
+			this.#count(key, { at, start: 0n, end, floored: false, waiting: true, budget });
 			return;
 		}
 		// A time start the groups held can't place reads nothing until its lookup answers.
 		const floor = at === undefined ? undefined : unresolved(at, start.group, start.floored, holdings);
 		const looking = at !== undefined && floor !== undefined ? { time: at, floor } : undefined;
-		this.#count(key, { at, start: start.group, end, floored: start.floored, looking, waiting: false, history });
+		this.#count(key, { at, start: start.group, end, floored: start.floored, looking, waiting: false, budget });
 	}
 
 	// Hold `span` under `key`, counting the groups it reads and where it starts.
 	#count(key: bigint, span: Span): void {
 		[span.reads, span.asks] = spanReads(span);
-		if (span.reads) this.#groups.add(span.reads.start, span.reads.end, 1);
-		if (span.reads && span.history) {
-			this.#history.add(span.reads.start, span.reads.end, 1);
+		if (span.reads) {
+			this.#groups.add(span.reads.start, span.reads.end, 1);
+			const layer = this.#layers.get(span.budget) ?? new Cover();
+			this.#layers.set(span.budget, layer);
+			layer.add(span.reads.start, span.reads.end, 1);
 			this.#budget = undefined;
 		}
 		if (span.asks) this.#missable.add(span.asks.start, span.asks.end, 1);
@@ -1265,9 +1278,11 @@ export class Window {
 
 	// Take back what {@link #count} counted for `span`, and take it out of the spans.
 	#uncount(key: bigint, span: Span): void {
-		if (span.reads) this.#groups.add(span.reads.start, span.reads.end, -1);
-		if (span.reads && span.history) {
-			this.#history.add(span.reads.start, span.reads.end, -1);
+		if (span.reads) {
+			this.#groups.add(span.reads.start, span.reads.end, -1);
+			const layer = this.#layers.get(span.budget);
+			layer?.add(span.reads.start, span.reads.end, -1);
+			if (layer?.lowest() === undefined) this.#layers.delete(span.budget);
 			this.#budget = undefined;
 		}
 		if (span.asks) this.#missable.add(span.asks.start, span.asks.end, -1);
@@ -1281,83 +1296,150 @@ export class Window {
 
 /**
  * How long each group stays worth delivering once superseded, in milliseconds, as a reader's ranges
- * set it: for as long as the publisher keeps it ({@link NO_MAX_DELAY}) while a history range covers
- * it, and otherwise the widest max among its live joins, which costs nothing to judge whatever
- * placed them. Immutable: a window hands out a new one when its ranges move. Mirrors the Rust
+ * set it: the widest budget among the ranges covering it, a live join's being its max, and a history
+ * range's as long as the publisher keeps it ({@link NO_MAX_DELAY}). A range not yet placed may cover
+ * any group up to its end. A group none covers, such as one handed out before the ranges moved, gets
+ * the widest max. Immutable: a window hands out a new one when its ranges move. Mirrors the Rust
  * `Budget`.
  */
 export class Budget {
-	/** A group no history range covers. */
-	readonly live: number;
-	/** A group a history range covers: unlimited, unless clamped to a bound. */
-	readonly history: number;
-	/** The groups history ranges cover, sorted and disjoint. */
-	readonly covered: readonly Run[];
-	/** Whether a history range is asked for, placed or not: wherever it lands, its groups get the history budget. */
-	readonly asked: boolean;
+	/** The groups the placed ranges cover, by the budget they give, widest first, each sorted and disjoint. */
+	readonly layers: readonly (readonly [number, readonly Run[]])[];
+	/**
+	 * The ranges not yet placed, each as the exclusive end of the groups it may cover and its budget:
+	 * by end ascending, budget descending, leaving out any another covers at least as widely.
+	 */
+	readonly unplaced: readonly (readonly [bigint, number])[];
+	/** A group no range covers: the widest live join's max. */
+	readonly rest: number;
+	// The widest budget any range asks, placed or not.
+	readonly #widest: number;
 
-	constructor(live: number, history: number, covered: readonly Run[], asked = false) {
-		this.live = live;
-		this.history = history;
-		this.covered = covered;
-		this.asked = asked;
+	constructor(parts: {
+		layers: readonly (readonly [number, readonly Run[]])[];
+		unplaced: readonly (readonly [bigint, number])[];
+		rest: number;
+		widest: number;
+	}) {
+		this.layers = parts.layers.filter(([, runs]) => runs.length > 0).sort(([a], [b]) => b - a);
+		// A range covering through a later group at least as widely hides one through an earlier.
+		const unplaced = [...parts.unplaced].sort(([a, x], [b, y]) => (a < b ? -1 : a > b ? 1 : x - y));
+		const kept: (readonly [bigint, number])[] = [];
+		for (let i = unplaced.length - 1; i >= 0; i--) {
+			const wider = kept.at(-1);
+			if (wider === undefined || unplaced[i][1] > wider[1]) kept.push(unplaced[i]);
+		}
+		this.unplaced = kept.reverse();
+		this.rest = parts.rest;
+		this.#widest = parts.widest;
 	}
 
 	/** The same budget for every group. */
 	static uniform(budget: number): Budget {
-		return new Budget(budget, budget, []);
+		return new Budget({ layers: [], unplaced: [], rest: budget, widest: budget });
 	}
 
 	/** This budget, each group's no wider than `bound`, undefined for none. */
 	clamped(bound: number | undefined): Budget {
-		if (bound === undefined || (this.live <= bound && this.history <= bound)) return this;
-		return new Budget(Math.min(this.live, bound), Math.min(this.history, bound), this.covered, this.asked);
+		if (bound === undefined || this.#widest <= bound) return this;
+		return new Budget({
+			layers: this.layers.map(([budget, runs]) => [Math.min(budget, bound), runs] as const),
+			unplaced: this.unplaced.map(([end, budget]) => [end, Math.min(budget, bound)] as const),
+			rest: Math.min(this.rest, bound),
+			widest: bound,
+		});
 	}
 
 	/** How long group `key` stays worth delivering once superseded. */
 	at(key: bigint): number {
-		if (this.covered.length === 0) return this.live;
-		const index = runsFrom(this.covered, key);
-		const run = this.covered[index];
-		return run !== undefined && run.start <= key ? this.history : this.live;
+		let at: number | undefined;
+		for (const [budget, runs] of this.layers) {
+			const run = runs[runsFrom(runs, key)];
+			if (run !== undefined && run.start <= key) {
+				at = budget;
+				break;
+			}
+		}
+		const unplaced = this.unplaced[this.#unplacedFrom(key)];
+		if (unplaced !== undefined) at = Math.max(at ?? 0, unplaced[1]);
+		return at ?? this.rest;
 	}
 
-	/** The widest budget any group gets, counting a history range not yet placed. */
+	/** The widest budget any group gets, counting a range not yet placed. */
 	widest(): number {
-		return this.asked ? Math.max(this.live, this.history) : this.live;
+		return this.#widest;
 	}
 
 	/** Whether every group gets the same budget. */
 	isUniform(): boolean {
-		return this.covered.length === 0 || this.live === this.history;
+		return (
+			this.layers.every(([budget]) => budget === this.rest) &&
+			this.unplaced.every(([, budget]) => budget === this.rest)
+		);
 	}
 
 	/** Whether `other` gives every group the same budget, as this one's copy. */
 	equals(other: Budget | undefined): boolean {
+		if (other === this) return true;
 		return (
 			other !== undefined &&
-			this.live === other.live &&
-			this.history === other.history &&
-			this.covered === other.covered &&
-			this.asked === other.asked
+			this.rest === other.rest &&
+			this.#widest === other.#widest &&
+			this.layers.length === other.layers.length &&
+			this.layers.every(([budget, runs], i) => budget === other.layers[i][0] && runs === other.layers[i][1]) &&
+			this.unplaced.length === other.unplaced.length &&
+			this.unplaced.every(([end, budget], i) => end === other.unplaced[i][0] && budget === other.unplaced[i][1])
 		);
 	}
 
 	/** `[start, end)` cut where the budget changes, each stretch with its budget, lowest first. */
 	runs(start: bigint, end: bigint): [Run, number][] {
-		if (start >= end) return [];
-		if (this.isUniform()) return [[{ start, end }, this.at(start)]];
 		const runs: [Run, number][] = [];
-		let at = start;
-		for (let i = runsFrom(this.covered, start); i < this.covered.length && this.covered[i].start < end; i++) {
-			const from = max(this.covered[i].start, start);
-			const to = min(this.covered[i].end, end);
-			if (at < from) runs.push([{ start: at, end: from }, this.live]);
-			runs.push([{ start: from, end: to }, this.history]);
+		for (let at = start; at < end; ) {
+			const [budget, next] = this.stretch(at);
+			const to = next === undefined ? end : min(next, end);
+			runs.push([{ start: at, end: to }, budget]);
 			at = to;
 		}
-		if (at < end) runs.push([{ start: at, end }, this.live]);
 		return runs;
+	}
+
+	/** The budget of group `key`, and the next key whose budget differs, undefined for none. */
+	stretch(key: bigint): [number, bigint | undefined] {
+		const budget = this.at(key);
+		if (this.isUniform()) return [budget, undefined];
+		for (let cut = this.#cutAfter(key); cut !== undefined; cut = this.#cutAfter(cut)) {
+			if (this.at(cut) !== budget) return [budget, cut];
+		}
+		return [budget, undefined];
+	}
+
+	// The next key past `key` where a layer's run or an unplaced range starts or ends, so the budget
+	// may change.
+	#cutAfter(key: bigint): bigint | undefined {
+		let cut: bigint | undefined;
+		const take = (at: bigint) => {
+			if (at < UNBOUNDED) cut = cut === undefined ? at : min(cut, at);
+		};
+		for (const [, runs] of this.layers) {
+			const run = runs[runsFrom(runs, key)];
+			if (run !== undefined) take(run.start <= key ? run.end : run.start);
+		}
+		const unplaced = this.unplaced[this.#unplacedFrom(key)];
+		if (unplaced !== undefined) take(unplaced[0]);
+		return cut;
+	}
+
+	// The index of the first unplaced range that may cover `key`.
+	#unplacedFrom(key: bigint): number {
+		let lo = 0;
+		let hi = this.unplaced.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (this.unplaced[mid][0] <= key) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo;
 	}
 }
 

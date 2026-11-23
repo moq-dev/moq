@@ -259,12 +259,6 @@ impl Start {
 			max: Some(max),
 		}
 	}
-
-	/// Whether this start is a floor for history rather than a live join, so the groups its
-	/// range covers never go stale.
-	pub(crate) fn is_history(&self) -> bool {
-		!matches!(self, Self::Live { .. })
-	}
 }
 
 /// Every group from where the start places it, following the live edge.
