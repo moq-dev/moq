@@ -606,6 +606,8 @@ export interface ResumeSource {
 	serving(): boolean;
 	/** The parts of `[start, end)` any copy held or let go says its publisher skipped; see `hooks.skippedIn`. */
 	skippedIn(start: bigint, end: bigint): Run[];
+	/** Ask the serving copy's fills for kept-out keys an outer front owes; see `hooks.askUnproven`. */
+	askUnproven(unproven: Run[]): Run[];
 	/** Whether a group in `land` may still land on a copy this reader keeps; see `hooks.mayLand`. */
 	mayLand(land: Land): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
@@ -956,6 +958,12 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/**
+	 * Ask a route copy's fills for the keys of `unproven` a front's resumed reader owes that its
+	 * track cannot prove skipped, once its feed no longer waits for them, returning those its fills
+	 * gave up. Assigned by `track.ts`.
+	 */
+	askUnproven: (subscriber: Subscriber, unproven: Run[]) => Run[];
 	/**
 	 * The runs of `[start, end)` a subscriber reads: inside its ranges and its local bounds.
 	 * Assigned by `track.ts`.
@@ -1507,6 +1515,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	tryDrop: () => {
+		throw new Error("track.ts not loaded");
+	},
+	askUnproven: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryNextGroup: () => {

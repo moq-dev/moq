@@ -1525,7 +1525,7 @@ class Reader implements ResumeSource {
 	 *
 	 * Under the serving copy's resume point, a key the cursor admits was the copies' it replaced, each
 	 * let go once it had nothing more. One it keeps out stays owed, as on one cursor, until a copy held
-	 * now declares it skipped, and the serving route is asked for those no copy does (see
+	 * now declares it skipped or the asked copy's fills give it up, and the serving route is asked for those no copy does (see
 	 * {@link #ask}), so its answer settles them however many copies came and went. The serving copy
 	 * judges the rest by where it placed the reader's ranges itself: a time a copy held no group for
 	 * places the reader's window at the time itself, wider than any group the serving copy reads.
@@ -1535,20 +1535,20 @@ class Reader implements ResumeSource {
 		const window = this.#window();
 		if (window.end() === undefined || window.pending) return false;
 		const resumed = resumePoint(serving) ?? 0n;
-		let open: Run | undefined;
+		const open: Run[] = [];
 		const above: Run[] = [];
 		for (const gap of gaps) {
 			for (const run of this.#keptOut(gap, resumed)) {
-				for (const unknown of this.#unskipped(run)) {
-					open = open ? { start: min(open.start, unknown.start), end: max(open.end, unknown.end) } : unknown;
-				}
+				for (const unknown of this.#unskipped(run)) insertRun(open, unknown.start, unknown.end);
 			}
 			const split = min(max(resumed, gap.start), gap.end);
 			if (split < gap.end) above.push({ start: split, end: gap.end });
 		}
-		if (open) {
-			this.#ask(open);
-			return false;
+		if (open.length > 0) {
+			// What the asked copy's fills gave up is accounted for, as on one cursor.
+			let owed: Run[] = open;
+			for (const gone of this.#ask(open)) owed = removeRun(owed, gone.start, gone.end);
+			if (owed.length > 0) return false;
 		}
 		return hooks.accountsFor(serving.sub, delivered, above, ordered);
 	}
@@ -1574,15 +1574,30 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Ask the serving route for `keys`, which hold a key the cursor keeps out that is neither recorded
-	 * nor declared skipped by a copy held now. Its answer settles each such key as it would on one
-	 * cursor: a skip accounts for it, while a group or a drop leaves it owed. A copy of that route
+	 * Ask the serving route for the hull of `open`, the keys the cursor keeps out that are neither
+	 * recorded nor declared skipped by a copy held now. Its answer settles each such key as it would on one
+	 * cursor: a skip, or a fill that gives it up, accounts for it, while a group or a drop leaves it owed. A copy of that route
 	 * already asked for them, kept by {@link #letGo} until {@link #skipped} records them, asks nothing
-	 * more, so neither a reader waiting on the answer nor one a group holds open asks again. Mirrors
-	 * the Rust `Reader::ask`.
+	 * more, so neither a reader waiting on the answer nor one a group holds open asks again. Its
+	 * track may forget a skip it answered before the rest lands, so it asks its fills for those it
+	 * cannot prove, returning the keys of `open` those fills gave up. Mirrors the Rust `Reader::ask`.
 	 */
-	#ask(keys: Run): void {
+	#ask(open: Run[]): Run[] {
+		const givenUp: Run[] = [];
+		const first = open.at(0);
+		const last = open.at(-1);
+		if (!first || !last) return givenUp;
+		const keys = { start: first.start, end: last.end };
 		this.#backfill(keys.start, keys.end);
+		const serving = this.#copies.at(-1);
+		if (!serving) return givenUp;
+		for (const copy of this.#copies.slice(0, -1)) {
+			const end = copyEnd(copy);
+			if (copyAskedFor(copy, serving, keys.start) && end !== undefined && end >= keys.end) {
+				for (const gone of hooks.askUnproven(copy.sub, open)) insertRun(givenUp, gone.start, gone.end);
+			}
+		}
+		return givenUp;
 	}
 
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined {
@@ -2200,6 +2215,16 @@ class Reader implements ResumeSource {
 	serving(): boolean {
 		this.sync();
 		return this.#serving() !== undefined;
+	}
+
+	/**
+	 * Ask the serving copy's fills for `unproven`, kept-out keys a containing front's reader owes, as
+	 * that reader asks a plain copy, returning what they gave up, so a key this front's route cannot
+	 * fill ends the outer read too. Mirrors the Rust `Resume::ask_unproven`.
+	 */
+	askUnproven(unproven: Run[]): Run[] {
+		const serving = this.#copies.at(-1);
+		return serving ? hooks.askUnproven(serving.sub, unproven) : [];
 	}
 
 	// What the reader recorded or any copy held now declared skipped: a skip is final for the whole
