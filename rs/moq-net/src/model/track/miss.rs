@@ -1075,17 +1075,23 @@ impl Misses {
 		for run in settled {
 			refills.remove(run);
 		}
+		// A fill's answer evicted before it was taken is no longer held for this reader, which
+		// asks for it again only while a hold fits, as every path finding the eviction does
+		// (see `Self::reask`); a group the live feed delivered keeps its ask.
+		let mut answered = RangeSet::new();
 		for run in refills.iter() {
-			// A fill's answer evicted before it was taken is no longer held for this reader,
-			// which asks for it again however often it is evicted: a fill holds what it fetched
-			// until a reader takes it, so each refill reaches one.
 			let filled: Vec<u64> = self.filled.range(run.clone()).copied().collect();
 			for key in filled {
 				self.filled.remove(&key);
-				self.release(&RangeSet::from_iter(std::iter::once(key..key + 1)));
+				answered.insert(key..key + 1);
 			}
-			candidates.insert(run.clone());
 		}
+		self.release(&answered);
+		for run in answered.iter() {
+			refills.remove(run.clone());
+		}
+		candidates.extend(refills);
+		candidates.extend(self.reask(state, answered, given_up));
 		self.ledger_revision = ledger.revision();
 		self.drops_revision = drops.revision();
 		self.budget = Some(drift.budget.clone());
