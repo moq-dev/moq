@@ -8981,11 +8981,8 @@ mod serve_group_test {
 		ranges: &[lite::Range],
 	) -> (TrackRun, Writer<crate::transport::boxed::SendStream, Version>, Log) {
 		let bounds = Bounds::new(ranges, None);
-		let subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_ranges(bounds.ranges.iter().copied())
-				.with_max(Duration::from_secs(3600)),
-		);
+		// The ranges as the SUBSCRIBE asked them: on lite-07 only a live join's own max expires a group.
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
 		let (mut run, writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		asked(&mut run, &bounds.ranges);
 		(run, writer, log)

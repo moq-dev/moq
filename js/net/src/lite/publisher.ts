@@ -743,18 +743,32 @@ function waitForSubscription(
 	subscriber: track.Subscriber,
 	drops: Signal<number>,
 ): Promise<void> {
-	return new Promise((resolve) => {
-		let settled = false;
-		const dispose: Dispose[] = [];
+	return armSubscription(controls, subscriber, drops).woke;
+}
+
+// `waitForSubscription`, registered now and awaited later, so a change between the two still wakes
+// it. `dispose` drops a registration left unawaited.
+function armSubscription(
+	controls: SubscriptionControls,
+	subscriber: track.Subscriber,
+	drops: Signal<number>,
+): { woke: Promise<void>; dispose: Dispose } {
+	const dispose: Dispose[] = [];
+	let settled = false;
+	const settle = () => {
+		if (settled) return false;
+		settled = true;
+		for (const close of dispose) close();
+		return true;
+	};
+	const woke = new Promise<void>((resolve) => {
 		const wake = () => {
-			if (settled) return;
-			settled = true;
-			for (const close of dispose) close();
-			resolve();
+			if (settle()) resolve();
 		};
 		dispose.push(controls.changed(wake), hooks.groupChanged(subscriber, wake));
 		dispose.push(drops.changed(wake));
 	});
+	return { woke, dispose: () => void settle() };
 }
 
 /** Resolves once the subscriber's next control (an update, its FIN, or a failure) arrives. */
@@ -1731,7 +1745,8 @@ export class Publisher {
 			const reaches = perRange() && hooks.sourceStart(track) === "pending";
 			for (const [index, id] of ids.entries()) {
 				const range = resolution[index];
-				if (!range || (unstarted.get(id)?.live && largest === "unknown")) continue;
+				// An update taken while an earlier start went out may have retired it.
+				if (!range || !controls.holds(id) || (unstarted.get(id)?.live && largest === "unknown")) continue;
 				// A live join starts where it was placed, past the groups its max expired, which may be
 				// below where delivery starts: a relay serves first the groups it holds, before those the
 				// join is owed arrive. It moves delivery down to it. Any other range starts no earlier
@@ -1958,6 +1973,9 @@ export class Publisher {
 		// a track that ran out of groups still has to flush the ones already queued, and the
 		// caller FINs the subscribe stream to say so.
 		let finished = false;
+		let armed: { woke: Promise<void>; dispose: Dispose } | undefined;
+		// Park until the subscription changes, from the wait armed this pass if any.
+		const park = () => armed?.woke ?? waitForSubscription(controls, track, drops);
 		let unsubscribe!: () => void;
 		const unsubscribed = new Promise<void>((resolve) => {
 			unsubscribe = resolve;
@@ -1993,6 +2011,10 @@ export class Publisher {
 							return false;
 					}
 				}
+				// While a range waits for its START, the wait below is armed before `reportStarted` reads
+				// what this hop knows, so an answer landing while this pass awaits still wakes it.
+				armed?.dispose();
+				armed = unstarted.size > 0 ? armSubscription(controls, track, drops) : undefined;
 				if (!(await reportStarted(false))) return false;
 				// Control before data, matching the Rust publisher: every control decoded while
 				// the loop was parked applies to the next pop, never to one already made. This
@@ -2118,7 +2140,7 @@ export class Publisher {
 							if (empty === false) return false;
 							if (empty) continue;
 						}
-						await waitForSubscription(controls, track, drops);
+						await park();
 						continue;
 					case "boundary":
 						// The producer finished but is still holding groups above the cap.
@@ -2127,7 +2149,7 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						await waitForSubscription(controls, track, drops);
+						await park();
 						continue;
 					case "done": {
 						const endError = hooks.subscriberEndError(track);
@@ -2201,7 +2223,7 @@ export class Publisher {
 					if (source === "pending") {
 						if (!placesAny(largest)) {
 							first = { group, largest };
-							await waitForSubscription(controls, track, drops);
+							await park();
 							continue;
 						}
 						source = floor;
@@ -2266,6 +2288,7 @@ export class Publisher {
 				});
 			}
 		} finally {
+			armed?.dispose();
 			// A group held for the upstream START has no one left to read it.
 			first?.group.close();
 			if (!finished) unsubscribe();

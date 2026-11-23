@@ -3202,6 +3202,21 @@ mod tests {
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
 
+	/// A burst's answers naming the same largest position keep it ended if any says so, in
+	/// either order: a later one from a copy yet to see the end can't reopen the group.
+	#[test]
+	fn newer_keeps_an_ended_largest() {
+		let at = |ended| {
+			lite::Edge::Largest(lite::Largest {
+				position: Position { group: 5, frame: 3 },
+				ended,
+			})
+		};
+		assert_eq!(newer(at(true), at(false)), at(true));
+		assert_eq!(newer(at(false), at(true)), at(true));
+		assert_eq!(newer(at(false), at(false)), at(false));
+	}
+
 	/// The answer to a SUBSCRIBE's one range starting at group 0: on lite-07, `largest` says
 	/// where the track is, or that it has no group yet.
 	fn start_answer(version: Version, largest: Option<lite::Largest>) -> lite::SubscribeStart {
@@ -11458,10 +11473,17 @@ fn through(end: Option<lite::Anchor>) -> Option<u64> {
 	}
 }
 
-/// The newer of two answers' edges: a Largest over none, the later of two.
+/// The newer of two answers' edges: a Largest over none, the later of two. Two naming the same
+/// position say it ended if either does: one from a copy that has yet to see the end says nothing.
 fn newer(a: lite::Edge, b: lite::Edge) -> lite::Edge {
 	match (a, b) {
 		(lite::Edge::Largest(x), lite::Edge::Largest(y)) if x.position > y.position => a,
+		(lite::Edge::Largest(x), lite::Edge::Largest(y)) if x.position == y.position => {
+			lite::Edge::Largest(lite::Largest {
+				position: x.position,
+				ended: x.ended || y.ended,
+			})
+		}
 		(lite::Edge::Largest(_), lite::Edge::Empty | lite::Edge::Unknown) => a,
 		(_, lite::Edge::Largest(_) | lite::Edge::Empty) => b,
 		_ => a,

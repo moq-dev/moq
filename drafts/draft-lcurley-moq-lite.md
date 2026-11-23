@@ -1846,7 +1846,7 @@ A datagram Track has no compression: each payload is sent as written.
 
 ## SUBSCRIBE_START {#subscribe-start}
 A SUBSCRIBE_START message resolves where a Range starts, and says what the publisher knows of the Track's largest position.
-The publisher sends one for each Range of the SUBSCRIBE and each Range an update adds, unless an update retires the Range first.
+The publisher sends one for each Range of the SUBSCRIBE and each Range an update adds, unless an update retires the Range first, or the Track finished before producing any Group, which SUBSCRIBE_END alone answers (see [Subscribe](#subscribe)).
 
 ~~~
 SUBSCRIBE_START Message {
@@ -2347,12 +2347,12 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - A relay places a Time `Start` only where it can show its origin would, and otherwise adds a Range from that time to its own subscription and waits for its answer.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups but for a Position `Start`: any other read of part of a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
-- Replaced SUBSCRIBE_OK with SUBSCRIBE_START (type 0x4), one per Range of the SUBSCRIBE or an update: its `Range Start` is the Group where that Range's delivery starts, including at a Time Anchor or a live join, from which its Groups are owed. Each Range is answered on its own, so one a relay answers from its cache waits for no other, and nothing else confirms a subscription.
+- Replaced SUBSCRIBE_OK with SUBSCRIBE_START (type 0x4), one per Range of the SUBSCRIBE or an update, unless the Track finished before producing any Group: its `Range Start` is the Group where that Range's delivery starts, including at a Time Anchor or a live join, from which its Groups are owed. Each Range is answered on its own, so one a relay answers from its cache waits for no other, and nothing else confirms a subscription.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.
 - A subscriber fills missing Groups through Ranges on a subscription instead of a FETCH per Group, and asks for a Group a subscription already delivered or dropped, including one dropped with OLD, with a SUBSCRIBE of its own.
 - SUBSCRIBE_START carries what the publisher knows of the Track's largest position, as a `Largest Type`: Unknown, Empty, or `Largest Group`, `Largest Frame`, and `Largest Ended`, which a subscriber takes as where the live feed is. A Range that follows the live edge is never answered Unknown, and on an empty Track one whose `Start` is None is answered Empty at once.
 - Added `Error Code` to SUBSCRIBE_END: a track can end with an error while keeping the groups below its end.
-- Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every start is accounted for by a Group Stream or a drop; a publisher SHOULD send a drop as soon as it gives a start up.
+- Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every start is accounted for by a Group Stream, a GROUP_END, a SUBSCRIBE_SKIP, or a drop; a publisher SHOULD send a drop as soon as it gives a start up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
 - A Group Stream the subscriber stopped (STOP_SENDING) is named in SUBSCRIBE_DROP with the STOP_SENDING's Error Code, even after a reliable reset.
 - SUBSCRIBE_DROP and SUBSCRIBE_SKIP name a span of starts, from `Group Start` up to an exclusive `Group End`, in place of an inclusive `Group End`. An empty or inverted span is a PROTOCOL_VIOLATION.
@@ -2360,7 +2360,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Every SUBSCRIBE_DROP is final on its subscription, OLD included: no SUBSCRIBE_UPDATE reopens a drop, and a subscriber that still wants the Group asks for it with a SUBSCRIBE of its own.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.
-- A publisher that withheld a Range's SUBSCRIBE_START sends it, then the drops it withheld, once no group can resolve it: every Group of the bounded Range was given up, or the Track finished.
+- A publisher that withheld a Range's SUBSCRIBE_START sends it, then the drops it withheld, once no group can resolve it: every Group of the bounded Range was given up, or the Track finished. A Track that finished before producing any Group is answered by SUBSCRIBE_END alone, with no SUBSCRIBE_START.
 - The subscriber FINs its Subscribe Stream once it wants nothing more, such as after settling its tail past SUBSCRIBE_END, and the publisher FINs in reply; graceful session close waits for the subscriber's FIN or reset.
 
 ### Delivery {#changelog-07-delivery}

@@ -1946,6 +1946,45 @@ test("lite draft-07: drops wait for the first SUBSCRIBE_START", async () => {
 	}
 });
 
+// An edge answer landing after the loop last read it, while it goes on to park, still answers the
+// range that waited on it, with nothing else arriving.
+test("lite draft-07: an edge answered just before the loop parks answers its range", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n });
+	const knowsEdge = hooks.knowsEdge;
+	let answered: Awaited<ReturnType<typeof decodeSubscribeResponse>> | undefined;
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { start: 0n });
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		await flush();
+		void decodeSubscribeResponse(sub.client.reader, version).then(
+			(msg) => {
+				answered = msg;
+			},
+			() => {},
+		);
+		// The next read of the edge finds it unknown, and the answer lands right after.
+		hooks.knowsEdge = (subscriber) => {
+			const known = knowsEdge(subscriber);
+			if (!known) {
+				hooks.knowsEdge = knowsEdge;
+				queueMicrotask(() => hooks.answerEdge(sub.track));
+			}
+			return known;
+		};
+		// Wakes the parked loop with nothing for this subscription.
+		hooks.answerJoin(sub.track, 1_000, undefined, 0n, NO_MAX_DELAY);
+		for (let i = 0; i < 10; i++) await flush();
+		if (!answered || !("start" in answered)) throw new Error("expected SUBSCRIBE_START");
+		expect(answered.start.id).toBe(0n);
+	} finally {
+		hooks.knowsEdge = knowsEdge;
+		await sub.close();
+	}
+});
+
 // On a relay's copy whose upstream placed one range and still places an older one, the placed range
 // is answered and served at once. The older one is answered once placed, where it starts, below the
 // range answered first. Mirrors the Rust `lite07_a_placed_range_goes_out_before_an_older_unplaced_one`.
@@ -2004,9 +2043,16 @@ test("lite draft-07: a range reaching back waits for the copy's start", async ()
 		expect([placed.start.id, placed.start.start]).toEqual([1n, 5000n]);
 		expect(await sub.servedSequence()).toBe(5000n);
 
+		// Nothing answers the oldest range while the copy's feed start is unknown.
+		let oldest: Awaited<ReturnType<typeof decodeSubscribeResponse>> | undefined;
+		const reading = decodeSubscribeResponse(sub.client.reader, version).then((msg) => {
+			oldest = msg;
+		});
+		for (let i = 0; i < 10; i++) await flush();
+		expect(oldest).toBeUndefined();
 		hooks.startTrack(sub.track, { start: 5000n, requested: 0n });
-		const oldest = await decodeSubscribeResponse(sub.client.reader, version);
-		if (!("start" in oldest)) throw new Error("expected SUBSCRIBE_START");
+		await reading;
+		if (!oldest || !("start" in oldest)) throw new Error("expected SUBSCRIBE_START");
 		expect([oldest.start.id, oldest.start.start]).toEqual([0n, 5000n]);
 	} finally {
 		await sub.close();
