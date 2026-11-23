@@ -338,7 +338,8 @@ async function run(c: Case, mode: Mode): Promise<boolean> {
 
 		const delivered = await got.delivered(clock, c.open);
 		expect(delivered, `${mode}: delivered`).toEqual(c.deliver);
-		if (after) expect(await after.delivered(clock, c.open), `${mode}: delivered after the switch`).toEqual(c.deliver);
+		if (after)
+			expect(await after.delivered(clock, c.open), `${mode}: delivered after the switch`).toEqual(c.deliver);
 		if (c.asks !== undefined && cached !== undefined) {
 			// Delivering nothing is answered alone only if the reader ended before upstream could answer.
 			const answered = cached === want && (want > 0 || endedWarm);
