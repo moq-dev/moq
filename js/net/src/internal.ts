@@ -586,6 +586,12 @@ export interface ResumeSource {
 	start(): bigint | "pending" | undefined;
 	/** Whether the serving copy places ranges as its publisher would; see `hooks.placesAsUpstream`. */
 	placesAsUpstream(): boolean;
+	/** Where the serving copy's feed starts, placed or not; see `hooks.feedStart`. */
+	feedStart(): bigint | "pending" | undefined;
+	/** Where the serving copy's upstream started a range asked from the oldest group; see `hooks.oldestStart`. */
+	oldestStart(): bigint | undefined;
+	/** The lowest group the serving copy holds at or after `from`; see `hooks.nextHeld`. */
+	nextHeld(from: bigint): bigint | undefined;
 	/** Whether the serving copy knows where the live feed is; see `hooks.knowsEdge`. */
 	knowsEdge(): boolean;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
@@ -921,6 +927,30 @@ export const hooks: {
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
 	 */
 	sourceStart: (subscriber: Subscriber) => bigint | "pending" | undefined;
+	/**
+	 * Where the source's feed starts, as `sourceStart` says, whether or not the subscriber's
+	 * ranges are placed yet: what a range placed on its own, or reaching back to the oldest group,
+	 * starts no lower than. Mirrors the Rust `track::Subscriber::poll_feed_start`; assigned by
+	 * `track.ts`.
+	 */
+	feedStart: (subscriber: Subscriber) => bigint | "pending" | undefined;
+	/**
+	 * Where the copy the subscriber reads says a range reaching back to the oldest group starts,
+	 * when it places ranges as its publisher would: where that publisher started a range asked
+	 * from the oldest group. Undefined with no such answer, or on any other track. Mirrors the
+	 * Rust `track::Subscriber::oldest_start`; assigned by `track.ts`.
+	 */
+	oldestStart: (subscriber: Subscriber) => bigint | undefined;
+	/**
+	 * The lowest group held at or after `from` in the cache a subscriber reads from. Mirrors the
+	 * Rust `Subscriber::next_held`; assigned by `track.ts`.
+	 */
+	nextHeld: (subscriber: Subscriber, from: bigint) => bigint | undefined;
+	/**
+	 * The lowest group at or after `from` a subscriber's ranges cover, past those given up for
+	 * good. Mirrors the Rust `Subscriber::next_in_range`; assigned by `track.ts`.
+	 */
+	nextInRange: (subscriber: Subscriber, from: bigint) => bigint | undefined;
 	/**
 	 * Whether the copy the subscriber reads places a range only where its publisher would, from
 	 * that publisher's answer for it or groups proving it, so `servingResolvedKeys` needs no other
@@ -1482,6 +1512,18 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	placesAsUpstream: () => {
+		throw new Error("track.ts not loaded");
+	},
+	feedStart: () => {
+		throw new Error("track.ts not loaded");
+	},
+	nextHeld: () => {
+		throw new Error("track.ts not loaded");
+	},
+	nextInRange: () => {
+		throw new Error("track.ts not loaded");
+	},
+	oldestStart: () => {
 		throw new Error("track.ts not loaded");
 	},
 	knowsEdge: () => {

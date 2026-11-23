@@ -1008,6 +1008,8 @@ let wireFed: (producer: Producer) => boolean;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { key: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
+// Where a copy's upstream started a range asked from the oldest group, if it answered one.
+let oldestAnswer: (producer: Producer) => bigint | undefined;
 let knowsEdge: (producer: Producer) => boolean;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
@@ -1704,6 +1706,7 @@ export class Producer {
 				(key) => producer.#cached.get(key)?.group.closed.peek() === undefined,
 			);
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
+		oldestAnswer = (producer) => producer.#timeStarts.get(0n)?.start;
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		keysOf = (producer) => producer.#keys;
 		wholeAt = (producer, key) => {
@@ -3335,6 +3338,8 @@ function blocksHole(reported: Reported, hole: Hole): boolean {
 export interface WireRecord {
 	/** Whether the wire was told of `key`: served, or given up. */
 	told(key: bigint): boolean;
+	/** What the wire was told of `key`, with the end of the run told alike. Mirrors the Rust `Record::report_at`. */
+	reportAt(key: bigint): Reported | undefined;
 	/** The parts of `[start, end)` the wire was told nothing of. */
 	untold(start: bigint, end: bigint): Run[];
 	/** Record that the wire was told `report` of `[start, end)`. */
@@ -3969,6 +3974,7 @@ export class Subscriber {
 		const reported = this.#reported;
 		return {
 			told: (key) => reported.at(key) !== undefined,
+			reportAt: (key) => reported.at(key),
 			untold: (start, end) => (start < end ? runGaps(reported.overlapping(start, end), start, end) : []),
 			tell: (start, end, report) => {
 				if (start < end) reported.set(start, end, { ...report, start, end });
@@ -4860,6 +4866,11 @@ export class Subscriber {
 			// names none for it for good. A closed track places it at once, as nothing more arrives.
 			// Mirrors the Rust `poll_start`.
 			if (subscriber.#window.reaching && subscriber.#state.closed.peek() === undefined) return "pending";
+			return hooks.feedStart(subscriber);
+		};
+		hooks.feedStart = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.feedStart();
+			subscriber.#settle();
 			const producer = subscriber.#state.producer;
 			const start = producer && sourceStart(producer);
 			if (start === "pending") return start;
@@ -4874,6 +4885,19 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.placesAsUpstream();
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && receivedCopy(producer) && !subscriber.#state.dropsAnchors.peek();
+		};
+		hooks.nextHeld = (subscriber, from) => {
+			if (subscriber.#resume) return subscriber.#resume.nextHeld(from);
+			const producer = subscriber.#state.producer;
+			if (producer === undefined) return undefined;
+			const keys = keysOf(producer);
+			return keys[keyIndex(keys, from)];
+		};
+		hooks.nextInRange = (subscriber, from) => subscriber.#nextInRange(from);
+		hooks.oldestStart = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.oldestStart();
+			const producer = subscriber.#state.producer;
+			return producer && hooks.placesAsUpstream(subscriber) ? oldestAnswer(producer) : undefined;
 		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.parked = (subscriber) => {

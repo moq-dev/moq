@@ -4,7 +4,7 @@ use crate::transport::poll::Session as _;
 use crate::model::record::Report;
 use crate::model::track::Hole;
 use crate::{SessionError, datagram, frame, group, origin, track};
-use rangemap::RangeMap;
+use rangemap::{RangeMap, RangeSet};
 use std::{
 	borrow::Cow,
 	collections::HashMap,
@@ -5446,6 +5446,12 @@ struct TrackRun {
 	/// Lite-07: the ranges no SUBSCRIBE_START answered yet, by Range ID, each as it was asked,
 	/// which a pin before the answer replaces.
 	unstarted: std::collections::BTreeMap<u64, Unstarted>,
+	/// Lite-07: where each range a SUBSCRIBE_START answered starts, by Range ID, `None` for one
+	/// answered with no group: it owes its groups from there to its end.
+	started: std::collections::BTreeMap<u64, Option<u64>>,
+	/// Lite-07: the stale runs the cursor gave up that no started range owes but a range still
+	/// waiting for its start covers; see [`Self::settle_stale`].
+	stale: RangeMap<u64, Hole>,
 	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 }
@@ -5593,6 +5599,8 @@ impl TrackRun {
 			#[cfg(test)]
 			initial,
 			unstarted,
+			started: Default::default(),
+			stale: RangeMap::new(),
 			unpinned,
 			bounded,
 			requested: bounds.requested(0..),
@@ -5800,7 +5808,11 @@ impl TrackRun {
 			self.requested.remove(*id);
 			// A range retired before its start resolved is owed no SUBSCRIBE_START.
 			self.unstarted.remove(id);
+			self.started.remove(id);
 		}
+		// Retiring makes no stale run owed, so this names none.
+		let owed = self.settle_stale();
+		debug_assert!(owed.is_empty(), "a retired range owes nothing");
 		for (id, range) in pins.into_iter().chain(retuned) {
 			self.requested.insert(id, range, placed.get(&id).copied());
 		}
@@ -5973,6 +5985,11 @@ impl TrackRun {
 			reported = true;
 		}
 		self.unstarted = waiting;
+		if reported {
+			for (groups, hole) in self.settle_stale() {
+				self.forward_range(groups, &hole, writer)?;
+			}
+		}
 		Ok(reported)
 	}
 
@@ -6009,22 +6026,56 @@ impl TrackRun {
 	/// a newer group's stream can beat an older one. Once nothing more arrives, it starts at
 	/// the feed or the floor, and the drops account for what is missing.
 	fn first_start(&mut self, from: u64, source: &Source, finished: bool) -> Option<u64> {
-		if source.upstream && let Some(answered) = source.oldest {
+		if source.upstream
+			&& let Some(answered) = source.oldest
+		{
 			return Some(from.max(answered));
 		}
 		let feed = match source.feed {
-			Poll::Ready(feed) => feed.map(|feed| from.max(feed)),
+			Poll::Ready(feed) => feed.map(|feed| self.pass_stale(from.max(feed))),
 			Poll::Pending if finished => None,
 			Poll::Pending => return None,
 		};
 		if source.upstream && feed.is_some() {
 			return feed;
 		}
-		match (feed, self.track.record_mut().first_group(from)) {
+		match (feed, self.first_group(from)) {
 			(feed, Some(told)) => Some(feed.map_or(told, |feed| feed.min(told))),
 			(Some(feed), None) if finished => Some(feed),
 			(None, None) if finished => Some(from.max(self.floor)),
 			_ => None,
+		}
+	}
+
+	/// The first key from `key` past the stale runs still held: none is a group a range starts
+	/// at, as a stale run below a start before lite-07 is not.
+	fn pass_stale(&self, mut key: u64) -> u64 {
+		while let Some((run, _)) = self.stale.get_key_value(&key) {
+			key = run.end;
+		}
+		key
+	}
+
+	/// The first group from `from` the cursor served or dropped, `None` while it has yet to
+	/// reach the next group held here in its ranges. It passes the keys the cursor told start
+	/// none, the stale runs still held, and those no group held here starts at, which a group
+	/// arriving later may take: the source's feed accounts for that (see [`Self::first_start`]).
+	fn first_group(&mut self, from: u64) -> Option<u64> {
+		let mut at = from;
+		loop {
+			at = self.pass_stale(at);
+			match self.track.record_mut().report_at(at) {
+				Some((end, Report::Skip)) => at = end,
+				Some(_) => return Some(at),
+				None => match self.track.next_held(at)? {
+					next if next > at => at = next,
+					// The cursor tells of each group held in its ranges, so this waits for it to.
+					_ => match self.track.next_in_range(at)? {
+						next if next == at => return None,
+						next => at = next,
+					},
+				},
+			}
 		}
 	}
 
@@ -6324,6 +6375,12 @@ impl TrackRun {
 		};
 		match &mut self.start {
 			Start::Unresolved { skipped, .. } => skipped.insert(range, hole),
+			start if start.per_range() && hole.stale_budget().is_some() => {
+				self.stale.insert(range, hole);
+				for (groups, hole) in self.settle_stale() {
+					self.forward_range(groups, &hole, writer)?;
+				}
+			}
 			_ => {
 				self.forward_range(range, &hole, writer)?;
 			}
@@ -6424,6 +6481,7 @@ impl TrackRun {
 		start: lite::SubscribeStart,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
+		self.started.insert(start.id, start.start);
 		writer.buffer(&lite::SubscribeResponse::Start(start))?;
 		if let Start::Withholding(withheld) = std::mem::replace(&mut self.start, Start::Started) {
 			for (groups, hole) in withheld {
@@ -6431,6 +6489,60 @@ impl TrackRun {
 			}
 		}
 		Ok(())
+	}
+
+	/// Lite-07: the stale runs held in [`Self::stale`] that a started range owes, from its
+	/// SUBSCRIBE_START on, for the caller to name. Each part a range still waiting for its start
+	/// covers stays held; any other is forgotten, never named, so a wider budget may still serve
+	/// it, as a stale run below a start before lite-07 is.
+	fn settle_stale(&mut self) -> Vec<(Range<u64>, Hole)> {
+		if self.stale.is_empty() {
+			return Vec::new();
+		}
+		let (owed, pending) = self.owed();
+		let mut named = Vec::new();
+		for (run, hole) in std::mem::take(&mut self.stale) {
+			for part in owed.overlapping(&run) {
+				named.push((part.start.max(run.start)..part.end.min(run.end), hole.clone()));
+			}
+			for gap in owed.gaps(&run) {
+				for part in pending.overlapping(&gap) {
+					let held = part.start.max(gap.start)..part.end.min(gap.end);
+					self.stale.insert(held, hole.clone());
+				}
+				for rest in pending.gaps(&gap) {
+					self.track.record_mut().untell(rest);
+				}
+			}
+		}
+		named
+	}
+
+	/// Lite-07: the keys each started range owes, from where its SUBSCRIBE_START placed it to
+	/// its end, and those a range still waiting for its start may come to owe.
+	fn owed(&mut self) -> (RangeSet<u64>, RangeSet<u64>) {
+		let started: Vec<(u64, u64)> = (self.started.iter())
+			.filter_map(|(&id, start)| start.map(|start| (id, start)))
+			.collect();
+		let mut owed = RangeSet::new();
+		let resolved = self.track.resolved_keys(started.iter().map(|(id, _)| *id));
+		for ((_, start), resolved) in started.into_iter().zip(resolved) {
+			let end = resolved.map(|resolved| resolved.end.unwrap_or(u64::MAX));
+			if let Some(end) = end.filter(|&end| end > start) {
+				owed.insert(start..end);
+			}
+		}
+		let mut pending = RangeSet::new();
+		let resolved = self.track.resolved_keys(self.unstarted.keys().copied());
+		for resolved in resolved {
+			// One not resolved yet may cover any key.
+			let (start, end) = resolved.map_or((0, None), |resolved| (resolved.start, resolved.end));
+			let end = end.unwrap_or(u64::MAX);
+			if end > start {
+				pending.insert(start..end);
+			}
+		}
+		(owed, pending)
 	}
 
 	/// Name every key from the start to the end that this subscription never got. The
@@ -6444,8 +6556,7 @@ impl TrackRun {
 	) -> Result<bool, Error> {
 		let start = match self.start {
 			Start::Resolved(start) => start,
-			// Each range answers where its own groups are owed from, and the cursor reads none
-			// below its floor. Withheld until the first SUBSCRIBE_START.
+			// The cursor reads none below its floor. Withheld until the first SUBSCRIBE_START.
 			Start::Withholding(_) | Start::Started => self.floor,
 			// Without a SUBSCRIBE_START the subscriber owes itself no group (see
 			// `SubStream::owed`), so there is nothing to drop.
@@ -6464,9 +6575,19 @@ impl TrackRun {
 		// A key the publisher declared skipped went out as a skip already; one it never
 		// declared might have existed, so it is not found.
 		let hole = Hole::drop(StreamError::NotFound);
+		let runs = self.track.runs_in_range(start, end);
+		// Lite-07: below where its own start placed it, a range is owed nothing.
+		let owed = self.start.per_range().then(|| self.owed().0);
 		let mut dropped = false;
-		for run in self.track.runs_in_range(start, end) {
-			dropped |= self.drop_range(run, &hole, writer)?;
+		for run in runs {
+			let Some(owed) = &owed else {
+				dropped |= self.drop_range(run, &hole, writer)?;
+				continue;
+			};
+			for part in owed.overlapping(&run) {
+				let part = part.start.max(run.start)..part.end.min(run.end);
+				dropped |= self.drop_range(part, &hole, writer)?;
+			}
 		}
 		Ok(dropped)
 	}
@@ -9842,7 +9963,10 @@ mod serve_group_test {
 		let oldest = lite::Range::span(None, 0, Some(9), None);
 		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[oldest]);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert!(starts(&responses(&mut writer, &log).await).is_empty(), "nothing says where it starts");
+		assert!(
+			starts(&responses(&mut writer, &log).await).is_empty(),
+			"nothing says where it starts"
+		);
 
 		// The upstream started its range from the oldest group at group 5, still on its way.
 		track.time_starts([(0, Some(5))]);
@@ -10867,7 +10991,11 @@ mod serve_group_test {
 			let (run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
 			let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(1000))], "{start:?}");
+			assert_eq!(
+				starts(&responses(&mut writer, &log).await),
+				[(0, Some(1000))],
+				"{start:?}"
+			);
 			assert_eq!(drops(&mut writer, &log, version).await, [], "{start:?}");
 
 			// Group 2000's successor arrived a full max age ago, so it lands stale for a live join.
@@ -11420,6 +11548,29 @@ mod serve_group_test {
 		}
 	}
 
+	/// A stale run below where every range starts is never named, on any version, so a wider
+	/// budget may still serve it.
+	#[kio::test]
+	async fn a_stale_run_below_the_start_is_never_named() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			track.start_at(0).unwrap();
+			// A group is as old as the start of the one after it, so a half-second budget joins at 4.
+			for key in 0..5 {
+				write_group(&mut track, key, key * 1000);
+			}
+			let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_millis(500)));
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert!(run.start.started(), "{version}");
+			assert_eq!(drops(&mut writer, &log, version).await, [], "{version}");
+		}
+	}
+
 	/// Upstream drops received before the start exclude the entire range, even on lite-07.
 	#[kio::test]
 	async fn the_start_names_past_the_upstream_dropped_range() {
@@ -11537,7 +11688,11 @@ mod serve_group_test {
 		let mut bench = CoverageBench::new(3, 2);
 		bench.wake();
 		bench.wake();
-		assert_eq!(bench.run.unstarted.keys().copied().collect::<Vec<_>>(), [2], "a range is still open");
+		assert_eq!(
+			bench.run.unstarted.keys().copied().collect::<Vec<_>>(),
+			[2],
+			"a range is still open"
+		);
 		bench.track.drop_groups(3..5, StreamError::NotFound);
 		loop {
 			match bench.run.poll_step(&mut bench.writer, &kio::Waiter::noop()) {
@@ -11546,7 +11701,10 @@ mod serve_group_test {
 				other => panic!("the subscription stays open, got {other:?}"),
 			}
 		}
-		assert!(bench.run.unstarted.is_empty(), "every range is answered without a group");
+		assert!(
+			bench.run.unstarted.is_empty(),
+			"every range is answered without a group"
+		);
 		assert!(bench.run.start.skipped().is_none(), "every held drop went out");
 	}
 
@@ -12095,7 +12253,7 @@ mod serve_group_test {
 		track.start_at(5).unwrap();
 		relay.settle();
 		assert!(relay.started_at(5));
-		assert_eq!(relay.drops(), [5..6]);
+		assert_eq!(relay.drops(), std::slice::from_ref(&(5..6)));
 	}
 
 	/// Adjacent runs given up with different errors before a range is answered are each named

@@ -152,16 +152,14 @@ impl Record {
 		}
 	}
 
-	/// The lowest key at or after `from` the wire was told of as a group, served or dropped,
-	/// rather than skipped as one no group starts at.
-	pub fn first_group(&self, from: u64) -> Option<u64> {
-		if from < self.floor {
-			return Some(from);
+	/// What the wire was told of `key`, with the end of the run told alike; `None` if nothing.
+	/// A key below the floor counts as settled.
+	pub fn report_at(&self, key: u64) -> Option<(u64, Report)> {
+		if key < self.floor {
+			return Some((self.floor, Report::Settled));
 		}
-		let range = from..u64::MAX;
-		let mut runs = self.reported.overlapping(&range);
-		let first = runs.find(|(_, report)| **report != Report::Skip);
-		first.map(|(run, _)| run.start.max(from))
+		let (run, report) = self.reported.get_key_value(&key)?;
+		Some((run.end, *report))
 	}
 
 	/// Record that the wire was told `report` of `range`.

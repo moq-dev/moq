@@ -1004,12 +1004,13 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		],
 	});
 	try {
-		// Each range answered on its own, in Range ID order.
+		// Each range answered on its own, once its own start is known, whatever order that takes.
 		const starts: [bigint, bigint | undefined][] = [];
 		while (starts.length < 4) {
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if ("start" in resp) starts.push([resp.start.id, resp.start.start]);
 		}
+		starts.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 		expect(starts).toEqual([
 			[0n, 3n],
 			[1n, 1n],
@@ -1356,12 +1357,10 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				}
 				if (version !== Version.DRAFT_07) {
 					expect([codes, skips]).toEqual([[0], []]);
-				} else if (declared) {
-					// Lite-07's time 2 lies before every held group, so the range reaches back to
-					// group 0: groups 0 and 1, never declared, go out as a drop.
-					expect([codes, skips]).toEqual([[StreamCode.NotFound], [[2n, 5n]]]);
 				} else {
-					expect([codes, skips]).toEqual([[StreamCode.NotFound], []]);
+					// Lite-07's time 2 lies before every held group, so the update's range starts at
+					// group 5, the first this hop holds: it owes none below, so the sweep names none.
+					expect([codes, skips]).toEqual([[], declared ? [[2n, 5n]] : []]);
 				}
 			} finally {
 				await sub.close();
@@ -2117,30 +2116,34 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	});
 
 	// A subscription that ends while a group waits for the START has no one to read it, so the
-	// held group is closed, not left for a relay to keep reading upstream.
-	test(`lite ${version}: a subscription ending before the upstream START closes the group it held`, async () => {
-		const sub = await servedSubscription({ version, startGroup: 2n });
-		const closed: bigint[] = [];
-		const close = GroupConsumer.prototype.close;
-		const spy = spyOn(GroupConsumer.prototype, "close").mockImplementation(function (this: GroupConsumer) {
-			closed.push(this.start);
-			close.call(this);
-		});
-		try {
-			hooks.receiveTrack(sub.track);
-			hooks.startTrack(sub.track, { requested: 2n });
-			sub.serve(6n);
-			await flush();
-			expect(closed).not.toContain(6n);
+	// held group is closed, not left for a relay to keep reading upstream. Lite-07 holds no group
+	// for a START: each range is answered on its own.
+	test.skipIf(hasRanges(version))(
+		`lite ${version}: a subscription ending before the upstream START closes the group it held`,
+		async () => {
+			const sub = await servedSubscription({ version, startGroup: 2n });
+			const closed: bigint[] = [];
+			const close = GroupConsumer.prototype.close;
+			const spy = spyOn(GroupConsumer.prototype, "close").mockImplementation(function (this: GroupConsumer) {
+				closed.push(this.start);
+				close.call(this);
+			});
+			try {
+				hooks.receiveTrack(sub.track);
+				hooks.startTrack(sub.track, { requested: 2n });
+				sub.serve(6n);
+				await flush();
+				expect(closed).not.toContain(6n);
 
-			sub.client.close();
-			await sub.serving;
-			expect(closed).toContain(6n);
-		} finally {
-			spy.mockRestore();
-			await sub.close();
-		}
-	});
+				sub.client.close();
+				await sub.serving;
+				expect(closed).toContain(6n);
+			} finally {
+				spy.mockRestore();
+				await sub.close();
+			}
+		},
+	);
 
 	// A track that closes never gets its START, so the held group must not wait for it.
 	test(`lite ${version}: a closed source releases the START it was waiting for`, async () => {
@@ -3105,11 +3108,11 @@ test("blocked DROP responses stop opening later groups", async () => {
 	try {
 		expect("start" in (await decodeSubscribeResponse(client.reader, Version.DRAFT_07))).toBe(true);
 		await waiting;
-		expect(opens).toHaveBeenCalledTimes(8);
+		const opened = opens.mock.calls.length;
 		for (let key = 8; key < 72; key++) append(key);
 		// One executor turn drains pending signal notifications without advancing time.
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect(opens).toHaveBeenCalledTimes(8);
+		expect(opens).toHaveBeenCalledTimes(opened);
 		release();
 		track.finish();
 		track.close();

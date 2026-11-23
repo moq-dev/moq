@@ -2172,6 +2172,28 @@ class Reader implements ResumeSource {
 		return serving && hooks.sourceStart(serving.sub);
 	}
 
+	// Where the serving copy's feed starts, placed or not; see `hooks.feedStart`.
+	feedStart(): bigint | "pending" | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.feedStart(serving.sub);
+	}
+
+	// The lowest group the serving copy holds at or after `from`; see `hooks.nextHeld`.
+	nextHeld(from: bigint): bigint | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.nextHeld(serving.sub, from);
+	}
+
+	// Where the serving copy's upstream started a range asked from the oldest group; see
+	// `hooks.oldestStart`.
+	oldestStart(): bigint | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.oldestStart(serving.sub);
+	}
+
 	/** Whether the copy serving now places ranges as its publisher would; see `hooks.placesAsUpstream`. */
 	placesAsUpstream(): boolean {
 		this.sync();

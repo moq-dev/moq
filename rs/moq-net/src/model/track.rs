@@ -26,9 +26,7 @@ use super::subscription;
 pub(crate) use super::subscription::Resolved;
 #[cfg(feature = "async")]
 pub(crate) use super::subscription::budget;
-use super::subscription::{
-	Budget, Containing, Cover, Found, Holdings, Join, Joining, Unplaced, Window, minus,
-};
+use super::subscription::{Budget, Containing, Cover, Found, Holdings, Join, Joining, Unplaced, Window, minus};
 pub(crate) use super::subscription::{JoinAsk, live_millis};
 pub use super::subscription::{Order, Position, Range, Start, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
@@ -7762,6 +7760,15 @@ impl Consumer {
 		})
 	}
 
+	/// The lowest group held at or after `from`, on the copy this handle reads.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn next_held(&self, from: u64) -> Option<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.next_held(from);
+		}
+		self.with_state(|state| state?.read().next_start(from))
+	}
+
 	/// Where a live join placed at `placed` starts for a reader within `budget`, on the copy
 	/// this handle reads; see [`TrackState::join_start`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -12252,6 +12259,18 @@ impl Subscriber {
 				Some(routes) => routes.serving().map_or(placed, |copy| copy.join_start(placed, budget)),
 				None => placed,
 			},
+		}
+	}
+
+	/// The lowest group held at or after `from`, in the cache this subscriber reads from.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn next_held(&self, from: u64) -> Option<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().next_start(from),
+			Inner::Resume(_, logical) => {
+				let routes = logical.state.read().routes.clone()?;
+				routes.serving()?.next_held(from)
+			}
 		}
 	}
 
