@@ -3,8 +3,8 @@
 //!
 //! Exporters declare what wire shape they want their frames in (currently:
 //! length-prefixed NAL units for H.264/H.265) and call [`ExportSource::poll_read`]
-//! to pull normalized frames. For Annex-B sources (catalog codec marked
-//! `inline: true` / `in_band: true`, empty `description`) the source attaches
+//! to pull normalized frames. For Annex-B sources (no catalog `description`,
+//! whatever the codec string says) the source attaches
 //! an [`Avc1`] / [`Hvc1`] transform that strips parameter sets into an avcC or
 //! hvcC and length-prefixes the rest; frames wait until that record exists. fMP4
 //! instead attaches an [`InBand`] transform, keeping the sets in the samples, when
@@ -22,7 +22,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Container, Reference, VideoCodec, VideoConfig};
 
-use super::consumer::{Event, Item};
+use super::consumer::{Event, Item, Reached};
 use crate::catalog::hang::Container as HangContainer;
 use crate::codec::annexb::{InBand, InBandCodec};
 use crate::codec::h264::Avc1;
@@ -68,7 +68,7 @@ enum SourceState {
 		/// Hand out only groups starting after this one.
 		after: Option<u64>,
 		/// Where the groups read before ended.
-		reached: Option<Duration>,
+		reached: Reached,
 		instance: Option<moq_net::broadcast::Consumer>,
 	},
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
@@ -76,6 +76,9 @@ enum SourceState {
 	Active(Box<Active>),
 	/// The track ended, the sibling instance it read went, or the source was stopped.
 	Ended,
+	/// The track itself failed: its subscription was refused, or it ended with an error once the
+	/// groups already here were read. Media that failed to decode is the export's own error instead.
+	Lost,
 }
 
 /// How a source subscribes, fixed before its first poll.
@@ -87,7 +90,7 @@ struct Start {
 	/// Read only groups starting after this one, so a resubscription skips groups already read.
 	after: Option<u64>,
 	/// Where the groups read before ended, so the first group after them reads as continuing.
-	reached: Option<Duration>,
+	reached: Reached,
 }
 
 /// A resolved subscription.
@@ -125,7 +128,7 @@ impl Target {
 				media,
 				live: false,
 				after: None,
-				reached: None,
+				reached: Reached::default(),
 			},
 		}
 	}
@@ -139,7 +142,7 @@ pub(crate) struct Resume {
 	/// The latest presentation time delivered.
 	latest: Option<Duration>,
 	/// Where the groups read through ended.
-	reached: Option<Duration>,
+	reached: Reached,
 }
 
 /// What a source continuing another rendition's track skips: media up to what that track delivered.
@@ -160,9 +163,9 @@ pub(crate) struct ExportSource {
 	target: Target,
 	state: SourceState,
 	/// Where the subscription starts behind the live edge, and how late a group may fall.
-	delay: moq_net::track::Delay,
+	delay: crate::container::Delay,
 	/// The delay the consumer skips and starts at, if not the one the subscription states.
-	skip: Option<moq_net::track::Delay>,
+	skip: Option<crate::container::Delay>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available - from the catalog
@@ -191,7 +194,7 @@ pub(crate) struct ExportSource {
 	/// The group of the last frame delivered.
 	delivered: Option<u64>,
 	/// Where the groups read through ended, here or by the source this one resumes.
-	reached: Option<Duration>,
+	reached: Reached,
 	/// Set while continuing another source, until the first sync frame past what it delivered.
 	splice: Option<Splice>,
 	/// Counts the payload of its frames the export emits, once subscribed under a
@@ -210,7 +213,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		Self::video(source, name, config, delay, build_video_transform(config))
 	}
@@ -224,7 +227,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		let record = annexb_catalog_record(config);
 		let transform = match (&config.codec, record.is_some()) {
@@ -241,7 +244,7 @@ impl ExportSource {
 
 	/// Subscribe to a video rendition without attaching any codec-shape
 	/// transform. Payloads pass through untouched (Annex-B stays Annex-B,
-	/// avc1 length-prefixed stays length-prefixed). The Annex-B exporter
+	/// length-prefixed stays length-prefixed). The Annex-B exporter
 	/// uses this to keep parameter sets in-band.
 	///
 	/// Rejects an escaping `broadcast` reference like [`Self::for_video`].
@@ -249,7 +252,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		Self::video(source, name, config, delay, None)
 	}
@@ -258,7 +261,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 		transform: Option<VideoTransform>,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
@@ -283,7 +286,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
 		let Some(target) = Target::of(source, name, config) else {
@@ -301,7 +304,11 @@ impl ExportSource {
 	///
 	/// Such a rendition has no catalog `broadcast` field, so it always lives on the
 	/// catalog broadcast and can never carry an escaping reference.
-	pub fn for_stream(source: &crate::Source, name: &str, delay: moq_net::track::Delay) -> Result<Self, crate::Error> {
+	pub fn for_stream(
+		source: &crate::Source,
+		name: &str,
+		delay: crate::container::Delay,
+	) -> Result<Self, crate::Error> {
 		let target = Target {
 			path: source.path().clone(),
 			instance: None,
@@ -317,7 +324,7 @@ impl ExportSource {
 		name: &str,
 		target: Target,
 		media: HangContainer,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Self {
 		Self {
 			name: name.to_string(),
@@ -340,7 +347,7 @@ impl ExportSource {
 			received: source.received(name),
 			latest: None,
 			delivered: None,
-			reached: None,
+			reached: Reached::default(),
 			splice: None,
 			bill: Default::default(),
 		}
@@ -376,15 +383,16 @@ impl ExportSource {
 	/// Pick up where an earlier source of this rendition stopped.
 	///
 	/// On the same track, start after the last group it delivered, so the publisher's cached
-	/// group is not replayed. Another track is new content, read from its live edge, and the
-	/// rendition never goes back in time: frames are dropped until a sync frame past the latest
-	/// one delivered. On a shared clock the first group read may overlap that, but a later group
-	/// that still does fails with [`Error::RenditionRewound`](crate::Error::RenditionRewound).
+	/// group is not replayed, and hand that cursor on until this source delivers a frame of its
+	/// own. Another track is new content, read from its live edge, and the rendition never goes
+	/// back in time: frames are dropped until a sync frame past the latest one delivered. On a
+	/// shared clock the first group read may overlap that, but a later group that still does fails with [`Error::RenditionRewound`](crate::Error::RenditionRewound).
 	pub(crate) fn resuming(mut self, resume: &Resume) -> Self {
 		if resume.target == self.target {
 			self.start().after = resume.group;
 			self.start().reached = resume.reached;
 			self.reached = resume.reached;
+			self.delivered = resume.group;
 		} else {
 			self.start().live = true;
 			self.splice = resume.latest.map(|read| Splice { read, group: None });
@@ -405,7 +413,7 @@ impl ExportSource {
 	/// Skip and start at `delay` instead of the subscription's own, which still tells the
 	/// publisher how long to keep a group: for a reader that asks the publisher for more than
 	/// it plays out itself.
-	pub(crate) fn skipping_at(mut self, delay: moq_net::track::Delay) -> Self {
+	pub(crate) fn skipping_at(mut self, delay: crate::container::Delay) -> Self {
 		self.skip = Some(delay);
 		self
 	}
@@ -524,7 +532,7 @@ impl ExportSource {
 	pub fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		match &mut self.state {
 			SourceState::Active(active) => active.consumer.poll_received(waiter),
-			SourceState::Ended => Poll::Ready(()),
+			SourceState::Ended | SourceState::Lost => Poll::Ready(()),
 			_ => Poll::Pending,
 		}
 	}
@@ -580,15 +588,14 @@ impl ExportSource {
 		if let SourceState::Requesting { binding, start } = &self.state {
 			let broadcast = ready!(binding.poll_broadcast(waiter))?;
 			let instance = binding.sibling().then(|| broadcast.clone());
-			let mut subscription = moq_net::track::Subscription::default().with_delay(self.delay);
 			// From the group starting at `after`: a time start names the group containing it, so the
 			// request reaches that group too and the reader below leaves it out.
-			if let Some(after) = start.after {
-				subscription = subscription.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(after),
-					end: None,
-				}]);
-			}
+			let subscription = match start.after {
+				Some(after) => moq_net::track::Subscription::default()
+					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(after))]),
+				None => moq_net::track::Subscription::default(),
+			};
+			let subscription = self.delay.subscription(subscription);
 			let track = match broadcast.track(&self.target.track) {
 				Ok(track) => track,
 				Err(_) if instance.as_ref().is_some_and(|i| i.poll_closed(waiter).is_ready()) => return self.end(),
@@ -617,7 +624,7 @@ impl ExportSource {
 				{
 					return self.end();
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+				Poll::Ready(Err(err)) => return self.lose(err.into()),
 				Poll::Pending => return Poll::Pending,
 			};
 			let priority = self.source.control(track.control())?;
@@ -640,11 +647,11 @@ impl ExportSource {
 				Some(after) => track.with_range((Bound::Excluded(after), Bound::Unbounded)),
 				None => track,
 			};
-			let consumer = Consumer::new(track, media).continuing(reached);
-			let consumer = match self.skip {
-				Some(delay) => consumer.skipping_at(delay),
-				None => consumer,
-			};
+			// The subscription states no min once its range starts at a time, so the consumer
+			// takes the delay from here rather than from it.
+			let consumer = Consumer::new(track, media)
+				.continuing(reached)
+				.skipping_at(self.skip.unwrap_or(self.delay));
 			let consumer = match live {
 				true => consumer.live(),
 				false => consumer,
@@ -684,6 +691,7 @@ impl ExportSource {
 					{
 						return self.end();
 					}
+					Poll::Ready(Err(err)) if consumer.lost() => return self.lose(err),
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => return Poll::Pending,
 				};
@@ -790,6 +798,20 @@ impl ExportSource {
 	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
 		self.stop();
 		Poll::Ready(Ok(None))
+	}
+
+	/// Fail the rendition with its track's own error, which [`Self::lost`] then tells apart from
+	/// the export's own errors.
+	fn lose(&mut self, err: crate::Error) -> Poll<crate::Result<Option<Event>>> {
+		self.stop();
+		self.state = SourceState::Lost;
+		Poll::Ready(Err(err))
+	}
+
+	/// Whether the error this source returned was its track failing, which ends only this
+	/// rendition: a publisher that loses a source may list a replacement for it.
+	pub(crate) fn lost(&self) -> bool {
+		matches!(self.state, SourceState::Lost)
 	}
 
 	fn finish_ends(&mut self) {
@@ -964,7 +986,7 @@ mod tests {
 	async fn escaping_reference_skips_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source().await;
-		let delay = moq_net::track::Delay::default();
+		let delay = crate::container::Delay::default();
 
 		let escaping = |result: Result<Option<ExportSource>, crate::Error>, what: &str| match result {
 			Ok(None) => {}
@@ -991,7 +1013,7 @@ mod tests {
 	async fn legal_reference_keeps_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source().await;
-		let delay = moq_net::track::Delay::default();
+		let delay = crate::container::Delay::default();
 
 		for reference in [None, Some(""), Some("./source"), Some("sub"), Some(".")] {
 			ExportSource::for_video(&source, "video", &video(reference), delay)
@@ -1021,7 +1043,7 @@ mod tests {
 			&source,
 			"audio",
 			&config,
-			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();
@@ -1055,7 +1077,7 @@ mod tests {
 			&source,
 			"late",
 			&config,
-			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();
@@ -1085,7 +1107,7 @@ mod tests {
 				&source,
 				"audio",
 				&config,
-				moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+				crate::container::Delay::default().with_max(Duration::from_secs(10)),
 			)
 			.unwrap()
 			.unwrap();
@@ -1160,7 +1182,7 @@ mod tests {
 			&source,
 			"audio",
 			&audio(Some("./source")),
-			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();
@@ -1186,7 +1208,7 @@ mod tests {
 		for live_start in [false, true] {
 			let live = Live::avc3();
 			let max_delay = std::time::Duration::from_secs(10);
-			let delay = moq_net::track::Delay::default().with_max(max_delay);
+			let delay = crate::container::Delay::default().with_max(max_delay);
 			let export = ExportSource::for_video(&live.source().await, live.track.name(), &video(None), delay)
 				.unwrap()
 				.expect("fixture should produce a video rendition");
@@ -1221,7 +1243,7 @@ mod tests {
 			&live.source().await,
 			live.track.name(),
 			&audio(None),
-			moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(std::time::Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap()
@@ -1268,7 +1290,7 @@ mod tests {
 			&source,
 			"audio",
 			&audio(None),
-			moq_net::track::Delay::default().with_max(Duration::from_secs(1)),
+			crate::container::Delay::default().with_max(Duration::from_secs(1)),
 		)
 		.unwrap()
 		.unwrap()
@@ -1317,8 +1339,7 @@ mod tests {
 	/// A live start begins at the publisher's newest group, even when an older group of the
 	/// backlog the budget serves arrives first. Starting at that older group reads it, then
 	/// skips the groups after it once the next PES moves the live edge a budget past them: a
-	/// gap right after the first frame. Behind a relay holding only that first group, the
-	/// relay passes on the newest group its source named.
+	/// gap right after the first frame.
 	#[tokio::test(start_paused = true)]
 	async fn a_live_start_behind_a_backlog_starts_at_the_newest_group() {
 		use std::time::Duration;
@@ -1377,7 +1398,7 @@ mod tests {
 				&source,
 				"audio",
 				&audio(None),
-				moq_net::track::Delay::default().with_max(Duration::from_millis(450)),
+				crate::container::Delay::default().with_max(Duration::from_millis(450)),
 			)
 			.unwrap()
 			.unwrap()
@@ -1406,8 +1427,15 @@ mod tests {
 				timestamps.push(timestamp);
 			}
 
-			// Group 84 was the newest when the export joined.
-			let expected: Vec<u128> = (84..95).map(|sequence| sequence * 24_000).collect();
+			// Group 84 was the newest when the export joined. Behind the relay the ordered reader
+			// hands out nothing until its start is placed, which the held streams delay past the
+			// next two PES, so the newest group by then is the start: either way nothing after it is
+			// skipped.
+			let start = match relay {
+				false => 84,
+				true => 94,
+			};
+			let expected: Vec<u128> = (start..95).map(|sequence| sequence * 24_000).collect();
 			assert_eq!(timestamps, expected, "relay: {relay}");
 			assert_eq!(export.skips(), 0, "relay: {relay}");
 		}
@@ -1423,7 +1451,7 @@ mod tests {
 		for (read, first) in [(900, Some(1_000_000)), (1_500, None)] {
 			let mut moving = Moving::new();
 			let source = moving.source().await;
-			let delay = moq_net::track::Delay::default().with_max(Duration::from_secs(10));
+			let delay = crate::container::Delay::default().with_max(Duration::from_secs(10));
 			let mut previous =
 				ExportSource::for_video(&source, Moving::RENDITION, &Moving::config("a", None, SPS), delay)
 					.unwrap()
@@ -1465,6 +1493,27 @@ mod tests {
 		}
 	}
 
+	/// A source resuming one on the same track hands its cursor on until it delivers a frame, so
+	/// a resumption that fails before reading anything does not lose where the first stopped.
+	#[tokio::test(start_paused = true)]
+	async fn a_resumed_source_keeps_the_cursor_until_it_reads() {
+		use crate::container::test_util::{Moving, SPS};
+
+		let moving = Moving::new();
+		let source = moving.source().await;
+		let delay = crate::container::Delay::default().with_max(Duration::from_secs(10));
+		let config = Moving::config("a", None, SPS);
+		let mut first = ExportSource::for_video(&source, Moving::RENDITION, &config, delay)
+			.unwrap()
+			.unwrap();
+		first.delivered = Some(7);
+		let second = ExportSource::for_video(&source, Moving::RENDITION, &config, delay)
+			.unwrap()
+			.unwrap()
+			.resuming(&first.resume());
+		assert_eq!(second.resume().group, Some(7));
+	}
+
 	async fn audio_export() -> (moq_net::track::Producer, ExportSource) {
 		use std::time::Duration;
 		let live = Live::audio(audio(None));
@@ -1472,7 +1521,7 @@ mod tests {
 			&live.source().await,
 			live.track.name(),
 			&audio(None),
-			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();

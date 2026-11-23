@@ -79,8 +79,8 @@ impl<'a> Message<'a> for Track<'a> {
 /// Lite05+ only.
 #[derive(Clone, Debug)]
 pub struct TrackInfo {
-	/// Refresh byte ratio, advertised on lite-07 only.
-	pub refresh: Option<u32>,
+	/// When a reader asks for a new group, advertised on lite-07 only.
+	pub refresh: crate::track::Refresh,
 	/// The publisher's tie-break priority for this track.
 	pub priority: i8,
 	/// Publisher Max Age: an upper bound on how long the publisher caches a
@@ -127,8 +127,8 @@ impl From<TrackInfo> for crate::track::Info {
 /// `ietf` extension, TRACK_PROPERTIES.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Framing {
-	/// The units of every frame Timestamp on the wire, or `None` when frames carry none or,
-	/// on lite-07, a scale-less track's bare number (see [`Self::stamped`]).
+	/// The units of every frame Timestamp on the wire, or `None` when frames carry none: before
+	/// lite-05, and on a scale-less lite-07 track.
 	pub timescale: Option<Timescale>,
 	/// The draft the track's moq-transport publisher spoke, which serialized its objects'
 	/// properties, or `None` for a moq-lite one, which carries no moq-transport state.
@@ -142,7 +142,7 @@ pub(crate) struct Framing {
 
 impl Framing {
 	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, an
-	/// untimed track's with its send time in milliseconds.
+	/// untimed track's with its group's start as milliseconds.
 	pub fn new(info: &crate::track::Info, version: Version) -> Self {
 		Self {
 			timescale: version.wire_timescale(info.timescale),
@@ -152,11 +152,10 @@ impl Framing {
 		}
 	}
 
-	/// Whether every FRAME carries a timestamp: lite-05/06 always declare a timescale, and
-	/// lite-07, which leads with the length, stamps a scale-less track's frames with their
-	/// group's start.
+	/// Whether every FRAME carries a timestamp: lite-05/06 always declare a timescale, and a
+	/// scale-less lite-07 track's frames carry none, since each one's time is its group's start.
 	pub fn stamped(&self) -> bool {
-		self.timescale.is_some() || self.length_first
+		self.timescale.is_some()
 	}
 }
 
@@ -181,13 +180,19 @@ impl<'a> Message<'a> for TrackInfo {
 		};
 
 		let refresh = match version.has_refresh() {
-			true => r
-				.varint()?
-				.checked_sub(1)
-				.map(u32::try_from)
-				.transpose()
-				.map_err(|_| DecodeError::InvalidValue)?,
-			false => None,
+			true => {
+				let ratio = r
+					.varint()?
+					.checked_sub(1)
+					.map(u32::try_from)
+					.transpose()
+					.map_err(|_| DecodeError::InvalidValue)?;
+				let interval = r.varint()?.checked_sub(1).map(Duration::from_millis);
+				crate::track::Refresh::default()
+					.with_ratio(ratio)
+					.with_interval(interval)
+			}
+			false => crate::track::Refresh::default(),
 		};
 		let compression = match version.has_compression() {
 			true => match r.varint()? {
@@ -223,7 +228,12 @@ impl<'a> Message<'a> for TrackInfo {
 		w.varint(encoded)?;
 		w.varint(version.wire_timescale(self.timescale).map_or(0, u64::from))?;
 		if version.has_refresh() {
-			w.varint(self.refresh.map_or(0, |ratio| u64::from(ratio) + 1))?;
+			w.varint(self.refresh.ratio.map_or(0, |ratio| u64::from(ratio) + 1))?;
+			let interval = match self.refresh.interval {
+				None => 0,
+				Some(interval) => u64::try_from(interval.as_millis() + 1).map_err(|_| EncodeError::BoundsExceeded)?,
+			};
+			w.varint(interval)?;
 		}
 		if version.has_compression() {
 			w.varint(self.compression as u64)?;
@@ -241,7 +251,7 @@ mod test {
 
 	fn info_sample() -> TrackInfo {
 		TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: 7,
 			max_age: Some(Duration::from_millis(2000)),
 			timescale: Some(Timescale::MICRO),
@@ -261,12 +271,20 @@ mod test {
 	fn refresh_is_lite07_only() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for ratio in [None, Some(0), Some(1), Some(u32::MAX)] {
-				let info = TrackInfo {
-					refresh: ratio,
-					..info_sample()
-				};
-				let expected = if version.has_refresh() { ratio } else { None };
-				assert_eq!(info_roundtrip(version, &info).refresh, expected);
+				for interval in [None, Some(Duration::ZERO), Some(Duration::from_millis(1500))] {
+					let refresh = crate::track::Refresh::default()
+						.with_ratio(ratio)
+						.with_interval(interval);
+					let info = TrackInfo {
+						refresh,
+						..info_sample()
+					};
+					let expected = match version.has_refresh() {
+						true => refresh,
+						false => crate::track::Refresh::default(),
+					};
+					assert_eq!(info_roundtrip(version, &info).refresh, expected);
+				}
 			}
 		}
 	}
@@ -466,7 +484,7 @@ mod test {
 	#[test]
 	fn track_info_roundtrips_varint_and_priority_bounds() {
 		let info = TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: i8::MIN,
 			max_age: None,
 			timescale: Some(Timescale::new((1u64 << 62) - 1).unwrap()),
@@ -486,7 +504,7 @@ mod test {
 	#[test]
 	fn track_info_encodes_sub_millisecond_max_age_as_zero() {
 		let info = TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: 0,
 			max_age: Some(Duration::from_nanos(999_999)),
 			timescale: Some(Timescale::MILLI),
@@ -500,7 +518,7 @@ mod test {
 	fn track_info_encode_rejects_max_age_past_varint() {
 		// Lite-07 varints carry the whole u64, and the age goes on the wire plus one.
 		let info = TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: 7,
 			max_age: Some(Duration::from_millis(u64::MAX)),
 			timescale: Some(Timescale::MILLI),

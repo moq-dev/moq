@@ -72,6 +72,8 @@ pub(crate) async fn run(
 			video: Arc::new(Mutex::new(VecDeque::new())),
 			drained: Arc::new(Notify::new()),
 			output,
+			// No window, so the catalog's ranking decides.
+			viewport: tokio::sync::watch::channel(None).1,
 		}
 		.run(),
 	);

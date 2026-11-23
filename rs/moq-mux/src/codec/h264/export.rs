@@ -36,12 +36,12 @@ impl<S: Stream> Export<S> {
 	}
 
 	/// Set how far behind the live edge the per-track source plays:
-	/// [`Delay::min`](moq_net::track::Delay::min) is where it starts, and
-	/// [`Delay::max`](moq_net::track::Delay::max) how late a group may fall before it is skipped.
+	/// [`Delay::min`](crate::container::Delay::min) is where it starts, and
+	/// [`Delay::max`](crate::container::Delay::max) how late a group may fall before it is skipped.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track start and skip behavior.
 	/// Defaults to zero for both (start at the live edge, skip aggressively).
-	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+	pub fn with_delay(mut self, delay: crate::container::Delay) -> Self {
 		self.inner = self.inner.with_delay(delay);
 		self
 	}
@@ -166,7 +166,7 @@ mod tests {
 		first.track = Some("a".into());
 		moving
 			.catalog
-			.modify()
+			.modify(moving.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -187,7 +187,7 @@ mod tests {
 		assert_ne!(first_prefix, second_prefix);
 		moving
 			.catalog
-			.modify()
+			.modify(moving.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -235,7 +235,7 @@ mod tests {
 		// The whole track is written before the exporter runs, so it needs a budget
 		// wide enough to read it: the default skips everything but the live edge.
 		let mut export = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)))
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
+			.with_delay(crate::container::Delay::default().with_max(std::time::Duration::from_secs(30)));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
 		let frame1 = export.next().await.unwrap().expect("second frame");
@@ -285,12 +285,17 @@ mod tests {
 		let primary = live.track.name().to_string();
 		let config = live.catalog.snapshot().video.renditions[&primary].clone();
 		let mut sibling = live.add_track(".sibling", |catalog, name| {
-			catalog.modify().unwrap().video.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.insert(name, config);
 		});
 		assert!(primary.as_str() < sibling.name(), "the primary is first by name");
 		let set_enabled = |live: &mut Live, enabled: bool| {
 			live.catalog
-				.modify()
+				.modify(live.catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -317,6 +322,31 @@ mod tests {
 		);
 		live.track.write(raw_frame(200_000, b"primary-2", true)).unwrap();
 		assert_eq!(next(&mut export).await.as_ref(), b"primary-2");
+	}
+
+	/// With several matching renditions, the catalog's ranking picks, not their names.
+	#[tokio::test(start_paused = true)]
+	async fn exports_the_best_ranked_rendition() {
+		use crate::container::test_util::{Live, raw_frame};
+
+		let mut live = Live::avc3();
+		let primary = live.track.name().to_string();
+		let mut config = live.catalog.snapshot().video.renditions[&primary].clone();
+		config.preference = 1;
+		let mut sibling = live.add_track(".sibling", |catalog, name| {
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.insert(name, config);
+		});
+		assert!(primary.as_str() < sibling.name(), "name order would pick the primary");
+		let mut export = Export::new(live.source().await, live.catalog_stream().await);
+
+		live.track.write(raw_frame(0, b"primary-0", true)).unwrap();
+		sibling.write(raw_frame(0, b"sibling-0", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"sibling-0");
 	}
 
 	#[tokio::test(start_paused = true)]

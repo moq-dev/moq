@@ -2,14 +2,15 @@
  * Segment-aware root matching, mirroring `@moq/net`'s path module.
  *
  * A token's root and a connection's path are literal paths, so overlapping them is
- * prefix arithmetic; everything beneath is a pattern from `@moq/pattern`, re-exported
+ * prefix arithmetic; everything beneath is a prefix from `@moq/pattern`, re-exported
  * from this package so a token minting service does not pull in the networking
  * stack. The normalization and boundary rules must stay identical to the Rust
  * `moq-auth` crate's `path` module, which mints and checks the same tokens. Minting
- * checks a root with {@link validate} instead, so a token never names a path no peer
+ * checks a root with {@link signable} instead, so a token never names a path no peer
  * can spell.
  *
- * Every function below but {@link validate} assumes its arguments are already {@link normalize}d.
+ * Every function below but {@link validate} and {@link signable} assumes its arguments are
+ * already {@link normalize}d.
  *
  * @internal
  * @module
@@ -23,16 +24,35 @@ const MAX_BYTES = 4096;
 const utf8 = new TextEncoder();
 
 /**
- * Throw on a root `@moq/net`'s `Path.from` refuses: one longer than 4096 bytes, with a `\` before
- * anything but `\` or `/`, or with a leading, trailing, or doubled `/` no `\` escapes.
+ * Throw on a root longer than 4096 bytes, with a lone surrogate, with a `\` before anything but
+ * `\` or `/`, or with a leading, trailing, or doubled `/` no `\` escapes. Parsing a key's scope
+ * checks this, so keys minted before {@link signable} tightened it still load.
  */
 export function validate(root: string): void {
 	const invalid = (reason: string) => new Error(`invalid root ${JSON.stringify(root)} ${reason}`);
+	// The `u` flag reads a pair as one scalar, so only a lone surrogate matches.
+	if (/\p{Surrogate}/u.test(root)) throw invalid("contains a lone surrogate");
 	if (utf8.encode(root).length > MAX_BYTES) throw invalid(`is longer than ${MAX_BYTES} bytes`);
 	if (/\\(?![\\/])/.test(root.replaceAll("\\\\", ""))) {
 		throw invalid("contains a `\\` that escapes neither `\\` nor `/`");
 	}
 	if (parts(root).includes("")) throw invalid("contains an empty segment");
+}
+
+/**
+ * Throw on a root `@moq/net`'s `Path.from` refuses, so a token or key scope is never minted for
+ * a root no session can dial.
+ */
+export function signable(root: string): void {
+	validate(root);
+	// TEMPORARY MIGRATION, delete with `@moq/net`'s at the next version cut: the previous release
+	// splits at every `/`, escaped or not, so `Path.from` refuses a `//` or a trailing `/` even
+	// when a `\` escapes it.
+	if (root.endsWith("/") || root.includes("//")) {
+		throw new Error(
+			`invalid root ${JSON.stringify(root)} contains a \`//\` or a trailing \`/\`, which the previous release re-spells`,
+		);
+	}
 }
 
 /**

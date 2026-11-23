@@ -289,7 +289,7 @@ fn a_clean_finish_closes_a_stream() {
 /// acknowledgment fail.
 #[test]
 fn an_offset_stays_acknowledged_through_a_reset() {
-	use moq_net::transport::poll::{Acked, SendStream};
+	use moq_net::transport::poll::SendStream;
 
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
@@ -327,7 +327,7 @@ fn an_offset_stays_acknowledged_through_a_reset() {
 				kio::wait(|waiter| send.poll_acked(waiter, &payload)),
 			)
 			.await;
-			assert!(matches!(acked, Ok(Acked::Delivered)), "{acked:?}");
+			assert!(matches!(acked, Ok(())), "{acked:?}");
 
 			// The connection is driven on this thread, so nothing acknowledges this before the reset.
 			let written = SendStream::poll_write(&mut send, &kio::Waiter::noop(), b"more");
@@ -335,10 +335,7 @@ fn an_offset_stays_acknowledged_through_a_reset() {
 			let cut = SendStream::offset(&send);
 			SendStream::reset(&mut send, 1);
 			let acked = |offset| SendStream::poll_acked(&send, &kio::Waiter::noop(), offset);
-			assert!(
-				matches!(acked(&payload), Poll::Ready(Ok(Acked::Delivered))),
-				"the reset forgot it"
-			);
+			assert!(matches!(acked(&payload), Poll::Ready(Ok(()))), "the reset forgot it");
 			assert!(matches!(acked(&cut), Poll::Ready(Err(_))), "the reset cut it");
 			assert_eq!(SendStream::offset(&send), cut);
 
@@ -1208,6 +1205,77 @@ fn dropped_session_delivers_close(explicit: bool) {
 			// The peer acts on the capsule, as a browser would.
 			peer.close(0u32.into(), "");
 			within(&handle, "the connection to close", watch.closed()).await;
+			drop(control);
+		})
+		.expect("worker");
+}
+
+/// A close capsule written in the same burst as the CONNECT headers, before
+/// any answer, still closes the session with its code: the handshake must
+/// hand the bytes it read past the headers to the capsule reader.
+#[test]
+fn a_capsule_pipelined_with_the_connect_closes_the_session() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let server = h3_endpoint(&handle, &certs);
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect("client endpoint");
+	let dial = quic::client::Config::new(support::client_tls(&["h3"]));
+
+	worker
+		.block_on(async {
+			let peer = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
+			let conn = server.accept().await.expect("accept");
+
+			let mut control = peer.open_uni(Default::default()).await.expect("control stream");
+			let mut settings = web_transport_proto::Settings::default();
+			settings.enable_webtransport(1);
+			let mut bytes = Vec::new();
+			settings.encode(&mut bytes);
+			write_raw(&mut control, &bytes).await;
+
+			let (mut connect_send, _connect_recv) = peer.open_bi(Default::default()).await.expect("CONNECT stream");
+			let url = url::Url::parse(&format!("https://localhost:{}/", server.local_addr().port())).expect("url");
+			let mut bytes = Vec::new();
+			web_transport_proto::ConnectRequest::new(url)
+				.encode(&mut bytes)
+				.expect("encode CONNECT");
+			let mut capsule = Vec::new();
+			web_transport_proto::Capsule::CloseWebTransportSession {
+				code: CLOSE_CODE,
+				reason: CLOSE_REASON.to_string(),
+			}
+			.encode(&mut capsule);
+			web_transport_proto::Frame::DATA.encode(&mut bytes);
+			web_transport_proto::VarInt::from_u64(capsule.len() as u64)
+				.expect("short capsule")
+				.encode(&mut bytes);
+			bytes.extend_from_slice(&capsule);
+			write_raw(&mut connect_send, &bytes).await;
+
+			let request = within(&handle, "the CONNECT", quic::web::Request::accept(conn))
+				.await
+				.expect("handshake");
+			let session = request.ok().await.expect("respond");
+			let err = within(
+				&handle,
+				"the pipelined close",
+				kio::wait(|waiter| session.poll_closed(waiter)),
+			)
+			.await;
+			match err {
+				quic::web::Error::Closed(code, reason) => {
+					assert_eq!(code, CLOSE_CODE, "close code");
+					assert_eq!(reason, CLOSE_REASON, "close reason");
+				}
+				other => panic!("expected the pipelined close, got {other:?}"),
+			}
 			drop(control);
 		})
 		.expect("worker");

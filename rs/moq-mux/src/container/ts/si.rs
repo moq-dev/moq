@@ -441,10 +441,9 @@ impl Entry {
 			None => {
 				let info = track_info(max_age);
 				self.track.insert(
-					match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone()) {
-						Ok(track) => track,
-						Err(_) => broadcast.unique_track(".si", info)?,
-					},
+					broadcast
+						.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone())
+						.unwrap_or_else(|| broadcast.unique_track(".si", info)),
 				)
 			}
 		};
@@ -667,7 +666,7 @@ impl<E: catalog::Catalog> Capture<E> {
 		}
 
 		if self.entries.values().any(|e| e.advertised != e.populated) {
-			let mut guard = self.catalog.modify()?;
+			let mut guard = self.catalog.edit()?;
 			let Some(mpegts) = guard.ext.mpegts_mut() else {
 				bail!("catalog extension no longer carries an mpegts section");
 			};
@@ -724,7 +723,7 @@ impl<E: catalog::Catalog> Capture<E> {
 			return;
 		}
 		// A closed catalog has nothing left to unadvertise from.
-		let Ok(mut guard) = self.catalog.modify() else {
+		let Ok(mut guard) = self.catalog.edit() else {
 			return;
 		};
 		let Some(mpegts) = guard.ext.mpegts_mut() else {
@@ -823,11 +822,9 @@ mod tests {
 				.ordered();
 			let waiter = kio::Waiter::noop();
 			let mut read = Vec::new();
-			while let std::task::Poll::Ready(Ok(Some(item))) = reader.poll_next_group(&waiter) {
-				// A group given up on is a gap, which reads no group.
-				if let Some(group) = item.group() {
-					read.push(group.start);
-				}
+			// A group given up on is passed over.
+			while let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) {
+				read.push(group.start);
 			}
 			assert_eq!(read, expected);
 		}

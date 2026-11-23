@@ -77,6 +77,11 @@ const PreviewSchema: z.ZodMiniType<Preview> = z.object({
 // `hang/preview.json` wraps the presence in `info`.
 const PreviewTrackSchema = z.object({ info: z.optional(PreviewSchema) });
 
+const TrackRefSchema = z.object({ track: z.string() });
+
+// Validates only the entries this module reads, so an app's extension (chat, location) passes through.
+const HangSchema = z.looseObject({ user: z.optional(TrackRefSchema), preview: z.optional(TrackRefSchema) });
+
 /** Points a `hang` catalog section at a track. */
 export type TrackRef = {
 	/** The track name. */
@@ -184,6 +189,7 @@ function serveSnapshot<T>(
 			maxAge: Duration.millis(86_400_000),
 			priority: PRIORITY,
 		});
+		if (!track) throw new Error(`the track ${name} already exists`);
 		effect.cleanup(() => {
 			track.finish();
 			track.close();
@@ -221,30 +227,44 @@ export function consume(broadcast: Watch.Broadcast): Consumed {
 	const preview = new Signal<Preview>({});
 	const signals = new Effect();
 
+	// Each track name is its own computed, so a catalog update that leaves it alone, such as an
+	// unrelated rendition or `hang.chat`, keeps its subscription instead of clearing and reopening it.
+	const hang = signals.computed((effect) => {
+		const section = (effect.get(broadcast.out.catalog) as ExtendedCatalog | undefined)?.hang;
+		if (section === undefined) return undefined;
+		const parsed = HangSchema.safeParse(section);
+		if (parsed.success) return parsed.data;
+		console.warn("refused invalid hang catalog section:", parsed.error);
+		return undefined;
+	});
+	const userTrack = signals.computed((effect) => effect.get(hang)?.user?.track);
+	const previewTrack = signals.computed((effect) => effect.get(hang)?.preview?.track);
+
 	signals.run((effect) => {
-		const catalog = effect.get(broadcast.out.catalog) as ExtendedCatalog | undefined;
-		const hang = catalog?.hang;
 		const active = effect.get(broadcast.out.active);
+		const track = effect.get(userTrack);
 		effect.cleanup(() => {
 			for (const field of Object.values(user)) field.set(undefined);
-			preview.set({});
 		});
-		if (!active || !hang) return;
+		if (!active || track === undefined) return;
 
-		if (hang.user) {
-			subscribeJson(active, hang.user.track, UserSchema, effect, (value) => {
-				user.id.set(value.id);
-				user.name.set(value.name);
-				user.avatar.set(value.avatar);
-				user.color.set(value.color);
-			});
-		}
+		subscribeJson(active, track, UserSchema, effect, (value) => {
+			user.id.set(value.id);
+			user.name.set(value.name);
+			user.avatar.set(value.avatar);
+			user.color.set(value.color);
+		});
+	});
 
-		if (hang.preview) {
-			subscribeJson(active, hang.preview.track, PreviewTrackSchema, effect, (value) => {
-				preview.set(value.info ?? {});
-			});
-		}
+	signals.run((effect) => {
+		const active = effect.get(broadcast.out.active);
+		const track = effect.get(previewTrack);
+		effect.cleanup(() => preview.set({}));
+		if (!active || track === undefined) return;
+
+		subscribeJson(active, track, PreviewTrackSchema, effect, (value) => {
+			preview.set(value.info ?? {});
+		});
 	});
 
 	return {
@@ -257,8 +277,8 @@ export function consume(broadcast: Watch.Broadcast): Consumed {
 /**
  * Feed each value on `name` that matches `schema` to `update`.
  *
- * A value that does not match is refused with a warning and the last valid one stays, so a
- * malformed publish neither reaches the UI nor ends the subscription.
+ * A value that does not match ends the subscription, as any failed read does: it never reaches the
+ * UI and the last valid one stays.
  */
 function subscribeJson<T>(
 	broadcast: Moq.Broadcast.Consumer,
@@ -271,18 +291,15 @@ function subscribeJson<T>(
 	effect.cleanup(() => consumer.close());
 
 	effect.spawn(async () => {
-		for (;;) {
-			let state: Moq.Timed<T> | undefined;
-			try {
-				state = await effect.race(consumer.latest());
-			} catch (err) {
-				// The value was decoded and only failed the schema, so the next frame still applies.
-				if (!(err instanceof z.core.$ZodError)) throw err;
-				console.warn(`refused invalid ${name}:`, err);
-				continue;
+		// A failed read ends the loop, so release the subscription instead of downloading what nothing reads.
+		try {
+			for (;;) {
+				const state = await effect.race(consumer.latest());
+				if (state === undefined) break;
+				update(state.value);
 			}
-			if (state === undefined) break;
-			update(state.value);
+		} finally {
+			consumer.close();
 		}
 	});
 }

@@ -26,6 +26,16 @@ and Firefox, and the maintainer decides from it.
 Still decided 2026-10-31 (maintainer): moq's old wasm-bindgen support stays
 removed; rust2-wasm is the only WebAssembly route.
 
+Decided with the maintainer on 2026-11-21: ✅ no hand-written `u64` type for
+`@moq/net` (rejected: profiling bigint's share first; a range-checked branded
+bigint; porting rust2-ts's number-or-limbs `u64` by hand). Either route here
+brings rust2's `u64`, a `number` while a safe integer and `{ hi, lo }` limbs
+past 2^53, which rust2's bench measured faster than `bigint` on the codec,
+while a `{ hi, lo }` pair for every value allocated as a `bigint` does and lost
+decode. Porting it by hand would break the bigint group IDs in the public API
+for code this quest may retire. The gate's report includes the codec's integer
+cost, so the comparison shows what `bigint` costs the handwritten package.
+
 - Adopt only after the gate's report, against the handwritten `@moq/net` in a
   complete browser workload. Preserve wire and correctness, full-width
   integer values, and explicit lifetime and cancellation behavior. Run the

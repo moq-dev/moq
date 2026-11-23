@@ -20,7 +20,7 @@ function named(request: Request): string {
 }
 
 /** Grants everything and refuses nothing. */
-const GRANT = { publish: new Path.Patterns([Path.Pattern.all()]), subscribe: new Path.Patterns() };
+const GRANT = { publish: Path.Prefixes.all(), subscribe: new Path.Prefixes() };
 
 /**
  * A lite-07 relay that answers each token itself: `decide` accepts or rejects the request, and
@@ -137,6 +137,80 @@ test("a close that refuses the connection credential answers a session without A
 		// The replacement is accepted by the server's SETUP, which is the answer without AUTH.
 		tokens.set(["new"]);
 		await clock.drive(reload.answered());
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a credential in the URL is judged for each dial like a token", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	const dialed: URL[] = [];
+	const served: MockTransport[] = [];
+	// What the relay's own auth was asked: the connection's credential, which it takes from the URL.
+	const asked: string[] = [];
+	// A relay that reads its credential from the URL and refuses "revoked" in band.
+	globalThis.WebTransport = function StubWebTransport(target: string | URL) {
+		const url = new URL(target);
+		dialed.push(url);
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		served.push(pair.server);
+		void acceptSession({ transport: pair.server, url }).then(async (session) => {
+			const requests = session.auth.requests();
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				asked.push(named(request));
+				if (url.searchParams.get("auth") === "revoked") {
+					request.reject(SessionCode.Unauthorized, "no");
+					pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "no" });
+				} else request.accept(GRANT);
+			}
+		});
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	const tokens = new Signal<readonly string[]>(["first"]);
+	const reload = new Reload({
+		url: URL_,
+		versions: ["moq-lite-07-wip"],
+		websocket: { enabled: false },
+		tokens,
+		urlAuth: true,
+		backoff: DELAY,
+	});
+	try {
+		await clock.drive(reload.answered());
+		expect(dialed[0]?.searchParams.get("auth")).toBe("first");
+		expect(dialed[0]?.searchParams.has("jwt")).toBe(false);
+		// The configured URL stays the key, so a new credential never starts another sequence.
+		expect(reload.url.peek()?.href).toBe(URL_.href);
+
+		// A replacement while the session lives waits for the next dial, and rides no AUTH stream
+		// to a relay that takes no token of its own.
+		tokens.set(["rotated"]);
+		let settled = false;
+		const settle = () => {
+			settled = true;
+		};
+		void reload.answered().then(settle, settle);
+		await clock.advance(Duration.millis(10));
+		expect(asked).toEqual(["connection"]);
+		expect(settled).toBe(false);
+
+		// The relay drops the session; the redial presents the replacement, which it refuses.
+		served[0]?.close({ closeCode: 0, reason: "restart" });
+		await clock.drive(waitFor(reload.established, (established) => established === undefined));
+		tokens.set(["revoked"]);
+		const err = await clock.drive(refusal(reload.answered()));
+		expect(err?.code).toBe(SessionCode.Unauthorized);
+		expect(dialed.at(-1)?.searchParams.get("auth")).toBe("revoked");
+
+		// The loop is still live, and the next credential is judged on its own.
+		tokens.set(["second"]);
+		await clock.drive(reload.answered());
+		expect(dialed.at(-1)?.searchParams.get("auth")).toBe("second");
+		expect(reload.error.peek()).toBeUndefined();
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;

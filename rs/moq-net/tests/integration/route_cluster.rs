@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
 use moq_net::stats::{Message, Registry, SessionInfo, Tier};
-use moq_net::{Error, Instance, Pattern, Patterns, Timestamp, auth, origin, track};
+use moq_net::{Error, Instance, Prefix, Prefixes, Timestamp, auth, origin, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, now, spawn};
 
@@ -463,8 +463,10 @@ impl Lan {
 /// publisher only over the CDN's own expensive link, never through the LAN.
 ///
 /// At the cut `lan[0]` moves onto the route through the CDN at once: its reader's
-/// announcement stays, available. The closed session still ends the subscription it
-/// carried, so a fresh one reads on through the CDN.
+/// announcement stays. `cdn[0]` reached the local broadcast through `lan[0]`, so it offered
+/// it nothing until the cut, and `lan[0]` shows it unavailable until that route lands, here
+/// in the same instant. The subscription the closed session carried reads on through the
+/// CDN.
 #[kio::test]
 async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let mut lan = Lan::new().await;
@@ -498,9 +500,13 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let partitioned = island.seen();
 	// The local publisher's push, `lan[1]`'s uplink, the CDN's link, and `lan[0]`'s uplink.
 	let through_cdn = 1 + 1 + CDN_INTERNAL + 1;
-	let [moved] = partitioned.as_slice() else {
+	let [lost, moved] = partitioned.as_slice() else {
 		panic!("the island moved once: {partitioned:?}");
 	};
+	assert!(
+		lost.kind == Kind::Update && !lost.available && lost.instance == instance && lost.at == cut_at,
+		"unavailable until the CDN's route lands: {partitioned:?}"
+	);
 	assert!(
 		moved.kind == Kind::Update
 			&& moved.available
@@ -509,15 +515,6 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 			&& moved.at.saturating_duration_since(cut_at) < DEBOUNCE,
 		"through the CDN at once: {partitioned:?}"
 	);
-	// The closed session ends the subscription it carried, and a fresh one joins at the
-	// latest group, the one already read.
-	let ended = kio::clock::timeout(Duration::from_secs(1), rx.next()).await;
-	assert!(
-		matches!(ended, Ok(Some((_, Err(_))))),
-		"the closed session ended the track: {ended:?}"
-	);
-	let (_broadcast, mut rx) = subscribe(&lan.lan[0], "local").await;
-	read_group(&mut rx, "O", 0).await;
 	local.group(1);
 	read_group(&mut rx, "O", 1).await;
 
@@ -768,16 +765,12 @@ async fn tokened_uplink(dialer: &origin::Producer, acceptor: &origin::Producer) 
 	(pair, requests)
 }
 
-/// A grant of the `publish` subtrees, or of everything for `**`, subscribing to
-/// everything and lapsing at `expires`.
+/// A grant of the `publish` prefixes, subscribing to everything and lapsing at `expires`.
 fn grant(publish: &[&str], expires: Option<kio::clock::Instant>) -> auth::Grant {
 	let mut grant = auth::Grant::all();
 	grant.publish = (publish.iter())
-		.map(|prefix| match *prefix {
-			"**" => Pattern::all(),
-			prefix => Pattern::subtree(prefix).unwrap(),
-		})
-		.collect::<Patterns>();
+		.map(|prefix| Prefix::try_from(*prefix).unwrap())
+		.collect::<Prefixes>();
 	grant.expires = expires;
 	grant
 }
@@ -813,7 +806,7 @@ async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
 		while let Some(request) = requests.next().await {
 			match request.token().as_ref() {
 				b"wide" => {
-					let issued = request.accept(grant(&["**"], Some(wide_expires)));
+					let issued = request.accept(grant(&[""], Some(wide_expires)));
 					// Revoking a token's grant once it expires is the acceptor's job.
 					kio::clock::sim::spawn(async move {
 						kio::clock::sleep_until(wide_expires).await;
@@ -937,9 +930,7 @@ struct Listing {
 
 impl Listing {
 	async fn new(node: &origin::Producer, prefix: &str) -> Self {
-		let routes = (node.consume().scope(prefix, &Patterns::from(Pattern::all())))
-			.unwrap()
-			.routes();
+		let routes = (node.consume().scope(prefix, &Prefixes::all())).unwrap().routes();
 		let listing = Self { routes };
 		// The request, its answer, and the initial set.
 		kio::clock::sleep(DEBOUNCE).await;
@@ -1000,8 +991,8 @@ impl Origin {
 /// over its own session. A client lists only `live`. It holds `L`'s route and never `V`'s:
 /// `V` churning costs the client no byte. A request outside that interest still resolves
 /// through the relay. A Rust client's request discovers its own path, so it names `V`'s
-/// node; Node ID 0, the publisher selecting, comes only from other implementations and
-/// is covered at the publisher (`an_answered_track_stream_holds_the_track_until_the_requester_closes`).
+/// node; Node ID 0, the publisher selecting, comes only from other implementations: the
+/// native JS claims lanes of `just test interop` cover a relay answering it.
 #[kio::test]
 async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
 	let relay = produce_origin(1);
@@ -1042,7 +1033,7 @@ async fn an_origin_leaving_the_interest_ends_its_route_by_its_floor() {
 		let l = Origin::new(2, &["live/a", "vod/l"], &relay).await;
 		if scoped {
 			let mut grant = auth::Grant::default();
-			grant.publish = [Pattern::subtree("live/a").unwrap(), Pattern::subtree("vod").unwrap()]
+			grant.publish = [Prefix::try_from("live/a").unwrap(), Prefix::try_from("vod").unwrap()]
 				.into_iter()
 				.collect();
 			l.link.server.auth().authorize(&grant);

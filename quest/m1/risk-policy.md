@@ -1,23 +1,18 @@
-# [S] Declare which changes are high risk
+# [XS] Name the high tier's full suite and the classes that land on their own
 
 ## Goal
 
-A file checked into this repository tells `quest` how risky a change here
-is to merge, so each PR's guardrails match its blast radius:
+[RISK.md](/RISK.md) also tells `quest` what each tier's guardrails need
+here:
 
-- The paths and surfaces that are always high: whatever the
-  [questline](/quest/README.md) calls breaking (the public Rust, JS, and
-  bindings API, a frozen wire version, the hang catalog JSON, stored and
-  exported container formats, CLI flags, config keys, and environment
-  variables), plus workflow files, release tooling, and this file itself.
 - The full suite a high-tier PR runs in the queue, `just gate`, where
   every other PR keeps the checks its diff selects.
 - The classes of change that land without the maintainer's pick, starting
   with tests, benchmarks, and internal docs, each added or removed only by
   a PR the maintainer picks.
 
-`CONTRIBUTING.md`'s landing gate and `REVIEW.md` point at the file instead
-of restating it, and a PR that changes none of this lands as it does
+`CONTRIBUTING.md`'s landing gate points at the file for both instead of
+restating them, and a PR whose tier acts on neither lands as it does
 today.
 
 ## Plan
@@ -38,23 +33,28 @@ narrows a class.
 - ✅ m1 (maintainer; rejected: m0, m4). The questline's rule would put
   tooling in m4; the maintainer placed it with this cycle's work.
 
+`RISK.md` already sets the tiers: its `## High` paths and the prose the
+classifier reads, with [Releases](/RELEASE.md#releases) as the one
+definition of an API break and a wire change. `quest`'s format has no
+place yet for a full-suite command or a class list; its guardrails quest
+adds both, so this quest only fills them in.
+
 Agent's choices, for the implementer to revisit:
 
-- Write the always-high list from the questline's definition of breaking
-  and the Impact list `CONTRIBUTING.md` already requires, so the three
-  cannot drift: one of them becomes the source the others cite.
 - Say in the PR what `just gate` costs in the queue against the scoped
   median of 5.5 minutes, and how often a PR would be high, from the last
-  month's merges.
-- The file's format is `quest`'s; take it from the risk tier's quest there
+  month's merges. The Nightly Gate job took 10m51s on 2026-11-18, and
+  `RISK.md`'s paths, with `quest`'s own, held 166 of 2,322 merges from
+  2026-10-19 high, before the classifier's share.
+- The file's format is `quest`'s; take it from the guardrails quest there
   and add nothing local.
 
 ## Waiting
 
-- moq-dev/quest: its quests `quest/m0/benchmark/risk-tier.md` and
-  `quest/m0/benchmark/guardrails.md` land and this repository's pinned
-  `quest` carries them; check both are gone from its tree and
-  `quest --version` here
+- moq-dev/quest: its quest `quest/m0/benchmark/guardrails.md` lands and
+  this repository's pinned `quest` carries it; check it is gone from its
+  tree and `quest review --help` here names a full-suite command and
+  classes
 
 ## Related
 

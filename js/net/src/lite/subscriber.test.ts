@@ -23,7 +23,7 @@ import {
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import { hooks } from "../internal.ts";
+import { hooks, NO_MAX_DELAY } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -93,7 +93,7 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 // Drives a Subscriber's announce stream directly: the harness plays the peer, writing
 // forged announce messages into the stream the subscriber opens. On lite-07 they are the
 // peer's Announce Stream instead, delivered in order as the session does.
-function announceHarness(version: Version, origin = 1n) {
+function announceHarness(version: Version, origin = 1n, grant?: Signal<Grant | undefined>) {
 	const routed = version === Version.DRAFT_07;
 	const reading = Promise.withResolvers<void>();
 	let inbound!: ReadableStreamDefaultController<Uint8Array>;
@@ -130,7 +130,7 @@ function announceHarness(version: Version, origin = 1n) {
 		},
 	} as unknown as WebTransport;
 
-	const subscriber = new Subscriber(quic, version, toHop(origin));
+	const subscriber = new Subscriber(quic, version, toHop(origin), undefined, undefined, undefined, grant);
 
 	const send = async (f: (w: Writer) => Promise<void>) => {
 		const written: Uint8Array[] = [];
@@ -439,6 +439,119 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	held.close();
 	announced.close();
+	subscriber.close();
+});
+
+// The peer answers a prefix wider than our grant region by region, so a region the grant gains
+// under a prefix already asked for is sent without a new prefix: the subscriber edits nothing, and
+// a reader overlapping the region, synced or not, waits for that edit's answer, which follows the
+// region's claims. A reader the region misses stays synced, and so does every reader on a narrowing.
+test("a lite-07 region granted under a wider prefix syncs at the next answer", async () => {
+	const v = Version.DRAFT_07;
+	const subscribe = (...paths: string[]): Grant => ({
+		publish: new Path.Prefixes(),
+		subscribe: Path.Prefixes.parse(paths),
+	});
+	const grant = new Signal<Grant | undefined>(subscribe("a"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
+	const everything = subscriber.routes();
+	const a = subscriber.routes(Path.Pattern.subtree(Path.from("a")));
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 0n }, v));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+	expect(a.synced.peek()).toBe(true);
+
+	grant.set(subscribe("a", "b"));
+	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	await settle();
+	expect(b.synced.peek()).toBe(false);
+	// The whole tree holds `b`, which may already be in the peer's answer; `a` cannot gain from it.
+	expect(everything.synced.peek()).toBe(false);
+	expect(a.synced.peek()).toBe(true);
+	await send((w) => claimer(v)(w, Path.from("b/x"), { instance: Instance.random(), hops: [] }));
+	await ok();
+	expect(await b.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
+	expect(await everything.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
+	// Synced once each reader asks past the region's claim.
+	void b.next();
+	void everything.next();
+	await settle();
+	expect(b.synced.peek()).toBe(true);
+	expect(everything.synced.peek()).toBe(true);
+
+	// A narrowing shows nothing new: every reader stays synced.
+	grant.set(subscribe("a"));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+	expect(a.synced.peek()).toBe(true);
+
+	a.close();
+	b.close();
+	everything.close();
+	subscriber.close();
+});
+
+test("a lite-07 grant gaining a prefix too long for a path keeps every reader synced", async () => {
+	const v = Version.DRAFT_07;
+	const subscribe = (...paths: string[]): Grant => ({
+		publish: new Path.Prefixes(),
+		subscribe: Path.Prefixes.parse(paths),
+	});
+	const grant = new Signal<Grant | undefined>(subscribe("a"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
+	const everything = subscriber.routes();
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 0n }, v));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+
+	// Like Rust's `Permit::beyond`, a prefix no path can name covers nothing the peer could answer.
+	grant.set(subscribe("a", `b${"x".repeat(Path.MAX_BYTES)}`));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+
+	everything.close();
+	subscriber.close();
+});
+
+// Readers too many to ask for one by one are asked for at the root. A grant change that shows more
+// within it, though within no reader's prefix, still sends an edit: a reader arriving there before
+// its answer waits for it, since the peer may already have sent what the change shows.
+test("a lite-07 grant change under a coarsened ask holds the readers that arrive", async () => {
+	const v = Version.DRAFT_07;
+	const grant = (...prefixes: string[]): Grant => ({
+		publish: new Path.Prefixes(),
+		subscribe: Path.Prefixes.parse(prefixes),
+	});
+	const signal = new Signal<Grant | undefined>(grant("a"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, signal);
+	const readers = Array.from({ length: 17 }, (_, i) =>
+		subscriber.routes(Path.Pattern.subtree(Path.from(`a/${i}${"x".repeat(4000)}`))),
+	);
+	// The first reader is asked for alone, and the rest then move the ask to the root.
+	await settle();
+	await ok();
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 1n }, v));
+	await settle();
+	expect(readers.every((reader) => reader.synced.peek())).toBe(true);
+
+	signal.set(grant("a", "b"));
+	// Noticed before the reader arrives, while no reader's prefix holds `b`.
+	await settle();
+	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	await settle();
+	expect(b.synced.peek()).toBe(false);
+	await ok();
+	await settle();
+	expect(b.synced.peek()).toBe(true);
+
+	b.close();
+	for (const reader of readers) reader.close();
 	subscriber.close();
 });
 
@@ -1770,6 +1883,56 @@ test("a malformed lite-07 group stream ends only its group", async () => {
 	}
 });
 
+// Lite-07: a GROUP_END accounts for the starts inside the group's span, `(start, End)`, in the
+// subscription's tail as the group itself is, and the copy records them skipped, ending at End.
+test("a lite-07 GROUP_END accounts for the starts inside its group's span", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { tail: { covers(start: bigint, end: bigint): boolean } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: Duration.millis(60_000) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		await (await opened(1)).reading;
+
+		const stream = handStream(version);
+		// Frame 0 at the group's start, delta 0, then the End 500 past it.
+		stream.write(await liteFrame(0, new Uint8Array([1])));
+		stream.write(
+			await Writer.collect(version, async (w) => {
+				await w.u53(0);
+				await w.u62(500n);
+			}),
+		);
+		stream.finish();
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 1000n }), stream.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.timestamp?.value).toBe(1000);
+		expect(group?.end).toBe(1500n);
+		if (!entry) throw new Error("no subscription");
+		expect(entry.tail.covers(1000n, 1500n)).toBe(true);
+		expect(entry.tail.covers(1500n, 1501n)).toBe(false);
+		expect(hooks.holeEnd(track, 1200n, false)).toBe(1500n);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		subscriber.close();
+	}
+});
+
 // A TRACK reset while its SUBSCRIBE is live fails the subscription, so the origin can try another
 // route, and resets the SUBSCRIBE.
 test("a reset track rejects the subscription and resets its subscribe", async () => {
@@ -1805,8 +1968,8 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 test("a grant that shrinks while the subscription sets up refuses it", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const scoped = (prefix: string): Grant => ({
-		publish: new Path.Patterns([]),
-		subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
+		publish: new Path.Prefixes(),
+		subscribe: new Path.Prefixes([Path.Prefix.parse(prefix)]),
 	});
 	const grant = new Signal<Grant | undefined>(scoped("room"));
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
@@ -2053,8 +2216,8 @@ test.each(["initial", "track", "fetch", "body"] as const)(
 	async (stage) => {
 		const { quic, streams, opened } = fakeSession();
 		const scoped = (prefix: string): Grant => ({
-			publish: new Path.Patterns(),
-			subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
+			publish: new Path.Prefixes(),
+			subscribe: new Path.Prefixes([Path.Prefix.parse(prefix)]),
 		});
 		const grant = new Signal<Grant | undefined>(scoped(stage === "initial" ? "other" : "room"));
 		const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
@@ -2741,7 +2904,7 @@ async function groupStream(timestamp: number, version: Version = Version.DRAFT_0
 	);
 }
 
-// Lite-05/06 stamp an untimed track's frames with their send time, which a receiver cannot tell
+// A released lite-05/06 publisher stamps an untimed track's frames with their send time, which a receiver cannot tell
 // from media time, so it keeps every timestamp there unchecked: a group that rewinds or lands out
 // of order is accepted with its timestamp.
 test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received timestamps through", async (version) => {
@@ -2853,24 +3016,105 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: 0n, end: 0n }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
 		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
 		await request.reading;
 		expect(hooks.sourceStart(track)).toBe("pending");
 		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
-		track.update({ ranges: [{ start: { time: 0n }, end: { time: 1n } }] });
-		await drainReactions();
+		track.update({ ranges: [{ start: 0n, end: 1n }] });
+		// The feed goes pending before the update is written, so reading it waits for both.
+		const update = await SubscribeUpdate.decode(sent, version);
 		expect(hooks.sourceStart(track)).toBe("pending");
-		// The widened range took the next Range ID.
+		// The widened range retires Range ID 0 and takes the next one.
+		expect(update.remove).toEqual([0n]);
+		expect(update.ranges).toHaveLength(1);
 		await respond(request, version, [{ started: new SubscribeStarted(1n, 1n) }]);
 		await drainReactions();
-		expect(await track.start()).toBe(1n);
+		expect(hooks.sourceStart(track)).toBe(1n);
 	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A reader joining a copy whose oldest range already covers its time gets no start of its own from
+// that range, so the copy asks its upstream with a probe, a range of its own from the time, and
+// retires it once the answer places the reader. Mirrors the Rust
+// `a_received_copy_places_no_time_start_by_another_range`.
+test("a lite-07 copy asks upstream for a time start it cannot place", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const oldest = broadcast.track("video").subscribe({ delay: { max: null } });
+	let reader: ReturnType<typeof oldest.fork> | undefined;
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		// The oldest group's range starts at 5, which may have expired a group at or before 3.
+		await respond(request, version, [{ start: new SubscribeStart([5n]) }]);
+		await drainReactions();
+		reader = oldest.fork({ delay: { max: null }, ranges: [{ start: 3n }] });
+		const probe = await SubscribeUpdate.decode(sent, version);
+		expect(probe.remove ?? []).toEqual([]);
+		expect(probe.ranges).toEqual([{ start: { time: 3n }, end: { time: 3n } }]);
+		// Answered past its time: no group at or before 3, so the reader starts at the oldest group.
+		await respond(request, version, [{ started: new SubscribeStarted(1n, 5n) }]);
+		await drainReactions();
+		expect(hooks.servingResolved(reader)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+		const retired = await SubscribeUpdate.decode(sent, version);
+		expect(retired.remove).toEqual([1n]);
+	} finally {
+		reader?.close();
+		oldest.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A range the publisher answers with no group to deliver lands none of its groups, so the copy is
+// told, and an ordered read holds no later group back for its time. Only one whose end takes in its
+// time says so: one following the live edge may still get the group containing it.
+test("a lite-07 range answered empty is reported only for a range reaching its time", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const reported: (readonly [bigint, bigint | undefined, number])[][] = [];
+	const timeStarts = hooks.timeStarts;
+	hooks.timeStarts = (producer, starts) => {
+		reported.push([...starts]);
+		timeStarts(producer, starts);
+	};
+	const track = broadcast.track("video").subscribe({
+		delay: { max: null },
+		ranges: [{ start: 10n, end: 20n }, { start: 30n }],
+	});
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([undefined, undefined]) }]);
+		await drainReactions();
+		// Under the budget the range was asked with, here none.
+		expect(reported.at(-1)).toEqual([[10n, undefined, NO_MAX_DELAY]]);
+	} finally {
+		hooks.timeStarts = timeStarts;
 		track.close();
 		broadcast.close();
 		subscriber.close();
@@ -2979,16 +3223,20 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
 		const stream = await opened(1);
+		const sent = new Reader(stream.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
 		await stream.reading;
-		await drainReactions();
 		if (!entry) throw new Error("no subscription");
 		expect(entry.staleBudget).toBe(500);
 
+		// Each update is sent only once the previous write is credited, which may take tasks, so wait
+		// for it on the wire: the budget narrows before its update is written.
 		track.update({ delay: { max: Duration.millis(5000) } });
-		await drainReactions();
+		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(5000);
 		expect(entry.staleBudget).toBe(500);
 		track.update({ delay: { max: Duration.millis(200) } });
-		await drainReactions();
+		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(200);
 		expect(entry.staleBudget).toBe(200);
 	} finally {
 		responses.mockRestore();
@@ -3284,7 +3532,7 @@ test("an update whose bound the wire can't carry fails the track", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], Version.DRAFT_05);
 		await (await opened(1)).reading;
-		track.update({ ranges: [{ start: { time: 2n ** 62n - 1n } }] });
+		track.update({ ranges: [{ start: 2n ** 62n - 1n }] });
 		expect(await track.closed).toBeInstanceOf(RangeError);
 	} finally {
 		track.close();

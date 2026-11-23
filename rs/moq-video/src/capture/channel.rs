@@ -205,6 +205,12 @@ impl FrameChannel {
 		self.state.lock().unwrap().skipped
 	}
 
+	/// Whether [`recv`](Self::recv) reached the last frame pushed.
+	#[cfg(all(test, feature = "openh264"))]
+	pub(super) fn taken(&self) -> bool {
+		self.state.lock().unwrap().frame.is_none()
+	}
+
 	/// Stop repeating until the next frame, because the last picture no longer
 	/// stands: the source resized, minimized, or blanked, or freed the buffer it
 	/// lives in. A frame the consumer has not reached yet is the same stale
@@ -686,7 +692,7 @@ mod tests {
 		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
 		let reserved = catalog.reserve().with_interval(config.effective_join());
 		let mut producer = Publisher::new(track, reserved, rendition).unwrap();
-		assert!(producer.demand().wanted().is_some());
+		assert!(producer.demand().wanted());
 
 		for step in 0..10u128 {
 			let frame = chan.recv().await.unwrap().unwrap();

@@ -24,7 +24,7 @@
 //! let info = moq_net::track::Info::default()
 //!     .with_timescale(moq_net::Timescale::MILLI)
 //!     .with_compression(moq_net::track::Compression::Deflate);
-//! let track = broadcast.create_track("chat", info)?;
+//! let track = broadcast.create_track("chat", info).ok_or(moq_net::Error::Duplicate)?;
 //! let mut chat = catalog.json_stream::<Message>(track, moq_mux::json::Config::default())?;
 //! chat.append(&Message { text: "hello".to_string() }, catalog.clock().now())?;
 //! # Ok(())

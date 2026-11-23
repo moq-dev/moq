@@ -22,8 +22,38 @@ export const BucketFrameSchema: ZodMiniObject<{
 	tiers: ZodMiniDefault<ZodMiniRecord<ZodMiniString<string>, ZodMiniPrefault<ZodMiniObject<{
 		labels: ZodMiniDefault<ZodMiniRecord<ZodMiniString<string>, ZodMiniPrefault<ZodMiniObject<{
 			announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_held_evicted_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 			received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			requests: ZodMiniDefault<ZodMiniNumber<number>>;
+			routes: ZodMiniPrefault<ZodMiniObject<{
+				changed: ZodMiniDefault<ZodMiniNumber<number>>;
+				closed: ZodMiniPrefault<ZodMiniObject<{
+					malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+					other: ZodMiniDefault<ZodMiniNumber<number>>;
+					overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+					regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+					role: ZodMiniDefault<ZodMiniNumber<number>>;
+					stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+					unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+				}, $strip>>;
+				received: ZodMiniPrefault<ZodMiniObject<{
+					dead: ZodMiniDefault<ZodMiniNumber<number>>;
+					drain: ZodMiniDefault<ZodMiniNumber<number>>;
+				}, $strip>>;
+				refused: ZodMiniPrefault<ZodMiniObject<{
+					looped: ZodMiniDefault<ZodMiniNumber<number>>;
+					path: ZodMiniDefault<ZodMiniNumber<number>>;
+					scope: ZodMiniDefault<ZodMiniNumber<number>>;
+				}, $strip>>;
+				rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+				sent: ZodMiniPrefault<ZodMiniObject<{
+					dead: ZodMiniDefault<ZodMiniNumber<number>>;
+					drain: ZodMiniDefault<ZodMiniNumber<number>>;
+				}, $strip>>;
+			}, $strip>>;
 			routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 			sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -110,8 +140,38 @@ export const BucketFrameSchema: ZodMiniObject<{
 		}, $strip>>;
 		sessions: ZodMiniPrefault<ZodMiniObject<{
 			announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_held_evicted_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 			received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			requests: ZodMiniDefault<ZodMiniNumber<number>>;
+			routes: ZodMiniPrefault<ZodMiniObject<{
+				changed: ZodMiniDefault<ZodMiniNumber<number>>;
+				closed: ZodMiniPrefault<ZodMiniObject<{
+					malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+					other: ZodMiniDefault<ZodMiniNumber<number>>;
+					overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+					regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+					role: ZodMiniDefault<ZodMiniNumber<number>>;
+					stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+					unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+				}, $strip>>;
+				received: ZodMiniPrefault<ZodMiniObject<{
+					dead: ZodMiniDefault<ZodMiniNumber<number>>;
+					drain: ZodMiniDefault<ZodMiniNumber<number>>;
+				}, $strip>>;
+				refused: ZodMiniPrefault<ZodMiniObject<{
+					looped: ZodMiniDefault<ZodMiniNumber<number>>;
+					path: ZodMiniDefault<ZodMiniNumber<number>>;
+					scope: ZodMiniDefault<ZodMiniNumber<number>>;
+				}, $strip>>;
+				rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+				sent: ZodMiniPrefault<ZodMiniObject<{
+					dead: ZodMiniDefault<ZodMiniNumber<number>>;
+					drain: ZodMiniDefault<ZodMiniNumber<number>>;
+				}, $strip>>;
+			}, $strip>>;
 			routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 			sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -165,8 +225,38 @@ export class BucketReader {
 export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 	labels: ZodMiniDefault<ZodMiniRecord<ZodMiniString<string>, ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_held_evicted_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
+		routes: ZodMiniPrefault<ZodMiniObject<{
+			changed: ZodMiniDefault<ZodMiniNumber<number>>;
+			closed: ZodMiniPrefault<ZodMiniObject<{
+				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+				other: ZodMiniDefault<ZodMiniNumber<number>>;
+				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+				role: ZodMiniDefault<ZodMiniNumber<number>>;
+				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			received: ZodMiniPrefault<ZodMiniObject<{
+				dead: ZodMiniDefault<ZodMiniNumber<number>>;
+				drain: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			refused: ZodMiniPrefault<ZodMiniObject<{
+				looped: ZodMiniDefault<ZodMiniNumber<number>>;
+				path: ZodMiniDefault<ZodMiniNumber<number>>;
+				scope: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+			sent: ZodMiniPrefault<ZodMiniObject<{
+				dead: ZodMiniDefault<ZodMiniNumber<number>>;
+				drain: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+		}, $strip>>;
 		routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 		sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -253,8 +343,38 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 	}, $strip>>;
 	sessions: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_held_evicted_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
+		routes: ZodMiniPrefault<ZodMiniObject<{
+			changed: ZodMiniDefault<ZodMiniNumber<number>>;
+			closed: ZodMiniPrefault<ZodMiniObject<{
+				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+				other: ZodMiniDefault<ZodMiniNumber<number>>;
+				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+				role: ZodMiniDefault<ZodMiniNumber<number>>;
+				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			received: ZodMiniPrefault<ZodMiniObject<{
+				dead: ZodMiniDefault<ZodMiniNumber<number>>;
+				drain: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			refused: ZodMiniPrefault<ZodMiniObject<{
+				looped: ZodMiniDefault<ZodMiniNumber<number>>;
+				path: ZodMiniDefault<ZodMiniNumber<number>>;
+				scope: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+			sent: ZodMiniPrefault<ZodMiniObject<{
+				dead: ZodMiniDefault<ZodMiniNumber<number>>;
+				drain: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+		}, $strip>>;
 		routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 		sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -609,8 +729,38 @@ export type PresenceFrame = infer<typeof PresenceFrameSchema>;
 
 export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPrefault<ZodMiniObject<{
 	announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_held_evicted_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 	received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	requests: ZodMiniDefault<ZodMiniNumber<number>>;
+	routes: ZodMiniPrefault<ZodMiniObject<{
+		changed: ZodMiniDefault<ZodMiniNumber<number>>;
+		closed: ZodMiniPrefault<ZodMiniObject<{
+			malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+			other: ZodMiniDefault<ZodMiniNumber<number>>;
+			overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+			regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+			role: ZodMiniDefault<ZodMiniNumber<number>>;
+			stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+			unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+		}, $strip>>;
+		received: ZodMiniPrefault<ZodMiniObject<{
+			dead: ZodMiniDefault<ZodMiniNumber<number>>;
+			drain: ZodMiniDefault<ZodMiniNumber<number>>;
+		}, $strip>>;
+		refused: ZodMiniPrefault<ZodMiniObject<{
+			looped: ZodMiniDefault<ZodMiniNumber<number>>;
+			path: ZodMiniDefault<ZodMiniNumber<number>>;
+			scope: ZodMiniDefault<ZodMiniNumber<number>>;
+		}, $strip>>;
+		rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+		sent: ZodMiniPrefault<ZodMiniObject<{
+			dead: ZodMiniDefault<ZodMiniNumber<number>>;
+			drain: ZodMiniDefault<ZodMiniNumber<number>>;
+		}, $strip>>;
+	}, $strip>>;
 	routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 	sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -636,8 +786,38 @@ export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPr
 
 export const PresenceSchema: ZodMiniPrefault<ZodMiniObject<{
 	announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_held_evicted_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 	received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	requests: ZodMiniDefault<ZodMiniNumber<number>>;
+	routes: ZodMiniPrefault<ZodMiniObject<{
+		changed: ZodMiniDefault<ZodMiniNumber<number>>;
+		closed: ZodMiniPrefault<ZodMiniObject<{
+			malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+			other: ZodMiniDefault<ZodMiniNumber<number>>;
+			overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+			regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+			role: ZodMiniDefault<ZodMiniNumber<number>>;
+			stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+			unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+		}, $strip>>;
+		received: ZodMiniPrefault<ZodMiniObject<{
+			dead: ZodMiniDefault<ZodMiniNumber<number>>;
+			drain: ZodMiniDefault<ZodMiniNumber<number>>;
+		}, $strip>>;
+		refused: ZodMiniPrefault<ZodMiniObject<{
+			looped: ZodMiniDefault<ZodMiniNumber<number>>;
+			path: ZodMiniDefault<ZodMiniNumber<number>>;
+			scope: ZodMiniDefault<ZodMiniNumber<number>>;
+		}, $strip>>;
+		rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+		sent: ZodMiniPrefault<ZodMiniObject<{
+			dead: ZodMiniDefault<ZodMiniNumber<number>>;
+			drain: ZodMiniDefault<ZodMiniNumber<number>>;
+		}, $strip>>;
+	}, $strip>>;
 	routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 	sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -677,6 +857,55 @@ export const RefusalsSchema: ZodMiniPrefault<ZodMiniObject<{
 	unavailable: ZodMiniDefault<ZodMiniNumber<number>>;
 }, $strip>>;
 
+export type RouteCloses = infer<typeof RouteClosesSchema>;
+
+export const RouteClosesSchema: ZodMiniPrefault<ZodMiniObject<{
+	malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+	other: ZodMiniDefault<ZodMiniNumber<number>>;
+	overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+	regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+	role: ZodMiniDefault<ZodMiniNumber<number>>;
+	stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+	unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+}, $strip>>;
+
+export type RouteRefusals = infer<typeof RouteRefusalsSchema>;
+
+export const RouteRefusalsSchema: ZodMiniPrefault<ZodMiniObject<{
+	looped: ZodMiniDefault<ZodMiniNumber<number>>;
+	path: ZodMiniDefault<ZodMiniNumber<number>>;
+	scope: ZodMiniDefault<ZodMiniNumber<number>>;
+}, $strip>>;
+
+export type Routes = infer<typeof RoutesSchema>;
+
+export const RoutesSchema: ZodMiniPrefault<ZodMiniObject<{
+	changed: ZodMiniDefault<ZodMiniNumber<number>>;
+	closed: ZodMiniPrefault<ZodMiniObject<{
+		malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+		other: ZodMiniDefault<ZodMiniNumber<number>>;
+		overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+		regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+		role: ZodMiniDefault<ZodMiniNumber<number>>;
+		stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+		unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+	}, $strip>>;
+	received: ZodMiniPrefault<ZodMiniObject<{
+		dead: ZodMiniDefault<ZodMiniNumber<number>>;
+		drain: ZodMiniDefault<ZodMiniNumber<number>>;
+	}, $strip>>;
+	refused: ZodMiniPrefault<ZodMiniObject<{
+		looped: ZodMiniDefault<ZodMiniNumber<number>>;
+		path: ZodMiniDefault<ZodMiniNumber<number>>;
+		scope: ZodMiniDefault<ZodMiniNumber<number>>;
+	}, $strip>>;
+	rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+	sent: ZodMiniPrefault<ZodMiniObject<{
+		dead: ZodMiniDefault<ZodMiniNumber<number>>;
+		drain: ZodMiniDefault<ZodMiniNumber<number>>;
+	}, $strip>>;
+}, $strip>>;
+
 export type Totals = infer<typeof TotalsSchema>;
 
 export type TotalsFrame = infer<typeof TotalsFrameSchema>;
@@ -704,8 +933,38 @@ export const TotalsFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPref
 	}, $strip>>;
 	sessions: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_held_evicted_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
+		routes: ZodMiniPrefault<ZodMiniObject<{
+			changed: ZodMiniDefault<ZodMiniNumber<number>>;
+			closed: ZodMiniPrefault<ZodMiniObject<{
+				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+				other: ZodMiniDefault<ZodMiniNumber<number>>;
+				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+				role: ZodMiniDefault<ZodMiniNumber<number>>;
+				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			received: ZodMiniPrefault<ZodMiniObject<{
+				dead: ZodMiniDefault<ZodMiniNumber<number>>;
+				drain: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			refused: ZodMiniPrefault<ZodMiniObject<{
+				looped: ZodMiniDefault<ZodMiniNumber<number>>;
+				path: ZodMiniDefault<ZodMiniNumber<number>>;
+				scope: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+			sent: ZodMiniPrefault<ZodMiniObject<{
+				dead: ZodMiniDefault<ZodMiniNumber<number>>;
+				drain: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+		}, $strip>>;
 		routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 		sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -773,8 +1032,38 @@ export const TotalsSchema: ZodMiniPrefault<ZodMiniObject<{
 	}, $strip>>;
 	sessions: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_held_evicted_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
+		routes: ZodMiniPrefault<ZodMiniObject<{
+			changed: ZodMiniDefault<ZodMiniNumber<number>>;
+			closed: ZodMiniPrefault<ZodMiniObject<{
+				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
+				other: ZodMiniDefault<ZodMiniNumber<number>>;
+				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
+				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
+				role: ZodMiniDefault<ZodMiniNumber<number>>;
+				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
+				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			received: ZodMiniPrefault<ZodMiniObject<{
+				dead: ZodMiniDefault<ZodMiniNumber<number>>;
+				drain: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			refused: ZodMiniPrefault<ZodMiniObject<{
+				looped: ZodMiniDefault<ZodMiniNumber<number>>;
+				path: ZodMiniDefault<ZodMiniNumber<number>>;
+				scope: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+			rewritten: ZodMiniDefault<ZodMiniNumber<number>>;
+			sent: ZodMiniPrefault<ZodMiniObject<{
+				dead: ZodMiniDefault<ZodMiniNumber<number>>;
+				drain: ZodMiniDefault<ZodMiniNumber<number>>;
+			}, $strip>>;
+		}, $strip>>;
 		routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 		sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -885,6 +1174,13 @@ export const UsageSchema: ZodMiniPrefault<ZodMiniObject<{
 		subscriptions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 		subscriptions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 	}, $strip>>;
+}, $strip>>;
+
+export type Withdrawals = infer<typeof WithdrawalsSchema>;
+
+export const WithdrawalsSchema: ZodMiniPrefault<ZodMiniObject<{
+	dead: ZodMiniDefault<ZodMiniNumber<number>>;
+	drain: ZodMiniDefault<ZodMiniNumber<number>>;
 }, $strip>>;
 
 export function bucketTrack(bucket: string, epoch: string): string;

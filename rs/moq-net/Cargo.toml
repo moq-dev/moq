@@ -64,7 +64,7 @@ futures = { workspace = true }
 # The tests' executor, with simulated time.
 kio = { path = "../kio", features = ["runtime", "sim"] }
 # This crate's own doors, for its integration tests and benches.
-moq-net = { path = ".", features = ["relay", "test-support"] }
+moq-net = { path = ".", default-features = false, features = ["relay", "test-support"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 # The benches run on tokio, the session fanout bench across worker threads. test-util

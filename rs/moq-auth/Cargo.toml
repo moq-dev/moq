@@ -9,6 +9,9 @@ version = "0.2.1"
 edition = "2024"
 rust-version.workspace = true
 
+keywords = ["quic", "moq", "jwt", "authorization", "live"]
+categories = ["authentication", "multimedia", "network-programming"]
+
 [features]
 default = ["client"]
 # Generated async wrappers for the lease poll methods, and `lease::Consumer::reported`.

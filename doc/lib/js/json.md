@@ -13,9 +13,9 @@ are the catalog modes on the [hang](/concept/hang#data-tracks) page. Window is
 a third framing for a raw track: both ends opt into it, and a generic catalog
 reader will not pick it up.
 
-- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error. `next()` yields each state in order, skipping every group a newer one supersedes; `latest()` skips to the newest. Deltas ride one group until a joiner wants a fresh one: give the track a `refresh` ratio (8 is typical) and the producer restates the value in a new group. Without a ratio a group rolls only at its caps.
+- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error. `next()` yields each state in order, skipping every group a newer one supersedes; `latest()` skips to the newest. Deltas ride one group until a reader asks for a fresh one: give the track a `refresh` (a `ratio` of 8 is typical for joins, and an `interval` lets `subscriber.refresh()` ask regardless of size) and the producer restates the value in a new group. Without one a group rolls only at its caps.
 - **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
-- **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
+- **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` the same way.
 
 Compression is the track's: create it with `compression: "deflate"`, which JSON benefits
 from, and readers see plain frames either way. Every write takes

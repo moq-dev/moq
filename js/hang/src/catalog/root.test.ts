@@ -417,3 +417,22 @@ test("shared stats and echo discovery round trips without changing old catalogs"
 	expect(RootSchema.parse(fixture)).toEqual(fixture);
 	expect(RootSchema.parse({})).toEqual({});
 });
+
+// Mirrors Rust's container and projection serializers, which write an unknown kind's object as is.
+test("encode writes unknown containers and projections back verbatim", () => {
+	const container = { kind: "future", magic: 7 };
+	const projection = { kind: "fisheye", lens: 220 };
+	const catalog = {
+		video: { renditions: { v: { codec: "avc1.64001f", container, projection } } },
+		audio: { renditions: { a: { codec: "opus", sampleRate: 48000, numberOfChannels: 2, container } } },
+		text: { renditions: { t: { format: "vtt", container } } },
+	};
+	const written = JSON.parse(JSON.stringify(encode(RootSchema.parse(catalog))));
+	expect(written.video.renditions.v.container).toEqual(container);
+	expect(written.video.renditions.v.projection).toEqual(projection);
+	expect(written.audio.renditions.a.container).toEqual(container);
+	expect(written.text.renditions.t.container).toEqual(container);
+
+	// Reparsing the written catalog lands on the same value.
+	expect(RootSchema.parse(written)).toEqual(RootSchema.parse(catalog));
+});

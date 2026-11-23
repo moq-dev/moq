@@ -57,6 +57,7 @@ try {
 	};
 	const publish = (kind: "video" | "audio", parts: Frame[][]) => {
 		const media = broadcast.createTrack(kind, Container.trackInfo({ priority: Catalog.PRIORITY[kind] }));
+		if (!media) throw new Error("the track already exists");
 		const producer = new Container.Legacy.Producer(media, new Container.Legacy.Format(kind));
 		for (const [index, part] of parts.entries()) {
 			if (index > 0) producer.discontinuity();
@@ -80,6 +81,7 @@ try {
 		priority: Catalog.PRIORITY.catalog,
 		compression: "deflate",
 	});
+	if (!track) throw new Error("the track already exists");
 	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 	catalog.update(
 		Catalog.encode({

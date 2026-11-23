@@ -2376,9 +2376,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2776,6 +2776,30 @@ name = "gstreamer-base-sys"
 version = "0.25.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b05f77bfd76b5afee6b29c27dae19eaf5018b5cf8d0d17520f3de44c6385c32"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps 9.0.0",
+]
+
+[[package]]
+name = "gstreamer-check"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bca00e318412c20405c6e0817cb330b706d128c779c9ec613fa2b53e4daf55c7"
+dependencies = [
+ "glib",
+ "gstreamer",
+ "gstreamer-check-sys",
+]
+
+[[package]]
+name = "gstreamer-check-sys"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7beea104cb86688e15047b9712419e7d9194c0ca8ce47848fcc8482c0207be9c"
 dependencies = [
  "glib-sys",
  "gobject-sys",
@@ -3733,6 +3757,7 @@ dependencies = [
  "futures",
  "kio",
  "kio-macros",
+ "libc",
  "rand 0.10.3",
  "serde",
  "serde_json",
@@ -4227,7 +4252,6 @@ name = "moq-audio"
 version = "0.1.10"
 dependencies = [
  "bench-harness",
- "bitstream-io 4.10.0",
  "block2 0.6.2",
  "bytes",
  "cpal",
@@ -4488,6 +4512,7 @@ dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
  "gstreamer-audio",
+ "gstreamer-check",
  "hang",
  "kio",
  "moq-audio",
@@ -4537,6 +4562,26 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-test",
+ "url",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moq-interop"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "hang",
+ "kio",
+ "moq-audio",
+ "moq-json",
+ "moq-mux",
+ "moq-net",
+ "moq-tokio",
+ "serde_json",
+ "tokio",
  "url",
  "workspace-hack",
 ]
@@ -4618,7 +4663,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-test",
- "url",
  "webm-iterable",
  "workspace-hack",
 ]
@@ -4990,9 +5034,11 @@ dependencies = [
  "rustls-platform-verifier",
  "rustls-webpki",
  "serde",
+ "serde_json",
  "serde_with",
  "socket2 0.6.5",
  "tempfile",
+ "test-env",
  "thiserror 2.0.21",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
@@ -9611,9 +9657,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -10630,6 +10676,7 @@ dependencies = [
  "num-bigint",
  "num-complex",
  "num-integer",
+ "num-rational",
  "num-traits",
  "objc2 0.6.5",
  "objc2-core-audio",

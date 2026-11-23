@@ -63,27 +63,31 @@ public typealias RouteInfo = MoqFFI.MoqRouteInfo
 /// Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields, each carrying an `Announce`: `.present` once a route
-/// covers the path, `.unavailable` and `.available` as a present path loses and recovers a
-/// usable path to its origin, `.absent` once the origin withdraws it, and `.offline` once this
-/// side lets go of it, which its origin may still serve. Another publisher instance taking a
-/// path over keeps it present: hold a `Following` to see the broadcast change.
+/// covers the path, and `.absent` once none does, whether its origin withdrew it or this side
+/// let go of it. Another publisher instance taking a path over keeps it present: hold a
+/// `Following` to see the broadcast change.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to
 /// deliver, and group ordering.
 public typealias Subscription = MoqFFI.MoqSubscription
-/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency, where a
-/// cold join starts, and how long a decoder waits for a missing group, `nil` to leave it unstated
-/// (a decoder starts it as zero and waits a missing group for `max`, except an audio decoder, which
-/// floors it at zero and waits only its playout estimate, which can be larger; a catalog warmup or
-/// an audio decoder's playout delay still states a `min` to the publisher), and `max`,
-/// `nil` for no subscriber limit, is how far a non-latest group may fall behind before it is
-/// skipped. A `min` past `max` starts at `max`.
+/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency, and once
+/// stated, zero included, a range with no start is a live join that far behind the live edge; `nil`
+/// leaves it unstated, so such a range reaches back as far as `max` allows (a decoder starts it as
+/// zero). `max`, `nil` for no subscriber limit, is how far a non-latest group may fall behind before
+/// it is skipped, and how far newer media may run past a missing group before a decoder gives it up.
+/// A `min` past `max` starts a live join no further back than the group covering the point `max`
+/// behind the live edge.
 public typealias Delay = MoqFFI.MoqDelay
 /// Options for fetching one complete group by start.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
-/// Publisher-side track properties: priority, group ordering, max age,
-/// and timescale.
+/// Publisher-side track properties: priority, max age, refresh, timescale,
+/// and compression.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
+/// When a subscriber asks a track's publisher for a new group, which `TrackDemand.refresh()`
+/// reports: a join once the newest group outweighs `ratio` times its first frame (any join
+/// when `nil`), waiting out `interval` (`nil` for no wait), which caps how often the publisher
+/// makes groups however many subscribers ask. A bare `TrackRefresh()` asks for nothing.
+public typealias TrackRefresh = MoqFFI.MoqTrackRefresh
 /// How a track's frames are compressed on the wire: `Compression.deflate()`, or `nil` in `TrackInfo`
 /// for none. Compare a received one with `==` or by `name()`.
 public typealias Compression = MoqFFI.MoqCompression
@@ -146,18 +150,19 @@ public typealias Position = MoqFFI.MoqPosition
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
 // in every file that imports Moq.
 extension Subscription {
-    /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
+    /// A span of a track to deliver: from the group containing `start` through the group
+    /// containing `end`, each a `Timestamp.unscaled` time in the track's timescale (a scaled one
+    /// is refused). Every end includes its whole group. A `nil` `start` is no start, which the
+    /// subscription's `delay` places: a stated `min` is a live join that far behind the live edge
+    /// (zero is the latest group), and an unstated one reaches back as far as `max` allows. A
+    /// `nil` `end` keeps following the live edge.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.oldest` (a start only), `.absolute(group:)`,
-    /// `.relative(groups:)` back from the latest group, or `.time(timestamp:)` for the group
-    /// containing an unscaled time in the track's timescale (a scaled one is refused).
-    public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder
 
-    /// moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded
-    /// one at once. A `nil` subscription means the same; copy this one to change a field. A
-    /// `Subscription(...)` must name `delay`.
+    /// moq-net's defaults, whose `delay` (no `min`, a zero `max`) starts at the newest group and
+    /// skips a superseded one at once. A `nil` subscription means the same; copy this one to
+    /// change a field. A `Subscription(...)` must name `delay`.
     public static var `default`: Subscription { moqSubscriptionDefaults() }
 }
 

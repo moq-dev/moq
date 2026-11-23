@@ -126,33 +126,33 @@ export interface MaxStreamData {
 	max: bigint;
 }
 
-export interface MaxStreamsBidi {
+interface MaxStreamsBidi {
 	type: "max_streams_bidi";
 	max: bigint;
 }
 
-export interface MaxStreamsUni {
+interface MaxStreamsUni {
 	type: "max_streams_uni";
 	max: bigint;
 }
 
-export interface DataBlocked {
+interface DataBlocked {
 	type: "data_blocked";
 	limit: bigint;
 }
 
-export interface StreamDataBlocked {
+interface StreamDataBlocked {
 	type: "stream_data_blocked";
 	id: Stream.Id;
 	limit: bigint;
 }
 
-export interface StreamsBlockedBidi {
+interface StreamsBlockedBidi {
 	type: "streams_blocked_bidi";
 	limit: bigint;
 }
 
-export interface StreamsBlockedUni {
+interface StreamsBlockedUni {
 	type: "streams_blocked_uni";
 	limit: bigint;
 }
@@ -194,6 +194,15 @@ export interface TransportParams {
 /** Default max_record_size per draft-01. */
 export const DEFAULT_MAX_RECORD_SIZE = 16382n;
 
+/** The most streams of one direction a QUIC stream ID can name (RFC 9000 §4.6). */
+export const MAX_STREAMS = 1n << 60n;
+
+/** A stream count from a frame, which may not name a stream ID past the varint range. */
+function streamCount(value: bigint, code: number, what: string): bigint {
+	if (value > MAX_STREAMS) throw new TransportError(code, `${what} exceeds 2^60`);
+	return value;
+}
+
 export const DEFAULT_TRANSPORT_PARAMS: TransportParams = {
 	maxIdleTimeout: 0n,
 	initialMaxData: 0n,
@@ -220,12 +229,8 @@ export const RECOMMENDED_TRANSPORT_PARAMS: TransportParams = {
 	resetStreamAt: false,
 };
 
-export interface Padding {
-	type: "padding";
-}
-
 /** QX_PING frame (draft-01) */
-export interface PingRequest {
+interface PingRequest {
 	type: "ping_request";
 	sequence: bigint;
 }
@@ -622,10 +627,18 @@ function parseTransportParams(buffer: Uint8Array): TransportParams {
 				params.initialMaxStreamDataUni = paramValue;
 				break;
 			case 0x08n:
-				params.initialMaxStreamsBidi = paramValue;
+				params.initialMaxStreamsBidi = streamCount(
+					paramValue,
+					TransportCode.TRANSPORT_PARAMETER_ERROR,
+					"initialMaxStreamsBidi",
+				);
 				break;
 			case 0x09n:
-				params.initialMaxStreamsUni = paramValue;
+				params.initialMaxStreamsUni = streamCount(
+					paramValue,
+					TransportCode.TRANSPORT_PARAMETER_ERROR,
+					"initialMaxStreamsUni",
+				);
 				break;
 			case 0x20n:
 				params.maxDatagramFrameSize = paramValue;
@@ -819,13 +832,19 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 	// MAX_STREAMS (bidi)
 	if (frameType === 0x12n) {
 		[v, buffer] = VarInt.decode(buffer);
-		return [{ type: "max_streams_bidi", max: v.value }, buffer];
+		return [
+			{ type: "max_streams_bidi", max: streamCount(v.value, TransportCode.FRAME_ENCODING_ERROR, "MAX_STREAMS") },
+			buffer,
+		];
 	}
 
 	// MAX_STREAMS (uni)
 	if (frameType === 0x13n) {
 		[v, buffer] = VarInt.decode(buffer);
-		return [{ type: "max_streams_uni", max: v.value }, buffer];
+		return [
+			{ type: "max_streams_uni", max: streamCount(v.value, TransportCode.FRAME_ENCODING_ERROR, "MAX_STREAMS") },
+			buffer,
+		];
 	}
 
 	// DATA_BLOCKED
@@ -845,13 +864,25 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 	// STREAMS_BLOCKED (bidi)
 	if (frameType === 0x16n) {
 		[v, buffer] = VarInt.decode(buffer);
-		return [{ type: "streams_blocked_bidi", limit: v.value }, buffer];
+		return [
+			{
+				type: "streams_blocked_bidi",
+				limit: streamCount(v.value, TransportCode.FRAME_ENCODING_ERROR, "STREAMS_BLOCKED"),
+			},
+			buffer,
+		];
 	}
 
 	// STREAMS_BLOCKED (uni)
 	if (frameType === 0x17n) {
 		[v, buffer] = VarInt.decode(buffer);
-		return [{ type: "streams_blocked_uni", limit: v.value }, buffer];
+		return [
+			{
+				type: "streams_blocked_uni",
+				limit: streamCount(v.value, TransportCode.FRAME_ENCODING_ERROR, "STREAMS_BLOCKED"),
+			},
+			buffer,
+		];
 	}
 
 	// QX_TRANSPORT_PARAMETERS

@@ -31,7 +31,7 @@ export class Nodes {
 			if (!event) return undefined;
 			const node = parseNodePath(this.#prefix, event.prefix);
 			if (node === undefined) continue;
-			const active = event.kind !== "absent" && event.kind !== "offline";
+			const active = event.kind === "present";
 			return { node, path: event.prefix, active };
 		}
 	}

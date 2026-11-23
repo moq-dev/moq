@@ -1,0 +1,82 @@
+{
+	"$schema": "./node_modules/fallow/schema.json",
+	// Entry points no plugin finds: files that shell scripts, justfiles, Python,
+	// and wrangler run, and the pages HTML files load.
+	"entry": [
+		"sh/**/*.{ts,mjs}",
+		"drafts/*.ts",
+		"demo/boy/src/worker.ts",
+		"js/*/bench/**/*.ts",
+		"js/*/examples/*.ts",
+		"js/*/test-dts/*.ts",
+		"js/common/*.ts",
+		"bench/browser/*.ts",
+		"bench/browser/page/*.ts",
+		"test/{datagram-tracks,max-age,stream-limits}/client.ts",
+		"test/{drain/drain,receive-credit/sender,relay-fill/relay,stream-credit/driver,worklet/matrix}.ts",
+		"test/video/renderer.browser.ts",
+		"test/interop/{auth-unsupported,bare-fin,ietf-compression,ietf-datagram,ietf-range-updates,lite-varint,track-status,tracks,varint}.ts",
+		"test/interop/compat/*.ts",
+		"test/audio-quality/clients/js/{analyze,driver,grade,native,ptt-analyze,ptt,record,replay}.ts",
+		"test/audio-quality/clients/js/src/{mic,ptt,page,recorder,tap-worklet}.ts",
+		"test/interop/clients/js/{close,driver,media,portrait,vr}.ts",
+		"test/interop/clients/js/*.browser.ts",
+		"test/interop/clients/js/*/main.ts",
+		"test/interop/clients/js/src/{main,capture-idle,capture-channel-count}.ts",
+		"test/interop/clients/js-native/*.ts"
+	],
+	"ignorePatterns": [
+		// Rust test data named `.ts`.
+		"rs/**",
+		".direnv/**",
+		// Packages outside the Bun workspace, each with a lockfile of its own.
+		"infra/**",
+		"demo/pub/**",
+		"test/smoke/**",
+		// Declares every published package so changing one rebuilds the API reference
+		// (its index.ts checks the list), and loads its TypeDoc plugins by path.
+		"doc/.vitepress/api/package.json"
+	],
+	"ignoreDependencies": [
+		// Replaces TypeScript's DOM lib, which `lib: ["dom"]` loads.
+		"@typescript/lib-dom",
+		// Used by path, never imported: justfiles run concurrently, sh/markdown.sh
+		// reads markdown-extensions, .remarkrc.mjs names its plugins as strings,
+		// test/worklet/matrix.ts resolves webpack with Bun.resolveSync, and doc runs
+		// moq-doc-api's generator.
+		"concurrently",
+		"markdown-extensions",
+		"remark-*",
+		"webpack",
+		"webpack-cli",
+		"moq-doc-api",
+		// Declared in doc/.vitepress/api/package.json, which is ignored above.
+		"typedoc-plugin-markdown"
+	],
+	// Installed by the Nix dev shell or the OS.
+	"ignoreBinaries": ["nix", "top"],
+	"usedClassMembers": [
+		// Called implicitly by coercion and JSON.stringify.
+		"valueOf",
+		"toJSON",
+		"toString",
+		// A custom element's members are its DOM API, and an implemented interface's
+		// members are what its callers reach through the interface.
+		{ "extends": "HTMLElement", "members": ["*"] },
+		{ "implements": "WebTransport", "members": ["*"] }
+	],
+	"rules": {
+		// fallow only warns on these by default.
+		"unused-dev-dependencies": "error",
+		"unused-optional-dependencies": "error",
+		// `export * as Track from "./track.ts"` namespaces reuse short names on purpose,
+		// and error.ts aliases its classes for the modules that would shadow them.
+		"duplicate-exports": "off",
+		"duplicate-export-aliases": "off",
+		// Not dead code; a type-aware run reports it alongside.
+		"private-type-leaks": "off"
+	},
+	// Resolves members through types, which the syntactic pass misses when an instance
+	// flows through a property or a return value.
+	"typeAware": { "enabled": true }
+}

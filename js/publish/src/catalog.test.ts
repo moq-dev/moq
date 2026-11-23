@@ -78,6 +78,35 @@ test("catalog producer computes each entry version from the fields it uses", asy
 	effect.close();
 });
 
+test("catalog producer keeps an unknown container and projection across later edits", async () => {
+	const catalog = new CatalogProducer();
+	const effect = new Effect();
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
+	catalog.serve(track, effect);
+	const consumer = new Json.Snapshot.Consumer<unknown>({ track });
+	// A kind spelled like the parser's own wrapper tag, the case a re-encode would confuse.
+	const container = { kind: "unknown", magic: 7 };
+	const projection = { kind: "unknown", lens: 220 };
+	const parsed = Catalog.RootSchema.parse({
+		video: { renditions: { hd: { codec: "avc1.64001f", container, projection } } },
+	});
+
+	catalog.mutate((c) => {
+		c.video = parsed.video;
+	});
+	await consumer.latest();
+	// An unrelated edit re-publishes the rendition as it was first written.
+	catalog.mutate((c) => {
+		c.text = {
+			renditions: { cc: Catalog.TextConfigSchema.parse({ format: "vtt", container: { kind: "legacy" } }) },
+		};
+	});
+	const written = (await consumer.latest())?.value as { video: { renditions: { hd: object } } };
+	expect(written.video.renditions.hd).toEqual({ codec: "avc1.64001f", container, projection });
+
+	effect.close();
+});
+
 test("catalog producer publishes every update as a snapshot group", async () => {
 	const catalog = new CatalogProducer();
 	catalog.mutate((c) => {

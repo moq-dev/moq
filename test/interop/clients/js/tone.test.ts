@@ -5,6 +5,7 @@ const wrong = {
 	at: 0,
 	audioContext: "running",
 	audioStalled: false,
+	audioTimestamp: 1000,
 	audioCodec: "opus",
 	audioChannels: 2,
 	tones: [

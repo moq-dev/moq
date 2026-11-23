@@ -29,7 +29,3 @@ version-5 rendition yields the compatibility one plus the report, and each
 wrapper's smoke test reads the field.
 
 Public API: additive in moq-ffi and every wrapper. Wire: none.
-
-## Related
-
-- [hang-04 freezes a catalog worth keeping](/quest/m2/hang04/README.md) - the epic whose entry versions this exposes

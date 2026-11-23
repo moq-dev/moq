@@ -63,7 +63,7 @@ tls.key = ["$HARNESS_RUN/key.pem"]
 [web.http]
 listen = "127.0.0.1:$port"
 [auth]
-public = "**"
+public = ""
 EOF
     if [[ -n "$seed" ]]; then
         cat >>"$config" <<EOF

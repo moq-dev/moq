@@ -15,8 +15,9 @@ deletion, also selects its readers. A check fails when an existing input is miss
 from the dispatcher's static JS pattern, which would otherwise never run the readers.
 
 An input outside every current workspace selects all packages, including shared
-inputs such as `js/common/`, `js/justfile`, `test/tsconfig.json`, `drafts/`, Rust's
-shared JSON vectors, and the root manifest and lockfile.
+inputs such as `js/justfile`, `test/tsconfig.json`, `drafts/`, Rust's shared JSON
+vectors, and the root manifest and lockfile. So does `js/common/`: it is the
+`@moq/common` workspace, but every package runs its build scripts by path.
 Biome is not part of this selection: the dispatcher's `biome` module runs
 `just biome` over the whole repository on every diff. Biome's full HTML support
 counts Vue template reads as uses; its HTML formatter stays opt-in.

@@ -85,7 +85,7 @@ class GroupProducer:
 
 
 class TrackDemand:
-    """A watch-only handle to the group a published track's subscribers want next.
+    """A watch-only handle to whether a published track has subscribers, and when they ask for a new group.
 
     Returned by a producer's ``demand()``. Weak: holding it neither keeps the
     track open nor locks the producer, so a wait can park here while the
@@ -101,20 +101,27 @@ class TrackDemand:
         """The name of the track this watches."""
         return self._inner.name()
 
-    def wanted(self) -> int | None:
-        """The group subscribers want next, or None while nobody subscribes.
-
-        A value past the newest group asks for a new group now, typically a keyframe.
-        """
+    def wanted(self) -> bool:
+        """Whether anyone consumes the track: a subscription, fetch, or a group one of them is still reading."""
         return self._inner.wanted()
 
-    async def wanted_changed(self) -> int | None:
+    async def wanted_changed(self) -> bool:
         """Wait for ``wanted`` to change and return it. The first call returns at once.
 
         End a track nobody wants with :meth:`TrackProducer.abort_unwanted`, which keeps it for
         a reader that joined since.
         """
         return await self._inner.wanted_changed()
+
+    async def refresh(self) -> None:
+        """Wait until a subscriber asks for a new group.
+
+        That is the first group of a track with none, or a join judged by the track's
+        :class:`TrackRefresh` once its interval passed. Returns at once while the request is
+        pending, and the next group written answers it, so loop: wait here, then write a group
+        that starts with a keyframe or a snapshot.
+        """
+        await self._inner.refresh()
 
 
 class TrackProducer:
@@ -182,7 +189,7 @@ class TrackProducer:
     def abort_unwanted(self, error_code: int) -> bool:
         """Abort this track with an application error code, but only while nobody wants it.
 
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
         the track is closed, and ``False``, leaving the track open, when a reader joined since;
         keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
         returned ``None`` misses a reader that came and went, and waits on.

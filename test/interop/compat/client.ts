@@ -108,11 +108,10 @@ function budget(millis: number): Record<string, unknown> {
 	const broadcast = new Moq.Broadcast.Producer();
 	try {
 		for (const spelling of spellings.slice(0, -1)) {
+			const track = broadcast.createTrack(`probe-${Object.keys(spelling)[0]}`);
+			if (!track) throw new Error("the probe track already exists");
 			try {
-				broadcast
-					.createTrack(`probe-${Object.keys(spelling)[0]}`)
-					.subscribe(spelling as Moq.Track.Subscription)
-					.close();
+				track.subscribe(spelling as Moq.Track.Subscription).close();
 				return spelling;
 			} catch (err) {
 				if (!(err instanceof TypeError)) throw err;
@@ -279,15 +278,27 @@ async function subscribe(url: URL, broadcast: string, read: Read) {
 
 const [command, ...args] = process.argv.slice(2);
 if (command === "sign") {
-	const key = Auth.Key.parse(readFileSync(args[0], "utf8"));
-	console.log(await Auth.Key.sign(key, { root: "compat", publish: ["video/**"], subscribe: ["**"] }));
+	// The grant is spelled per release: prefixes now, the equivalent patterns before.
+	const [path, publish, subscribe] = args;
+	const key = Auth.Key.parse(readFileSync(path, "utf8"));
+	console.log(await Auth.Key.sign(key, { root: "compat", publish: [publish], subscribe: [subscribe] }));
+} else if (command === "generate") {
+	// A scoped key as this library writes one, and the public half it publishes. Current only.
+	const [secret, published] = args;
+	const scope = { root: "compat", publish: ["video"], subscribe: [""] };
+	const key = Auth.Key.parse(JSON.stringify({ ...(await Auth.Key.generate("ES256")), scope }));
+	writeFileSync(secret, JSON.stringify(key));
+	writeFileSync(published, JSON.stringify(Auth.Key.public(key)));
 } else if (command === "verify") {
-	const key = Auth.Key.parse(readFileSync(args[0], "utf8"));
-	const claims = await Auth.Key.verify(key, readFileSync(args[1], "utf8").trim());
+	// The grant this release should read back, spelled as `sign` takes it, each role a
+	// comma-separated list.
+	const [path, token, publish, subscribe] = args;
+	const key = Auth.Key.parse(readFileSync(path, "utf8"));
+	const claims = await Auth.Key.verify(key, readFileSync(token, "utf8").trim());
 	if (
 		claims.root !== "compat" ||
-		JSON.stringify(claims.publish) !== '["video/**"]' ||
-		JSON.stringify(claims.subscribe) !== '["**"]'
+		JSON.stringify(claims.publish) !== JSON.stringify(publish.split(",")) ||
+		JSON.stringify(claims.subscribe) !== JSON.stringify(subscribe.split(","))
 	) {
 		throw new Error(`token scope changed: ${JSON.stringify(claims)}`);
 	}
@@ -325,6 +336,7 @@ if (command === "sign") {
 			: (origin as unknown as Released).createBroadcast(path);
 	const broadcast = ("broadcast" in publication ? publication.broadcast : publication) as Moq.Broadcast.Producer;
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MICRO });
+	if (!track) throw new Error("the track already exists");
 	publication.announce();
 	const connection = await connect({
 		url: new URL(args[0]),
@@ -335,12 +347,16 @@ if (command === "sign") {
 	process.once("SIGTERM", () => void connection.close());
 	console.log("published");
 	// `demand()` replaced the producer's own `used` after @moq/net 0.4.2, then `wanted`
-	// replaced `demand().used`, and this one client runs against each package.
+	// replaced `demand().used`, first as the wanted group and then as a boolean, and this one
+	// client runs against each package.
 	type Watch = { peek(): unknown; changed(): Promise<unknown> };
 	const demand = ("demand" in track ? track.demand() : track) as unknown as { used?: Watch; wanted?: Watch };
 	const watch = demand.wanted ?? demand.used;
 	if (!watch) throw new Error("track has no demand");
-	const wanted = () => (demand.wanted ? watch.peek() !== undefined : watch.peek() === true);
+	const wanted = () => {
+		const value = watch.peek();
+		return value === true || typeof value === "bigint";
+	};
 	while (!wanted()) await watch.changed();
 	// The group starts at its frame's time; a released package's appendGroup takes no start.
 	const timestamp = Moq.Time.Timestamp.fromMicros(1 as TimestampMicros);

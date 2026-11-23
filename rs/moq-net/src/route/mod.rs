@@ -80,6 +80,9 @@ pub(crate) type Id = u64;
 /// A route metric: the sum of configured link costs.
 pub(crate) type Metric = u64;
 
+/// The highest cost a claim carries: every sum saturates here, as the draft says.
+pub(crate) const MAX_COST: Metric = crate::origin::Cost::MAX.value();
+
 /// A forwarding node's claim revision, advancing on every change to its own claims.
 pub(crate) type Rev = u64;
 
@@ -177,4 +180,20 @@ pub(crate) enum Error {
 		"a routing neighbor started before a session of its relay known closed: its clock went back, or two relays share an id"
 	)]
 	Regressed,
+}
+
+impl Error {
+	/// How a session this error closes counts in its stats.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn close(self) -> crate::stats::RouteClose {
+		use crate::stats::RouteClose;
+		match self {
+			Self::Malformed | Self::Nested | Self::UnknownPrefix => RouteClose::Malformed,
+			Self::Role | Self::Partial => RouteClose::Role,
+			Self::Unasked | Self::Unrouted => RouteClose::Unasked,
+			Self::Regressed => RouteClose::Regressed,
+			// This node's own inputs: never a peer's, short of a bug here.
+			Self::ZeroCost | Self::UnknownNeighbor | Self::Duplicate => RouteClose::Other,
+		}
+	}
 }

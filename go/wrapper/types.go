@@ -41,36 +41,21 @@ type (
 	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
 	// empty when the filter has no wildcards.
 	Announce = ffi.MoqAnnounce
-	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventPresent, AnnounceEventUnavailable,
-	// AnnounceEventAvailable, AnnounceEventAbsent, or AnnounceEventOffline.
+	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventPresent or AnnounceEventAbsent.
 	// Another publisher instance taking a path over keeps it present; see it with [OriginConsumer.Follow].
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventPresent reports a route now covering a path that was absent; it may arrive unavailable.
 	AnnounceEventPresent = ffi.MoqAnnounceEventPresent
-	// AnnounceEventUnavailable reports that a present path lost every usable path to its origin but may
-	// recover one: it stays present while requests for it may fail.
-	AnnounceEventUnavailable = ffi.MoqAnnounceEventUnavailable
-	// AnnounceEventAvailable reports that a present path recovered a usable path: request it again.
-	AnnounceEventAvailable = ffi.MoqAnnounceEventAvailable
-	// AnnounceEventAbsent reports that the origin withdrew a path, carrying its last route.
+	// AnnounceEventAbsent reports that no route covers a path any more, whether its origin withdrew it
+	// or this side let go of it, carrying its last route.
 	AnnounceEventAbsent = ffi.MoqAnnounceEventAbsent
-	// AnnounceEventOffline reports that this side let go of a path, carrying its last route: the session
-	// it arrived on closed, or the network lost every path to it, so its origin may still serve it.
-	AnnounceEventOffline = ffi.MoqAnnounceEventOffline
-	// Range is a span of a track to deliver: from Start up to End, or onward when End is nil.
-	// A relative start is the first frame of its group, a relative end includes its whole
-	// group, and an absolute end is exclusive.
+	// Range is a span of a track to deliver: from the group containing Start through the group
+	// containing End, each an Unscaled Timestamp in the track's timescale (a scaled one is
+	// refused). Every start is the first frame of its group, and every end includes its whole
+	// group. A nil Start is no start, which the subscription's Delay places: a stated Min is a
+	// live join that far behind the live edge (zero is the latest group), and an unstated one
+	// reaches back as far as Max allows. A nil End keeps following the live edge.
 	Range = ffi.MoqRange
-	// Anchor is where one end of a Range falls: AnchorOldest, AnchorAbsolute, AnchorRelative, or AnchorTime.
-	Anchor = ffi.MoqAnchor
-	// AnchorOldest is the oldest group still around, as far back as the max delay allows. A start only.
-	AnchorOldest = ffi.MoqAnchorOldest
-	// AnchorAbsolute is a group, delivered from its first frame.
-	AnchorAbsolute = ffi.MoqAnchorAbsolute
-	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
-	AnchorRelative = ffi.MoqAnchorRelative
-	// AnchorTime is the group containing a time, an Unscaled Timestamp in the track's timescale; a scaled one is refused.
-	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
 	// Compression is how a track's frames are compressed on the wire. Build one with
@@ -114,14 +99,15 @@ func AacAudioCodec() *AudioCodec {
 	return ffi.MoqAudioCodecAac()
 }
 
-// VideoPixelFormat values: the raw pixel layout fed to the in-process encoder,
-// and the one the in-process decoder delivers.
-const (
-	// VideoPixelFormatI420 is tightly-packed planar I420: Y, then U, then V.
-	VideoPixelFormatI420 = ffi.MoqVideoPixelFormatI420
-	// VideoPixelFormatRgba is tightly-packed RGBA, four bytes per pixel.
-	VideoPixelFormatRgba = ffi.MoqVideoPixelFormatRgba
-)
+// I420VideoPixelFormat is tightly-packed planar I420: Y, then U, then V.
+func I420VideoPixelFormat() *VideoPixelFormat {
+	return ffi.MoqVideoPixelFormatI420()
+}
+
+// RgbaVideoPixelFormat is tightly-packed RGBA, four bytes per pixel.
+func RgbaVideoPixelFormat() *VideoPixelFormat {
+	return ffi.MoqVideoPixelFormatRgba()
+}
 
 // H264VideoCodec publishes H.264 / AVC as an avc3 track.
 func H264VideoCodec() *VideoCodec {

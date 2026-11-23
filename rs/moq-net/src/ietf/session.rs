@@ -50,8 +50,8 @@ pub struct Config {
 	/// falling back to 1; that is what a server accepting a connection passes, since it
 	/// has no per-peer configuration of its own.
 	///
-	/// A peer that does not negotiate the MoQ Cluster extension carries no cost at all, so
-	/// nothing is charged and its routes rank on hop count alone.
+	/// A peer that does not negotiate the MoQ Cluster extension carries no route cost, so
+	/// its routes cost this link alone.
 	pub cost: Option<u64>,
 
 	pub version: Version,
@@ -317,6 +317,8 @@ impl Launch {
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
+		// Budgets of its own, so what the peer publishes crowds out no other session.
+		let subscribe = subscribe.with_own_budgets(limits.live_edges);
 		// Counted for the peak only: stream credit bounds them.
 		let subscriptions =
 			crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
@@ -1980,9 +1982,9 @@ mod tests {
 	#[kio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let scope: crate::Patterns = ["cam", "mic"]
+		let scope: crate::Prefixes = ["cam", "mic"]
 			.into_iter()
-			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
+			.map(|prefix| crate::Prefix::try_from(prefix).unwrap())
 			.collect();
 		let scoped = origin
 			.scope("rootns", &scope)
@@ -2054,7 +2056,7 @@ mod tests {
 	fn watch(origin: &crate::origin::Producer, prefix: &str) -> crate::origin::Routes {
 		origin
 			.consume()
-			.scope(prefix, &crate::Patterns::from(crate::Pattern::all()))
+			.scope(prefix, &crate::Prefixes::all())
 			.unwrap()
 			.routes()
 	}

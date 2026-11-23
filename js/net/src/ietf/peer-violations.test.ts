@@ -21,7 +21,8 @@ const versions = [
 
 // Both connection drivers run, while the client can inject a malformed peer stream.
 for (const [version, alpn] of versions) {
-	test.each(["update", "unsolicited"] as const)(
+	// "long" names a namespace past the 1024-byte close reason a browser accepts.
+	test.each(["update", "unsolicited", "long"] as const)(
 		`${alpn}: %s closes the peer session with its violation`,
 		async (kind) => {
 			const pair = createMockTransportPair(alpn);
@@ -51,7 +52,8 @@ for (const [version, alpn] of versions) {
 				if (kind === "update") await stream.writer.u62(0x02n);
 				else {
 					await stream.writer.u53(PublishNamespace.id);
-					await new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("unasked") }).encode(
+					const name = kind === "long" ? "x".repeat(2000) : "unasked";
+					await new PublishNamespace({ requestId: 0n, trackNamespace: Path.from(name) }).encode(
 						stream.writer,
 						version,
 					);

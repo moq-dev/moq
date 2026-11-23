@@ -30,7 +30,7 @@ async fn relay() -> Relay {
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
 		.chain(moq_net::Versions::all().iter().copied())
 		.collect();
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	let relay = moq_relay::Relay::load(config).await.unwrap();
 	let url = format!("https://{}/", relay.quic_addr().unwrap()).parse().unwrap();
 	let ready = relay.ready();
@@ -91,12 +91,15 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 	write(&media, &format!("{tag}:0"));
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	catalog
-		.mutate(|catalog| {
-			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-			audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-			audio.instance = Some(instance.clone());
-			catalog.audio.renditions.insert("audio".into(), audio);
-		})
+		.mutate(
+			|catalog| {
+				let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+				audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
+				audio.instance = Some(instance.clone());
+				catalog.audio.renditions.insert("audio".into(), audio);
+			},
+			catalog.next_timestamp(),
+		)
 		.unwrap();
 	Published {
 		catalog,
@@ -151,8 +154,8 @@ async fn replacement(version: &str) {
 	let viewer_origin = moq_tokio::origin::spawn();
 	let viewer = viewer_origin.consume();
 	let watch = |path| {
-		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
-		viewer.scope("", &path).unwrap().routes()
+		let path = moq_net::Pattern::literal(path).unwrap();
+		viewer.filter(&path).unwrap().routes()
 	};
 	let mut catalog_follow = watch("live/catalog.hang");
 	let mut media_follow = watch("live/media");
@@ -229,7 +232,10 @@ async fn replacement(version: &str) {
 	// Later catalog snapshots stay on A and resolving again keeps A's sibling pin.
 	first
 		.catalog
-		.mutate(|catalog| catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(64_000))
+		.mutate(
+			|catalog| catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(64_000),
+			first.catalog.next_timestamp(),
+		)
 		.unwrap();
 	let later = catalog.next().await.unwrap().unwrap();
 	assert_eq!(later.audio.renditions["audio"].bitrate, Some(64_000));
@@ -344,13 +350,16 @@ impl Worker {
 							moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), Default::default())
 								.unwrap();
 						catalog
-							.mutate(|catalog| {
-								let mut audio =
-									hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-								audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-								audio.instance = Some(instance);
-								catalog.audio.renditions.insert("audio".into(), audio);
-							})
+							.mutate(
+								|catalog| {
+									let mut audio =
+										hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+									audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
+									audio.instance = Some(instance);
+									catalog.audio.renditions.insert("audio".into(), audio);
+								},
+								catalog.next_timestamp(),
+							)
 							.unwrap();
 						(Some(catalog), None)
 					}

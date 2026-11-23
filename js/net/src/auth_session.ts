@@ -5,25 +5,19 @@ import { closeReason, error, ProtocolViolation, SessionCode, SessionError, Strea
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
 
-/** Write a grant's patterns as a count and each one's canonical text, the encoding both wires' AUTH_OK share. @internal */
-export async function encodePatterns(w: Writer, patterns: Path.Patterns) {
-	await w.u53(patterns.size);
-	for (const pattern of patterns) await w.string(pattern.text);
+/** Write a grant's prefixes as a count and each one's text, the encoding both wires' AUTH_OK share. @internal */
+export async function encodePrefixes(w: Writer, prefixes: Path.Prefixes) {
+	await w.u53(prefixes.size);
+	for (const prefix of prefixes) await w.string(prefix.text);
 }
 
-/** Read a grant's patterns, refusing any that is invalid or not canonical. @internal */
-export async function decodePatterns(r: Reader): Promise<Path.Patterns> {
+/** Read a grant's prefixes, refusing any that is a wildcard or not a valid path. @internal */
+export async function decodePrefixes(r: Reader): Promise<Path.Prefixes> {
 	const count = await r.u53();
-	const patterns: Path.Pattern[] = [];
-	for (let i = 0; i < count; i++) {
-		const text = await r.string();
-		const pattern = Path.Pattern.parse(text);
-		// Only the canonical spelling is valid, so each pattern has one encoding.
-		if (pattern.text !== text) throw new Error(`non-canonical pattern: ${text}`);
-		patterns.push(pattern);
-	}
-	// Reduce once, so a peer's count never turns into quadratic work.
-	return new Path.Patterns(patterns);
+	const prefixes: Path.Prefix[] = [];
+	for (let i = 0; i < count; i++) prefixes.push(Path.Prefix.parse(await r.string()));
+	// Sort and sweep once, so a peer's count costs n log n whatever its shape.
+	return new Path.Prefixes(prefixes);
 }
 
 /** Whether two grants allow the same paths and lapse together. */
@@ -37,6 +31,7 @@ function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
 /** The session or peer carries no AUTH exchange, or takes no tokens in band. */
 export class Unsupported extends Error {
 	/** The moq-lite session code for this condition. */
+	// fallow-ignore-next-line unused-class-member
 	readonly code = SessionCode.Unsupported;
 	constructor(message = "auth unsupported") {
 		super(message);
@@ -74,8 +69,8 @@ type Refused = "final" | "undecided";
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
 export interface WireGrant {
-	publish: Path.Patterns;
-	subscribe: Path.Patterns;
+	publish: Path.Prefixes;
+	subscribe: Path.Prefixes;
 	expires?: number;
 }
 
@@ -110,17 +105,17 @@ export interface AuthWire {
 
 /** The paths any of `grants` allows. Reduced once over all of them, not pairwise. */
 function union(grants: Iterable<Grant>): Grant {
-	const publish: Path.Pattern[] = [];
-	const subscribe: Path.Pattern[] = [];
+	const publish: Path.Prefix[] = [];
+	const subscribe: Path.Prefix[] = [];
 	let expires: Wall | undefined;
 	for (const grant of grants) {
-		for (const pattern of grant.publish) publish.push(pattern);
-		for (const pattern of grant.subscribe) subscribe.push(pattern);
+		for (const prefix of grant.publish) publish.push(prefix);
+		for (const prefix of grant.subscribe) subscribe.push(prefix);
 		// The earliest expiry is when the union next shrinks.
 		if (grant.expires !== undefined && (expires === undefined || grant.expires.lt(expires)))
 			expires = grant.expires;
 	}
-	return { publish: new Path.Patterns(publish), subscribe: new Path.Patterns(subscribe), expires };
+	return { publish: new Path.Prefixes(publish), subscribe: new Path.Prefixes(subscribe), expires };
 }
 
 // The transport closed under the stream, which ends the whole session rather than one token.

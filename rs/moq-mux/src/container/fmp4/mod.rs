@@ -33,7 +33,7 @@ const MAX_HELD_BYTES: usize = 32 * 1024 * 1024;
 /// [`TrunEntry`](mp4_atom::TrunEntry)), so this keeps a parse within [`MAX_HELD_BYTES`].
 /// Counts and retained metadata-tree entries are checked separately, including entries that
 /// consume no bytes. Media payloads in `mdat` keep their transport-owned bound.
-const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
+pub(crate) const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
 
 /// The most samples parsed or planned for one CMAF fragment.
 ///
@@ -303,6 +303,16 @@ pub enum Error {
 		head: u32,
 	},
 
+	/// An audio config whose sample rate or channel count is zero, or whose channel count does
+	/// not fit a sample entry's 16-bit field.
+	#[error("audio config of {sample_rate} Hz and {channel_count} channels does not fit a sample entry")]
+	InvalidAudioConfig {
+		/// The catalog sample rate.
+		sample_rate: u32,
+		/// The catalog channel count.
+		channel_count: u32,
+	},
+
 	/// A non-final sample has no duration, so its decode timeline cannot be recovered.
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
@@ -350,7 +360,8 @@ pub enum Error {
 		previous: moq_net::Timestamp,
 	},
 
-	/// The init segment fixes the track set, so a rendition that joins later can't be written.
+	/// The init segment fixes the track set, so a rendition that joins later can't be written,
+	/// unless it continues a declared track of its medium that failed.
 	#[error("rendition {0} joined after the init segment; restart the export to include it")]
 	TrackAdded(String),
 
@@ -387,6 +398,14 @@ pub enum Error {
 		/// What the sample tables can't express.
 		reason: &'static str,
 	},
+
+	/// A regular MP4's chapter list holds 255 chapters.
+	#[error("{0} chapters, more than the 255 a chapter list holds")]
+	TooManyChapters(usize),
+
+	/// A regular MP4's chapter list holds titles of 255 bytes.
+	#[error("a chapter title of {0} bytes, more than the 255 a chapter list holds")]
+	ChapterTitleTooLong(usize),
 
 	/// A file to repair is not a recording that an MP4 export left unfinished.
 	#[error("not an unfinished mp4 recording: {0}")]
@@ -1022,9 +1041,13 @@ pub(crate) fn synthesize_video_trak(
 		VideoCodec::H264(h264) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
 			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::mp4)?;
-			// Empty parameter-set lists are the in-band sample entry. A record that
-			// still carries them, including one built from the first keyframe, stays avc1.
-			if h264.inline && avcc.sequence_parameter_sets.is_empty() && avcc.picture_parameter_sets.is_empty() {
+			// avc3 when the samples may still carry parameter sets: a catalog record
+			// passes the samples through as they are, and empty lists are the in-band
+			// entry. A record built from the first keyframe strips them from the
+			// samples, so it stays avc1.
+			let catalog_record = config.description.as_ref().is_some_and(|d| !d.is_empty());
+			let empty = avcc.sequence_parameter_sets.is_empty() && avcc.picture_parameter_sets.is_empty();
+			if h264.inline && (catalog_record || empty) {
 				mp4_atom::Codec::from(mp4_atom::Avc3 {
 					visual,
 					avcc,
@@ -1124,11 +1147,20 @@ fn dops_mapping(mapping: &crate::codec::opus::Mapping) -> Result<mp4_atom::OpusC
 pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &AudioConfig) -> Result<mp4_atom::Trak> {
 	use mp4_atom::Decode;
 
+	let channel_count = u16::try_from(config.channel_count)
+		.ok()
+		.filter(|&count| count > 0 && config.sample_rate > 0)
+		.ok_or(Error::InvalidAudioConfig {
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
+		})?;
 	let audio = mp4_atom::Audio {
 		data_reference_index: 1,
-		channel_count: config.channel_count as u16,
+		channel_count,
 		sample_size: 16,
-		sample_rate: mp4_atom::FixedPoint::from(config.sample_rate as u16),
+		// The 16.16 field can't hold a rate past 65,535 Hz, so it is 0 there, as ffmpeg writes
+		// it; the codec's own config (esds, dOps, dfLa) carries the real rate.
+		sample_rate: mp4_atom::FixedPoint::from(u16::try_from(config.sample_rate).unwrap_or(0)),
 	};
 
 	let sample_entry = match &config.codec {
@@ -1144,12 +1176,15 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 					}
 					head
 				}
-				None => crate::codec::opus::Config::new(config.sample_rate, config.channel_count),
+				// Without a head there is no mapping table, which only mono and stereo go without.
+				None if channel_count <= 2 => crate::codec::opus::Config::new(config.sample_rate, config.channel_count),
+				None => return Err(crate::codec::opus::Error::UnsupportedChannelCount(config.channel_count).into()),
 			};
 			mp4_atom::Codec::from(mp4_atom::Opus {
 				audio,
 				dops: mp4_atom::Dops {
-					output_channel_count: config.channel_count as u8,
+					// The head's count, which matches the catalog's, fits its one byte.
+					output_channel_count: head.channel_count as u8,
 					pre_skip: head.pre_skip,
 					input_sample_rate: head.sample_rate,
 					output_gain: head.output_gain,

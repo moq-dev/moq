@@ -79,9 +79,12 @@ async fn main() -> anyhow::Result<()> {
 		let route = origin.route(&args.broadcast, moq_net::origin::RouteOptions::hidden())?;
 		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut route.broadcast().clone(), Default::default())?;
 		let mut stream = moq_mux::import::TrackStream::video(
-			route.broadcast().reserve_track("video")?,
+			route
+				.broadcast()
+				.reserve_track("video")
+				.context("the track already exists")?,
 			catalog.reserve(),
-			moq_mux::import::VideoInit::new(moq_mux::import::VideoFormat::Avc3, Vec::new()),
+			moq_mux::import::VideoInit::new(moq_mux::import::VideoFormat::H264, Vec::new()),
 		)?;
 		let mut data = Vec::new();
 		stdin.read_to_end(&mut data).await?;
@@ -100,7 +103,8 @@ async fn main() -> anyhow::Result<()> {
 		)?;
 		let track = health
 			.broadcast()
-			.create_track("live", moq_net::track::Info::default())?;
+			.create_track("live", moq_net::track::Info::default())
+			.context("the track already exists")?;
 		let start = moq_net::Timestamp::unscaled(0);
 		let mut group = track.append_group(start)?;
 		group.write_frame(start, b"session-alive".to_vec())?;
@@ -141,11 +145,8 @@ async fn main() -> anyhow::Result<()> {
 				.track(name)?
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_min(None).with_max(args.timeout))
-						.with_ranges([moq_net::track::Range {
-							start: moq_net::track::Anchor::Time(0),
-							end: None,
-						}]),
+						.with_delay(moq_net::track::Delay::default().with_max(args.timeout))
+						.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]),
 				))
 				.await?;
 			let format = moq_mux::catalog::hang::Container::try_from(config)?;

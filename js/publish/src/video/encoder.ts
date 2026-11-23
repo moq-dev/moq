@@ -15,7 +15,6 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import { hardwareReliable } from "../support/video";
@@ -158,6 +157,7 @@ export class Encoder {
 	 * A snapshot. Read {@link in}.capture through an effect instead when you need to react to it
 	 * being swapped.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	get capture(): Capture | undefined {
 		return this.in.capture.peek();
 	}
@@ -384,7 +384,7 @@ export class Encoder {
 			const allocator = effect.get(this.in.bandwidth);
 			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
-			const demanded = watched(track, effect);
+			const demanded = track.demand().wanted;
 			effect.run((effect) => {
 				if (!effect.get(demanded)) return;
 
@@ -430,8 +430,12 @@ export class Encoder {
 		// the encoder. A join over the refresh ratio asks for one past the largest, which the next frame
 		// opens; any other join is served by a group already written, encoded with or without demand.
 		let answered: bigint | undefined;
+		// The group past the largest while a subscriber asks for one, named so that requests made while
+		// the keyframe is still in the encoder ask for the same group and coalesce into it.
+		const asked = (): bigint | undefined =>
+			demand.refresh.peek() ? (track.largest()?.group ?? -1n) + 1n : undefined;
 		const answer = () => {
-			const wanted = demand.wanted.peek();
+			const wanted = asked();
 			if (wanted !== undefined && (answered === undefined || wanted > answered)) answered = wanted;
 		};
 		const covered = () => {
@@ -505,11 +509,17 @@ export class Encoder {
 			let configured: VideoEncoderConfig | undefined;
 			// Set when the size changed, so the next frame opens a group whose keyframe carries it.
 			let resized = false;
+			// Set while a zero grant holds a constant bitrate encoder's frames back.
+			let held = false;
 			effect.run((effect) => {
 				const current = effect.get(settings);
 				if (!current) return;
 				const { config, scale } = current;
 
+				// A constant bitrate can't be configured at zero, which the allocator grants once higher
+				// priorities take the estimate, so hold every frame back until the grant rises again.
+				held = !scale && config.bitrate === 0;
+				if (held) return;
 				if (configured && (configured.width !== config.width || configured.height !== config.height)) {
 					resized = true;
 				}
@@ -557,12 +567,14 @@ export class Encoder {
 						// Ours now: every path below has to close it.
 						try {
 							if (effect.abort.aborted) break;
-							if (encoder.state !== "configured") continue;
+							if (!held && encoder.state !== "configured") continue;
 							// A pending input means the codec is saturated. Keep capture live instead of
 							// growing a stale encode queue whose lateness becomes permanent catalog delay.
 							// Drop before answering a keyframe request or advancing the frame-rate cursor.
-							// Likewise while quantizer mode's bucket is full: the scene outgrew the largest QP.
+							// Likewise while quantizer mode's bucket is full: the scene outgrew the largest QP,
+							// and while a zero grant holds a constant bitrate back.
 							if (
+								held ||
 								encoder.encodeQueueSize > 0 ||
 								quantizer?.control.admit(frame.timestamp, budget) === false
 							) {
@@ -599,7 +611,7 @@ export class Encoder {
 							// caller asked for one, or a join wants a group past the largest. No spacing: the
 							// refresh ratio already rate-limits joins by the bytes a group holds.
 							const since = lastKeyframe === undefined ? undefined : frame.timestamp - lastKeyframe;
-							const wanted = demand.wanted.peek();
+							const wanted = asked();
 							const keyFrame =
 								resized ||
 								since === undefined ||
@@ -1029,7 +1041,8 @@ type Probe = {
 	// The config the browser accepted and encoded a probe frame with. Its bitrate is the ceiling,
 	// before any bandwidth grant.
 	config: VideoEncoderConfig & { framerate: number; bitrate: number };
-	// The codec string the encoder reported for it, which the catalog advertises.
+	// The codec string the encoder reported for it, as the catalog advertises it: `avc3`/`hev1` for
+	// Annex B.
 	reported: string;
 	// How the encoder reads a per-frame quantizer, when the config runs in quantizer mode.
 	scale?: Scale;
@@ -1160,7 +1173,17 @@ async function probeEncoder(
 	if (requestsAnnexB(config.codec) && (described || !(first && startsWithStartCode(first)))) {
 		return { refused: "its encoder ignored the requested Annex B format" };
 	}
-	return { reported };
+	return { reported: requestsAnnexB(config.codec) ? inBand(reported) : reported };
+}
+
+// The codec string for Annex B output, which carries its parameter sets in band: `avc3`/`hev1`
+// rather than the `avc1`/`hvc1` an encoder reports, which would say they live in a description the
+// catalog doesn't carry. Only the catalog changes: Safari refuses `avc3` as an encoder string, and the
+// watcher opens an `avc3` rendition as `avc1` where it must.
+function inBand(codec: string): string {
+	if (codec.startsWith("avc1.")) return `avc3.${codec.slice(5)}`;
+	if (codec.startsWith("hvc1.")) return `hev1.${codec.slice(5)}`;
+	return codec;
 }
 
 // How `config`'s encoder reads a per-frame quantizer, when its codec has one and the encoder both

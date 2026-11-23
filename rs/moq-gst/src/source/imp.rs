@@ -1714,10 +1714,8 @@ impl Reader {
 		// wait here keeps it off every other rendition.
 		// The catalog warmup reaches that much further back for a decoder to start clean. No min:
 		// the pipeline's own latency is unknown here, so a missing group is waited for the max delay.
-		let playout = moq_mux::container::Playout::new(
-			moq_net::track::Delay::default().with_min(None).with_max(max_delay),
-			shape.warmup,
-		);
+		let playout =
+			moq_mux::container::Playout::new(moq_mux::container::Delay::default().with_max(max_delay), shape.warmup);
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return Exit::Done,
 			subscriber = async {
@@ -2768,7 +2766,7 @@ mod session_tests {
 							})
 							.collect();
 						{
-							let mut guard = catalog.modify().unwrap();
+							let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 							guard.video.renditions.insert("video".into(), video);
 							guard.audio.renditions.insert("audio".into(), audio);
 						}
@@ -2878,7 +2876,12 @@ mod session_tests {
 		let mut config = video_rendition();
 		config.broadcast = Some(moq_net::path::Relative::new("./left").unwrap());
 		config.track = Some("encoded".into());
-		catalog.modify().unwrap().video.renditions.insert("view".into(), config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert("view".into(), config);
 		catalog_broadcast.announce().unwrap();
 		left.announce().unwrap();
 		right.announce().unwrap();
@@ -2904,7 +2907,7 @@ mod session_tests {
 		assert_eq!(request.name(), "encoded");
 		// The ID and wire track stay the same; only its broadcast changes.
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -2940,7 +2943,7 @@ mod session_tests {
 
 		// First update announces audio only, and no producer ever answers for it.
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 
@@ -2959,7 +2962,7 @@ mod session_tests {
 		// Second update adds video, backed by a real track so its subscription resolves.
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
@@ -2986,7 +2989,7 @@ mod session_tests {
 		// the session still has to end cleanly.
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
@@ -3008,7 +3011,8 @@ mod session_tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut dynamic = broadcast.requests();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		catalog.modify().unwrap().video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		catalog.modify(catalog.next_timestamp()).unwrap().video.renditions =
+			BTreeMap::from([("video".to_string(), video_rendition())]);
 
 		let max_delay = Duration::from_secs(5);
 		let (shutdown, mut cancelled) = watch::channel(false);
@@ -3038,7 +3042,7 @@ mod session_tests {
 		let mut dynamic = broadcast.requests();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			let mut audio = audio_rendition();
 			audio.warmup = Some(warmup);
 			guard.audio.renditions = BTreeMap::from([("media".to_string(), audio)]);
@@ -3091,7 +3095,7 @@ mod session_tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
 		}
 
@@ -3104,7 +3108,7 @@ mod session_tests {
 		// is cancelled while it is still waiting.
 		let request = await_request(&mut dynamic);
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions.clear();
 		}
 
@@ -3114,7 +3118,7 @@ mod session_tests {
 		// wait is what the assertion below is about.
 		let mut demand = request.demand();
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		super::RUNTIME
@@ -3129,7 +3133,8 @@ mod session_tests {
 			"a cancelled reader still took a pad"
 		);
 
-		catalog.modify().unwrap().video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
+		catalog.modify(catalog.next_timestamp()).unwrap().video.renditions =
+			BTreeMap::from([("stalled".to_string(), video_rendition())]);
 		await_pad(&element, "video_");
 
 		let _ = shutdown.send(true);
@@ -3150,7 +3155,7 @@ mod session_tests {
 
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 		catalog.finish().unwrap();
@@ -3178,7 +3183,7 @@ mod session_tests {
 		let _video = broadcast.create_track("video", None).unwrap();
 		let _audio = broadcast.create_track("audio", None).unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
@@ -3187,7 +3192,7 @@ mod session_tests {
 		await_pad(&element, "video_");
 
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 		catalog.finish().unwrap();
@@ -3216,7 +3221,7 @@ mod session_tests {
 			.unwrap();
 		let _reserved = broadcast.reserve_track("audio").unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
@@ -3283,7 +3288,7 @@ mod session_tests {
 			.create_track("audio2", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
@@ -3348,7 +3353,7 @@ mod session_tests {
 		// stay open, so nothing else can end the reader. The same update lists an audio rendition:
 		// its pad appearing proves the session acted on the update before the tail is written.
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions.clear();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
@@ -3360,7 +3365,7 @@ mod session_tests {
 			let _ = added.send(pad.name().to_string());
 		});
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.audio.renditions.insert("audio2".to_string(), audio_rendition());
 		}
 		while !added_rx.recv().expect("the element is alive").starts_with("audio_") {}
@@ -3422,7 +3427,7 @@ mod session_tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
@@ -3490,7 +3495,7 @@ mod session_tests {
 		// lists an audio rendition: its pad appearing proves the session acted on the delist
 		// rather than skipping straight to the relist below.
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions.clear();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
@@ -3498,7 +3503,7 @@ mod session_tests {
 
 		// List it again, unchanged.
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
@@ -3552,7 +3557,8 @@ mod session_tests {
 		let audio = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		catalog.modify().unwrap().video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		catalog.modify(catalog.next_timestamp()).unwrap().video.renditions =
+			BTreeMap::from([("video".to_string(), video_rendition())]);
 
 		// Count what reaches the first video pad once it is added. A reader adds a new pad from the
 		// signal, before it pushes anything, so every buffer and every later stream is seen.
@@ -3624,7 +3630,7 @@ mod session_tests {
 		// new reader, and lists a second rendition of that track. Its audio pad proves the session
 		// acted on it.
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions.get_mut("video").unwrap().description = Some(bytes::Bytes::from_static(&[1]));
 			let mut again = video_rendition();
 			again.track = Some("video".into());
@@ -3670,7 +3676,8 @@ mod session_tests {
 		let mut producer =
 			moq_mux::container::Producer::new(broadcast.create_track("video", info.clone()).unwrap(), container());
 		producer.write(keyframe.clone()).unwrap();
-		catalog.modify().unwrap().video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		catalog.modify(catalog.next_timestamp()).unwrap().video.renditions =
+			BTreeMap::from([("video".to_string(), video_rendition())]);
 
 		// The probe goes on before the pad's first push, so it sees every buffer and every later
 		// stream start.
@@ -3728,7 +3735,7 @@ mod session_tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions.get_mut("video").unwrap().description = Some(bytes::Bytes::from_static(&[1]));
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
@@ -3761,7 +3768,7 @@ mod session_tests {
 		// separate one and the stalled rendition had its chance to claim an id first.
 		let _audio = broadcast.create_track("audio", None).unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
@@ -3776,7 +3783,7 @@ mod session_tests {
 
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			guard.video.renditions.insert("video".to_string(), video_rendition());
 		}
 
@@ -3871,7 +3878,10 @@ mod session_tests {
 		video: Option<moq_mux::container::Producer<moq_mux::catalog::hang::Container>>,
 		/// The video track once [`Self::finish_video`] finished it.
 		finished: Option<moq_mux::container::Finished<moq_mux::catalog::hang::Container>>,
-		start: kio::clock::Instant,
+		/// What frames are stamped from: the system clock, or the test clock [`rendered`] moves it to.
+		clock: gst::Clock,
+		/// The `clock` time of timestamp zero.
+		start: gst::ClockTime,
 	}
 
 	impl Publisher {
@@ -3905,13 +3915,15 @@ mod session_tests {
 		}
 
 		fn build(mut broadcast: moq_net::broadcast::Producer, config: VideoConfig) -> Self {
+			gst::init().unwrap();
+			let clock = gst::SystemClock::obtain();
 			let mut catalog =
 				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 			let video = broadcast
 				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
 			{
-				let mut guard = catalog.modify().unwrap();
+				let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 				guard.video.renditions = BTreeMap::from([("video".to_string(), config)]);
 			}
 			let video = moq_mux::container::Producer::new(
@@ -3924,15 +3936,26 @@ mod session_tests {
 				catalog,
 				video: Some(video),
 				finished: None,
-				start: kio::clock::now(),
+				start: clock.time(),
+				clock,
 			}
 		}
 
 		/// Write a keyframe whose every byte is `tag`, stamped with the time since publishing so a
-		/// synced sink renders it on time.
-		fn write(&mut self, tag: u8) {
+		/// synced sink renders it on time, and return that timestamp.
+		fn write(&mut self, tag: u8) -> gst::ClockTime {
 			let frame = self.frame(tag);
+			let pts = gst::ClockTime::from_useconds(frame.timestamp.as_micros().unwrap() as u64);
 			self.video.as_mut().unwrap().write(frame).unwrap();
+			pts
+		}
+
+		/// Stamp later frames from `clock`, starting over at zero, unless they already are.
+		fn follow(&mut self, clock: &gst::Clock) {
+			if self.clock != *clock {
+				self.clock = clock.clone();
+				self.start = clock.time();
+			}
 		}
 
 		/// Finish the video track, keeping it served.
@@ -3942,7 +3965,7 @@ mod session_tests {
 
 		/// The keyframe [`Self::write`] writes for `tag`.
 		fn frame(&self, tag: u8) -> moq_mux::container::Frame {
-			let elapsed = self.start.elapsed().as_micros() as u64;
+			let elapsed = (self.clock.time() - self.start).useconds();
 			moq_mux::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(elapsed).unwrap(),
 				payload: bytes::Bytes::from(vec![tag; 64]),
@@ -3953,7 +3976,7 @@ mod session_tests {
 
 		/// Move the timestamps of later frames `by` ahead.
 		fn skip(&mut self, by: Duration) {
-			self.start = self.start.saturating_sub(by);
+			self.start = self.start.saturating_sub(by.try_into().unwrap());
 		}
 	}
 
@@ -4356,7 +4379,7 @@ mod session_tests {
 	/// Block until someone reads the publisher's video, or until nobody does once `wanted` is false.
 	fn await_demand(publisher: &Publisher, wanted: bool) {
 		let mut demand = publisher.video.as_ref().unwrap().demand();
-		let changed = async { while demand.wanted_changed().await.expect("the track closed").is_some() != wanted {} };
+		let changed = async { while demand.wanted_changed().await.expect("the track closed") != wanted {} };
 		super::RUNTIME
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), changed).await })
 			.expect("the demand never changed");
@@ -4364,8 +4387,8 @@ mod session_tests {
 
 	/// The announcements of the routes covering `path` on `origin`.
 	fn watch(origin: &moq_net::origin::Producer, path: &str) -> moq_net::origin::Routes {
-		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
-		origin.consume().scope("", &path).unwrap().routes()
+		let path = moq_net::Pattern::literal(path).unwrap();
+		origin.consume().filter(&path).unwrap().routes()
 	}
 
 	/// Follow `room` on `origin` past its start.
@@ -4554,10 +4577,16 @@ mod session_tests {
 		new.skip(Duration::from_secs(2));
 		recorder.written(&mut new, 4);
 
-		let mut again = room.catalog.modify().unwrap().video.renditions["video"].clone();
+		let mut again = room
+			.catalog
+			.modify(room.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions["video"]
+			.clone();
 		again.track = Some("video".into());
 		room.catalog
-			.modify()
+			.modify(room.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -4801,7 +4830,12 @@ mod session_tests {
 		let mut cam = Publisher::sibling(&origin, Default::default());
 		recorder.written(&mut cam, 1);
 		// The delisted rendition plays out its track before its pad retires.
-		room.catalog.modify().unwrap().video.renditions.clear();
+		room.catalog
+			.modify(room.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.clear();
 		cam.finish_video();
 		for _ in 0..200 {
 			if pads(&element, "video_").is_empty() {
@@ -4862,7 +4896,7 @@ mod session_tests {
 		let mut demand = second.video.as_ref().unwrap().demand();
 		drop(room);
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		super::RUNTIME
@@ -4945,15 +4979,21 @@ mod session_tests {
 
 		// The catalog consumer only yields the newest snapshot, so each update lists another audio
 		// rendition: its pad appearing proves the run acted on it.
-		let listed = room.catalog.modify().unwrap().video.renditions.clone();
+		let listed = room
+			.catalog
+			.modify(room.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.clone();
 		{
-			let mut guard = room.catalog.modify().unwrap();
+			let mut guard = room.catalog.modify(room.catalog.next_timestamp()).unwrap();
 			guard.video.renditions.clear();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 		await_pad(&element, "audio_");
 		{
-			let mut guard = room.catalog.modify().unwrap();
+			let mut guard = room.catalog.modify(room.catalog.next_timestamp()).unwrap();
 			guard.video.renditions = listed;
 			let mut again = audio_rendition();
 			again.track = Some("again".into());
@@ -5002,7 +5042,7 @@ mod session_tests {
 
 		let mut second = Publisher::sibling(&origin, Some(new.clone()));
 		room.catalog
-			.modify()
+			.modify(room.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -5035,7 +5075,7 @@ mod session_tests {
 		);
 		let mut room = referencing(&origin, Some(pinned.clone()));
 		{
-			let mut guard = room.catalog.modify().unwrap();
+			let mut guard = room.catalog.modify(room.catalog.next_timestamp()).unwrap();
 			let mut again = guard.video.renditions["video"].clone();
 			again.track = Some("video".into());
 			again.instance = None;
@@ -5082,7 +5122,7 @@ mod session_tests {
 
 		let mut third = Publisher::sibling(&origin, Some(next.clone()));
 		room.catalog
-			.modify()
+			.modify(room.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -5141,7 +5181,12 @@ mod session_tests {
 			)
 		});
 
-		room.catalog.modify().unwrap().video.renditions.clear();
+		room.catalog
+			.modify(room.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.clear();
 		for _ in 0..200 {
 			if recorder.seen().contains(&Seen::Eos(pad.clone())) {
 				break;
@@ -5207,8 +5252,19 @@ mod session_tests {
 			)
 		});
 
-		let listed = room.catalog.modify().unwrap().video.renditions.clone();
-		room.catalog.modify().unwrap().video.renditions.clear();
+		let listed = room
+			.catalog
+			.modify(room.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.clone();
+		room.catalog
+			.modify(room.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.clear();
 		for _ in 0..200 {
 			if recorder.seen().contains(&Seen::Eos(pad.clone())) {
 				break;
@@ -5219,7 +5275,11 @@ mod session_tests {
 			recorder.seen().contains(&Seen::Eos(pad.clone())),
 			"the idle pad never ended"
 		);
-		room.catalog.modify().unwrap().video.renditions = listed;
+		room.catalog
+			.modify(room.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions = listed;
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_ne!(recorder.written(&mut second, 2), pad, "the ended pad came back");
@@ -5350,7 +5410,7 @@ mod session_tests {
 		);
 		let mut left = room.video.replace(moved).unwrap();
 		room.catalog
-			.modify()
+			.modify(room.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -5365,7 +5425,7 @@ mod session_tests {
 		let mut cam = Publisher::sibling(&origin, Default::default());
 		cam.start = room.start;
 		{
-			let mut guard = room.catalog.modify().unwrap();
+			let mut guard = room.catalog.modify(room.catalog.next_timestamp()).unwrap();
 			let config = guard.video.renditions.get_mut("video").unwrap();
 			config.track = None;
 			config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
@@ -5467,7 +5527,7 @@ mod session_tests {
 
 		publisher
 			.catalog
-			.modify()
+			.modify(publisher.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -5487,7 +5547,7 @@ mod session_tests {
 
 		publisher
 			.catalog
-			.modify()
+			.modify(publisher.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -5544,7 +5604,7 @@ mod session_tests {
 		for enabled in [false, true] {
 			publisher
 				.catalog
-				.modify()
+				.modify(publisher.catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -5696,10 +5756,21 @@ mod session_tests {
 					hang::container::track_info(hang::catalog::PRIORITY.audio),
 				)
 				.unwrap();
-			let listed = next.catalog.modify().unwrap().video.renditions.clone();
-			next.catalog.modify().unwrap().video.renditions.clear();
+			let listed = next
+				.catalog
+				.modify(next.catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.clone();
+			next.catalog
+				.modify(next.catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.clear();
 			{
-				let mut catalog = next.catalog.modify().unwrap();
+				let mut catalog = next.catalog.modify(next.catalog.next_timestamp()).unwrap();
 				catalog.video.renditions = listed;
 				catalog.audio.renditions.insert(name, audio_rendition());
 			}
@@ -5878,7 +5949,8 @@ mod session_tests {
 	}
 
 	/// `moqsrc` playing `room` from `url`, its first video pad linked by name to a synced sink
-	/// that drops anything more than 100ms late.
+	/// that drops anything more than 100ms late, on a test clock that moves only when the test
+	/// moves it.
 	fn pipeline(url: &url::Url) -> (gst::Pipeline, gst::Element) {
 		register();
 		let first = NEXT_VIDEO_PAD_ID.load(Ordering::Relaxed);
@@ -5889,28 +5961,55 @@ mod session_tests {
 		.unwrap()
 		.downcast::<gst::Pipeline>()
 		.unwrap();
+		pipeline.use_clock(Some(&gst_check::TestClock::new()));
 		let sink = pipeline.by_name("sink").unwrap();
 		pipeline.set_state(gst::State::Playing).unwrap();
 		(pipeline, sink)
 	}
 
+	/// The test clock [`pipeline`] runs `sink` on.
+	fn test_clock(sink: &gst::Element) -> gst_check::TestClock {
+		sink.parent()
+			.and_downcast::<gst::Pipeline>()
+			.unwrap()
+			.pipeline_clock()
+			.downcast()
+			.unwrap()
+	}
+
 	/// Keep writing `tag` until the sink renders it, then check it renders every frame after.
 	/// A sink renders a late frame when nothing rendered for a second, so one frame proves
 	/// nothing about lateness.
+	///
+	/// The publisher stamps frames from the pipeline's test clock, which stands still while a
+	/// frame travels, so a frame is late only when moqsrc placed it wrong, however long it took
+	/// to arrive. A frame placed later than it was stamped waits on the clock, which then moves
+	/// to it as real time would.
 	fn rendered(sink: &gst::Element, publisher: &mut Publisher, tag: u8) {
 		const FRAMES: usize = 10;
+		let clock = test_clock(sink);
+		publisher.follow(clock.upcast_ref());
+		// Release the clock wait the next buffer starts, then report whether the sample it
+		// rendered carries `tag`, and its pts. A test clock releases no wait on its own.
 		let pull = |timeout: Duration| {
-			let tagged = sink
-				.emit_by_name::<Option<gst::Sample>>("try-pull-sample", &[&(timeout.as_nanos() as u64)])?
-				.buffer()
-				.is_some_and(|buffer| buffer.map_readable().unwrap()[0] == tag);
-			Some(tagged)
+			let (waiting, _) = clock.timed_wait_for_multiple_pending_ids(1, timeout.as_millis() as u32);
+			if !waiting {
+				return None;
+			}
+			if let Some(due) = clock.next_entry_time().filter(|due| *due > clock.time()) {
+				clock.set_time(due);
+			}
+			clock.process_next_clock_id().unwrap();
+			let sample =
+				sink.emit_by_name::<Option<gst::Sample>>("try-pull-sample", &[&(timeout.as_nanos() as u64)])?;
+			let buffer = sample.buffer()?;
+			Some((buffer.map_readable().unwrap()[0] == tag, buffer.pts()))
 		};
 
 		let mut reached = false;
 		for _ in 0..200 {
 			publisher.write(tag);
-			while let Some(tagged) = pull(Duration::from_millis(50)) {
+			while let Some((tagged, _)) = pull(Duration::from_millis(50)) {
 				reached |= tagged;
 			}
 			if reached {
@@ -5919,18 +6018,15 @@ mod session_tests {
 		}
 		assert!(reached, "{tag} never rendered");
 
-		for _ in 0..FRAMES {
-			publisher.write(tag);
-			block(Duration::from_millis(50));
+		for frame in 0..FRAMES {
+			clock.set_time(clock.time() + gst::ClockTime::from_mseconds(50));
+			let pts = publisher.write(tag);
+			// Earlier frames still arriving render before it. The bound is reached only when the sink
+			// dropped the frame as late.
+			let on_time =
+				std::iter::from_fn(|| pull(Duration::from_secs(10))).any(|(tagged, at)| tagged && at == Some(pts));
+			assert!(on_time, "the sink dropped {tag} as late: {frame} of {FRAMES} rendered");
 		}
-		let mut frames = 0;
-		while let Some(tagged) = pull(Duration::from_millis(500)) {
-			frames += usize::from(tagged);
-		}
-		assert!(
-			frames >= FRAMES,
-			"the sink dropped {tag} as late: {frames} of {FRAMES} rendered"
-		);
 	}
 
 	/// The pipeline played on one video pad with nothing on the bus.
@@ -5956,6 +6052,9 @@ mod session_tests {
 		let relay = Relay::new();
 		let url = relay.url.clone();
 		let (pipeline, output) = pipeline(&url);
+		// This checks reconnecting, not timing, and moqsink stamps from the wall clock, which the
+		// pipeline's test clock never reaches.
+		output.set_property("sync", false);
 		let sink = glib::Object::builder::<crate::sink::MoqSink>()
 			.property("url", url.as_str())
 			.property("broadcast", "room")
@@ -6075,7 +6174,8 @@ mod session_tests {
 		rendered(&sink, &mut old, 1);
 
 		// Long enough that a restarted run placed at the old segment would be a second late.
-		block(Duration::from_secs(1));
+		let clock = test_clock(&sink);
+		clock.set_time(clock.time() + gst::ClockTime::SECOND);
 		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		rendered(&sink, &mut new, 2);
 		assert_played_cleanly(pipeline);

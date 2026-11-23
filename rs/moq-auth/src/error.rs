@@ -112,9 +112,9 @@ pub enum Error {
 	#[error("token is not valid yet")]
 	TokenNotYetValid,
 
-	/// A path pattern did not parse.
+	/// A grant prefix did not parse, such as one holding a wildcard.
 	#[error(transparent)]
-	Pattern(#[from] moq_pattern::InvalidPattern),
+	Prefix(#[from] moq_pattern::InvalidPrefix),
 
 	/// The grant allows nothing, so the session is refused.
 	#[error("grant names nothing; the session is refused")]
@@ -132,9 +132,9 @@ pub enum Error {
 	#[error("the grant bound reaches past the system clock's range")]
 	ExpiresOutOfRange,
 
-	/// The grant's revalidate interval is zero.
-	#[error("grant asks to be revalidated at no interval")]
-	ZeroRevalidate,
+	/// The grant's revalidate interval is under a second, the finest the wire writes.
+	#[error("grant asks to be revalidated more often than once a second")]
+	ShortRevalidate,
 
 	/// The grant's expiry has passed.
 	#[error("grant has already expired")]
@@ -233,7 +233,7 @@ impl Error {
 			Self::InvalidGrant(_)
 				| Self::UselessGrant
 				| Self::UnboundedRevalidate
-				| Self::ZeroRevalidate
+				| Self::ShortRevalidate
 				| Self::GrantExpired
 				| Self::InvalidLabel(_)
 				| Self::InvalidTier(_)
@@ -266,7 +266,7 @@ mod tests {
 	#[test]
 	fn final_grant_faults() {
 		assert!(Error::InvalidGrant("unknown field".into()).is_final_grant());
-		assert!(Error::ZeroRevalidate.is_final_grant());
+		assert!(Error::ShortRevalidate.is_final_grant());
 		assert!(Error::InvalidTier("a b".into()).is_final_grant());
 		assert!(!Error::Unavailable("down".into()).is_final_grant());
 		assert!(!Error::Refused(Default::default()).is_final_grant());

@@ -17,7 +17,7 @@ use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Polled;
 use crate::media::MoqTimestamp;
-use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
+use crate::producer::{Child, Children, MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for a JSON snapshot producer (lossy latest-value mode).
 ///
@@ -26,7 +26,7 @@ use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonSnapshotConfig {
 	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
-	/// group with a full snapshot. How long a group runs is set by the track's `refresh` ratio
+	/// group with a full snapshot. How long a group runs is set by the track's `refresh.ratio`
 	/// instead.
 	#[uniffi(default = true)]
 	pub deltas: bool,
@@ -114,7 +114,7 @@ mod tests {
 
 /// Publishes a JSON value that consumers see as a single latest state.
 ///
-/// A join that finds more deltas than the track's `refresh` ratio allows gets the value restated
+/// A join that finds more deltas than the track's `refresh.ratio` allows gets the value restated
 /// in a fresh group, by a task this producer runs until it is finished or dropped. That joiner
 /// still reads the cached group first.
 ///
@@ -190,7 +190,7 @@ impl MoqJsonSnapshotProducer {
 		let _guard = crate::ffi::enter();
 		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
 		let config = moq_mux::json::Config::default();
-		let this = track.adopt(|track| {
+		let this = track.adopt(|track, _| {
 			let producer =
 				broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config, options)?))?;
 			Ok(Self {
@@ -378,7 +378,7 @@ impl MoqJsonStreamProducer {
 	pub fn new(broadcast: &MoqBroadcastProducer, track: &MoqTrackProducer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = moq_mux::json::Config::default();
-		track.adopt(|track| {
+		track.adopt(|track, _| {
 			let producer = broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?))?;
 			Ok(Self {
 				inner: std::sync::Mutex::new(Some(producer)),
@@ -483,7 +483,7 @@ impl MoqJsonStreamConsumer {
 /// that restates the retained records, so a reader can join at any point and the producer's
 /// memory stays bounded by what it pops or by [`MoqJsonWindowConfig::checkpoint_records`].
 ///
-/// A join that finds the open group's edits outweigh the track's `refresh` ratio gets the window
+/// A join that finds the open group's edits outweigh the track's `refresh.ratio` gets the window
 /// restated in a fresh group, by a task this producer runs until it is finished or dropped.
 ///
 /// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
@@ -495,6 +495,10 @@ pub struct MoqJsonWindowProducer {
 
 	/// Closed on finish or drop, which stops the refresh task.
 	alive: kio::Producer<()>,
+
+	/// The broadcast's children, which keep the finished window so a late subscriber still finds
+	/// it. `None` when the track had already finished before this handle took it.
+	family: Option<Children>,
 }
 
 impl MoqJsonWindowProducer {
@@ -562,7 +566,7 @@ impl MoqJsonWindowProducer {
 	pub fn new(track: &MoqTrackProducer, config: MoqJsonWindowConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = config.try_into()?;
-		let this = track.adopt(|track| {
+		let this = track.adopt(|track, family| {
 			if track.info().timescale.is_none() {
 				return Err(moq_net::Error::TimestampMismatch.into());
 			}
@@ -571,6 +575,7 @@ impl MoqJsonWindowProducer {
 					track, config,
 				)))),
 				alive: kio::Producer::new(()),
+				family: family.cloned(),
 			})
 		})?;
 		crate::ffi::spawn(Self::refresh(this.inner.clone(), this.alive.consume()));
@@ -635,11 +640,16 @@ impl MoqJsonWindowProducer {
 	}
 
 	/// Finish the track, closing any open group.
+	///
+	/// The broadcast keeps the finished window until it ends, so a late subscriber still finds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		let _ = self.alive.close();
-		drop(producer.finish()?);
+		let finished = producer.finish()?;
+		if let Some(family) = &self.family {
+			family.keep(finished);
+		}
 		Ok(())
 	}
 }

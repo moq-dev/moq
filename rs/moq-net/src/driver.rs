@@ -16,10 +16,14 @@ use crate::time::{Deadlines, Instant};
 /// It holds no session handle: dropping the last [`crate::Session`] requests
 /// closure on the next poll. Dropping the driver cancels the session, and
 /// [`crate::Session::closed`] resolves with [`Error::Cancel`]. It is `Send` on
-/// native, like the [`Boxable`](crate::transport::poll::Boxable) transport it drives.
+/// native, like the [`Boxable`](crate::transport::poll::Boxable) transport it drives, and never `Sync`.
 /// A panic during polling is published as a transport failure before unwinding to the caller.
 #[must_use = "the session makes no progress unless its driver is polled"]
 pub struct Driver {
+	// Polled only through `&mut`, so sharing gains nothing, and moq-transport's task set holds
+	// non-`Sync` children anyway. The definite no keeps a `Sync` check, such as an exporter's,
+	// from overflowing the default recursion limit on the session model's depth.
+	not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
 	state: State,
 	clock: Deadlines,
 }
@@ -56,7 +60,8 @@ pub(crate) struct State {
 	pub(crate) protocol: Protocol,
 	// The session supervisor, polled alongside the protocol: it executes the
 	// handles' close requests, publishes the transport's terminal error, and
-	// samples stats. It finishes once the transport reports closed, and the
+	// samples stats. It finishes once the transport reports closed (or a close
+	// this side sent outlives its grace unconfirmed), and the
 	// machine is not done until it has: the protocol's terminal transport close
 	// is what `Session::closed` observes, so resolving before it is published
 	// would leave waiters parked on a machine nobody polls again. `None` once
@@ -68,7 +73,11 @@ pub(crate) struct State {
 
 impl Driver {
 	pub(crate) fn new(clock: Deadlines, state: State) -> Self {
-		Self { state, clock }
+		Self {
+			not_sync: std::marker::PhantomData,
+			state,
+			clock,
+		}
 	}
 
 	/// Process ready work at `now`, registering for external activity.
@@ -167,8 +176,19 @@ impl std::fmt::Debug for Driver {
 	}
 }
 
-// The relay and the bindings spawn drivers on multi-threaded runtimes.
+// The relay and the bindings spawn drivers on multi-threaded runtimes. The fields prove `Send`
+// here, once, so a future holding the driver doesn't walk the whole session model again.
+// The exhaustive pattern fails to compile when a field is added without being checked.
 const _: () = {
-	const fn assert_send<T: Send>() {}
-	assert_send::<Driver>();
+	fn assert_send<T: Send>(_: &T) {}
+	#[allow(dead_code, reason = "only type-checked, never called")]
+	fn fields(driver: &Driver) {
+		let Driver { not_sync, state, clock } = driver;
+		assert_send(not_sync);
+		assert_send(state);
+		assert_send(clock);
+	}
 };
+
+// SAFETY: the assertion above proves every field `Send`.
+unsafe impl Send for Driver {}

@@ -410,7 +410,7 @@ impl<T: Serialize> Encoder<T> {
 		// `T` exactly once.
 		if let Some(Baseline::Encoded { bytes, .. }) = self.last.as_ref() {
 			let bytes = bytes.clone();
-			let next = serde_json::to_vec(value)?;
+			let next = crate::strict::to_vec(value, 0)?;
 			if next.as_slice() == bytes.as_ref() {
 				return Ok(None);
 			}
@@ -425,7 +425,8 @@ impl<T: Serialize> Encoder<T> {
 		// Diff without building a full `Value` for the new value first. `T` is written with the same
 		// `serde_json` writer a snapshot uses, and the diff reads those bytes entry by entry, so
 		// nothing past this line is compiled per `T`.
-		serde_json::to_writer(self.scratch.get_mut().next_buffer(), value)?;
+		// A delta nests no deeper than the value it patches, so checking the value covers the delta.
+		crate::strict::to_writer(self.scratch.get_mut().next_buffer(), value, 0)?;
 		let crate::diff::PatchBytes { patch, forced_snapshot } =
 			crate::diff::serialized(last, &self.scratch).map_err(crate::Error::Json)?;
 
@@ -474,7 +475,7 @@ impl<T: Serialize> Encoder<T> {
 	fn encode_snapshot(&mut self, value: &T) -> Result<(Encoded, Edit)> {
 		// Serialize directly from `value` so the snapshot frame preserves the type's own field order,
 		// keeping the wire bytes identical to serializing `T` straight to a frame.
-		let snapshot = serde_json::to_vec(value)?;
+		let snapshot = crate::strict::to_vec(value, 0)?;
 		self.snapshot_staged(Bytes::from(snapshot))
 	}
 }

@@ -91,7 +91,7 @@ pub fn ingest(data: &[u8]) -> bool {
 		0 => {
 			let version = super::LITE_VERSIONS[(*selector as usize / 2) % super::LITE_VERSIONS.len()];
 			// The track arrives timed exactly when the wire stamps it: never before Lite05,
-			// always on Lite05/06 (an untimed one carries its send times), as declared after.
+			// always on Lite05/06 (an untimed one carries its keys), as declared after.
 			let timed = version.wire_timescale(timed.then_some(Timescale::MILLI)).is_some();
 			// Only the `ietf` extension carries a Version, and only on a track that has one.
 			let draft = draft.filter(|_| settings & 0x10 != 0 && version.has_ietf());
@@ -214,7 +214,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	// Unbounded, so eviction never aborts a group mid-frame.
 	broadcast.pool = cache::Pool::unbounded();
 	let broadcast = broadcast.produce();
-	let track = broadcast.create_track("ingest", info.clone()).ok()?;
+	let track = broadcast.create_track("ingest", info.clone())?;
 
 	let (end, fin, group) = match session {
 		Session::Lite {
@@ -224,11 +224,12 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		} => {
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
 			let producer = track.append_next().ok()?;
+			let clock = lite::Clock::new(version, producer.start);
 			let consumer = producer.consume();
 			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);
 			let framing = lite::Framing::new(info, version);
-			let mut ingest = lite::FrameIngest::new(framing, records, frame_start);
+			let mut ingest = lite::FrameIngest::new(framing, records, frame_start, clock);
 			let end = drive(body.len(), |waiter| {
 				let res = ingest.poll(&mut reader, &mut group, waiter);
 				keep_up(&mut viewer);
@@ -267,15 +268,15 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	};
 
 	let (group, consumer) = group;
-	// Settle the group as the session does, so the reader below never waits.
-	match &end {
-		Ok(_) => {
-			let _ = group.end(fin);
-		}
+	// Settle the group as the session does, so the reader below never waits. A GROUP_END
+	// the group refuses, such as one before a frame it holds, fails the stream there too.
+	let end = match end {
+		Ok(said) => group.end(fin).map(|()| said),
 		Err(err) => {
 			let _ = group.abort(err.clone());
+			Err(err)
 		}
-	}
+	};
 
 	Some(Ingested {
 		frames: read(consumer, info.compressed()),
@@ -364,8 +365,7 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 
 	// moq-lite: three plain frames, at every version, timed and untimed. The timing
 	// prefix is a zigzag delta, so 0x02 steps the clock forward by one; an untimed lite-07
-	// frame carries one too, which keeps its group's start. Lite-07 also ends the group
-	// whole with a GROUP_END.
+	// frame carries none. Lite-07 also ends the group whole with a GROUP_END.
 	for (index, version) in super::LITE_VERSIONS.iter().enumerate() {
 		for timed in [false, true] {
 			let mut data = vec![(index * 2) as u8, timed as u8, 3];
@@ -386,10 +386,9 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 				data.extend_from_slice(payload);
 			}
 			if version.has_group_end() {
-				// A zero length, then the End: past the last frame's 2ms, or the start's next
-				// unit when untimed.
+				// A zero length, then the End, one past the highest frame (or the start, untimed).
 				let mut whole = data.clone();
-				whole.extend_from_slice(&[0, if timed { 3 } else { 1 }]);
+				whole.extend_from_slice(&[0, 1]);
 				push(whole);
 			}
 			push(data);
@@ -402,9 +401,9 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 	let mut data = vec![(lite07 * 2) as u8, 0x10, 2, 0];
 	for payload in [&b"ab"[..], b"c"] {
 		// Object 0 is the first record's absolute ID, then each next one is a zero delta,
-		// and neither has a property block. The frame's size follows, plus one, then a zero
-		// timestamp delta, which keeps the untimed group's start.
-		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1, 0]);
+		// and neither has a property block. The frame's size follows, plus one, and no
+		// timestamp, since the track is untimed.
+		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1]);
 		data.extend_from_slice(payload);
 	}
 	push(data);

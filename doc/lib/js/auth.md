@@ -15,11 +15,16 @@ contract with one import. It also generates keys, signs and verifies JWTs, and
 checks a connection path against a token's claims exactly as `moq auth serve`
 does. A grant can label its session's stats independently of its authorization
 root. Tokens are interchangeable with the Rust side. Grants and claims are
-[`Pattern`](https://www.npmjs.com/package/@moq/pattern) unions: `foo` is one
-broadcast, `foo/**` is a subtree, `**` is everything. A claim or grant role is
-an `Access`: its pattern array, or `{ path, rate }` with a bitrate cap. A
-`Grant` is typed as its wire shape, so a typed `Grant` is the JSON to answer
-with, and the relay refuses a field it does not know. `Claims` spell a token's
+[`Prefix`](https://www.npmjs.com/package/@moq/pattern) sets: `foo` covers `foo`
+and everything beneath it, and the empty prefix is everything. `Key.sign` and
+the CLI refuse a wildcard such as `foo/**` or `*`. A token, key scope, or grant
+spells each prefix as the subtree pattern releases before 0.22 read, `foo/**`
+or `**`, and reads that spelling back as the prefix. A claim or grant role is
+an `Access`: its prefix array, or `{ path, rate }` with a bitrate cap. A
+`Grant` is typed as its wire shape: answer with `GrantSchema.parse(grant)`,
+which spells it as every relay reads it, and the relay refuses a field it does
+not know. A parsed key spells its scope the same way, and so does `Key.public`,
+so write a key you scope by hand from `Key.parse` of it or from `Key.public`. `Claims` spell a token's
 `exp`, `iat`, `nbf`, and `jti` as `expires`, `issued`, `notBefore`, and `id`, as
 the Rust crate does. Key scopes bound paths only, and `Claims.authorize` checks
 paths only.
@@ -27,7 +32,7 @@ paths only.
 ```bash
 bun add @moq/auth
 bunx @moq/auth generate --out root.jwk
-bunx @moq/auth sign --key root.jwk --root "rooms/123" --publish 'alice/**'
+bunx @moq/auth sign --key root.jwk --root "rooms/123" --publish alice
 ```
 
 Mint tokens on a server, never in the browser, and prefer asymmetric keys so

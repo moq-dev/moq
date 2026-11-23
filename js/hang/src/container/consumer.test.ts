@@ -107,6 +107,14 @@ async function poll<T>(read: Promise<T>): Promise<T | "pending"> {
 function replay(track: Track.Producer): Track.Subscriber {
 	return track.subscribe({ delay: { max: Duration.millis(30_000) } });
 }
+// A subscription from group `from` on whose missing groups an unserved fill owes, as a session's
+// feed would, so its ordered read waits `max` for each hole before giving it up.
+function owed(track: Track.Producer, max: number, from: bigint): Track.Subscriber {
+	track.requests();
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(max) } });
+	subscriber.withRange({ start: { included: from } });
+	return subscriber;
+}
 // A track at hang's microsecond timescale, as `trackInfo` pins it: the Legacy producer opens each
 // keyframe's group at its timestamp. No publisher max age, so a reader reaches superseded groups.
 function micro(name: string): Track.Producer {
@@ -187,6 +195,49 @@ test("Legacy Producer accepts open-GOP leading pictures above the previous group
 	producer.encode(new Uint8Array([1]), Duration.micros(33_000), false);
 	producer.encode(new Uint8Array([1]), Duration.micros(66_000), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(50_000), false);
+	producer.finish();
+});
+
+test("Legacy Producer continues a group at a keyframe overlapping it, and drops a leading picture before it with those after it", async () => {
+	const track = micro("test");
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	for (const [timestamp, keyframe] of [
+		[100_000, true],
+		[166_000, false],
+		[133_000, false],
+		// A splice dipping below the newest frame continues the group.
+		[150_000, true],
+		[183_000, false],
+		// Past the newest frame: a new group, whose leading picture at 183_000 presents with the last,
+		// and whose later leading picture at 190_000 may reference it. 233_000 never does.
+		[200_000, true],
+		[183_000, false],
+		[190_000, false],
+		[233_000, false],
+	] as const) {
+		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), keyframe);
+	}
+	producer.finish();
+	const groups = (await readGroups(subscriber, 200_000n)).map(([, frames]) =>
+		frames.filter(([, size]) => size > 0).map(([timestamp]) => timestamp),
+	);
+	expect(groups).toEqual([
+		[100_000, 166_000, 133_000, 150_000, 183_000],
+		[200_000, 233_000],
+	]);
+});
+
+test("Legacy Producer drops a keyframe overlapping a closed group", () => {
+	const track = micro("test");
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), Duration.micros(100_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(166_000), false);
+	producer.discontinuity(Duration.micros(200_000));
+	const largest = track.largest()?.group;
+	producer.encode(new Uint8Array([1]), Duration.micros(150_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(183_000), false);
+	expect(track.largest()?.group).toBe(largest);
 	producer.finish();
 });
 
@@ -355,8 +406,9 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 	producer.discontinuity(Duration.micros(33_000));
 	producer.finish();
 
-	// The marker starts one microsecond before the edge, so media resuming right at it follows.
-	expect(await readGroups(subscriber, 32_999n)).toEqual([
+	// The marker never starts below a frame of the group it ends, here its end marker, so it starts
+	// at the caller's end, where that group ends whole.
+	expect(await readGroups(subscriber, 33_000n)).toEqual([
 		[
 			0n,
 			[
@@ -364,7 +416,7 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 				[33_000, 0],
 			],
 		],
-		[32_999n, [[32_999, 0]]],
+		[33_000n, [[33_000, 0]]],
 	]);
 });
 
@@ -724,6 +776,43 @@ for (const [where, payloads] of [
 		consumer.close();
 	});
 }
+
+// A step onto a group whose first payload failed to decode raises the error rather than waiting for a
+// timestamp that frame will never give, while the group's other frames are still unread.
+test("Consumer raises a decode error at the head of an open group past a hole", async () => {
+	const failingFormat: ContainerFormat = {
+		decode(frame: Uint8Array): Frame[] {
+			if (frame[0] === 0xff) throw new Error("malformed");
+			return [{ payload: frame, timestamp: Duration.micros(frame[0]), keyframe: false }];
+		},
+	};
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: failingFormat, delay: { max: Duration.millis(500) } });
+
+	const g0 = track.createGroup(0n);
+	g0.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.fromMicros(1) });
+	g0.finish();
+	expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
+
+	// A sparse key the live local track never declared the keys below skipped, left open.
+	const g10 = track.createGroup(10n);
+	g10.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.fromMicros(2) });
+	g10.writeFrame({ payload: new Uint8Array([0x03]), timestamp: Time.Timestamp.fromMicros(3) });
+
+	let settled = "hung";
+	consumer.next().then(
+		() => {
+			settled = "read";
+		},
+		(err: Error) => {
+			settled = err.message;
+		},
+	);
+	await clock.advance(Duration.millis(100));
+	expect(settled).toBe("malformed");
+	consumer.close();
+	track.close();
+});
 
 // Errors come in delivery order, so a decode error waits behind the items ahead of it, a gap included.
 test("Consumer delivers everything ahead of a decode error", async () => {
@@ -1779,7 +1868,7 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (Legac
 // Delivery resumes only once the missing, timeline-continuous group arrives.
 test("Consumer waits on a PTS gap instead of skipping to a later buffered group (Legacy)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(replay(track), {
+	const consumer = new Consumer(owed(track, 10_000, 1_000_000n), {
 		format: timedLegacy,
 		delay: { min: null, max: Duration.millis(10_000) },
 	});
@@ -1797,7 +1886,10 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 	const pending = consumer.next();
 
 	// Group C (seq 1_090_000) starts at 90_000 ticks (1_000_000µs) -- far past A.end (33_333µs), a real
-	// gap. An intermediate group may still be in transit, so C must NOT be delivered yet.
+	// gap. An intermediate group may still be in transit, so C must NOT be delivered yet. Appending
+	// B and C declared the starts between the groups skipped, so B's alone is owed.
+	track.skipGroups(1_000_001n, 1_045_000n);
+	track.skipGroups(1_045_001n, 1_090_000n);
 	const c = track.createGroup(1_090_000n);
 	c.writeFrame({
 		payload: encodeLegacyFrame(Math.round((90_000 / TIMESCALE) * 1_000_000) as number, new Uint8Array([0x03])),
@@ -1871,7 +1963,7 @@ test("Consumer delivers a contiguous group after one that completed out of order
 // old to play, so the head is the group to play next and must not be dropped as "slow".
 test("Consumer plays the head once a waited-out gap exceeds the budget (Legacy)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(replay(track), {
+	const consumer = new Consumer(owed(track, 100, 1000n), {
 		format: timedLegacy,
 		delay: { min: null, max: Duration.millis(100) },
 	});
@@ -1906,7 +1998,7 @@ test("Consumer plays the head once a waited-out gap exceeds the budget (Legacy)"
 // A gap still inside the budget is waited out: the missing group may yet arrive in time.
 test("Consumer waits on a gap within the budget, then plays the head once it exceeds it (Legacy)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(replay(track), {
+	const consumer = new Consumer(owed(track, 100, 1000n), {
 		format: timedLegacy,
 		delay: { min: null, max: Duration.millis(100) },
 	});
@@ -1926,12 +2018,16 @@ test("Consumer waits on a gap within the budget, then plays the head once it exc
 	await clock.advance(Duration.millis(99));
 	expect(await poll(pending)).toBe("pending");
 
-	// B alone grows past the budget (up to 12_000 ticks, 100ms past A's end and beyond).
+	// B alone grows past the budget (up to 12_000 ticks, 100ms past A's end and beyond). The ordered
+	// read measures the hole against the newest group's start, so that proves nothing yet.
 	for (let i = 1; i <= 3; i++) {
 		b.writeFrame(timedFrame(0x02, 6000 + i * 3000, 1 + i));
 		await flush();
 	}
+	expect(await poll(pending)).toBe("pending");
 
+	// B landed a whole budget ago, so the wall clock gives the hole up.
+	await clock.advance(Duration.millis(1));
 	const result = await poll(pending);
 	expect(result).toEqual({ kind: "gap", timestamp: Duration.micros(33_333), duration: Duration.micros(33_334) });
 	expect(frameOf(await consumer.next()).payload).toEqual(new Uint8Array([0x02]));

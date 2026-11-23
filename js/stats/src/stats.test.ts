@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Json from "@moq/json";
 import { type Broadcast, Origin, Path, Time } from "@moq/net";
+import { defined } from "./defined.test-util.ts";
 import {
 	Consumer,
 	Nodes,
@@ -17,7 +19,7 @@ let keys = 0n;
 const key = () => Time.Timestamp.unscaled(keys++);
 
 function publish(broadcast: Broadcast.Producer, name: string) {
-	return new Json.Snapshot.Producer<unknown>({ track: broadcast.createTrack(name) });
+	return new Json.Snapshot.Producer<unknown>({ track: defined(broadcast.createTrack(name)) });
 }
 
 test("discovers each node under the prefix", async () => {
@@ -120,6 +122,8 @@ test("a frame names each counter once and a missing counter reads zero", () => {
 	expect(PresenceSchema.parse({ sessions_started: 4, sessions_ended: 2 })).toMatchObject({
 		sessions_started: 4,
 		sessions_ended: 2,
+		// A label that never routed sends no `routes`.
+		routes: { changed: 0, closed: { other: 0 } },
 	});
 	// The pre-rename spellings are neither read nor kept.
 	expect(PresenceSchema.parse({ sessions: 4, sessions_closed: 2 })).toMatchObject({
@@ -141,4 +145,24 @@ test("track and node names", () => {
 	expect(node(".stats/nodes/sjc")).toBeUndefined();
 	expect(node(".stats/acme/node/sjc")).toBeUndefined();
 	expect(node("other/node/sjc")).toBeUndefined();
+});
+
+test("a finished run yields its final frame before it ends", async () => {
+	const origin = new Origin.Producer();
+	const broadcast = origin.route(Path.from(".stats/node/a")).broadcast;
+	const bucket = new Consumer(broadcast.consume()).bucket("");
+	const run = publish(broadcast, "bucket.e1.json");
+	run.update({ epoch: "e1" }, key());
+	expect((await bucket.next())?.kind).toBe("frame");
+
+	// The final frame and the listing's `finished` arrive together; the frame must not be lost.
+	run.update({ epoch: "e1", tiers: { "": {} } }, key());
+	run.finish();
+	broadcast.removeTrack("bucket.e1.json");
+	// Let the listing report the run finished, so it is ready before the frame is read.
+	await yieldNow();
+	expect(await bucket.next()).toMatchObject({ kind: "frame", frame: { tiers: { "": {} } } });
+	expect(await bucket.next()).toEqual({ kind: "ended" });
+	bucket.close();
+	origin.close();
 });

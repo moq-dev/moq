@@ -11,9 +11,9 @@ import { type Identity, identity, type Listing, Publication, type Slot } from ".
 import type { Kind, Rendition } from "./rendition";
 import { makeRendition } from "./rendition-internal";
 
-// The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
-// outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
-const VIDEO_REFRESH = 2;
+// The refresh video tracks advertise: a joiner forces a keyframe once a group's deltas outweigh
+// twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
+const VIDEO_REFRESH = { ratio: 2 };
 
 // The stats track, named in the catalog's `stats` section while stats are on. Matches moq-cli's.
 const STATS_TRACK = "stats.json";
@@ -211,7 +211,7 @@ export class Broadcast {
 	 * Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken.
 	 *
 	 * Its track advertises a refresh ratio, so its producer opens a group with a keyframe whenever
-	 * `track.demand().wanted` passes the largest group, as the video `Encoder` does.
+	 * `track.demand().refresh` asks for one, as the video `Encoder` does.
 	 */
 	video(name: string): Rendition<Catalog.VideoConfig> {
 		return this.#register<Catalog.VideoConfig>(name, "video");
@@ -228,7 +228,7 @@ export class Broadcast {
 	 *
 	 * Set the returned rendition's `config` to a {@link Catalog.TextConfig}, then write one cue per
 	 * group into its `track` with `Hang.Container.Legacy.Producer` (each cue is a keyframe, so it opens
-	 * its own group). See the module docs for the cue framing. Stamp cues with `@moq/clock`'s `now()` in
+	 * its own group). See the module docs for the cue framing. Stamp cues with `MediaClock.now()` in
 	 * microseconds, the broadcast clock the catalog advertises.
 	 */
 	text(name: string): Rendition<Catalog.TextConfig> {
@@ -401,7 +401,7 @@ export class Broadcast {
 		);
 
 		// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
-		const watched = effect.computed((demand) => demand.get(writer.track.demand().wanted) !== undefined);
+		const watched = writer.track.demand().wanted;
 		effect.run((demand) => {
 			if (demand.get(watched)) demand.get(this.in.probe);
 		});
@@ -515,6 +515,7 @@ export class Broadcast {
 					// Catalog JSON is small and repetitive.
 					compression: "deflate",
 				});
+				if (!track) throw new Error(`the track ${Broadcast.CATALOG_TRACK} already exists`);
 				effect.cleanup(() => {
 					track.finish();
 					track.close();
@@ -564,6 +565,7 @@ export class Broadcast {
 						entry.name,
 						rendition.kind === "video" ? { ...info, refresh: VIDEO_REFRESH } : info,
 					);
+					if (!entry.track) throw new Error(`the track ${entry.name} already exists`);
 				}
 				entry.owner = rendition;
 				const served = entry.track;
@@ -582,7 +584,7 @@ export class Broadcast {
 					const idle =
 						rendition.kind !== "audio" &&
 						gate.get(this.in.onDemand) === "all" &&
-						gate.get(served.demand().wanted) === undefined;
+						!gate.get(served.demand().wanted);
 					handle.track.set(idle ? undefined : served);
 				});
 			}

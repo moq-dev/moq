@@ -6,6 +6,7 @@ import { type Broadcast, Connection, Origin, type Path, Time } from "@moq/net";
 import { createMockTransportPair } from "../../net/src/mock.ts";
 import * as Protected from "./broadcast.ts";
 import { Credential } from "./credential.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Epoch from "./epoch.ts";
 
 const encoder = new TextEncoder();
@@ -68,9 +69,11 @@ for (const [name, protocol, routed, keyed] of transports) {
 			instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
 		});
 		const broadcast = broadcastRoute.broadcast;
-		const video = await new Protected.Producer(broadcast, generation).createTrack("video", {
-			timescale: Time.Timescale.MILLI,
-		});
+		const video = defined(
+			await new Protected.Producer(broadcast, generation).createTrack("video", {
+				timescale: Time.Timescale.MILLI,
+			}),
+		);
 		broadcastRoute.announce();
 
 		// Starts before its first frame, so a keyed frame's time (its group's key) tells apart.
@@ -129,9 +132,11 @@ for (const [name, protocol] of [
 			instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
 		});
 		const broadcast = broadcastRoute.broadcast;
-		const audio = await new Protected.Producer(broadcast, generation).createDatagrams("audio", {
-			timescale: Time.Timescale.MILLI,
-		});
+		const audio = defined(
+			await new Protected.Producer(broadcast, generation).createDatagrams("audio", {
+				timescale: Time.Timescale.MILLI,
+			}),
+		);
 		broadcastRoute.announce();
 
 		const remote = await active(subscriber, path);

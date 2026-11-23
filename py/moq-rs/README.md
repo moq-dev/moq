@@ -30,7 +30,7 @@ async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
             if not isinstance(event, moq.AnnounceEventPresent):
-                continue  # absent, offline, or a change in availability
+                continue  # AnnounceEventAbsent
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
@@ -63,7 +63,7 @@ async def main():
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = moq.media.TrackProducer.audio(
-            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes)
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_init_bytes)
         )
 
         # Write frames
@@ -266,7 +266,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `.announce()`, `.withdraw()`, `.set_cost(cost)`, `.set_auth(credential)`. Show, hide, re-price, or swap its request credential (`None` for the session's scope) in place.
   - `await .requested() → BroadcastRequest | None`, or async iteration. Call `.serve(consumer)` to answer with held content under the claim's continuous group starts, `.route(hidden=..., ...)` for the path's own route, which continues the claim's instance until the job ends and then moves the claim to a fresh one (unless either names an instance: a named claim lends none, and a named job keeps its own), or `.reject(code)` to fail the requester.
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent`, `AnnounceEventUnavailable`, `AnnounceEventAvailable`, `AnnounceEventAbsent`, or `AnnounceEventOffline`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent` or `AnnounceEventAbsent`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
   - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then returns each stream that takes over, or `None` once the path goes offline; an `instance` follows only that stream)
   - `.request(path, instance=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one stream, or raises once synced without a route; an `instance` refuses any other stream)
 
@@ -280,7 +280,8 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
-- **`TrackInfo`**. Publisher track properties: priority, cache window, and timescale.
+- **`TrackInfo`**. Publisher track properties: priority, cache window, refresh, and timescale.
+- **`TrackRefresh`**. When a subscriber asks the publisher for a new group: a join past `ratio`, waiting out `interval`. `TrackDemand.refresh()` waits for the request.
 - **`Instance`**. Names one continuous stream at a path. `Instance.parse(text)` names one (an empty `text` raises `Error.InvalidInstance`); `.text()` and `str()` give its text, and `.is_minted()` tells whether a session minted it for a route whose wire (moq-lite 06 or older, or moq-transport) carries none. Instances compare and hash by text and that flag, so pass back an announced instance as is, not `Instance.parse` of its text, to pin its stream.
 - **`media.Dimensions`**. `.width: int`, `.height: int`.
 - **`media.Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
@@ -290,7 +291,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`log_level(level="info")`**. Initialize logging for the underlying Rust layer (`"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`). Call once per process.
 - **`Error`**. The exception raised by all operations. Catch a specific case via its variants, e.g. `except moq.Error.AlreadyResponded:`, `except moq.Error.Cancelled:`, or `except moq.Error.Busy:` when a call races an in-flight read on the same handle.
 - **`is_shutdown(err)`**. True for `Cancelled` and `Closed`, which arise from graceful shutdown rather than an actual failure. Use it to break out of an `async for` without treating the expected end-of-stream error as a problem.
-- **`is_auth(err)`**. True for `Unauthorized` (HTTP 401), `Forbidden` (HTTP 403), and `Expired` (a request token expired), and for a protocol Unauthorized or Expired session close or track revocation. Retrying without new credentials won't help, so surface these rather than reconnect.
+- **`is_auth(err)`**. True for `Unauthorized` (HTTP 401), `Forbidden` (HTTP 403), and `Expired` (a request token expired), and for a protocol Unauthorized, Expired, or MalformedAuthToken session close or track revocation. Retrying without new credentials won't help, so surface these rather than reconnect.
 - **`protocol_error(err)`**. The structured protocol failure (session or stream scope, verbatim wire code, known kind) when the peer sent one.
 
 ## See Also

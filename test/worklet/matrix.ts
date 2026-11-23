@@ -11,10 +11,10 @@ import { spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { libav as libavPlugin } from "@moq/common/vite-plugin-libav";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import { chromium } from "playwright";
 import { build } from "vite";
-import { libav as libavPlugin } from "../../js/common/vite-plugin-libav";
-import { worklet } from "../../js/common/vite-plugin-worklet";
 
 const root = mkdtempSync(join(tmpdir(), "worklet-matrix-"));
 const js = resolve(import.meta.dir, "../../js");

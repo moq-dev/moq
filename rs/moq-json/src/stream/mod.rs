@@ -135,13 +135,13 @@ mod test {
 	fn demand_follows_subscribers() {
 		let (producer, consumer) = producer(Config::default());
 		let demand = producer.demand();
-		assert_eq!(demand.wanted(), Some(0));
+		assert!(demand.wanted());
 
 		drop(consumer);
-		assert_eq!(demand.wanted(), None);
+		assert!(!demand.wanted());
 
 		let _consumer = producer.consume();
-		assert_eq!(demand.wanted(), Some(0));
+		assert!(demand.wanted());
 	}
 
 	/// A compressed track.

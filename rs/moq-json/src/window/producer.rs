@@ -191,7 +191,8 @@ impl<T> Finished<T> {
 		self.inner.lock().unwrap().encoder.range()
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it.
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining
+	/// get the clean end instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		self.inner.lock().unwrap().abort(err.into());
 		Ok(())
@@ -292,6 +293,7 @@ impl<T> Inner<T> {
 			return Err(err);
 		}
 		self.state = crate::state::State::Finished;
+		self.refresh.ended();
 		Ok(())
 	}
 
@@ -311,6 +313,7 @@ impl<T> Inner<T> {
 		// Idempotent: a track that is already closed keeps its first reason.
 		let _ = self.track.inner.clone().abort(reason);
 		self.state.abort(err);
+		self.refresh.ended();
 	}
 
 	/// Refuse further edits once the track can't take another group.
@@ -391,9 +394,14 @@ impl Track {
 		let mut group = self.inner.append_group(timestamp)?;
 		self.largest = Some(group.start);
 
-		// The previous group is complete; no more frames will be appended to it.
-		if let Some(previous) = self.group.take() {
-			previous.finish()?;
+		// The previous group is complete; no more frames will be appended to it. One that can't
+		// close (already aborted) fails the write, taking the group just published with it rather
+		// than leaving it to drop as `Dropped`.
+		if let Some(previous) = self.group.take()
+			&& let Err(err) = previous.finish()
+		{
+			let _ = group.abort(err.clone());
+			return Err(err.into());
 		}
 
 		if let Err(err) = group.write_frame(timestamp, payload) {
@@ -428,5 +436,68 @@ impl Track {
 			drop(self.inner.clone().finish()?);
 		}
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::task::Poll;
+
+	use serde_json::{Value, json};
+
+	use super::*;
+
+	/// A previous group already aborted fails the next header, which aborts the group it just
+	/// published with the same error rather than dropping it as `Dropped`.
+	#[test]
+	fn a_previous_group_that_cannot_close_aborts_the_next() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::<Value>::new(track, Config::default());
+		producer
+			.push(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
+			.unwrap();
+
+		let mut inner = producer.inner.lock().unwrap();
+		// Swap in a group its own track's abort already failed, keeping the handle.
+		let other = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("other", moq_net::track::Info::default())
+			.unwrap();
+		let aborted = other.append_group(moq_net::Timestamp::unscaled(1)).unwrap();
+		other.abort(moq_net::Error::GroupTooLarge).unwrap();
+		let open = inner.track.group.replace(aborted).expect("an open group");
+		let _finished = open.finish().unwrap();
+		let err = inner
+			.track
+			.write_header(moq_net::Timestamp::unscaled(2), bytes::Bytes::from_static(b"{}"))
+			.unwrap_err();
+		assert!(matches!(err, crate::Error::Net(moq_net::Error::GroupTooLarge)), "{err}");
+		assert!(inner.track.group.is_none());
+		drop(inner);
+
+		let waiter = kio::Waiter::noop();
+		let mut read = 0;
+		while let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) {
+			let ended = loop {
+				match group.poll_read_frame(&waiter) {
+					Poll::Ready(Ok(Some(_))) => continue,
+					other => break other,
+				}
+			};
+			read += 1;
+			// The first group finished; the one the failed write published carries the abort.
+			match read {
+				1 => assert!(matches!(ended, Poll::Ready(Ok(None))), "{ended:?}"),
+				_ => assert!(
+					matches!(ended, Poll::Ready(Err(moq_net::Error::GroupTooLarge))),
+					"{ended:?}"
+				),
+			}
+		}
+		assert_eq!(read, 2);
 	}
 }

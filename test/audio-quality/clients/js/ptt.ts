@@ -7,8 +7,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import { createServer } from "vite";
-import { worklet } from "../../../../js/common/vite-plugin-worklet";
 import { launch, sleep } from "../../../interop/clients/js/harness";
 import type { measurement } from "./src/ptt";
 import type { Sample } from "./src/schema";

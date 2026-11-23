@@ -201,6 +201,10 @@ impl Future for ConnectionDriver {
 			let stats = conn.inner.stats();
 			this.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
 			this.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
+			let credit = stats.send_credit;
+			this.conn.shared.wire.set_credit_stalls(credit.stalls, credit.stalled);
+			let held = stats.credit.held;
+			this.conn.shared.wire.set_credit_held(held.readers, held.evicted);
 		}
 
 		// A local close still reaches a driver whose socket holds output back, which skips
@@ -501,7 +505,7 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn send_released(&self, id: StreamId) -> bool {
 		let mut state = self.0.state.lock();
-		matches!(state.inner.send_stream(id).end(), Err(moq_quic::send::Error::Closed))
+		state.inner.send_stream(id).stopped().is_err()
 	}
 
 	/// The wire counters the driver updates as it sends and receives.

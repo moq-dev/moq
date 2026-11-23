@@ -45,7 +45,7 @@ const STRIP = 1 / 6;
 const SAMPLE = 0.5;
 
 /** Minimum gap between the white and black reference blocks for a frame to be readable, 0-255. */
-export const MIN_CONTRAST = 60;
+const MIN_CONTRAST = 60;
 
 /** How long each audio tone step lasts. */
 export const STEP_MS = 200;

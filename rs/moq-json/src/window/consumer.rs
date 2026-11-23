@@ -1,6 +1,6 @@
 //! Consuming a window from a track: a [`Decoder`] plus the track it reads from.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use serde::de::DeserializeOwned;
 
@@ -72,16 +72,14 @@ impl<T: DeserializeOwned> Consumer<T> {
 			}
 
 			let Some(group) = &mut self.group else {
-				match self.track.poll_next_group(waiter)? {
-					Poll::Ready(Some(moq_net::track::Item::Group(group))) => {
+				// The window advances by index, so a group given up on is read past.
+				match ready!(self.track.poll_next_group(waiter)?) {
+					Some(group) => {
 						self.codec = Some(Codec::new());
 						self.group = Some(group);
 						continue;
 					}
-					// The window advances by index, so a group given up on is read past.
-					Poll::Ready(Some(moq_net::track::Item::Gap { .. })) => continue,
-					Poll::Ready(None) => return Poll::Ready(Ok(None)),
-					Poll::Pending => return Poll::Pending,
+					None => return Poll::Ready(Ok(None)),
 				}
 			};
 

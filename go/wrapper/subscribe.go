@@ -153,13 +153,25 @@ func (t *TrackConsumer) Info() TrackInfo {
 }
 
 // Update changes this subscriber's delivery preferences. It fails on a
-// negative MaxDelay, or a time anchor the track can't serve.
+// negative MaxDelay, or a range time the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {
 		return err
 	}
 	return t.inner.Update(sub)
+}
+
+// Refresh asks the publisher for a group newer than the newest held, and
+// returns once the request is sent. It is judged by the track's TrackRefresh:
+// sent once the newest group is old enough, when whatever serves the track
+// reads it (the session forwarding it upstream, or a local publisher blocked in
+// TrackDemand.Refresh). Concurrent calls share one request and all return when
+// it is sent. Cancelling ctx before then withdraws this call's request. It
+// returns at once when there is nothing to send, or when a newer group lands
+// first. The new group arrives through the normal reads, such as NextGroup.
+func (t *TrackConsumer) Refresh(ctx context.Context) error {
+	return bridge.CallErr(ctx, nil, t.inner.Refresh)
 }
 
 // Groups ranges over groups in start order.
@@ -201,7 +213,7 @@ func (f *VideoDecodedFrame) Height() uint32 {
 }
 
 // Pixels converts the frame to tightly packed pixels in format.
-func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
+func (f *VideoDecodedFrame) Pixels(format *VideoPixelFormat) ([]byte, error) {
 	return f.inner.Pixels(format)
 }
 

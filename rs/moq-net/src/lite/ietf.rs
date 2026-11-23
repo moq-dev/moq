@@ -851,7 +851,7 @@ mod hop_tests {
 			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
 			info.max_age = Some(Duration::from_secs(7));
 			info.priority = 9;
-			info.refresh = Some(0);
+			info.refresh = crate::track::Refresh::default().with_ratio(0);
 			let track_properties = draft22(vec![property(0x40, 3)]);
 			info.properties = track_properties.clone();
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
@@ -922,7 +922,12 @@ mod hop_tests {
 			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(
 				(info.max_age, info.timescale, info.priority, info.refresh),
-				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9, Some(0)),
+				(
+					Some(Duration::from_secs(7)),
+					Some(Timescale::MILLI),
+					9,
+					crate::track::Refresh::default().with_ratio(0)
+				),
 				"{offer:?}"
 			);
 			match negotiated {
@@ -1026,7 +1031,7 @@ mod hop_tests {
 			e.varint(0x30).unwrap();
 			e.varint(value).unwrap();
 			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
-			info.refresh = refresh;
+			info.refresh = crate::track::Refresh::default().with_ratio(refresh);
 			info.properties = draft22(vec![Property {
 				id: IMMUTABLE,
 				value: Value::Bytes(sealed.into()),
@@ -1127,9 +1132,9 @@ mod hop_tests {
 		drop(sessions);
 	}
 
-	/// Every hop carries IETF times, and provenance keeps them unchecked after a hop that
-	/// negotiated the extension. A peer declining it checks them like native moq-lite, as a
-	/// listing's copy does. SUBSCRIBE and FETCH must agree with TRACK_INFO.
+	/// Every hop carries IETF times, and provenance survives a hop that negotiated the
+	/// extension. A peer declining it, like a listing, sees a native moq-lite track.
+	/// SUBSCRIBE and FETCH must agree with TRACK_INFO.
 	#[kio::test]
 	async fn ietf_timestamps_keep_their_provenance_across_a_hop() {
 		for offer in [[true, true], [true, false], [false, true]] {
@@ -1184,19 +1189,21 @@ mod hop_tests {
 					.await
 					.unwrap()
 					.unwrap();
-			// A peer may have stamped arrival times. The second group's rewind must not
-			// acquire native moq-lite checks merely because it crossed a negotiated hop;
-			// without the extension, the copy is checked, so it advances instead.
-			let start = if negotiated { ts(50) } else { ts(150) };
 			let mut group = track.create_group(1u64.into()).unwrap();
-			group.write_frame(start, b"frame".to_vec()).unwrap();
+			group.write_frame(ts(150), b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;
 			assert_eq!(received.start, 1);
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(frame.timestamp, start, "{offer:?}");
+			assert_eq!(frame.timestamp, ts(150), "{offer:?}");
 			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
+			// Provenance exempts nothing from the rewind check.
+			let mut rewound = track.create_group(2u64.into()).unwrap();
+			assert!(matches!(
+				rewound.write_frame(ts(50), b"frame".to_vec()),
+				Err(crate::Error::TimestampMismatch)
+			));
 			drop(sessions);
 		}
 	}

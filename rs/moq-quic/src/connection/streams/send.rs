@@ -54,8 +54,8 @@ impl Send {
 	}
 
 	pub(super) fn finish(&mut self) -> Result<(), Error> {
-		if let Some(error_code) = self.stop_reason {
-			Err(Error::Stopped(error_code))
+		if self.stop_reason.is_some() {
+			Err(Error::Stopped)
 		} else if self.state == SendState::Ready {
 			self.state = SendState::DataSent {
 				finish_acked: false,
@@ -67,20 +67,21 @@ impl Send {
 		}
 	}
 
-	/// Queue as much of `data` as `limit` and the stream's flow control allow.
+	/// Queue as much of `data` as `limit` and the stream's flow control allow, or `None` when
+	/// neither has room.
 	///
 	/// Each chunk is taken with [`Buf::copy_to_bytes`], which a [`Bytes`](bytes::Bytes) source
 	/// splits off without copying.
-	pub(super) fn write(&mut self, data: &mut impl Buf, limit: u64) -> Result<usize, Error> {
+	pub(super) fn write(&mut self, data: &mut impl Buf, limit: u64) -> Result<Option<usize>, Error> {
 		if !self.is_writable() {
 			return Err(Error::Closed);
 		}
-		if let Some(error_code) = self.stop_reason {
-			return Err(Error::Stopped(error_code));
+		if self.stop_reason.is_some() {
+			return Err(Error::Stopped);
 		}
 		let budget = self.max_data - self.pending.offset();
 		if budget == 0 || limit == 0 {
-			return Err(Error::Blocked);
+			return Ok(None);
 		}
 		let mut limit = usize::try_from(limit.min(budget)).unwrap_or(usize::MAX);
 
@@ -94,7 +95,7 @@ impl Send {
 			limit -= take;
 			written += take;
 		}
-		Ok(written)
+		Ok(Some(written))
 	}
 
 	/// How the stream ended, if it has: a peer's stop wins over the end it interrupted.
@@ -373,43 +374,76 @@ impl<'a> Stream<'a> {
 	/// Queue as much of `data` as the stream and connection accept now, returning how many bytes
 	///
 	/// Each chunk is taken with [`Buf::copy_to_bytes`], which a [`Bytes`](bytes::Bytes) source
-	/// splits off without copying. Fails with [`Error::Blocked`] when nothing fits;
-	/// [`Self::poll_write`] waits for room instead.
-	pub fn write(&mut self, data: &mut impl Buf) -> Result<usize, Error> {
+	/// splits off without copying. Pending registers `waiter` until flow control or the send
+	/// buffer has room, the peer stops the stream, or it is finished, reset, or released. Fails
+	/// with [`Error::Stopped`] once the peer stopped it, which [`Self::stopped`] gives the code
+	/// of, and with [`Error::ConnectionLost`] once the connection is lost.
+	pub fn poll_write(&mut self, waiter: &kio::Waiter, data: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		if let Some(written) = self.write_now(data)? {
+			return Poll::Ready(Ok(written));
+		}
+		if self.state.waits.lost().is_some() {
+			return Poll::Ready(Err(Error::ConnectionLost));
+		}
+		self.state.waits.register(self.id, Wait::Write, waiter);
+		Poll::Pending
+	}
+
+	/// [`Self::poll_write`] without waiting, for tests and the fuzz target.
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn try_write(&mut self, data: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		self.poll_write(&kio::Waiter::noop(), data)
+	}
+
+	/// [`Self::try_write`] when something must fit, for tests.
+	///
+	/// # Panics
+	/// - when nothing fits
+	#[cfg(test)]
+	pub(crate) fn write(&mut self, data: &mut impl Buf) -> Result<usize, Error> {
+		match self.try_write(data) {
+			Poll::Ready(result) => result,
+			Poll::Pending => panic!("write blocked"),
+		}
+	}
+
+	/// The bytes of `data` queued, or `None` when nothing fits.
+	fn write_now(&mut self, data: &mut impl Buf) -> Result<Option<usize>, Error> {
 		if self.closed {
 			trace!(%self.id, "write blocked; connection draining");
-			return Err(Error::Blocked);
+			return Ok(None);
 		}
 
 		let limit = self.state.write_limit();
 		let max_data = self.state.max_send_data(self.id);
 		let stream = StreamsState::send_mut(&mut self.state.send, self.id, max_data)?;
 		let was_pending = stream.is_pending();
-		let written = match stream.write(data, limit) {
-			Ok(written) => written,
-			Err(Error::Blocked) => {
-				if limit == 0 {
-					trace!(
-						stream = %self.id, max_data = self.state.max_data, data_sent = self.state.data_sent,
-						"write blocked by connection-level flow control or send window"
-					);
-					self.state.connection_blocked.insert(self.id);
-					// Only report the peer's limit, not our own send window.
-					if self.state.data_sent == self.state.max_data
-						&& self.state.data_blocked_limit != Some(self.state.max_data)
-					{
+		let Some(written) = stream.write(data, limit)? else {
+			if limit == 0 {
+				trace!(
+					stream = %self.id, max_data = self.state.max_data, data_sent = self.state.data_sent,
+					"write blocked by connection-level flow control or send window"
+				);
+				self.state.connection_blocked.insert(self.id);
+				// Only report the peer's limit, not our own send window.
+				if self.state.data_sent == self.state.max_data {
+					// A new episode wakes a transmit to date it, even with no new DATA_BLOCKED.
+					let mut wake = self.state.send_stalled();
+					if self.state.data_blocked_limit != Some(self.state.max_data) {
 						self.state.data_blocked_limit = Some(self.state.max_data);
 						self.pending.data_blocked = true;
+						wake = true;
+					}
+					if wake {
 						self.state.waits.wake_transmit();
 					}
-				} else if stream.data_blocked_limit != Some(stream.max_data) {
-					stream.data_blocked_limit = Some(stream.max_data);
-					self.pending.stream_data_blocked.insert(self.id);
-					self.state.waits.wake_transmit();
 				}
-				return Err(Error::Blocked);
+			} else if stream.data_blocked_limit != Some(stream.max_data) {
+				stream.data_blocked_limit = Some(stream.max_data);
+				self.pending.stream_data_blocked.insert(self.id);
+				self.state.waits.wake_transmit();
 			}
-			Err(e) => return Err(e),
+			return Ok(None);
 		};
 		self.state.data_sent += written as u64;
 		self.state.buffered_data += written as u64;
@@ -418,22 +452,40 @@ impl<'a> Stream<'a> {
 			self.state.pending.push(self.id, &mut stream.slot, stream.priority);
 		}
 		self.state.waits.wake_transmit();
-		Ok(written)
+		Ok(Some(written))
 	}
 
-	/// [`Self::write`], or wait for room when nothing fits
+	/// The code of the peer's STOP_SENDING, or `None` while it sent none
 	///
-	/// Pending registers `waiter` until flow control or the send buffer has room, the peer stops
-	/// the stream, or it is finished, reset, or released. Fails with [`Error::ConnectionLost`] once
-	/// the connection is lost.
-	pub fn poll_write(&mut self, waiter: &kio::Waiter, data: &mut impl Buf) -> Poll<Result<usize, Error>> {
-		match self.write(data) {
-			Err(Error::Blocked) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
-			Err(Error::Blocked) => {
-				self.state.waits.register(self.id, Wait::Write, waiter);
+	/// Kept until [`Self::release`], so it can be asked after the stream's state is gone.
+	pub fn stopped(&self) -> Result<Option<VarInt>, Error> {
+		Ok(match self.end()? {
+			Some(End::Stopped(code)) => Some(code),
+			_ => None,
+		})
+	}
+
+	/// Wait for the stream to end, resolving to the peer's stop code, or `None` once the peer
+	/// acknowledged every byte of a finish, or the stream was reset
+	///
+	/// Pending registers `waiter` until then, or until the stream is released. Fails with
+	/// [`Error::ConnectionLost`] once the connection is lost first.
+	pub fn poll_stopped(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		self.poll_end(waiter).map_ok(|end| match end {
+			End::Stopped(code) => Some(code),
+			End::Finished | End::Reset(_) => None,
+		})
+	}
+
+	/// Wait for the stream to end, as [`Self::end`] reports it
+	pub(crate) fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Result<End, Error>> {
+		match self.end()? {
+			Some(end) => Poll::Ready(Ok(end)),
+			None if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			None => {
+				self.state.waits.register(self.id, Wait::End, waiter);
 				Poll::Pending
 			}
-			result => Poll::Ready(result),
 		}
 	}
 
@@ -441,7 +493,7 @@ impl<'a> Stream<'a> {
 	///
 	/// The peer's stop, a reset, or a finish every byte of which the peer acknowledged. Kept
 	/// until [`Self::release`], so it can be asked after the stream's state is gone.
-	pub fn end(&self) -> Result<Option<End>, Error> {
+	pub(crate) fn end(&self) -> Result<Option<End>, Error> {
 		match self.state.send.get(&self.id) {
 			Some(Some(stream)) if stream.released => Err(Error::Closed),
 			Some(Some(stream)) => Ok(stream.end()),
@@ -455,24 +507,7 @@ impl<'a> Stream<'a> {
 		}
 	}
 
-	/// Wait for the stream to end, as [`Self::end`] reports it
-	///
-	/// Pending registers `waiter` until the peer acknowledges a finish, stops the stream, or the
-	/// stream is reset or released. Fails with [`Error::ConnectionLost`] once the connection is
-	/// lost first.
-	pub fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Result<End, Error>> {
-		match self.end() {
-			Ok(Some(end)) => Poll::Ready(Ok(end)),
-			Err(err) => Poll::Ready(Err(err)),
-			Ok(None) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
-			Ok(None) => {
-				self.state.waits.register(self.id, Wait::End, waiter);
-				Poll::Pending
-			}
-		}
-	}
-
-	/// Give up the stream's ID: its [`end`](Self::end) is no longer kept
+	/// Give up the stream's ID: how it ended, as [`Self::stopped`] reports it, is no longer kept
 	///
 	/// The stream itself carries on, so finish or reset it first. Every later call on the ID
 	/// fails with [`Error::Closed`]. Without it, the end of every finished or reset stream is
@@ -496,7 +531,7 @@ impl<'a> Stream<'a> {
 
 	/// Finish the stream, signalling that no more data will be sent
 	///
-	/// If this fails, the stream never reaches [`End::Finished`].
+	/// If this fails, the peer never acknowledges a finish.
 	pub fn finish(&mut self) -> Result<(), Error> {
 		let max_data = self.state.max_send_data(self.id);
 		let stream = StreamsState::send_mut(&mut self.state.send, self.id, max_data)?;
@@ -551,7 +586,7 @@ impl<'a> Stream<'a> {
 
 	/// Whether the peer acknowledged every byte before `offset`
 	///
-	/// Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack holds the data,
+	/// An acknowledgment only means the peer's QUIC stack holds the data,
 	/// not that its application read it.
 	///
 	/// Fails with [`Error::Closed`] once the peer will never acknowledge it, or no longer reads
@@ -735,9 +770,9 @@ impl From<Offset> for u64 {
 	}
 }
 
-/// How an outgoing stream ended, from [`Stream::end`]
+/// How an outgoing stream ended
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum End {
+pub(crate) enum End {
 	/// Finished, and the peer acknowledged every byte
 	Finished,
 	/// The peer asked us to stop sending, with its code
@@ -825,12 +860,9 @@ impl Group {
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-	/// Flow control or the send buffer has no room; [`Stream::poll_write`] waits for it
-	#[error("blocked")]
-	Blocked,
-	/// The peer asked us to stop sending, with its code
-	#[error("stopped by peer: code {0}")]
-	Stopped(VarInt),
+	/// The peer asked us to stop sending; [`Stream::stopped`] gives its code
+	#[error("stopped by peer")]
+	Stopped,
 	/// The datagram is larger than the path or the peer's limit allows
 	#[error("datagram too large")]
 	TooLarge,
@@ -849,8 +881,7 @@ pub enum Error {
 impl From<Error> for io::Error {
 	fn from(err: Error) -> Self {
 		let kind = match err {
-			Error::Blocked => io::ErrorKind::WouldBlock,
-			Error::Stopped(_) => io::ErrorKind::ConnectionReset,
+			Error::Stopped => io::ErrorKind::ConnectionReset,
 			Error::TooLarge => io::ErrorKind::InvalidInput,
 			Error::Unsupported => io::ErrorKind::Unsupported,
 			Error::Closed | Error::ConnectionLost => io::ErrorKind::NotConnected,

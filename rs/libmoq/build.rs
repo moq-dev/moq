@@ -4,23 +4,22 @@ use std::path::PathBuf;
 
 const LIB_NAME: &str = "moq";
 
-/// Enums the header must declare even though no signature mentions them.
-const ENUMS: &[&str] = &[
-	"moq_container_kind",
-	"moq_audio_format",
-	"moq_audio_sample_format",
-	"moq_video_format",
-	"moq_container_format",
-	"moq_video_pixel_format",
-	"moq_video_codec",
-	"moq_video_encoder_kind",
-	"moq_error_scope",
-	"moq_protocol_kind",
-	"moq_demand",
-	"moq_decode_start",
-	"moq_anchor_kind",
-	"moq_compression",
-];
+/// Every `pub enum moq_*` under `dir`, which the header must declare even when no signature
+/// mentions them.
+fn enums(dir: &std::path::Path, found: &mut Vec<String>) {
+	for entry in fs::read_dir(dir).expect("Failed to read src") {
+		let path = entry.expect("Failed to read src entry").path();
+		if path.is_dir() {
+			enums(&path, found);
+		} else if path.extension().is_some_and(|ext| ext == "rs") {
+			let source = fs::read_to_string(&path).expect("Failed to read source");
+			found.extend(source.lines().filter_map(|line| {
+				let name = line.trim().strip_prefix("pub enum ")?.split_whitespace().next()?;
+				name.starts_with("moq_").then(|| name.to_string())
+			}));
+		}
+	}
+}
 
 fn main() {
 	let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -36,6 +35,10 @@ fn main() {
 	// file in the package changes", so the sources cbindgen reads have to be
 	// named explicitly or an edited signature leaves a stale header behind.
 	println!("cargo:rerun-if-changed=src");
+
+	let mut include = Vec::new();
+	enums(&PathBuf::from(&crate_dir).join("src"), &mut include);
+	include.sort();
 
 	let include_dir = out_dir.join("include");
 	fs::create_dir_all(&include_dir).expect("Failed to create include directory");
@@ -54,8 +57,8 @@ fn main() {
 			// These enums cross the ABI as plain `uint32_t`, so that an unknown
 			// discriminant from C is an error rather than UB. That leaves no signature
 			// referencing them, and cbindgen emits only what a signature reaches, so
-			// name them here: without this a C caller has to hardcode the integers.
-			include: ENUMS.iter().map(|name| name.to_string()).collect(),
+			// name them all here: without this a C caller has to hardcode the integers.
+			include,
 			..Default::default()
 		},
 		..Default::default()

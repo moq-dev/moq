@@ -55,6 +55,9 @@ def test_timedelta_conversions():
     assert moq.Timestamp.unscaled(3) == moq.Timestamp(3, None)
     with pytest.raises(ValueError):
         moq.Timestamp.unscaled(3).to_timedelta()
+    # A zero scale has no time either, rather than dividing by zero.
+    with pytest.raises(ValueError):
+        moq.Timestamp(3, 0).to_timedelta()
 
 
 @pytest.mark.parametrize("mode", ["snapshot", "stream"])
@@ -99,7 +102,7 @@ def test_whole_media_frames_require_the_callers_timestamp():
         + bytes([0])
     )
     producer = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=head)
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=head)
     )
     with pytest.raises(moq.Error.Codec, match="timestamp"):
         producer._inner.write_frame(

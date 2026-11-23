@@ -19,18 +19,28 @@ use crate::{Color, Device, Error, Frame, FrameRate, Size};
 /// (VideoToolbox on macOS and iOS today). Building an [`Encoder`] returns
 /// [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode the
 /// requested codec on this machine.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Codec {
-	/// H.264 / AVC, Annex-B with in-band SPS/PPS (the "avc3" shape). The widest
+	/// H.264 / AVC, Annex-B with in-band SPS/PPS, published as avc3 with no
+	/// description. The widest
 	/// support and the default.
 	#[default]
 	H264,
-	/// H.265 / HEVC, Annex-B with in-band VPS/SPS/PPS (the "hev1" shape).
+	/// H.265 / HEVC, Annex-B with in-band VPS/SPS/PPS, published as hev1
+	/// with no description.
 	H265,
 }
 
 impl Codec {
+	/// The codec's lowercase name, such as `h264`.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::H264 => "h264",
+			Self::H265 => "h265",
+		}
+	}
+
 	/// What this codec needs against H.264 for the same picture, which scales the default cap.
 	fn bitrate_scale(self) -> f64 {
 		match self {
@@ -822,7 +832,7 @@ mod tests {
 			"encoded timestamp outside the fed set: {micros:?}"
 		);
 
-		// The first packet must start with an Annex-B start code so the avc3
+		// The first packet must start with an Annex-B start code so the Annex-B
 		// importer can find the inline SPS/PPS.
 		let packets = payloads(&frames);
 		let first = &packets[0];

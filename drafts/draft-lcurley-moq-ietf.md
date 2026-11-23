@@ -143,8 +143,6 @@ Other properties are opaque to this extension.
 ## Timestamps {#timestamps}
 A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop.
 A nonzero Version identifies a track from MoQ Transport, whose objects take their time from their Group ID, in the track's Timescale.
-The receiver MUST NOT apply moq-lite's group-start rewind check to such a track; a Version of zero retains that check.
-Without this extension, or in a listing ({{track}}), the receiver may check them like native moq-lite timestamps and refuse a Group that rewinds.
 
 The FRAME's Timestamp is the object's time.
 A Timestamp property (0x10) a {{moqt}} publisher attached, mutable or sealed, is opaque like any other: it stays in the Property Block, and a relay neither reads nor restates it.
@@ -193,7 +191,7 @@ The receiver parses the keys inside the Immutable Properties from its value, whi
 It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
 
 A TRACKS_ADD ({{moql}} Tracks Stream) embeds TRACK_INFO without TRACK_PROPERTIES, so when the extension is negotiated a subscriber MUST NOT skip the Track Stream for a track it learned from a listing.
-Lacking the Version, a TRACKS_ADD cannot mark a {{moqt}} track's timestamps as unchecked ({{timestamps}}).
+Lacking the Version, a TRACKS_ADD cannot say whether the track's Group Streams carry Object Records ({{group}}).
 
 
 # Security Considerations

@@ -42,10 +42,9 @@ impl<E: CatalogExt> Consumer<E> {
 		// Drain pending groups, keeping only the newest. Remember whether the track is done
 		// so we can distinguish "more groups may arrive" from "no more groups, ever".
 		let track_finished = loop {
+			// Only the newest catalog matters, so a group given up on changes nothing.
 			match self.track.poll_next_group(waiter)? {
-				Poll::Ready(Some(moq_net::track::Item::Group(group))) => self.group = Some(group),
-				// Only the newest catalog matters, so a group given up on changes nothing.
-				Poll::Ready(Some(moq_net::track::Item::Gap { .. })) => {}
+				Poll::Ready(Some(group)) => self.group = Some(group),
 				Poll::Ready(None) => break true,
 				Poll::Pending => break false,
 			}
@@ -358,7 +357,8 @@ struct DerivedAudio {
 /// - **Legacy / LOC**: the bytes are the codec config directly. For AAC we parse the
 ///   `AudioSpecificConfig` and for Opus we parse the `OpusHead`.
 /// - **CMAF**: the bytes are an `ftyp+moov` init segment. We walk the moov to find the
-///   audio `trak` and pull `sample_rate` / `channel_count` from its sample entry.
+///   audio `trak` and read its codec config the same way: the `esds` AudioSpecificConfig or
+///   the `dOps` channel count.
 ///
 /// Returns an error if `init_data` is absent, malformed, or doesn't carry usable audio
 /// parameters. The caller is expected to surface this as a hard failure rather than
@@ -483,16 +483,32 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 		let stbl = &trak.mdia.minf.stbl;
 		for sample in &stbl.stsd.codecs {
 			match sample {
+				// The sample entry's 16-bit fields can't hold 96 kHz and describe an SBR or PS
+				// stream's core, so the codec's own config gives the rate and channels.
 				mp4_atom::Codec::Mp4a(mp4a) => {
+					let malformed = || Error::MalformedAac(track.name.clone());
+					let asc = mp4a
+						.esds
+						.es_desc
+						.dec_config
+						.dec_specific
+						.as_ref()
+						.ok_or_else(malformed)?;
+					let cfg = crate::codec::aac::Config::parse(&mut asc.raw.as_slice()).map_err(|_| malformed())?;
 					return Ok(DerivedAudio {
-						sample_rate: mp4a.audio.sample_rate.integer() as u32,
-						channel_count: mp4a.audio.channel_count as u32,
+						sample_rate: cfg.sample_rate,
+						channel_count: cfg.channel_count,
 					});
 				}
+				// Opus decodes at 48 kHz; the dOps input rate is informational.
 				mp4_atom::Codec::Opus(opus) => {
+					let channel_count = u32::from(opus.dops.output_channel_count);
+					if channel_count == 0 {
+						return Err(Error::MalformedOpus(track.name.clone()).into());
+					}
 					return Ok(DerivedAudio {
-						sample_rate: opus.audio.sample_rate.integer() as u32,
-						channel_count: opus.audio.channel_count as u32,
+						sample_rate: 48_000,
+						channel_count,
 					});
 				}
 				_ => {}
@@ -1084,6 +1100,55 @@ mod test {
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
 		assert_eq!(audio.sample_rate, 48_000);
 		assert_eq!(audio.channel_count, 2);
+	}
+
+	/// A CMAF init's rate and channels come from its codec config, not the sample entry, which
+	/// can't hold 96 kHz and describes an HE-AACv2 stream's mono core.
+	#[test]
+	fn cmaf_audio_derivation_reads_the_codec_config() {
+		let aac = |profile, rate, channels| {
+			let mut config =
+				hang::catalog::AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile }), rate, channels);
+			config.description = Some(
+				crate::codec::aac::Config::new(profile, rate, channels)
+					.encode()
+					.unwrap(),
+			);
+			(format!("mp4a.40.{profile}"), config)
+		};
+		let opus = (
+			"opus".to_string(),
+			hang::catalog::AudioConfig::new(AudioCodec::Opus, 48_000, 2),
+		);
+		for (codec, config) in [aac(2, 96_000, 2), aac(29, 48_000, 2), opus] {
+			let mut trak = crate::container::fmp4::synthesize_audio_trak(1, 48_000, &config).unwrap();
+			match &mut trak.mdia.minf.stbl.stsd.codecs[0] {
+				mp4_atom::Codec::Mp4a(mp4a) => mp4a.audio.channel_count = 1,
+				mp4_atom::Codec::Opus(opus) => opus.audio.sample_rate = mp4_atom::FixedPoint::from(44_100u16),
+				other => panic!("unexpected {other:?}"),
+			}
+			let trex = mp4_atom::Trex {
+				track_id: 1,
+				default_sample_description_index: 1,
+				..Default::default()
+			};
+			let init = crate::container::fmp4::encode_init(None, vec![trak], vec![trex]).unwrap();
+
+			let mut track = audio_track("audio0", moq_msf::Packaging::Cmaf);
+			track.codec = Some(codec.clone());
+			track.samplerate = None;
+			track.channel_config = None;
+			track.init_data = Some(base64::engine::general_purpose::STANDARD.encode(&init).into());
+			let msf = moq_msf::Catalog::new(vec![track]);
+
+			let catalog = from_msf::<()>(&msf, &moq_net::Path::empty()).expect("CMAF audio should convert");
+			let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
+			assert_eq!(
+				(audio.sample_rate, audio.channel_count),
+				(config.sample_rate, 2),
+				"{codec}"
+			);
+		}
 	}
 
 	#[test]

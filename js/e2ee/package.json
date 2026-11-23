@@ -16,7 +16,7 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts && tsc --project test-dts/tsconfig.json",
-		"check": "tsc --noEmit && tsc --noEmit --project bench/tsconfig.json",
+		"check": "bun check --no-script && bun check --no-script -p bench/tsconfig.json",
 		"test": "bun test --only-failures"
 	},
 	"dependencies": {

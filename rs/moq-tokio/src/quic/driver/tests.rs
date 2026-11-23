@@ -2336,6 +2336,31 @@ async fn reads_after_a_received_reset_fail_with_it() {
 	);
 }
 
+/// A lease wanting more than a reset stream has left fails with the reset, but leaves its
+/// reliable bytes for a smaller lease.
+#[tokio::test]
+async fn a_failed_lease_keeps_a_reset_streams_reliable_bytes() {
+	let _guard = subscribe();
+	let endpoint = endpoint();
+	let (client, server) = connect_self(&endpoint).await;
+	let mut send = client.open_uni(Default::default()).await.unwrap();
+	send.write_all(&b"reliable"[..]).await.unwrap();
+	let mut recv = server.accept_uni().await.unwrap();
+	let offset = send.offset();
+	send.reset_at(offset, VarInt::from_u32(7));
+
+	let lease = timeout(Duration::from_secs(10), recv.lease(16)).await.unwrap().err();
+	assert!(
+		matches!(lease, Some(recv::Error::Reset(code)) if code == VarInt::from_u32(7)),
+		"{lease:?}"
+	);
+	let mut lease = recv.lease(8).await.unwrap();
+	assert_eq!(lease.copy_to_bytes(8), &b"reliable"[..]);
+	lease.release();
+	let reset = recv.received_reset().await;
+	assert_eq!(reset.unwrap(), Some(VarInt::from_u32(7)));
+}
+
 /// A tiny datagram, and a tiny stream frame taken from a lease, each reach the application in
 /// an allocation of their own rather than as a slice of the receive batch they arrived in, which
 /// their credit does not pay for.

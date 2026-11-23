@@ -46,7 +46,3 @@ Agent's choices, for the implementer to revisit:
   seeded scheduler and network with no shims.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) - the scripted partition and failover fixtures

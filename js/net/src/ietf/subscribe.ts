@@ -23,11 +23,8 @@ export const GroupOrder = {
 	Descending: 0x02,
 } as const;
 
-/** A GROUP_ORDER wire value. */
-export type GroupOrder = (typeof GroupOrder)[keyof typeof GroupOrder];
-
 /** The GROUP_ORDER byte for a model {@link Order}. */
-function encodeGroupOrder(order: Order): GroupOrder {
+function encodeGroupOrder(order: Order): number {
 	return order === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
 }
 

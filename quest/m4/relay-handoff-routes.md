@@ -18,9 +18,13 @@ relay's drain ends.
   between them already exists; the new relay runs a moq-lite session to the
   old one over a socket it carries, and each treats the other as a cluster
   peer until the old one exits, so routes cross between generations as they
-  cross between nodes. Check first how the route rule treats two processes
-  that share the node's identity, since a shared hop would read each other's
-  routes as loops.
+  cross between nodes. The two share only the node's stats name
+  (`rs/moq-relay/src/handoff.rs`): each process routes under its own random
+  Relay ID (`origin::Config::default`, which `Cluster::new` uses), so
+  lite-07's rule that a node never uses a route whose Path names its own
+  relay treats them as two routing nodes, and neither refuses the other's
+  routes. A test pins that, so a later change that shares the Relay ID
+  across a handoff fails it.
 - Rejected: keep a peer's old session past idle until the old relay closes it.
   That holds the old relay to its drain deadline again, which is what handoff
   removes.
