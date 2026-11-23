@@ -355,16 +355,9 @@ impl Node {
 		}
 	}
 
-	/// A node for the origin whose node is `relay`, named by it and by when it started,
-	/// which only grows across the restarts of one relay, that `forwards` as the origin does.
+	/// A node for the origin whose node is `relay`, that `forwards` as the origin does.
 	pub fn origin(relay: std::num::NonZeroU64, forwards: bool, clock: Deadlines) -> Self {
-		let started = kio::clock::Wall::now().saturating_duration_since(kio::clock::Wall::UNIX_EPOCH);
-		let me = NodeId {
-			relay: relay.get(),
-			start: u64::try_from(started.as_micros()).unwrap_or(u64::MAX),
-			marked: false,
-		};
-		Self::new(me, forwards, clock)
+		Self::new(NodeId::new(relay.get()), forwards, clock)
 	}
 
 	/// Whether `other` is this node, rather than another origin's.

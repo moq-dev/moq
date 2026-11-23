@@ -32,13 +32,11 @@ export async function encodeNode(w: Writer, version: Version): Promise<void> {
 	if (hasRoutes(version)) await w.u62(0n);
 }
 
-/** Decode the forwarding node a request names: a Node ID, and the node's start and Marked unless
- * the ID is 0. An endpoint forwards nothing, so whichever node the request names, it serves the
- * request itself. */
+/** Decode the forwarding node a request names: a Node ID, and its Marked unless the ID is 0. An
+ * endpoint forwards nothing, so whichever node the request names, it serves the request itself. */
 export async function decodeNode(r: Reader, version: Version): Promise<void> {
 	if (!hasRoutes(version)) return;
 	if ((await r.u62()) === 0n) return;
-	await r.u62();
 	await r.bool();
 }
 

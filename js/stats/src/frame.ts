@@ -58,7 +58,6 @@ export const RouteClosesSchema = zeros({
 	malformed: counter,
 	role: counter,
 	unasked: counter,
-	regressed: counter,
 	other: counter,
 });
 

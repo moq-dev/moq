@@ -1269,7 +1269,7 @@ mod tests {
 		use crate::container::Container as _;
 		use crate::container::test_util::{Link, origin, raw_frame};
 
-		let (publisher, subscriber) = (origin(1), origin(2));
+		let (publisher, subscriber) = (origin(), origin());
 		let _link = Link::new(&publisher, &subscriber).await;
 
 		let broadcast = publisher
@@ -1351,12 +1351,12 @@ mod tests {
 		use crate::container::test_util::{Link, origin, raw_frame};
 
 		for relay in [false, true] {
-			let (publisher, subscriber) = (origin(1), origin(3));
+			let (publisher, subscriber) = (origin(), origin());
 			// SETUP and the Announce Stream take the first two uni streams; the third is
 			// the backlog's oldest group.
 			let (held, _downstream) = match relay {
 				true => {
-					let middle = origin(2);
+					let middle = origin();
 					let held = Link::held(&publisher, &middle, 3).await;
 					(held, Some(Link::new(&middle, &subscriber).await))
 				}

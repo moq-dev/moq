@@ -36,7 +36,6 @@ export const BucketFrameSchema: ZodMiniObject<{
 					malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 					other: ZodMiniDefault<ZodMiniNumber<number>>;
 					overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-					regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 					role: ZodMiniDefault<ZodMiniNumber<number>>;
 					stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 					unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -157,7 +156,6 @@ export const BucketFrameSchema: ZodMiniObject<{
 					malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 					other: ZodMiniDefault<ZodMiniNumber<number>>;
 					overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-					regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 					role: ZodMiniDefault<ZodMiniNumber<number>>;
 					stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 					unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -245,7 +243,6 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 				other: ZodMiniDefault<ZodMiniNumber<number>>;
 				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 				role: ZodMiniDefault<ZodMiniNumber<number>>;
 				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -366,7 +363,6 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 				other: ZodMiniDefault<ZodMiniNumber<number>>;
 				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 				role: ZodMiniDefault<ZodMiniNumber<number>>;
 				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -755,7 +751,6 @@ export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPr
 			malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 			other: ZodMiniDefault<ZodMiniNumber<number>>;
 			overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-			regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 			role: ZodMiniDefault<ZodMiniNumber<number>>;
 			stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 			unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -815,7 +810,6 @@ export const PresenceSchema: ZodMiniPrefault<ZodMiniObject<{
 			malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 			other: ZodMiniDefault<ZodMiniNumber<number>>;
 			overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-			regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 			role: ZodMiniDefault<ZodMiniNumber<number>>;
 			stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 			unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -881,7 +875,6 @@ export const RouteClosesSchema: ZodMiniPrefault<ZodMiniObject<{
 	malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 	other: ZodMiniDefault<ZodMiniNumber<number>>;
 	overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-	regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 	role: ZodMiniDefault<ZodMiniNumber<number>>;
 	stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 	unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -903,7 +896,6 @@ export const RoutesSchema: ZodMiniPrefault<ZodMiniObject<{
 		malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 		other: ZodMiniDefault<ZodMiniNumber<number>>;
 		overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-		regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 		role: ZodMiniDefault<ZodMiniNumber<number>>;
 		stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 		unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -965,7 +957,6 @@ export const TotalsFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPref
 				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 				other: ZodMiniDefault<ZodMiniNumber<number>>;
 				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 				role: ZodMiniDefault<ZodMiniNumber<number>>;
 				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -1067,7 +1058,6 @@ export const TotalsSchema: ZodMiniPrefault<ZodMiniObject<{
 				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 				other: ZodMiniDefault<ZodMiniNumber<number>>;
 				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 				role: ZodMiniDefault<ZodMiniNumber<number>>;
 				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 				unasked: ZodMiniDefault<ZodMiniNumber<number>>;

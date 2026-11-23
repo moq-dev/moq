@@ -1720,14 +1720,12 @@ mod test {
 		let mut msg = subscribe_sample();
 		msg.node = Some(crate::route::NodeId {
 			relay: 0x7a3f,
-			start: 9,
 			marked: false,
 		});
 		assert_eq!(
 			roundtrip(&msg, Version::Lite07).node,
 			Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9,
 				marked: false,
 			})
 		);

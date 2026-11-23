@@ -34,7 +34,7 @@ open import Data.List.Base using (List; []; length)
 open import Data.Maybe.Base using (Maybe; nothing; just)
 open import Data.Nat.Base using (ℕ; _+_; _≤ᵇ_; z≤n)
 import Data.Nat.Properties as ℕ
-open import Data.Product.Base using (_×_; _,_; proj₁; proj₂)
+open import Data.Product.Base using (_×_; _,_; proj₁)
 open import Data.Sum.Base using (inj₁)
 open import Relation.Binary.PropositionalEquality using (_≡_; refl; cong)
 open import Relation.Nullary.Decidable.Core using (does)
@@ -64,9 +64,9 @@ private
 ------------------------------------------------------------------------
 -- What else a claim carries
 
--- A Node ID: relay, start, and 1 for a marked identity.
+-- A Node ID: relay, and 1 for a marked identity.
 Who : Set
-Who = ℕ × ℕ × ℕ
+Who = ℕ × ℕ
 
 -- The claimant, and the key its holder gives the neighbour that gave it.
 Extra : Set
@@ -74,14 +74,14 @@ Extra = Who × ℕ
 
 private
   OE : Ordered Extra
-  OE = lex (lex nat (lex nat nat)) nat
+  OE = lex (lex nat nat) nat
 
   e₀ : Extra
-  e₀ = (0 , 0 , 0) , 0
+  e₀ = (0 , 0) , 0
 
   e₀-least : ∀ e → Ordered._≤_ OE e₀ e
-  e₀-least ((_ , _ , _) , _) =
-    lex-≤ (lex nat (lex nat nat)) nat (lex-≤ nat (lex nat nat) z≤n λ _ → lex-≤ nat nat z≤n λ _ → z≤n) λ _ → z≤n
+  e₀-least ((_ , _) , _) =
+    lex-≤ (lex nat nat) nat (lex-≤ nat nat z≤n λ _ → z≤n) λ _ → z≤n
 
   -- Among equal ranks, marks, and lengths, by claimant and giver: one claimant has one
   -- claim of a broadcast, and one holder takes it from a giver once, so the path never
@@ -114,7 +114,7 @@ record Step : Set where
     lowered      : ℕ          -- how far below the claim's path the receiver is shown it
     run          : Maybe ℕ    -- the publisher's run, on its own step
     top          : Precedence -- the best precedence the receiver knows of, reachable or not
-    me           : ℕ × ℕ      -- the receiver's relay and start
+    me           : ℕ          -- the receiver's relay
     giver        : ℕ          -- the receiver's key for the giver
 
 private
@@ -147,13 +147,13 @@ refuses f _ v =
 -- it; a domain step keeps the announcer's claimant.
 tag : Step → Edge → Valid → Extra
 tag f _ v with S.adopts f
-... | true  = (proj₁ (S.me f) , proj₂ (S.me f) , (if marked v ∨ S.marked-here f then 1 else 0)) , S.giver f
+... | true  = (S.me f , (if marked v ∨ S.marked-here f then 1 else 0)) , S.giver f
 ... | false = proj₁ (extra v) , 0
 
 policy : Policy
 policy = record
   { Link         = Step
-  ; down         = step false 0 0 false false false false 0 nothing (0 , nothing) (0 , 0) 0
+  ; down         = step false 0 0 false false false false 0 nothing (0 , nothing) 0 0
   ; rise         = rise
   ; rise-≥       = rise-≥
   ; cost         = S.cost

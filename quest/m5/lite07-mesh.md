@@ -17,7 +17,7 @@ Decided 2026-10-05, and redesigned 2026-11-15 by
 [cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md): the final lite-07
 carries the route layer of [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987).
 Relays route to each other by ROUTE, ROUTE_END, DEAD, and DRAIN under a
-Node ID with a Start, and every claim belongs to the relay that announces
+Node ID, and every claim belongs to the relay that announces
 it, with no hop list on the wire; a claim from a lite-06 peer, or across a
 scoped grant, carries a chain of the relays that announced it again. Announce
 compression is `Path Base`/`Path Keep`. moq.pro's rollout must plan for that
