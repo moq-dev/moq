@@ -34562,6 +34562,42 @@ mod test {
 		drop(arriving);
 	}
 
+	/// A frame partly read when the pool evicts its copy, whose flight the handler refuses as
+	/// too old, fails `Old` as its group does, not with the copy's eviction.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_frame_whose_flight_is_refused_as_stale_fails_old() {
+		let noop = kio::Waiter::noop();
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		let handle = live.handle();
+		let payload = numbered(0);
+		let mut arriving = live.create_frame(frame_info(&payload)).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		let Poll::Ready(Ok(Some(mut frame))) = reader.poll_next_frame(&noop) else {
+			panic!("the arriving frame");
+		};
+		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(_)))));
+		handle.shed_all();
+
+		let (flag, waiter) = Flag::waiter();
+		assert!(frame.poll_read_chunk(&waiter).is_pending(), "boarding a flight");
+		let fill = match requests.poll_requested_fill(&noop) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("a flight is asked"),
+		};
+		// As a session reads the refusal off the wire.
+		fill.refuse_groups(0..1, Error::Stream(StreamError::Old));
+		assert!(flag.take(), "the refusal woke the read");
+		assert!(
+			matches!(frame.poll_read_chunk(&waiter), Poll::Ready(Err(Error::Old))),
+			"stale, not evicted"
+		);
+		drop(arriving);
+	}
+
 	/// The end of a group evicted while it arrives waits on a flight from past the frames
 	/// the reader already prefetched, rather than failing the group with them in hand.
 	#[test]

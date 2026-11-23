@@ -1683,7 +1683,8 @@ impl Consumer {
 							flown = true;
 							(None, frame, index)
 						}
-						Poll::Ready(Err(_)) => return res,
+						// The flight's verdict, such as `Old` for a group refused as stale.
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 						// A read waiting on its flight is stalled like one waiting on its bytes.
 						Poll::Pending => return self.poll_expired_or(waiter, Poll::Pending),
 					}
