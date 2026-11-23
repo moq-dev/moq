@@ -12,35 +12,77 @@ import type { BufferedRanges, Frame, ReceivedFrame } from "./types.ts";
 export const DELAY_MAX = Duration.secs(10);
 
 /**
- * How far behind the live edge a reader plays: its playout delay. `@moq/net`'s `Moq.Track.Delay`
- * keeps only `max`, since a live join states its lag as a range start; build the subscription for
- * this delay with {@link subscription}.
+ * How far behind the live edge a reader plays: its playout delay, where it starts and how late it
+ * may fall. Build the subscription for it with {@link subscription}, which places each range from the
+ * oldest group as a live join. The default states no minimum and a zero maximum, which reaches back
+ * as far as the max allows and skips a superseded group at once. Mirrors `moq_mux::container::Delay`.
  */
 export interface Delay {
 	/**
 	 * How far behind the live edge the reader starts: {@link subscription} turns each range from the
-	 * oldest group into a live join this far back. `null` or omitted is not stated: such a range
-	 * still reads from the oldest group, and the {@link Consumer}'s start reads it as zero.
+	 * oldest group into a live join this far back, as its `min`. `null` or omitted is not stated: the
+	 * join then reaches back as far as {@link max} allows, and the {@link Consumer}'s start reads it as
+	 * zero.
 	 */
 	min?: Duration | null;
-	/** How late a group may fall before it is skipped. The same as `Moq.Track.Delay.max`. */
+	/**
+	 * How long a superseded group stays worth delivering: each live join's `max`. Omitted is zero, and
+	 * `null` is for as long as the publisher keeps it; with no {@link min} either, a range from the
+	 * oldest group then stays history, delivered in full.
+	 */
 	max?: Duration | null;
 }
 
+// A delay's max as a live join's: omitted is zero.
+function maxOf(delay: Delay): Duration | null {
+	return delay.max === undefined ? Duration.ZERO : delay.max;
+}
+
 /**
- * `subscription` (default one range from the oldest group) at `delay`: `delay.max` as its budget,
- * and each range from the oldest group a live join `delay.min` behind the live edge, once `min` is
- * stated. Other ranges keep their start. Mirrors `moq_mux::container::Delay::subscription`.
+ * `subscription` (default one range from the oldest group) at `delay`: each range from the oldest
+ * group joins live `delay.min` behind the live edge, or `delay.max` when only that is stated, and each
+ * live join takes `delay.max` as its own. A time start stays history. Mirrors
+ * `moq_mux::container::Delay::subscription`.
  */
 export function subscription(delay: Delay, subscription: Moq.Track.Subscription = {}): Moq.Track.Subscription {
-	const min = delay.min ?? undefined;
-	const net: Moq.Track.Delay = delay.max === undefined ? {} : { max: delay.max };
+	const max = maxOf(delay);
+	const lag = delay.min ?? max;
 	return {
 		...subscription,
-		delay: net,
-		ranges: (subscription.ranges ?? [{}]).map((range) =>
-			min === undefined || range.start !== undefined ? { ...range } : { ...range, start: { live: min } },
-		),
+		ranges: (subscription.ranges ?? [{}]).map((range): Moq.Track.Range => {
+			if (typeof range.start === "object")
+				return { ...range, start: { live: { min: range.start.live.min, max } } };
+			if (range.start === undefined && lag !== null) return { ...range, start: { live: { min: lag, max } } };
+			return { ...range };
+		}),
+	};
+}
+
+/**
+ * {@link subscription} as an update to `current`, the subscription it replaces: a range from the
+ * oldest group that `current` already joins live with the same end keeps that join's `min` and takes
+ * the new `delay.max`, so changing `delay.min` places only the ranges it adds. A live join that
+ * already resolved stays where it started: a change of its max alone is retuned in place. Mirrors
+ * `moq_mux::container::Delay::update`.
+ */
+export function update(
+	delay: Delay,
+	current: Moq.Track.Subscription,
+	asked: Moq.Track.Subscription = {},
+): Moq.Track.Subscription {
+	const max = maxOf(delay);
+	const ranges = asked.ranges ?? [{}];
+	const updated = subscription(delay, asked);
+	return {
+		...updated,
+		ranges: (updated.ranges ?? []).map((range, index) => {
+			const { start, end } = ranges[index];
+			if (start !== undefined) return range;
+			// For a caller whose own ranges start at the oldest group or a time, a live join in `current`
+			// is one a delay placed.
+			const held = current.ranges?.find((held) => typeof held.start === "object" && held.end === end)?.start;
+			return typeof held === "object" ? { ...range, start: { live: { min: held.live.min, max } } } : range;
+		}),
 	};
 }
 
@@ -58,8 +100,8 @@ export interface ConsumerProps {
 	 * `max` alone gives up a missing group: the ordered read waits for one until where the group past
 	 * it begins falls `max` behind the newest content. `max` is also measured as the span from the
 	 * oldest buffered frame to the newest, so it bounds how long a late group that did arrive is
-	 * waited for. It is the local half of the subscription's `delay.max`; both measure the same
-	 * budget, one on the wire and one as frames are read. It bounds a join's lateness too: a backlog
+	 * waited for. It is the local half of each live join's `max` on the subscription; both measure the
+	 * same budget, one on the wire and one as frames are read. It bounds a join's lateness too: a backlog
 	 * that landed before the first read starts at the first group whose first frame is within it,
 	 * plus any warmup, of the newest content, though the start keeps the group covering the live edge
 	 * less `min` and the warmup.
@@ -107,8 +149,8 @@ export interface ConsumerProps {
 	 * Without it the consumer reads `track.ordered()`, and the estimate learns from the frames that
 	 * read hands out and from when each group it gives up as a join's backlog landed. Either way the
 	 * ordered read decides every hole: a missing group is a hole once it reports a gap and the media
-	 * after it does not continue the timeline, and never waited for here. Its `delay.max` is how long
-	 * a hole is waited for, so size it to what the player can still play late.
+	 * after it does not continue the timeline, and never waited for here. Its live joins' `max` is how
+	 * long a hole is waited for, so size it to what the player can still play late.
 	 */
 	ordered?: Moq.Track.Ordered;
 }

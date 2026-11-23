@@ -26,6 +26,7 @@ import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
 import { routeFailed } from "./resume.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -386,10 +387,10 @@ function groups(range: Range): track.Groups {
 }
 
 function subscription(budget: Budget, range: Range): track.Subscription {
-	return {
+	return withMax({
 		delay: { max: budget === "hour" ? HOUR : SHORT },
 		ranges: range ? [{ start: BigInt(range[0]), end: BigInt(range[1]) - 1n }] : undefined,
-	};
+	});
 }
 
 function max(values: Iterable<number>): number | undefined {

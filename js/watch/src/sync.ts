@@ -566,7 +566,7 @@ export class Sync {
 				delay = delay.max(effect.get(props.target) ?? Duration.ZERO);
 			}
 			// Capped once, on the resolved delay, so audio and video stay on one clock. The
-			// subscription's max delay follows it.
+			// subscription's live join max follows it.
 			delay = delay.min(DELAY_MAX);
 		}
 

@@ -19,6 +19,7 @@ import { createMockTransportPair } from "../mock.ts";
 import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { FillGroups, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
@@ -119,8 +120,8 @@ async function idle(clock: Manual, reader: Subscriber): Promise<boolean> {
 
 // Groups 0 to 4, one per second: a group is as old as the start of the one after it, so a
 // reader with a half-second budget starts at group 3, on lite-06 and later.
-const NARROW: Subscription = { delay: { max: Duration.millis(500) } };
-const WIDE: Subscription = { delay: { max: null }, order: "ascending" };
+const NARROW: Subscription = withMax({ delay: { max: Duration.millis(500) } });
+const WIDE: Subscription = withMax({ delay: { max: null }, order: "ascending" });
 
 function populate(track: Producer): void {
 	for (let key = 0n; key < 5n; key++) write(track.createGroup(key), key, "live");
@@ -155,7 +156,7 @@ test("copy fill: lite-07 fills below a start resolved from the budget, as far as
 
 // A live join `ms` behind the newest frame, read in order.
 function joining(ms: number): Subscription {
-	return { delay: { max: null }, order: "ascending", ranges: [{ start: { live: Duration.millis(ms) } }] };
+	return { order: "ascending", ranges: [{ start: { live: { min: Duration.millis(ms), max: null } } }] };
 }
 
 // Groups starting at 0 to 4 seconds, each keyed by the millisecond it starts at, as a timed
@@ -209,7 +210,7 @@ test("copy fill: lite-07 asks upstream for a live join reaching back past what t
 		const far = peer.remote.track("video").subscribe(joining(2500));
 		expect(sorted(await take(far, 4))).toEqual(timed(1_000n));
 		const asked = peer.track.subscription.peek()?.ranges ?? [];
-		expect(asked.some((range) => typeof range.start === "object" && range.start.live.asMillis() === 2500)).toBe(
+		expect(asked.some((range) => typeof range.start === "object" && range.start.live.min.asMillis() === 2500)).toBe(
 			true,
 		);
 		const origin = peer.track.subscribe(joining(2500));
@@ -232,7 +233,7 @@ test("copy fill: lite-07 ends a live join answered empty", async () => {
 		// 1 s behind the newest frame at 4 s is 3 s, past the range's end at 1 s.
 		const bounded = (): Subscription => ({
 			...joining(1000),
-			ranges: [{ start: { live: Duration.millis(1000) }, end: 1_000n }],
+			ranges: [{ start: { live: { min: Duration.millis(1000), max: null } }, end: 1_000n }],
 		});
 		const origin = peer.track.subscribe(bounded());
 		expect(sorted(await take(origin, 1))).toEqual([]);
@@ -305,11 +306,11 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const installed = clock.install();
 		const peer = await peers(alpn);
 		try {
-			const history: Subscription = {
+			const history: Subscription = withMax({
 				ranges: [{ start: 0n }],
 				delay: { max: null },
 				order: "ascending",
-			};
+			});
 			const first = peer.remote.track("video").subscribe(history);
 			for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
 			// Before lite-07 a subscription carries no order and is served newest first, so only
@@ -374,7 +375,9 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 	try {
 		// A live reader keeps the copy up, and has read past group 0 before it lands. It never
 		// reads again, so the copy it still buffers is all that is left of it.
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: Duration.ZERO } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		expect((await reader.ordered().nextGroup())?.start).toBe(1n);
 		const history = remote.track("video").subscribe({ ...WIDE, ranges: [{ start: 0n, end: 0n }] });
 		const group = await history.recvGroup();
@@ -436,7 +439,9 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		// A live reader keeps the copy up. It reads in order, so it lets go of what it passes.
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: Duration.ZERO } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		const live = reader.ordered();
 		expect((await live.nextGroup())?.start).toBe(1n);
 		const history = remote.track("video").subscribe({ ...WIDE, ranges: [{ start: 0n, end: 0n }] });
@@ -506,7 +511,9 @@ test("copy fill: a group reset to make room ends", async () => {
 	})();
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: Duration.ZERO } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		const live = await reader.ordered().nextGroup();
 		expect(live?.start).toBe(2n);
 		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 2");
@@ -613,7 +620,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const remote = wireOf(client).consume(Path.from("room"));
 		try {
 			// Reads from the oldest group, so a bounded reader widens nothing.
-			const open = remote.track("video").subscribe({ delay: { max: null } });
+			const open = remote.track("video").subscribe(withMax({ delay: { max: null } }));
 			expect((await open.recvGroup())?.start).toBe(3n);
 			if (!copy) throw new Error("no copy");
 			const tail = hooks.receiveGroup(copy, { start: 2n, offset: 3 });
@@ -623,10 +630,12 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			archived = true;
 			const before = fetched.length;
 
-			const bounded = remote.track("video").subscribe({
-				ranges: [{ start: 2n, end: 2n }],
-				delay: { max: null },
-			});
+			const bounded = remote.track("video").subscribe(
+				withMax({
+					ranges: [{ start: 2n, end: 2n }],
+					delay: { max: null },
+				}),
+			);
 			const group = await bounded.recvGroup();
 			if (!group) throw new Error("no group");
 			const got: string[] = [];
@@ -720,11 +729,13 @@ test.each([
 		})();
 		const remote = wireOf(client).consume(Path.from("room"));
 		try {
-			const reader = remote.track("video").subscribe({
-				ranges: [{ start: 2n }],
-				delay: { max: null },
-				order: "ascending",
-			});
+			const reader = remote.track("video").subscribe(
+				withMax({
+					ranges: [{ start: 2n }],
+					delay: { max: null },
+					order: "ascending",
+				}),
+			);
 			const ordered = reader.ordered();
 			const got: [bigint, string[]][] = [];
 			for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {

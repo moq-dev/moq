@@ -60,7 +60,6 @@ import {
 	hooks,
 	insertDrop,
 	insertRun,
-	maxDelayOf,
 	type RecoverCause,
 	type Recv,
 	type Replacement,
@@ -86,6 +85,7 @@ import {
 	sameRanges,
 	UNHELD,
 	Window,
+	widest,
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
@@ -918,7 +918,7 @@ class Reader implements ResumeSource {
 	/**
 	 * Apply the reader's preferences and cursor to every copy once they changed. Their signals
 	 * notify a microtask after a change, so every read applies them first too: a copy then picks
-	 * and judges its groups by what the reader holds now, such as a just-lowered `delay.max` or
+	 * and judges its groups by what the reader holds now, such as a just-lowered live {@link track.Live.max} or
 	 * replaced ranges, not its last ones. Mirrors the Rust `Reader::sync`.
 	 */
 	#follow(): void {
@@ -1837,10 +1837,12 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	/** The reader's budget in milliseconds: how far behind a group may fall before it is skipped. */
+	/**
+	 * The reader's widest budget in milliseconds, how far behind any group may fall before it is
+	 * skipped: a copy is let go as a whole, so it waits out the widest.
+	 */
 	#budget(): number {
-		const subscription = this.#shell.subscription.peek();
-		return subscription ? maxDelayOf(subscription) : 0;
+		return this.#window().budget().widest();
 	}
 
 	/**
@@ -2046,6 +2048,14 @@ class Reader implements ResumeSource {
 		if (!serving) return undefined;
 		if (!this.#placesNothing(serving)) return hooks.servingStarts(serving.sub, from);
 		return this.#window().starts(from);
+	}
+
+	// Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the
+	// serving copy. Mirrors the Rust `Subscriber::join_start` on a reader following route copies.
+	joinStart(placed: bigint, budget: number): bigint {
+		this.sync();
+		const serving = this.#serving();
+		return serving ? hooks.joinStart(serving.sub, placed, budget) : placed;
 	}
 
 	// The reader's ranges as its window resolved them, whichever copy serves.
@@ -2545,7 +2555,7 @@ class Recover implements GroupRecover {
 				// group either.
 				if (outcome && settled && !routeFailed(outcome.error) && !copyFailed(serving)) {
 					const subscription = serving.sub.subscription.peek();
-					const maxDelay = Duration.millis(subscription ? maxDelayOf(subscription) : 0);
+					const maxDelay = Duration.millis(widest(subscription?.ranges ?? []));
 					const land = { start: this.key, end: this.key + 1n, floor: true, grace: grace(maxDelay) };
 					if (generation === current.generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
 					landing = new Promise<void>((resolve) => {
@@ -2580,7 +2590,7 @@ class Recover implements GroupRecover {
 }
 
 /**
- * A fetched group's own budget, in milliseconds, judged against a reader's copy of its track on
+ * A fetched group judged by the publisher's max age alone against a reader's copy of its track on
  * the route it came from, as the Rust relay judges a fetch landed in that copy's cache. It opens
  * no subscription, so a fetch-only relay never pulls the track: with no copy, nothing newer is
  * known here, and the group is never stale.
@@ -2589,17 +2599,15 @@ class FetchExpiry implements Expiry {
 	readonly changed: readonly Getter<unknown>[];
 	#find: () => Copy | undefined;
 	#key: bigint;
-	#budget: number;
 	// The copy judging the group. One that closed still judges by what it held, until another opens.
 	#judging?: { sub: track.Subscriber; expiry: Expiry; unwatch: Dispose[] };
 	// Bumped whenever the judging copy's verdict may change.
 	#relay = new Signal(0);
 	#closed = false;
 
-	constructor(find: () => Copy | undefined, copied: Getter<unknown>, key: bigint, budget: number) {
+	constructor(find: () => Copy | undefined, copied: Getter<unknown>, key: bigint) {
 		this.#find = find;
 		this.#key = key;
-		this.#budget = budget;
 		this.changed = [copied, this.#relay];
 	}
 
@@ -2625,7 +2633,7 @@ class FetchExpiry implements Expiry {
 		const found = this.#find();
 		if (!found || found.sub === this.#judging?.sub) return;
 		this.#unwatch();
-		const expiry = hooks.staleAt(found.sub, this.#key, this.#budget);
+		const expiry = hooks.staleAt(found.sub, this.#key, true);
 		const bump = () => this.#relay.update((n) => n + 1);
 		const unwatch = this.#closed ? [] : expiry.changed.map((changed) => changed.subscribe(bump));
 		this.#judging = { sub: found.sub, expiry, unwatch };
@@ -3040,14 +3048,9 @@ export class Front {
 	async fetchGroup(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
 		const fetched = await this.#fetch(name, key, options);
 		let current = fetched.source;
-		// A group fetched over a wire carries no budget of its own, unlike one a local track
-		// answers: the fetch's own budget judges it against a copy of the route it came from.
-		const judge = new FetchExpiry(
-			() => this.#copyOn(name, current),
-			this.#copied,
-			key,
-			options?.maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY,
-		);
+		// A group fetched over a wire carries no expiry of its own, unlike one a local track
+		// answers: the publisher's max age judges it against a copy of the route it came from.
+		const judge = new FetchExpiry(() => this.#copyOn(name, current), this.#copied, key);
 		const expiry = (group: GroupConsumer) => hooks.groupExpiry(group) ?? judge;
 		if (!hooks.groupExpiry(fetched.group)) hooks.expireGroup(fetched.group, judge);
 		// Too old and evicted judge a subscription's delivery, not whether the group exists, so

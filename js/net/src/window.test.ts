@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
-import { NO_MAX_DELAY } from "./internal.ts";
-import type { Range } from "./track.ts";
+import type { Live, Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
 import {
 	AT_KEYS,
@@ -43,7 +42,7 @@ const groups = (start: bigint, end?: bigint): Range =>
 
 /** A live join `ms` behind the live edge, through `end` or onward for undefined. */
 const live = (ms: number, end?: bigint): Range => {
-	const out: Range = { start: { live: Duration.millis(ms) } };
+	const out: Range = { start: { live: { min: Duration.millis(ms), max: Duration.ZERO } } };
 	if (end !== undefined) out.end = end;
 	return out;
 };
@@ -247,9 +246,9 @@ describe("Window", () => {
 		held.joins = () => ({ group: 33n });
 		for (const lag of [0, 40]) {
 			held.answered = 3;
-			const window = Window.keyed([[0n, live(lag)]], 99n, held, NO_MAX_DELAY, () => 3);
+			const window = Window.keyed([[0n, live(lag)]], 99n, held, () => 3);
 			expect([window.settled, window.contains(99n)]).toEqual([false, false]);
-			expect(window.joins()).toEqual([[lag, undefined, 3]]);
+			expect(window.joins()).toEqual([[lag, undefined, 0, 3]]);
 
 			// A newer answer places it, at exactly the group upstream answered.
 			held.answered = 4;
@@ -261,14 +260,14 @@ describe("Window", () => {
 		// An answer of nothing places a join with an end past it, and keeps one without waiting.
 		held.answered = 3;
 		held.joins = () => "empty";
-		const bounded = Window.keyed([[0n, live(40, 50n)]], 99n, held, NO_MAX_DELAY, () => 3);
-		const open = Window.keyed([[0n, live(40)]], 99n, held, NO_MAX_DELAY, () => 3);
+		const bounded = Window.keyed([[0n, live(40, 50n)]], 99n, held, () => 3);
+		const open = Window.keyed([[0n, live(40)]], 99n, held, () => 3);
 		held.answered = 4;
 		expect(bounded.settle(99n, held)).toBe(true);
 		expect(covered(bounded, held.held)).toEqual([]);
 		expect(bounded.settled).toBe(true);
 		expect(open.settle(99n, held)).toBe(false);
-		expect(open.joins()).toEqual([[40, undefined, 3]]);
+		expect(open.joins()).toEqual([[40, undefined, 0, 3]]);
 	});
 
 	test("a zero lag starts a live join at the latest group, once there is one", () => {
@@ -617,8 +616,7 @@ describe("ranges", () => {
 	test("an open range with no time start joins live", () => {
 		expect(joinsLive([live(0)])).toBe(true);
 		expect(joinsLive([groups(3n), live(500)])).toBe(true);
-		// From the oldest group, as by default, it follows the live edge too.
-		expect(joinsLive(undefined)).toBe(true);
+		// From the oldest group, it follows the live edge too.
 		expect(joinsLive([{}])).toBe(true);
 		// A time start, or any range with an end, doesn't.
 		expect(joinsLive([groups(3n)])).toBe(false);
@@ -628,8 +626,9 @@ describe("ranges", () => {
 
 	test("a lag is checked and rounded up to whole milliseconds", () => {
 		expect(rangesOf([live(5)])).toEqual([live(5)]);
-		expect(() => rangesOf([{ start: { live: 5 as unknown as Duration } }])).toThrow(TypeError);
-		const sub = { start: { live: Duration.micros(1500) } };
+		expect(() => rangesOf([{ start: { live: 5 as unknown as Live } }])).toThrow(TypeError);
+		expect(() => rangesOf([{ start: { live: Duration.millis(5) as unknown as Live } }])).toThrow(TypeError);
+		const sub = { start: { live: { min: Duration.micros(1500), max: Duration.ZERO } } };
 		expect(rangeKey(sub)).toBe(rangeKey(live(2)));
 	});
 });

@@ -6,18 +6,15 @@
  * @module
  */
 
-import { Duration } from "@moq/clock";
 import { type Dispose, type Getter, Signal } from "@moq/signals";
 import { Counts } from "./cover.ts";
-import { maxDelayOf } from "./internal.ts";
 import { Ranges } from "./ranges.ts";
-import type { Delay, Order, Range, Subscription } from "./track.ts";
-import { liveMillis, rangeKey, sameRanges } from "./window.ts";
+import type { Order, Range, Subscription } from "./track.ts";
+import { isEmpty, joinOf, rangeBudget, rangeKey, sameRanges } from "./window.ts";
 
 /** The preferences besides the ranges, already checked and defaulted. */
 export interface Scalars {
 	priority: number;
-	delay: Delay;
 	order: Order;
 }
 
@@ -35,16 +32,14 @@ export interface Edit extends Scalars {
 /** What one subscriber adds to an aggregate besides its ranges. */
 export interface Contribution {
 	priority: number;
-	/** The max delay in milliseconds, see {@link maxDelayOf}. */
-	maxDelay: number;
 	descending: boolean;
 }
 
 /**
  * A live join a received copy's readers wait on, by its lag in milliseconds and its end, with the
- * widest budget in milliseconds one waits under and the newest answer tick any of them saw before
- * it began waiting: only an answer recorded after that is fresh for every one of them. Mirrors the
- * Rust `JoinAsk`.
+ * widest max in milliseconds one waits with, as a budget, and the newest answer tick any of them saw
+ * before it began waiting: only an answer recorded after that is fresh for every one of them.
+ * Mirrors the Rust `JoinAsk`.
  */
 export interface JoinAsk {
 	min: number;
@@ -64,17 +59,23 @@ export interface Change {
 }
 
 function contribution(scalars: Scalars): Contribution {
-	return {
-		priority: scalars.priority,
-		maxDelay: maxDelayOf(scalars),
-		descending: scalars.order === "descending",
-	};
+	return { priority: scalars.priority, descending: scalars.order === "descending" };
 }
 
 function sameScalars(a: Scalars, b: Scalars): boolean {
-	const same = (x: Duration | null | undefined, y: Duration | null | undefined) =>
-		x === y || (x instanceof Duration && y instanceof Duration && x.eq(y));
-	return a.priority === b.priority && a.order === b.order && same(a.delay.max, b.delay.max);
+	return a.priority === b.priority && a.order === b.order;
+}
+
+// Whether `next` holds `old`'s ranges in order, each the same or the same live join under another
+// max: a change that keeps every key, so each join stays where it joined.
+function retunes(old: readonly Range[], next: readonly Range[]): boolean {
+	return (
+		old.length === next.length &&
+		old.every((range, index) => {
+			const join = joinOf(next[index]);
+			return rangeKey(range) === rangeKey(next[index]) || (join !== undefined && joinOf(range) === join);
+		})
+	);
 }
 
 /** The ranges `old` holds more of than `next`, then those `next` holds more of than `old`. */
@@ -209,19 +210,35 @@ export class Prefs implements Getter<Subscription | undefined> {
 
 	/**
 	 * Replace every preference, already checked and defaulted, rekeying the ranges by position when
-	 * they change. Returns whether the ranges changed; nothing happens unless something did.
+	 * they change. Ranges that change only a live join's max keep their keys, so each stays where it
+	 * joined: those come back as the keyed ranges they now read. Returns whether the ranges changed,
+	 * and how; nothing happens unless something did.
 	 */
-	set(next: Subscription): boolean {
+	set(next: Subscription): false | "replaced" | (readonly [bigint, Range])[] {
 		const scalars = this.#scalars;
 		const old = [...this.#ranges.values()];
 		const same = sameRanges(old, next.ranges ?? []);
 		if (scalars && same && sameScalars(scalars, next as Scalars)) return false;
 		const before = this.contribution();
 		const [gone, came] = same ? [[], []] : moved(old, next.ranges ?? []);
-		this.#replace(next);
+		const retuned = !same && retunes(old, next.ranges ?? []) ? this.#retune(next.ranges ?? []) : undefined;
+		this.#replace(next, retuned !== undefined);
 		this.watch?.({ before, after: this.contribution(), gone, came });
 		this.touch();
-		return !same;
+		return same ? false : (retuned ?? "replaced");
+	}
+
+	// Replace each range that changed only its live join's max under its own key, keeping its join
+	// tick. Returns the ranges replaced, with their keys.
+	#retune(next: readonly Range[]): (readonly [bigint, Range])[] {
+		const changed: (readonly [bigint, Range])[] = [];
+		for (const [index, [key, old]] of [...this.#ranges].entries()) {
+			const range = next[index];
+			if (rangeKey(old) === rangeKey(range)) continue;
+			this.#ranges.set(key, range);
+			changed.push([key, range]);
+		}
+		return changed;
 	}
 
 	/** Apply `edit`, costing the ranges it names. Returns whether the ranges changed. */
@@ -244,8 +261,11 @@ export class Prefs implements Getter<Subscription | undefined> {
 			const old = this.#ranges.get(key);
 			if (old !== undefined) gone.push(old);
 			this.#ranges.set(key, range);
-			if (liveMillis(range) !== undefined) this.#since.set(key, tick);
-			else this.#since.delete(key);
+			// A live join that changes only its max keeps the tick it was added at, since it stays where
+			// it joined. Mirrors the Rust `Prefs::tick_for`.
+			const join = joinOf(range);
+			if (join === undefined) this.#since.delete(key);
+			else if (old === undefined || joinOf(old) !== join) this.#since.set(key, tick);
 			came.push(range);
 		}
 		const moved = gone.length > 0 || came.length > 0;
@@ -257,14 +277,16 @@ export class Prefs implements Getter<Subscription | undefined> {
 		return moved;
 	}
 
-	#replace(next: Subscription): void {
+	// Take `next`, already checked and defaulted, rekeying its ranges by position unless they were
+	// `retuned` in place already.
+	#replace(next: Subscription, retuned = false): void {
 		const { ranges, ...rest } = next;
 		this.#scalars = rest as Scalars;
-		if (!sameRanges([...this.#ranges.values()], ranges ?? [])) {
+		if (!retuned && !sameRanges([...this.#ranges.values()], ranges ?? [])) {
 			this.#ranges = new Map((ranges ?? []).map((range, index) => [BigInt(index), range]));
 			const tick = joinTick();
 			this.#since.clear();
-			for (const [key, range] of this.#ranges) if (liveMillis(range) !== undefined) this.#since.set(key, tick);
+			for (const [key, range] of this.#ranges) if (joinOf(range) !== undefined) this.#since.set(key, tick);
 		}
 		// Read back as given, so its identity holds until the next change.
 		this.#value = next;
@@ -273,19 +295,19 @@ export class Prefs implements Getter<Subscription | undefined> {
 
 /**
  * The aggregate of every subscriber's preferences, counted so a change costs what it moved:
- * the highest priority and max delay, descending if any subscriber is, and the union of the
- * ranges. Read as a {@link Subscription}, materialized only when read. Mirrors the Rust
+ * the highest priority and widest staleness budget, descending if any subscriber is, and the union
+ * of the ranges. Read as a {@link Subscription}, materialized only when read. Mirrors the Rust
  * `Subscriptions`.
  */
 export class Subscriptions implements Getter<Subscription | undefined> {
 	#count = 0;
 	#priority = new Counts<number>();
+	// Each non-empty range's staleness budget, counted: a history range's is the widest of all.
 	#maxDelay = new Counts<number>();
 	#descending = 0;
 	#ranges = new Ranges();
-	// The time starts a received copy's readers wait on, by time, each budget they wait under
-	// counted: see {@link asks}.
-	#asks = new Map<bigint, Counts<number>>();
+	// The time starts a received copy's readers wait on, by time, counted: see {@link asks}.
+	#asks = new Map<bigint, number>();
 	// The live joins a received copy's readers wait on, by lag and end, each budget they wait under
 	// and the answer tick each began waiting at counted: see {@link joins}.
 	#joins = new Map<
@@ -304,26 +326,22 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		const prev = this.#scalars();
 		let reshaped = false;
 		// New ranges count before old ones leave, so a range both hold never reads as gone.
+		for (const range of came) if (!isEmpty(range)) this.#maxDelay.add(rangeBudget(range));
+		for (const range of gone) if (!isEmpty(range)) this.#maxDelay.remove(rangeBudget(range));
 		if (after) {
 			this.#priority.add(after.priority);
-			this.#maxDelay.add(after.maxDelay);
 			this.#descending += after.descending ? 1 : 0;
 			this.#count++;
 		}
 		for (const range of came) if (this.#ranges.add(range)) reshaped = true;
 		if (before) {
 			this.#priority.remove(before.priority);
-			this.#maxDelay.remove(before.maxDelay);
 			this.#descending -= before.descending ? 1 : 0;
 			this.#count--;
 		}
 		for (const range of gone) if (this.#ranges.remove(range)) reshaped = true;
 		const next = this.#scalars();
-		const changed =
-			reshaped ||
-			prev?.priority !== next?.priority ||
-			prev?.maxDelay !== next?.maxDelay ||
-			prev?.descending !== next?.descending;
+		const changed = reshaped || prev?.priority !== next?.priority || prev?.descending !== next?.descending;
 		if (changed) {
 			this.#value = null;
 			this.#revision.update((revision) => revision + 1);
@@ -332,40 +350,27 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	}
 
 	/**
-	 * Count a reader waiting on time start `time` under `budget`, the max delay in milliseconds,
-	 * once more when `waits`, else once less. Returns whether {@link asks} changed, which wakes
+	 * Count a reader waiting on time start `time` once more when `waits`, else once less. Returns
+	 * whether {@link asks} changed, the first starting or the last stopping waiting on it, which wakes
 	 * every watcher as any change to the aggregate does. Mirrors the Rust `Subscriptions::ask`.
 	 */
-	ask(time: bigint, budget: number, waits: boolean): boolean {
-		let budgets = this.#asks.get(time);
-		const widest = budgets?.last();
-		if (waits) {
-			if (!budgets) {
-				budgets = new Counts<number>();
-				this.#asks.set(time, budgets);
-			}
-			budgets.add(budget);
-		} else if (budgets) {
-			budgets.remove(budget);
-			if (budgets.last() === undefined) this.#asks.delete(time);
-		}
-		const changed = this.#asks.get(time)?.last() !== widest;
+	ask(time: bigint, waits: boolean): boolean {
+		const held = this.#asks.get(time) ?? 0;
+		if (!waits && held === 0) return false;
+		const count = held + (waits ? 1 : -1);
+		if (count === 0) this.#asks.delete(time);
+		else this.#asks.set(time, count);
+		const changed = waits ? held === 0 : count === 0;
 		if (changed) this.#revision.update((revision) => revision + 1);
 		return changed;
 	}
 
 	/**
-	 * The time starts a received copy's readers wait on, lowest first, each with the widest budget
-	 * in milliseconds one waits under: its session asks its upstream to place each with a range of
-	 * its own. Mirrors the Rust `Subscription::asks`.
+	 * The time starts a received copy's readers wait on, lowest first: its session asks its
+	 * upstream to place each with a range of its own. Mirrors the Rust `Subscription::asks`.
 	 */
-	asks(): [bigint, number][] {
-		const asks: [bigint, number][] = [];
-		for (const [time, budgets] of this.#asks) {
-			const widest = budgets.last();
-			if (widest !== undefined) asks.push([time, widest]);
-		}
-		return asks.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+	asks(): bigint[] {
+		return [...this.#asks.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 	}
 
 	/**
@@ -397,8 +402,8 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	}
 
 	/**
-	 * The live joins a received copy's readers wait on, each with the widest budget one waits under
-	 * and the newest answer tick one saw before it began: its session asks its upstream to place each
+	 * The live joins a received copy's readers wait on, each with the widest max one waits with and
+	 * the newest answer tick one saw before it began: its session asks its upstream to place each
 	 * with a range of its own. Mirrors the Rust `Subscription::joins`.
 	 */
 	joins(): JoinAsk[] {
@@ -413,18 +418,14 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		return joins.sort((a, b) => a.min - b.min || (end(a) < end(b) ? -1 : end(a) > end(b) ? 1 : 0));
 	}
 
-	/** The largest max delay in milliseconds, without reading the ranges. */
+	/** The widest staleness budget in milliseconds any range asks under, without reading the ranges. */
 	maxDelay(): number {
 		return this.#maxDelay.last() ?? 0;
 	}
 
 	#scalars(): Contribution | undefined {
 		if (this.#count === 0) return undefined;
-		return {
-			priority: this.#priority.last() ?? 0,
-			maxDelay: this.maxDelay(),
-			descending: this.#descending > 0,
-		};
+		return { priority: this.#priority.last() ?? 0, descending: this.#descending > 0 };
 	}
 
 	/** The aggregate, costing the union's length once per change. */
@@ -433,7 +434,6 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		const scalars = this.#scalars();
 		this.#value = scalars && {
 			priority: scalars.priority,
-			delay: { max: Duration.millis(scalars.maxDelay) },
 			// One live subscriber held behind another's backlog is worse than a backlog sent late.
 			order: scalars.descending ? "descending" : "ascending",
 			ranges: [...this.#ranges.union()],

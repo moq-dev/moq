@@ -32,6 +32,7 @@ import {
 	hiddenBelow,
 	hooks,
 	insertRun,
+	NO_MAX_DELAY,
 	presented,
 	type Run,
 	runGaps,
@@ -63,6 +64,7 @@ import {
 	type Applied,
 	encodeSubscribeResponse,
 	LiveRanges,
+	legacyStart,
 	positionFrames,
 	rangeBounds,
 	rangesOf,
@@ -360,7 +362,12 @@ class SubscriptionControls {
 	#live: LiveRanges;
 	// The latest update the loop has yet to take, with every edit since the last one it took: a
 	// range added then retired before then was never live, so it is in neither.
-	#update?: { update: SubscribeUpdate; retired: bigint[]; added: Map<bigint, WireRange> };
+	#update?: {
+		update: SubscribeUpdate;
+		retired: bigint[];
+		added: Map<bigint, WireRange>;
+		retuned: Map<bigint, WireRange>;
+	};
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
 	#ended: Promise<Error | null>;
@@ -395,7 +402,7 @@ class SubscriptionControls {
 			return {
 				kind: "update",
 				update: update.update,
-				applied: { retired: update.retired, added: [...update.added] },
+				applied: { retired: update.retired, added: [...update.added], retuned: [...update.retuned] },
 			};
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
@@ -415,9 +422,10 @@ class SubscriptionControls {
 		return this.#live.get(id) !== undefined;
 	}
 
-	/** Whether Range ID `id` is live and starts with a live join. */
-	joins(id: bigint): boolean {
-		return this.#live.get(id)?.start?.live !== undefined;
+	/** The staleness budget in milliseconds of Range ID `id` when it is live and a live join. */
+	joinBudget(id: bigint): number | undefined {
+		const range = this.#live.get(id);
+		return range && joinBudget(range);
 	}
 
 	/** Whether {@link take} has a control to answer with now. */
@@ -479,9 +487,19 @@ class SubscriptionControls {
 					update,
 					retired: [] as bigint[],
 					added: new Map<bigint, WireRange>(),
+					retuned: new Map<bigint, WireRange>(),
 				};
 				pending.update = update;
-				for (const id of edit.retired) if (!pending.added.delete(id)) pending.retired.push(id);
+				for (const id of edit.retired) {
+					pending.retuned.delete(id);
+					if (!pending.added.delete(id)) pending.retired.push(id);
+				}
+				// A later retune of a range this added is that range added as it now reads, and one
+				// of a range this retuned replaces that retune. Mirrors the Rust `Applied::then`.
+				for (const [id, range] of edit.retuned) {
+					if (pending.added.has(id)) pending.added.set(id, range);
+					else pending.retuned.set(id, range);
+				}
 				for (const [id, range] of edit.added) pending.added.set(id, range);
 				this.#update = pending;
 				this.#changed.update((value) => value + 1);
@@ -601,20 +619,29 @@ class Unpinned {
 }
 
 /**
- * The lowest latest group start that could resolve `range`'s start, a time or a live join, unless
- * `started`, then its time end. Undefined once neither can move. Mirrors the Rust `due`.
+ * The lowest latest group start that could resolve `range`'s time start, unless `started`, then
+ * its time end. Undefined once neither can move. A live join is never pinned: as a time start its
+ * groups would turn from live ones that expire past its max into history, and the model already
+ * keeps it placed by its Range ID. Mirrors the Rust `due`.
  */
 function due(range: WireRange, started: boolean): bigint | undefined {
-	if (isEmpty(requestedRange(range))) return undefined;
+	if (range.start?.live !== undefined || isEmpty(requestedRange(range))) return undefined;
 	if (!started && range.start !== undefined && range.start.absolute === undefined) return 0n;
 	if (range.end?.time !== undefined) return range.end.time + 1n;
 	return undefined;
 }
 
+// A live join's staleness budget in milliseconds, undefined for any other range. Mirrors the Rust
+// `join_budget`.
+function joinBudget(range: WireRange): number | undefined {
+	const live = range.start?.live;
+	return live && (live.max ?? NO_MAX_DELAY);
+}
+
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
-// an update that leaves it live never looks a time start up again in newer holdings, nor places a
-// live join again against a newer live edge. A start reaching back to the oldest group held stays as
-// it was, since an absolute start would turn it into a floor the subscriber never named.
+// an update that leaves it live never looks a time start up again in newer holdings. A live join
+// stays as asked (see `due`). A start reaching back to the oldest group held stays as it was, since
+// an absolute start would turn it into a floor the subscriber never named.
 function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	if (!resolved) return asked;
 	const range = { ...asked };
@@ -660,11 +687,6 @@ function waitForControl(controls: SubscriptionControls): Promise<void> {
 			resolve();
 		});
 	});
-}
-
-/** The budget a SUBSCRIBE's `Subscriber Max Age` asks for: `null` for no limit, as lite-01/02 decode. */
-function servingMaxDelay(requested: number | null): Duration | null {
-	return requested === null ? null : Duration.millis(requested);
 }
 
 /**
@@ -1102,12 +1124,11 @@ export class Publisher {
 		const subscription = (ranges: track.Range[]): track.Subscription => ({
 			priority: msg.priority,
 			order: msg.order,
-			delay: { max: servingMaxDelay(msg.maxDelay) },
 			ranges,
 		});
 		let ranges: track.Range[];
 		try {
-			ranges = requestedRanges(msg);
+			ranges = requestedRanges(msg, legacyStart(this.version, msg.maxDelay));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -1274,7 +1295,7 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
-				apply: (update, { retired, added }) => {
+				apply: (update, { retired, added, retuned }) => {
 					legacyPriority.set(update.priority);
 					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					// Every update restates the wanted group. Past our largest it is a refresh, which
@@ -1282,23 +1303,24 @@ export class Publisher {
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
 						hooks.askSubscriber(track, "refresh");
-					const delay = { max: servingMaxDelay(update.maxDelay) };
 					if (!hasRanges(this.version)) {
 						// An older update restates its one span, replacing every range.
 						track.update({
 							priority: update.priority,
 							order: update.order,
-							delay,
-							ranges: requestedRanges(update),
+							ranges: requestedRanges(update, legacyStart(this.version, update.maxDelay)),
 						});
 						return;
 					}
 					// Lite-07 hands the model the edit by Range ID, so it costs the ranges it names
-					// whatever else is live. A pinned range is replaced in place, keeping its Range ID.
+					// whatever else is live. A pinned or retuned range is replaced in place, keeping its
+					// Range ID: a live join is never pinned (see `due`), so a retune replaces it as it
+					// stands, and the model keeps it placed where it was.
 					for (const id of retired) unpinned.remove(id);
 					const pins = pinDue();
+					const replaced = [...pins, ...retuned];
 					for (const id of retired) requested.remove(id);
-					for (const [id, range] of [...pins, ...added]) requested.insert(id, range);
+					for (const [id, range] of [...replaced, ...added]) requested.insert(id, range);
 					for (const [id, range] of added) unpinned.insert(id, due(range, false));
 					for (const id of retired) positions.delete(id);
 					for (const [id, range] of added)
@@ -1309,13 +1331,12 @@ export class Publisher {
 					);
 					// Refused before the model moves, as one SUBSCRIBE asking for nothing is.
 					Object.assign(update, spanBetween(this.version, requested.start(), requested.end()));
-					const add = [...pins, ...added].map(([id, range]) => [id, requestedRange(range)] as const);
+					const add = [...replaced, ...added].map(([id, range]) => [id, requestedRange(range)] as const);
 					hooks.editSubscriber(track, {
-						retire: [...retired, ...pins.map(([id]) => id)],
+						retire: [...retired, ...replaced.map(([id]) => id)],
 						add,
 						priority: update.priority,
 						order: update.order,
-						delay,
 					});
 				},
 			});
@@ -1438,7 +1459,6 @@ export class Publisher {
 				// FETCH's slot until the requester leaves.
 				const options: track.FetchGroupOptions & broadcast.FetchFrom = {
 					priority: msg.priority,
-					maxDelay: msg.maxDelay === undefined ? undefined : Duration.millis(msg.maxDelay),
 					signal: left.signal,
 					// A copy holding the frames asked on serves them; one missing them is filled whole.
 					frameStart: msg.startFrame,
@@ -1546,20 +1566,34 @@ export class Publisher {
 		const answered = (position: track.Position | undefined) =>
 			position && { position, ended: hooks.largestFinished(track, position) };
 		let endSent = false;
-		// Lite-07: the Range IDs an update added whose start no SUBSCRIBE_STARTED reported yet.
-		const unstarted = new Set<bigint>();
+		// Lite-07: the Range IDs an update added whose start no SUBSCRIBE_STARTED reported yet, each
+		// with its budget in milliseconds when it was added as a live join.
+		const unstarted = new Map<bigint, number | undefined>();
 
 		// Where each of the SUBSCRIBE's ranges starts once delivery starts at `from`, by Range ID,
-		// undefined for one with no group there or an update retired: SUBSCRIBE_STARTED answers
-		// each one an update added. Before lite-07 there is one range, which starts there.
+		// undefined for one with no group there or an update retired: SUBSCRIBE_START answers them.
+		// Before lite-07 there is one range, which starts there.
+		//
+		// A live join starts where it was placed, past the groups its max expired, which may be below
+		// where delivery starts: a relay serves first the groups it holds, before those the join is
+		// owed arrive. It moves delivery down to it, as one an update adds does. Any other range starts
+		// no earlier than delivery. Mirrors the Rust `TrackRun::starts`.
 		const rangeStarts = (from: bigint): (bigint | undefined)[] => {
 			if (!hasRanges(this.version)) return [from];
 			const starts = hooks.servingStarts(track, from);
+			const resolved = hooks.servingResolved(track);
 			const positions = controls.positions();
-			return Array.from({ length: Number(initial) }, (_, id) => {
+			const out = Array.from({ length: Number(initial) }, (_, id) => {
 				const index = positions.get(BigInt(id));
-				return index === undefined ? undefined : starts[index];
+				if (index === undefined) return undefined;
+				const budget = controls.joinBudget(BigInt(id));
+				const range = resolved[index];
+				if (budget === undefined || range === undefined) return starts[index];
+				const start = hooks.joinStart(track, range.start, budget);
+				return range.end === undefined || range.end > start ? start : undefined;
 			});
+			for (const start of out) if (start !== undefined && startKey !== undefined) startKey = min(startKey, start);
+			return out;
 		};
 
 		// Report where each range an update added starts, once it resolves, or with no start once
@@ -1568,7 +1602,9 @@ export class Publisher {
 			if (startKey === undefined || unstarted.size === 0) return true;
 			// An update not taken yet retired one, and taking that update forgets it. In Range ID
 			// order, as the Rust `TrackRun::report_started` reports them.
-			const held = [...unstarted].filter((id) => controls.holds(id)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+			const held = [...unstarted.keys()]
+				.filter((id) => controls.holds(id))
+				.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 			// Every range clamps against where delivery started before this batch, so one reported
 			// later isn't clamped against a start an earlier join in the batch lowered.
 			const from = startKey;
@@ -1581,11 +1617,11 @@ export class Publisher {
 				let start: bigint | undefined;
 				if (range) {
 					// A live join placed behind where delivery started, further from the live edge than
-					// the first ranges, starts where it was placed: the subscriber reads its answer as
-					// the join's start, so its groups from there are owed, and delivery now starts there
-					// too. Any other range starts no earlier than delivery.
-					const joins = controls.joins(id);
-					start = joins ? range.start : max(range.start, from);
+					// the first ranges, starts where it was placed, past the groups its max expired: the
+					// subscriber reads its answer as the join's start, so its groups from there are owed,
+					// and delivery now starts there too. Any other range starts no earlier than delivery.
+					const budget = unstarted.get(id);
+					start = budget !== undefined ? hooks.joinStart(track, range.start, budget) : max(range.start, from);
 					if (range.end !== undefined && range.end <= start) start = undefined;
 					else startKey = min(startKey, start);
 				}
@@ -1758,7 +1794,8 @@ export class Publisher {
 							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
 								for (const id of control.applied.retired) unstarted.delete(id);
-								for (const [id] of control.applied.added) if (id >= initial) unstarted.add(id);
+								for (const [id, range] of control.applied.added)
+									if (id >= initial) unstarted.set(id, joinBudget(range));
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest

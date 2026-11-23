@@ -3,6 +3,7 @@ import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { AudioConfigSchema } from "../catalog/audio.ts";
+import { within } from "../subscription.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
@@ -59,9 +60,9 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// the wait. The CMAF path (per-sample duration in the moof) is covered in consumer.test.ts.
 	// An unserved fill owes the missing groups, as a session's feed would, so the ordered read waits
 	// for them up to the max delay.
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	track.requests();
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(5000) } });
+	const subscriber = track.subscribe(within(Duration.millis(5000)));
 	// Read from group A on, so nothing below it is owed.
 	subscriber.withRange({ start: { included: 1_000_000n } });
 	const consumer = new Consumer(subscriber, {
@@ -147,7 +148,7 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 // waiting on the sequences between them, while a missing one is still a gap.
 test("Consumer reads one-packet Opus groups at sparse sequences back to back", async () => {
 	// An unserved fill owes the missing groups, as a session's feed would.
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	track.requests();
 	const config = AudioConfigSchema.parse({
 		codec: "opus",
@@ -155,7 +156,7 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 		sampleRate: 48_000,
 		numberOfChannels: 2,
 	});
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(5000) } }), {
+	const consumer = new Consumer(track.subscribe(within(Duration.millis(5000))), {
 		format: new LegacyFormat(config),
 		delay: { min: null, max: Duration.millis(5000) },
 	});
@@ -190,14 +191,14 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 // lands. The finish says nothing of where that frame starts, so a step onto the group waits for it,
 // and a frame continuing the timeline reads on without a gap.
 test("Consumer judges a step onto a frameless group by its first frame, not the track's finish", async () => {
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	const config = AudioConfigSchema.parse({
 		codec: "opus",
 		container: { kind: "legacy" },
 		sampleRate: 48_000,
 		numberOfChannels: 2,
 	});
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(5000) } }), {
+	const consumer = new Consumer(track.subscribe(within(Duration.millis(5000))), {
 		format: new LegacyFormat(config),
 		delay: { min: null, max: Duration.millis(5000) },
 	});
@@ -287,7 +288,7 @@ test("Consumer buffers groups at sparse starts as one range", async () => {
 		const track = micro();
 		const delay = { min: Duration.millis(100), max: Duration.millis(5000) };
 		// Reaching back past the first group, so the start keeps every one.
-		const consumer = new Consumer(track.subscribe({ delay }), { format, delay });
+		const consumer = new Consumer(track.subscribe(within(delay.max)), { format, delay });
 		for (const start of [0, 20_000, 40_000]) {
 			const group = create(track, start);
 			group.writeFrame({

@@ -4,9 +4,9 @@ import { expect, test } from "bun:test";
 import { Duration, now, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
-import { rejectGroups } from "./fill.ts";
-import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
+import { hooks, staleHole } from "./internal.ts";
 import { manual, settlesWithin, textFrame } from "./mock.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
 
@@ -14,6 +14,14 @@ import { type Ordered, Producer as TrackProducer } from "./track.ts";
 function receivedTrack() {
 	const producer = new TrackProducer("test").accept({ maxAge: null });
 	hooks.receiveTrack(producer);
+	return producer;
+}
+
+// A session-fed copy whose wire reports no anchors, so it places a live join from the groups it
+// holds, as the Rust `received_producer` does.
+function unanchoredTrack() {
+	const producer = receivedTrack();
+	hooks.dropAnchors(producer);
 	return producer;
 }
 
@@ -63,7 +71,7 @@ function withClock(fn: (clock: Manual) => void) {
 
 test("an ordered read reports what it gives up, in key order, but no skip", () => {
 	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(producer, 0n);
 	put(producer, 3n);
 	drop(producer, 1n, 3n);
@@ -82,7 +90,7 @@ test("an ordered read reports what it gives up, in key order, but no skip", () =
 
 test("nextGroup and tryNextGroup pass the gaps nextItem reports", async () => {
 	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(producer, 0n);
 	drop(producer, 1n, 2n);
 	put(producer, 2n);
@@ -97,7 +105,7 @@ test("nextGroup and tryNextGroup pass the gaps nextItem reports", async () => {
 test("keys below where a session's feed starts are no gap unless a fill owed them", () => {
 	const producer = receivedTrack();
 	hooks.startTrack(producer, { start: 10n });
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	// Group 0 comes from history, as a fill would bring it; the feed owes nothing below 10.
 	put(producer, 0n, false);
 	put(producer, 10n, false);
@@ -106,7 +114,7 @@ test("keys below where a session's feed starts are no gap unless a fill owed the
 
 test("a group held behind a gap is not returned once the reader closes", () => {
 	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(producer, 0n);
 	drop(producer, 1n, 2n);
 	put(producer, 2n);
@@ -118,8 +126,8 @@ test("a group held behind a gap is not returned once the reader closes", () => {
 
 test("a key passed under a stale verdict that does not settle this reader is still a gap", () =>
 	withClock((clock) => {
-		const producer = receivedTrack();
-		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		const producer = unanchoredTrack();
+		const ordered = producer.subscribe(withMax({ delay: { max: Duration.millis(50) } })).ordered();
 		put(producer, 0n, false);
 		expect(items(ordered)).toEqual(["group 0"]);
 		// The feed gave key 1 up under a 10 ms budget, which binds no reader waiting 50 ms.
@@ -131,8 +139,8 @@ test("a key passed under a stale verdict that does not settle this reader is sti
 	}));
 
 test("a key a local track never produced is no gap", () => {
-	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: Duration.secs(1) } }).ordered();
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const ordered = producer.subscribe(withMax({ delay: { max: Duration.secs(1) } })).ordered();
 	put(producer, 0n);
 	put(producer, 2n);
 	expect(items(ordered)).toEqual(["group 0", "group 2"]);
@@ -141,7 +149,7 @@ test("a key a local track never produced is no gap", () => {
 test("a gap waits behind what is owed below it, and goes out before the end", () =>
 	withClock(() => {
 		const producer = receivedTrack();
-		const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+		const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 		put(producer, 0n, false);
 		put(producer, 2n, false);
 		drop(producer, 4n, 5n);
@@ -154,7 +162,7 @@ test("a gap waits behind what is owed below it, and goes out before the end", ()
 
 test("the last gap goes out before the end, and the read then ends", async () => {
 	const local = new TrackProducer("test");
-	const read = local.subscribe({ delay: { max: null } }).ordered();
+	const read = local.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(local, 0n);
 	drop(local, 1n, 2n);
 	local.finish();
@@ -165,8 +173,8 @@ test("the last gap goes out before the end, and the read then ends", async () =>
 
 test("a gap is returned once, even when a later drop names it again", () =>
 	withClock((clock) => {
-		const producer = receivedTrack();
-		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		const producer = unanchoredTrack();
+		const ordered = producer.subscribe(withMax({ delay: { max: Duration.millis(50) } })).ordered();
 		put(producer, 0n, false);
 		put(producer, 2n, false);
 		expect(items(ordered)).toEqual(["group 0"]);
@@ -181,7 +189,7 @@ test("a gap is returned once, even when a later drop names it again", () =>
 test("a skip replaces a gap still waiting, and the rest of the drop stays one", () =>
 	withClock(() => {
 		const producer = receivedTrack();
-		const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+		const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 		put(producer, 0n, false);
 		put(producer, 2n, false);
 		drop(producer, 4n, 8n);
@@ -195,12 +203,12 @@ test("a skip replaces a gap still waiting, and the rest of the drop stays one", 
 
 test("a cached group the seek passes as stale is a gap", () =>
 	withClock((clock) => {
-		const producer = receivedTrack();
+		const producer = unanchoredTrack();
 		put(producer, 0n, false);
 		put(producer, 1n, false);
 		clock.jump(Duration.millis(100));
 		put(producer, 2n, false);
-		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		const ordered = producer.subscribe(withMax({ delay: { max: Duration.millis(50) } })).ordered();
 		expect(items(ordered)).toEqual(["gap 0..1 (old)", "group 1", "group 2"]);
 	}));
 
@@ -220,14 +228,14 @@ test("a gap reports when what it gives up landed", () =>
 			}
 			return out;
 		};
-		const producer = receivedTrack();
+		const producer = unanchoredTrack();
 		const first = now();
 		clock.jump(Duration.millis(5));
 		put(producer, 0n, false);
 		put(producer, 1n, false);
 		clock.jump(Duration.millis(100));
 		put(producer, 2n, false);
-		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		const ordered = producer.subscribe(withMax({ delay: { max: Duration.millis(50) } })).ordered();
 		drop(producer, 3n, 4n);
 		put(producer, 4n, false);
 		// Group 0 landed 5 ms in, before it went stale, and group 3 never did.
@@ -237,7 +245,7 @@ test("a gap reports when what it gives up landed", () =>
 // Rust reports it Old; JS keeps no record below the read, so its memory stays bounded.
 test("a local track's late arrival is no gap", () => {
 	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(producer, 0n);
 	put(producer, 5n);
 	expect(items(ordered)).toEqual(["group 0", "group 5"]);
@@ -250,7 +258,7 @@ test("a local track's late arrival is no gap", () => {
 test("a gap is clipped to the reader's range", () => {
 	const producer = new TrackProducer("test");
 	const ordered = producer
-		.subscribe({ delay: { max: null } })
+		.subscribe(withMax({ delay: { max: null } }))
 		.ordered()
 		.withRange({ start: { included: 2n }, end: { excluded: 4n } });
 	drop(producer, 0n, 6n);
@@ -260,7 +268,7 @@ test("a gap is clipped to the reader's range", () => {
 
 test("the frame helpers read past a gap", async () => {
 	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(producer, 0n);
 	drop(producer, 1n, 2n);
 	put(producer, 2n);
@@ -270,9 +278,9 @@ test("the frame helpers read past a gap", async () => {
 
 test("a local track waits for what it asked a fill for, and reports a gap once the budget gives up", () =>
 	withClock((clock) => {
-		const producer = new TrackProducer("test");
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 		const requests = producer.requests();
-		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		const ordered = producer.subscribe(withMax({ delay: { max: Duration.millis(50) } })).ordered();
 		put(producer, 0n);
 		put(producer, 2n);
 		expect(items(ordered)).toEqual(["group 0"]);
@@ -288,7 +296,7 @@ test("a local track waits for what it asked a fill for, and reports a gap once t
 
 test("a gap moves the read past it, so a group landing there after is no group", () => {
 	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(producer, 0n);
 	expect(items(ordered)).toEqual(["group 0"]);
 	drop(producer, 1n, 2n);
@@ -301,7 +309,7 @@ test("a gap moves the read past it, so a group landing there after is no group",
 
 test("a group held past a gap, under a cap lowered off it, still sees the read end", async () => {
 	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	put(producer, 0n);
 	drop(producer, 1n, 2n);
 	put(producer, 2n);
@@ -323,8 +331,8 @@ test("a group held past a gap, under a cap lowered off it, still sees the read e
 
 test("a stale group passes the owed holes below it as gaps", () =>
 	withClock((clock) => {
-		const producer = receivedTrack();
-		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		const producer = unanchoredTrack();
+		const ordered = producer.subscribe(withMax({ delay: { max: Duration.millis(50) } })).ordered();
 		put(producer, 0n, false);
 		expect(items(ordered)).toEqual(["group 0"]);
 		// Group 1 is owed; group 3 lands, then group 2 after it, which turns stale while the wall
@@ -338,7 +346,7 @@ test("a stale group passes the owed holes below it as gaps", () =>
 
 test("an ordered read's record holds only what lies ahead of it", () => {
 	const producer = new TrackProducer("test");
-	const sub = producer.subscribe({ delay: { max: null } });
+	const sub = producer.subscribe(withMax({ delay: { max: null } }));
 	const ordered = sub.ordered();
 	// Keyed apart, as audio by timestamp is: each group would be a run of its own.
 	for (let i = 0n; i < 3000n; i++) {
@@ -356,8 +364,8 @@ test("an ordered read's record holds only what lies ahead of it", () => {
 // still wait to be reported.
 test("a session-fed key-order read folds without losing the keys it passed", () =>
 	withClock((clock) => {
-		const producer = receivedTrack();
-		const sub = producer.subscribe({ delay: { max: Duration.millis(50) } });
+		const producer = unanchoredTrack();
+		const sub = producer.subscribe(withMax({ delay: { max: Duration.millis(50) } }));
 		const read = () => {
 			const out: string[] = [];
 			for (let drop = hooks.tryDrop(sub); drop; drop = hooks.tryDrop(sub))
@@ -388,7 +396,7 @@ test("a session-fed key-order read folds without losing the keys it passed", () 
 
 test("a gap the bounds left out below the read never pins its record", () => {
 	const producer = receivedTrack();
-	const sub = producer.subscribe({ delay: { max: null } });
+	const sub = producer.subscribe(withMax({ delay: { max: null } }));
 	const ordered = sub.ordered();
 	put(producer, 0n, false);
 	expect(items(ordered)).toEqual(["group 0"]);
@@ -410,7 +418,7 @@ test("a gap the bounds left out below the read never pins its record", () => {
 
 test("a key-order read draining its drops folds its record", () => {
 	const producer = new TrackProducer("test");
-	const sub = producer.subscribe({ delay: { max: null } });
+	const sub = producer.subscribe(withMax({ delay: { max: null } }));
 	// Keyed apart with the keys between skipped, so each skip is a run of its own.
 	for (let i = 0n; i < 3000n; i++) {
 		put(producer, i * 20n);
@@ -425,7 +433,7 @@ test("a key-order read draining its drops folds its record", () => {
 
 test("a read returning only gaps keeps its handed-out record compact", () => {
 	const producer = new TrackProducer("test");
-	const sub = producer.subscribe({ delay: { max: null } });
+	const sub = producer.subscribe(withMax({ delay: { max: null } }));
 	const ordered = sub.ordered();
 	put(producer, 0n);
 	expect(items(ordered)).toEqual(["group 0"]);
@@ -440,26 +448,24 @@ test("a read returning only gaps keeps its handed-out record compact", () => {
 test("an ordered read hands out nothing past a time start still waiting to be placed", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
-	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1500n }] })).ordered();
 	expect(items(ordered)).toEqual([]);
 	// A session's tail holds the read at the answered start's group until it lands, and says
 	// nothing lies between it and 2000.
-	hooks.timeStarts(producer, [[1500n, 1000n, NO_MAX_DELAY]]);
+	hooks.timeStarts(producer, [[1500n, 1000n]]);
 	put(producer, 1000n, false);
 	producer.skipGroups(1001n, 2000n);
 	expect(items(ordered)).toEqual(["group 1000", "group 2000"]);
 });
 
-// Mirrors the Rust `a_waiting_time_start_places_within_the_budget_it_was_answered_under`.
-test("a waiting time start places once the reader narrows to the budget it was answered under", () => {
+// A time start is history, which no budget moves: an answer past its time places it, whatever max
+// the reader asks elsewhere. Mirrors the Rust `an_answered_time_start_places_whatever_the_budget`.
+test("an answered time start places whatever the budget", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
-	const from = (max: Duration | null) => ({ delay: { max }, ranges: [{ start: 1500n }] });
-	const subscriber = producer.subscribe(from(null));
-	// The publisher started the range asked from 1500 past it, under a 100 ms budget.
-	hooks.timeStarts(producer, [[1500n, 2000n, 100]]);
-	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
-	subscriber.update(from(Duration.millis(100)));
+	const subscriber = producer.subscribe({ ranges: [{ start: 1500n }] });
+	// The publisher started the range asked from 1500 past it.
+	hooks.timeStarts(producer, [[1500n, 2000n]]);
 	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
 	subscriber.close();
 });
@@ -472,14 +478,11 @@ test("a stale drop places no time start past a held group", () => {
 	producer.skipGroups(1001n, 1400n);
 	hooks.dropTrackGroups(producer, 1400n, 1401n, staleHole(100));
 	producer.skipGroups(1401n, 2000n);
-	const from = { delay: { max: null }, ranges: [{ start: 1500n }] };
+	const from = { ranges: [{ start: 1500n }] };
 	const waiting = producer.subscribe(from);
-	// A reader wider than the stale verdict's budget may still get 1400.
+	// A time start never goes stale, so it may still get 1400.
 	expect(hooks.servingResolved(waiting)).toEqual([undefined]);
 	waiting.close();
-	const narrow = producer.subscribe({ ...from, delay: { max: Duration.millis(100) } });
-	expect(hooks.servingResolved(narrow)[0]?.start).toBe(1000n);
-	narrow.close();
 	producer.skipGroups(1400n, 1401n);
 	const placed = producer.subscribe(from);
 	expect(hooks.servingResolved(placed)[0]?.start).toBe(1000n);
@@ -489,105 +492,40 @@ test("a stale drop places no time start past a held group", () => {
 test("a time start no answer for its own time places asks upstream for it", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
-	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] });
-	expect(hooks.requested(producer).asks()).toEqual([[1500n, NO_MAX_DELAY]]);
+	const subscriber = producer.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1500n }] }));
+	expect(hooks.requested(producer).asks()).toEqual([1500n]);
 	// Answers for other times place nothing at it: the oldest group's range starting at 2000 may
 	// have expired the group containing it, and a range from 1000 says nothing past its own time.
 	hooks.timeStarts(producer, [
-		[0n, 2000n, NO_MAX_DELAY],
-		[1000n, 1000n, NO_MAX_DELAY],
+		[0n, 2000n],
+		[1000n, 1000n],
 	]);
 	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
 	// Its own range started past it: no group at or before it.
-	hooks.timeStarts(producer, [[1500n, 2000n, NO_MAX_DELAY]]);
+	hooks.timeStarts(producer, [[1500n, 2000n]]);
 	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
 	expect(hooks.requested(producer).asks()).toEqual([]);
 	subscriber.close();
-});
-
-test("a folded time start wakes its read when the grace for a gap below it passes", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		const producer = receivedTrack();
-		// An oldest-group reader holds the feed open from its answered start, 1000.
-		const oldest = producer.subscribe({ delay: { max: Duration.secs(1) } });
-		hooks.startTrack(producer, { start: 1000n });
-		hooks.timeStarts(producer, [[0n, 1000n, NO_MAX_DELAY]]);
-		// Group 1000's stream reset before its header: only 1800, 2000, and the skips around them
-		// land, 1800 last, so the read's own budget for the time runs out after the gap's grace.
-		producer.skipGroups(1001n, 1800n);
-		producer.skipGroups(1801n, 2000n);
-		put(producer, 2000n, false);
-		clock.jump(Duration.millis(10));
-		put(producer, 1800n, false);
-		const ordered = producer.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: 1500n }] }).ordered();
-		expect(items(ordered)).toEqual([]);
-		let read: bigint | undefined;
-		const next = ordered.nextGroup().then((group) => {
-			read = group?.start;
-		});
-		// Let the read settle into its wait, so only a timer can wake it.
-		await flush();
-		clock.jump(Duration.millis(989));
-		await flush();
-		expect(read).toBeUndefined();
-		clock.jump(Duration.millis(1));
-		await flush();
-		// 1800 came a full budget after 2000 superseded it.
-		expect(read).toBe(2000n);
-		await next;
-		oldest.close();
-	} finally {
-		installed.close();
-	}
 });
 
 test("a waiting time start holds back a gap above its group", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
 	drop(producer, 1500n, 1600n);
-	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1500n }] })).ordered();
 	expect(items(ordered)).toEqual([]);
-	hooks.timeStarts(producer, [[1500n, 1000n, NO_MAX_DELAY]]);
+	hooks.timeStarts(producer, [[1500n, 1000n]]);
 	put(producer, 1000n, false);
 	producer.skipGroups(1001n, 1500n);
 	producer.skipGroups(1600n, 2000n);
 	expect(items(ordered)).toEqual(["group 1000", "gap 1500..1600 (delivery timeout)", "group 2000"]);
 });
 
-test("a waiting time start holds an ordered read only within its budget", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		const producer = receivedTrack();
-		put(producer, 2000n, false);
-		const ordered = producer
-			.subscribe({ delay: { max: Duration.millis(100) }, ranges: [{ start: 1500n }] })
-			.ordered();
-		expect(items(ordered)).toEqual([]);
-		let read: bigint | undefined;
-		const next = ordered.nextGroup().then((group) => {
-			read = group?.start;
-		});
-		await flush();
-		clock.jump(Duration.millis(99));
-		await flush();
-		expect(read).toBeUndefined();
-		clock.jump(Duration.millis(1));
-		await flush();
-		expect(read).toBe(2000n);
-		await next;
-	} finally {
-		installed.close();
-	}
-});
-
 test("a waiting time start below an ordered read's own floor holds nothing", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
 	const ordered = producer
-		.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] })
+		.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1500n }] }))
 		.withRange({ start: { included: 2000n } })
 		.ordered();
 	expect(items(ordered)).toEqual(["group 2000"]);
@@ -598,7 +536,7 @@ test("a waiting time start holds no gap once nothing from the read's floor throu
 	put(producer, 2000n, false);
 	const ordered = () =>
 		producer
-			.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] })
+			.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1500n }] }))
 			.withRange({ start: { included: 1500n }, end: { excluded: 1600n } })
 			.ordered();
 	drop(producer, 1501n, 1600n);
@@ -616,7 +554,7 @@ test("a stale verdict narrower than an ordered read's budget leaves its time sta
 	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(100));
 	drop(producer, 1500n, 1600n);
 	const ordered = producer
-		.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] })
+		.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1500n }] }))
 		.withRange({ start: { included: 1000n }, end: { excluded: 1600n } })
 		.ordered();
 	// The group containing 1500 may still land for this budget.
@@ -624,7 +562,7 @@ test("a stale verdict narrower than an ordered read's budget leaves its time sta
 	put(producer, 1200n, false);
 	// A group between 1200 and 1500 may still land, so the time waits for its upstream's answer.
 	expect(items(ordered)).toEqual([]);
-	hooks.timeStarts(producer, [[1500n, 1200n, NO_MAX_DELAY]]);
+	hooks.timeStarts(producer, [[1500n, 1200n]]);
 	producer.skipGroups(1201n, 1500n);
 	expect(items(ordered)).toEqual(["group 1200", "gap 1500..1600 (delivery timeout)"]);
 });
@@ -635,105 +573,112 @@ test("a stale verdict a capped ordered read rejects leaves its time start waitin
 	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
 	drop(producer, 1500n, 1600n);
 	const ordered = producer
-		.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: 1500n }] })
+		.subscribe(withMax({ delay: { max: Duration.secs(1) }, ranges: [{ start: 1500n }] }))
 		.withRange({ start: { included: 1000n }, end: { excluded: 1600n } })
 		.ordered();
 	// Within the verdict's budget, but the cap keeps the read from the groups it rests on.
 	expect(items(ordered)).toEqual([]);
-	hooks.timeStarts(producer, [[1500n, 1500n, NO_MAX_DELAY]]);
+	hooks.timeStarts(producer, [[1500n, 1500n]]);
 	expect(items(ordered)).toEqual(["gap 1500..1600 (delivery timeout)"]);
 });
 
-test("a refusal judged stale under a narrower budget leaves a widened read's time start waiting", async () => {
-	const producer = receivedTrack();
+// A session-fed timed copy whose wire reports where its ranges start, as the Rust `received` and
+// `anchored` producer.
+function anchoredTrack() {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	hooks.receiveTrack(producer);
+	return producer;
+}
+
+// A stale verdict within a capped live join's budget settles none of its keys either: the cap keeps
+// it from the newer groups the verdict rests on. The read asks the run again, and a gap above the
+// time the join lands at holds until that answer comes.
+test("a capped read asks a stale run again before passing a time start", async () => {
+	const producer = anchoredTrack();
 	const requests = producer.requests();
-	put(producer, 2000n, false);
+	put(producer, 900n);
+	put(producer, 2000n);
+	producer.skipGroups(901n, 1000n);
 	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
-	drop(producer, 1500n, 1600n);
-	const subscriber = producer
-		.subscribe({ delay: { max: Duration.millis(100) } })
-		.withRange({ start: { included: 1000n }, end: { excluded: 1600n } });
-	const ordered = subscriber.ordered();
-	// Capped, so the stale run does not settle it: it asks the run again.
-	expect(items(ordered)).toEqual([]);
+	hooks.dropTrackGroups(producer, 1500n, 1600n, { error: new StreamError(StreamCode.NotFound) });
+	// Half a second behind the live edge at 2000 is time 1500.
+	const ordered = producer
+		.subscribe({ ranges: [{ start: { live: { min: Duration.millis(500), max: Duration.secs(1) } } }] })
+		.withRange({ start: { included: 900n }, end: { excluded: 1600n } })
+		.ordered();
+	expect(items(ordered)).toEqual(["group 900"]);
 	const fill = await requests.requestedFill();
 	expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
-	if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 100, everyone: false });
-	// Widened past the refusal's budget, with a time start nothing held places.
-	subscriber.update({ delay: { max: null }, ranges: [{ start: 1500n }] });
-	expect(items(ordered)).toEqual([]);
+	fill?.accept(1200n)?.finish();
+	fill?.refuseGroups(1000n, 1200n, new StreamError(StreamCode.Old));
+	fill?.refuseGroups(1201n, 1500n, new StreamError(StreamCode.Old));
+	expect(items(ordered)).toEqual([
+		"gap 1000..1200 (old)",
+		"group 1200",
+		"gap 1201..1500 (old)",
+		"gap 1500..1600 (not found)",
+	]);
 	requests.close();
 });
 
-test("a widened ordered read asks its own stale refusal again unless it returned the gap", async () => {
-	for (const returned of [false, true]) {
-		const producer = receivedTrack();
-		const requests = producer.requests();
-		put(producer, 900n, false);
-		put(producer, 2000n, false);
-		if (returned) producer.skipGroups(901n, 1000n);
-		hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
-		const subscriber = producer
-			.subscribe({ delay: { max: Duration.secs(1) } })
-			.withRange({ start: { included: 900n }, end: { excluded: 1600n } });
-		const ordered = subscriber.ordered();
-		expect(items(ordered)).toEqual(["group 900"]);
-		const fill = await requests.requestedFill();
-		expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
-		if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 1000, everyone: false });
-		// A verdict under its own budget, though the cap keeps it from the groups the fill judged
-		// against: returned once nothing is owed below it, and never asked again.
-		expect(items(ordered)).toEqual(returned ? ["gap 1000..1500 (old)"] : []);
+// Whether a fill is asked again within a few microtasks.
+async function askedAgain(requests: ReturnType<TrackProducer["requests"]>): Promise<boolean> {
+	let again = false;
+	void requests.requestedFill().then((fill) => {
+		if (fill) again = true;
+	});
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+	return again;
+}
 
-		// Widened past the budget the fill refused under: the refusal is no verdict for it now,
-		// unless the read already passed it, since a read in key order never goes back.
-		subscriber.update({ delay: { max: null } });
-		if (!returned) producer.skipGroups(901n, 1000n);
-		expect(items(ordered)).toEqual([]);
-		let again: [bigint, bigint] | undefined;
-		void requests.requestedFill().then((fill) => {
-			if (fill) again = [fill.start, fill.end];
-		});
-		for (let i = 0; i < 10; i++) await Promise.resolve();
-		expect(again).toEqual(returned ? undefined : [1000n, 1500n]);
-		requests.close();
-	}
-});
-
-// The refusal's gap stays queued when a group arriving for its first key fails again: the widening
-// takes back all of it, not just what the refusal still names, so no gap stands for that key.
-test("a widened ordered read takes back its whole stale gap after a group for it fails", async () => {
-	const producer = receivedTrack();
+// A fill asks under no subscriber budget, so a run it refused as stale stays given up for the read
+// waiting on it once that read widens its budget, even while the gap is still queued behind an owed
+// group: nothing is asked again.
+test("a widened read keeps its fill's stale refusal", async () => {
+	const producer = anchoredTrack();
 	const requests = producer.requests();
-	put(producer, 900n, false);
-	put(producer, 2000n, false);
+	put(producer, 900n);
+	put(producer, 2000n);
 	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
 	const subscriber = producer
-		.subscribe({ delay: { max: Duration.secs(1) } })
+		.subscribe(withMax({ delay: { max: Duration.secs(1) } }))
+		.withRange({ start: { included: 900n }, end: { excluded: 1600n } });
+	const ordered = subscriber.ordered();
+	// 901..1000 is still owed.
+	expect(items(ordered)).toEqual(["group 900"]);
+	const fill = await requests.requestedFill();
+	expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
+	fill?.refuseGroups(1000n, 1500n, new StreamError(StreamCode.Old));
+	// The gap waits behind 901..1000.
+	expect(items(ordered)).toEqual([]);
+
+	subscriber.update(withMax({ delay: { max: null } }));
+	producer.skipGroups(901n, 1000n);
+	expect(items(ordered)).toEqual(["gap 1000..1500 (old)"]);
+	expect(await askedAgain(requests)).toBe(false);
+	requests.close();
+});
+
+// A gap an ordered read returned stands once it widens: a read in key order never goes back.
+test("a widened read keeps a stale gap it returned", async () => {
+	const producer = anchoredTrack();
+	const requests = producer.requests();
+	put(producer, 900n);
+	put(producer, 2000n);
+	producer.skipGroups(901n, 1000n);
+	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
+	const subscriber = producer
+		.subscribe(withMax({ delay: { max: Duration.secs(1) } }))
 		.withRange({ start: { included: 900n }, end: { excluded: 1600n } });
 	const ordered = subscriber.ordered();
 	expect(items(ordered)).toEqual(["group 900"]);
 	const fill = await requests.requestedFill();
-	expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
-	if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 1000, everyone: false });
-	expect(items(ordered)).toEqual([]);
+	fill?.refuseGroups(1000n, 1500n, new StreamError(StreamCode.Old));
+	expect(items(ordered)).toEqual(["gap 1000..1500 (old)"]);
 
-	// A wider reader asks the run, and its answer for 1000 lands and then fails.
-	const wide = producer
-		.subscribe({ delay: { max: null } })
-		.withRange({ start: { included: 900n }, end: { excluded: 1600n } })
-		.ordered();
-	items(wide);
-	const other = await requests.requestedFill();
-	expect(other?.start).toBe(1000n);
-	const answer = other?.accept(1000n);
-	answer?.writeFrame(textFrame("x", Timestamp.unscaled(1000n)));
-	answer?.abort(new StreamError(StreamCode.Cancel));
-	for (let i = 0; i < 10; i++) await Promise.resolve();
-
-	subscriber.update({ delay: { max: null } });
-	producer.skipGroups(901n, 1000n);
+	subscriber.update(withMax({ delay: { max: null } }));
 	expect(items(ordered)).toEqual([]);
+	expect(await askedAgain(requests)).toBe(false);
 	requests.close();
 });
 
@@ -742,38 +687,30 @@ test("a skip is no group to place a waiting time start from", () => {
 	// GROUP 2000 says the group before it is 1000, which is still on its way.
 	producer.skipGroups(1001n, 2000n);
 	put(producer, 2000n, false);
-	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1500n }] })).ordered();
 	expect(items(ordered)).toEqual([]);
 	put(producer, 1000n, false);
 	expect(items(ordered)).toEqual(["group 1000", "group 2000"]);
 });
 
-test("a range answered empty holds back no later group at its time within its budget, though it places nothing", () => {
+test("a range answered empty places its time before every group, though a time inside it waits", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
-	// Asked with a one second budget: the answer says nothing about a group a wider reader still wants.
-	hooks.timeStarts(producer, [[1000n, undefined, 1000]]);
-	const at = (time: bigint) =>
-		hooks.servingResolved(producer.subscribe({ delay: { max: null }, ranges: [{ start: time }] }));
-	expect(at(1000n)).toEqual([undefined]);
+	// The range asked from 1000 had no group at or before it.
+	hooks.timeStarts(producer, [[1000n, undefined]]);
+	const at = (time: bigint) => hooks.servingResolved(producer.subscribe({ ranges: [{ start: time }] }));
+	expect(at(1000n)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+	// A time inside the range is no time it was asked from, so it waits for an answer of its own.
 	expect(at(1500n)).toEqual([undefined]);
 	// GROUP 2000 says nothing lies between the time and it.
 	producer.skipGroups(1000n, 2000n);
-	const read = (time: bigint, max: Duration | null) =>
-		items(producer.subscribe({ delay: { max }, ranges: [{ start: time }] }).ordered());
-	expect(read(1000n, Duration.secs(1))).toEqual(["group 2000"]);
-	expect(read(1000n, null)).toEqual([]);
-	// A time inside the range is no time it was asked from, so it waits for an answer of its own.
-	expect(read(1500n, Duration.secs(1))).toEqual([]);
+	const read = (time: bigint) => items(producer.subscribe({ ranges: [{ start: time }] }).ordered());
+	expect(read(1000n)).toEqual(["group 2000"]);
+	expect(read(1500n)).toEqual([]);
 });
 
-// Run every pending microtask and the ones they queue, as a timer firing would.
-async function flush() {
-	for (let i = 0; i < 20; i++) await Promise.resolve();
-}
-
 // Mirrors the Rust `a_time_end_between_*` tests in `track.rs`.
-const between = { ranges: [{ start: 1500n, end: 1999n }], delay: { max: Duration.millis(30_000) } };
+const between = withMax({ ranges: [{ start: 1500n, end: 1999n }], delay: { max: Duration.millis(30_000) } });
 
 test("a time end between two groups ends an ordered read once the publisher created one past it", async () => {
 	using clock = manual();
@@ -843,7 +780,7 @@ test("an ordered read whose window ends past a group it passed as stale reports 
 		clock.jump(Duration.millis(100));
 		put(producer, 100n);
 		const ordered = producer
-			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: 0n, end: 49n }] })
+			.subscribe(withMax({ delay: { max: Duration.millis(50) }, ranges: [{ start: 0n, end: 49n }] }))
 			.ordered();
 		expect(items(ordered)).toEqual(["gap 0..1 (old)"]);
 		expect(ordered.tryNextItem()).toBeUndefined();
