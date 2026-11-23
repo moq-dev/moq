@@ -19,8 +19,7 @@ export type LegacySubscription = Omit<Subscription, "ranges"> & {
 export function withMax(subscription: LegacySubscription): Subscription {
 	const { delay, ranges, ...rest } = subscription;
 	const max = delay?.max === undefined ? Duration.ZERO : delay.max;
-	const within = (): Range["start"] =>
-		max === null ? undefined : { live: { min: null, max } };
+	const within = (): Range["start"] => (max === null ? undefined : { live: { min: null, max } });
 	const out = (ranges ?? [{}]).map((range): Range => {
 		const start = range.start;
 		const mapped: Range = {};

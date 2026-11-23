@@ -1,4 +1,4 @@
-import { Duration } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import type { Track } from "@moq/net";
 
 /**

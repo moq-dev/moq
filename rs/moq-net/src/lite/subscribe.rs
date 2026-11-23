@@ -2225,7 +2225,10 @@ mod test {
 	fn a_live_starts_max_age_roundtrips_on_lite07() {
 		let ms = std::time::Duration::from_millis;
 		let live = |max| Range {
-			start: Some(Anchor::Live { min: Some(ms(100)), max }),
+			start: Some(Anchor::Live {
+				min: Some(ms(100)),
+				max,
+			}),
 			end: None,
 		};
 		for (max, wire) in [
@@ -2337,7 +2340,10 @@ mod test {
 		let ms = std::time::Duration::from_millis;
 		let version = Version::Lite07;
 		let live = |min, max| Range {
-			start: Some(Anchor::Live { min: Some(ms(min)), max }),
+			start: Some(Anchor::Live {
+				min: Some(ms(min)),
+				max,
+			}),
 			end: None,
 		};
 		let time = Range {

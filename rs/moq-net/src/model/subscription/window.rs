@@ -102,7 +102,13 @@ pub(in crate::model) trait Holdings {
 	/// to deliver. It stands once the end is declared too, when [`Self::answers_joins`] no
 	/// longer holds: a copy holds only the groups from where its feed started, so they can't
 	/// measure a join behind them.
-	fn answered_join(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+	fn answered_join(
+		&self,
+		min: Option<Duration>,
+		end: Option<u64>,
+		budget: Duration,
+		since: u64,
+	) -> Option<Option<u64>> {
 		let _ = (min, end, budget, since);
 		None
 	}
@@ -1491,7 +1497,13 @@ mod tests {
 			self.0.answers_joins()
 		}
 
-		fn answered_join(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+		fn answered_join(
+			&self,
+			min: Option<Duration>,
+			end: Option<u64>,
+			budget: Duration,
+			since: u64,
+		) -> Option<Option<u64>> {
 			self.0.answered_join(min, end, budget, since)
 		}
 
@@ -1595,7 +1607,10 @@ mod tests {
 	/// A live join `min` behind the live edge, or with no lag limit for `None`.
 	fn live(min: impl Into<Option<Duration>>, end: impl Into<Option<u64>>) -> Range {
 		Range {
-			start: Start::Live { min: min.into(), max: None },
+			start: Start::Live {
+				min: min.into(),
+				max: None,
+			},
 			end: end.into(),
 		}
 	}
@@ -1754,11 +1769,17 @@ mod tests {
 				window.is_reaching() && !window.contains(99),
 				"an answer from before it waited"
 			);
-			assert_eq!(window.joins().collect::<Vec<_>>(), [(Some(min), None, Duration::MAX, 3)]);
+			assert_eq!(
+				window.joins().collect::<Vec<_>>(),
+				[(Some(min), None, Duration::MAX, 3)]
+			);
 			// One through the reserved last group asks and waits as an unbounded one, as the wire
 			// carries it.
 			let through = Window::keyed_since([(0, live(min, time(u64::MAX)))], |_| Joining::Since(3), Some(99), &keys);
-			assert_eq!(through.joins().collect::<Vec<_>>(), [(Some(min), None, Duration::MAX, 3)]);
+			assert_eq!(
+				through.joins().collect::<Vec<_>>(),
+				[(Some(min), None, Duration::MAX, 3)]
+			);
 
 			// A newer answer places it, at exactly the group upstream answered.
 			keys.answered = Some(4);

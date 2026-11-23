@@ -1335,9 +1335,7 @@ impl Holdings for TrackState {
 				// This copy's arrivals don't reach back that far yet, but its upstream's may. One with
 				// no lag limit, which no arrival ever reaches, waits only on an upstream that answers
 				// joins, whose answer may still land until the read ends.
-				None if wire && (min.is_some() || (self.answers_joins && !ended)) => {
-					Join::Unknown
-				}
+				None if wire && (min.is_some() || (self.answers_joins && !ended)) => Join::Unknown,
 				// It reaches back past every arrival, so it starts where a time start from 0
 				// does, taking a lower group that arrives late as the oldest group would. On a copy
 				// that asks upstream for any lower group the copy lacks, as on a timed track.
@@ -1420,7 +1418,13 @@ impl Holdings for TrackState {
 		self.joins_answered()
 	}
 
-	fn answered_join(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+	fn answered_join(
+		&self,
+		min: Option<Duration>,
+		end: Option<u64>,
+		budget: Duration,
+		since: u64,
+	) -> Option<Option<u64>> {
 		Some(self.join_answer(min, end, budget, since)?.start)
 	}
 
@@ -1530,7 +1534,13 @@ impl TrackState {
 impl TrackState {
 	/// The upstream's answer to the live join `min` through `end`, recorded after join tick
 	/// `since` under a budget at least as wide as the reader's `budget`.
-	fn join_answer(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Option<&JoinAnswer> {
+	fn join_answer(
+		&self,
+		min: Option<Duration>,
+		end: Option<u64>,
+		budget: Duration,
+		since: u64,
+	) -> Option<&JoinAnswer> {
 		let answer = self.join_answers.get(&(min, end))?;
 		(answer.tick > since && budget <= answer.budget).then_some(answer)
 	}
@@ -5432,7 +5442,13 @@ impl Producer {
 	/// places every reader of that join that began waiting before now, within the budget.
 	/// Returns the tick it was recorded at.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn answer_join(&self, min: Option<Duration>, end: Option<u64>, start: Option<u64>, budget: Duration) -> u64 {
+	pub(crate) fn answer_join(
+		&self,
+		min: Option<Duration>,
+		end: Option<u64>,
+		start: Option<u64>,
+		budget: Duration,
+	) -> u64 {
 		// Ticked first: a range added once the tick moved takes no answer recorded at it, and
 		// asks again.
 		let tick = demand::answered();

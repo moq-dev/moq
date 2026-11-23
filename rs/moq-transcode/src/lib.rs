@@ -2023,7 +2023,11 @@ mod tests {
 		else {
 			panic!("the feed asks one live join: {:?}", asked.ranges);
 		};
-		assert_eq!(min, Some(std::time::Duration::ZERO), "a cold start begins at the live edge");
+		assert_eq!(
+			min,
+			Some(std::time::Duration::ZERO),
+			"a cold start begins at the live edge"
+		);
 		assert_ne!(
 			max,
 			Some(std::time::Duration::ZERO),
