@@ -28,7 +28,7 @@ use serde_with::DurationMilliSecondsWithFrac;
 pub const DEFAULT_NAME: &str = "catalog";
 
 /// Maximum serialized catalog bytes and aggregate resolved initData string bytes.
-pub const MAX_CATALOG_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 
 /// A snapshot of an MSF catalog: the tracks currently in a broadcast.
 ///
