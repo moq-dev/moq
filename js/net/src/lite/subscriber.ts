@@ -1,4 +1,4 @@
-import { Duration, sleep, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -73,7 +73,16 @@ import { AnnounceStream } from "./announce_stream.ts";
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
-import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
+import {
+	dropped,
+	passing,
+	RangeFills,
+	type RecoveryHandle,
+	type Refusal,
+	type Refused,
+	refuseRun,
+	Stall,
+} from "./fills.ts";
 import * as Fit from "./fit.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -2246,39 +2255,14 @@ export class Subscriber {
 		// relay of the previous release is left. That relay starts the recovery at its floor, sends the
 		// next group it holds, and never accounts for the keys between: it read a SUBSCRIBE asking no max
 		// delay as a 285,000-year grace, so it never asks its own upstream. Its FETCH answers them, so
-		// once the grace passes with no progress they are left to FETCH, a key at a time. A current
-		// relay answers them once its own upstream does, which may take longer than the grace, so
-		// every response and data stream restarts it.
+		// once the `Stall` grace passes with no progress they are left to FETCH, a key at a time.
 		let walk: Run[] = [];
-		let stall: Promise<void> | undefined;
-		let stallTimer: AbortController | undefined;
-		let stalled = false;
-		// The tail's streams received and whether one is being read, when last seen.
-		let seen: [number, boolean] = [0, false];
-		const armStall = () => {
-			stallTimer?.abort();
-			const timer = new AbortController();
-			stallTimer = timer;
-			stalled = false;
-			seen = [entry.tail.streams, entry.tail.reading];
-			stall = sleep(GRACE, { signal: timer.signal }).then(
-				() => {
-					stalled = true;
-					// Once fired it wakes nothing more: a stream still being read is waited on as a change.
-					stall = undefined;
-					stallTimer = undefined;
-				},
-				() => undefined,
-			);
-		};
-		const restartStall = () => {
-			if (stallTimer !== undefined || stalled) armStall();
-		};
+		let stall: Stall | undefined;
 		const changed = new Signal(0);
 		// What the publisher gives up of the groups, accounted for in the tail. The latest verdict on a
 		// group replaces any earlier one, so a peer repeating its drops grows nothing.
 		const giveUp = (start: bigint, end: bigint, refusal: Refusal) => {
-			restartStall();
+			stall?.restart();
 			entry.tail.account(start, end);
 			refused = refuseRun(refused, max(start, groups.start), min(end, groups.end), refusal);
 			fresh = refuseRun(fresh, max(start, groups.start), min(end, groups.end), refusal);
@@ -2332,7 +2316,10 @@ export class Subscriber {
 					if (first + 1n < groups.end) groups.end = first + 1n;
 					cap();
 					// TEMPORARY MIGRATION, see `walk`.
-					if (!entry.tail.covers(groups.start, groups.end)) armStall();
+					if (!entry.tail.covers(groups.start, groups.end)) {
+						stall?.close();
+						stall = new Stall(entry.tail);
+					}
 				};
 				const responses = this.#recoveryResponses(
 					opened,
@@ -2367,9 +2354,7 @@ export class Subscriber {
 						capAtFirst();
 						// TEMPORARY MIGRATION, see `walk`: what is still owed once the grace passed with no
 						// progress is left to FETCH.
-						if (entry.tail.reading || entry.tail.streams !== seen[0] || entry.tail.reading !== seen[1])
-							restartStall();
-						if (stalled && !covered()) {
+						if (stall?.poll(entry.tail) && !covered()) {
 							let owed: Run[] = [{ ...groups }];
 							for (const run of [...entry.tail.accounted(groups.start, groups.end), ...refused])
 								owed = removeRun(owed, run.start, run.end);
@@ -2392,7 +2377,7 @@ export class Subscriber {
 							Signal.race(entry.tail.changed),
 							over,
 							leaving,
-							...(stall === undefined ? [] : [stall]),
+							...(stall === undefined ? [] : [stall.wake]),
 						]);
 					}
 				} finally {
@@ -2426,7 +2411,7 @@ export class Subscriber {
 				// The publisher reset its side, or reading failed: give back our side too.
 				stream?.abort(failed);
 			} finally {
-				stallTimer?.abort();
+				stall?.close();
 				left.abort();
 				this.#subscribes.delete(id);
 				entry.tail.close();

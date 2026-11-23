@@ -1,16 +1,18 @@
 // The rules a lite-07 copy's `RangeFills` settles its fills by. Mirrors the tests in the Rust
 // `lite/subscriber/fills.rs`.
 import { expect, spyOn, test } from "bun:test";
-import { yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import { hooks, type Run } from "../internal.ts";
+import { GRACE } from "../ledger.ts";
+import { manual } from "../mock.ts";
 import { Tail } from "../tail.ts";
 import { Timestamp } from "../time.ts";
 import type { FillGroups, Producer } from "../track.ts";
-import { dropped, passing, RangeFills, type RecoveryHandle, type Refused } from "./fills.ts";
+import { dropped, passing, RangeFills, type RecoveryHandle, type Refused, Stall } from "./fills.ts";
 import { Version } from "./version.ts";
 
 const enc = new TextEncoder();
@@ -137,6 +139,56 @@ test("range fills: a stalled recovery hands its fill to FETCH", async () => {
 	expect(fills.recovering).toBe(false);
 	expect(fills.isEmpty()).toBe(true);
 	peer.close();
+});
+
+// TEMPORARY MIGRATION, delete with `RecoveryHandle.walk`: a fill handed to FETCH takes what the
+// recovery of the rest of its run refused in the same pass, such as the keys below that recovery's
+// START, which answer only the fills owing them and are not recorded on the copy.
+test("range fills: a walked fill takes a refusal from the same pass", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, Version.DRAFT_06, recover);
+	fills.push(peer.fill);
+	fills.poll(new Tail(), true);
+	// The recovery stops past the first group that arrives, 1, and the rest of the run goes out on a
+	// second one.
+	const first = defined(opened[0]);
+	first.groups = { start: 0n, end: 2n };
+	fills.poll(new Tail(), true);
+	const rest = defined(opened[1]);
+	expect(rest.groups).toEqual({ start: 2n, end: 4n });
+
+	// The second starts at 3, and the first stalls, both before the next poll.
+	rest.refuse({ start: 2n, end: 3n, refusal: passing(new StreamError(StreamCode.NotFound)) });
+	first.walk = [{ start: 0n, end: 1n }];
+	first.finish([]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	fills.poll(new Tail(), true);
+	expect(fills.takeWalks()).toEqual([peer.fill]);
+	expect(peer.fill.isWanted(0n)).toBe(true);
+	expect(peer.fill.isWanted(2n)).toBe(false);
+	expect(peer.fill.isWanted(3n)).toBe(true);
+	fills.close();
+	peer.close();
+});
+
+// TEMPORARY MIGRATION, delete with `Stall`: progress in the tick the grace passes, before its timer's
+// callback runs, restarts the grace rather than being overwritten by the expiry.
+test("stall: progress as the grace passes restarts it", async () => {
+	using clock = manual();
+	const tail = new Tail();
+	const stall = new Stall(tail);
+	// Fires the timer at once, queueing its callback.
+	clock.jump(GRACE);
+	stall.restart();
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(stall.poll(tail)).toBe(false);
+
+	await clock.advance(GRACE.saturatingSub(Duration.millis(1)));
+	expect(stall.poll(tail)).toBe(false);
+	await clock.advance(Duration.millis(1));
+	expect(stall.poll(tail)).toBe(true);
+	stall.close();
 });
 
 test("range fills: a stale drop of asked groups is recovered once, on a subscription of its own", async () => {

@@ -1,10 +1,12 @@
 // Fills a copy asks of its upstream through a subscription rather than FETCH: lite-07's own, or
 // before it, one of its own per run. Mirrors the Rust `lite/subscriber/fills.rs`.
 
+import { type Instant, now, sleepUntil } from "@moq/clock";
 import { type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "../error.ts";
 import { fillChanged, wantedRuns } from "../fill.ts";
 import { hooks, insertRun, type Run, removeRun, runGaps } from "../internal.ts";
+import { GRACE } from "../ledger.ts";
 import type { Tail } from "../tail.ts";
 import type * as track from "../track.ts";
 import { max, min } from "../util/key.ts";
@@ -280,6 +282,16 @@ export class RangeFills {
 			for (const refused of done.refused) this.#setRefused(refused.start, refused.end, refused.refusal);
 			for (const run of done.walk) insertRun(walk, run.start, run.end);
 		}
+		// What a recovery still out refused since the last poll answers the fills owing it now,
+		// rather than waiting on its other streams, including a fill handed to FETCH below. Taken
+		// once, so once those fills end, a later request for the same groups asks again rather than
+		// reading it back.
+		for (const recovery of this.#recoveries) {
+			for (const refused of recovery.handle.takeRefused()) {
+				this.#setRefused(refused.start, refused.end, refused.refusal);
+				insertRun(recovery.released, refused.start, refused.end);
+			}
+		}
 		// TEMPORARY MIGRATION, see `RecoveryHandle.walk`: a fill owing keys a stalled recovery left
 		// goes to FETCH whole, as before per-run recoveries, once it takes what was refused already,
 		// which it may not have reached yet.
@@ -298,15 +310,6 @@ export class RangeFills {
 				this.#walking.push(fill);
 			}
 			this.#held = kept;
-		}
-		// What a recovery still out refused since the last poll answers the fills owing it now,
-		// rather than waiting on its other streams. Taken once, so once those fills end, a later
-		// request for the same groups asks again rather than reading it back.
-		for (const recovery of this.#recoveries) {
-			for (const refused of recovery.handle.takeRefused()) {
-				this.#setRefused(refused.start, refused.end, refused.refusal);
-				insertRun(recovery.released, refused.start, refused.end);
-			}
 		}
 		// Rebuilt from those still out, so one ending leaves a later one's coverage of the same
 		// groups intact.
@@ -501,6 +504,56 @@ function nextRun(fill: track.FillGroups): Run | undefined {
 
 // Answer `[start, end)` of `fill`: a lost group is named dropped, as a FETCH's miss is, and
 // anything else is refused for now, recorded nowhere.
+/**
+ * TEMPORARY MIGRATION, delete at the next version cut with `RecoveryHandle.walk`: how long a capped
+ * recovery may go without progress before what it still owes is left to FETCH. Mirrors the Rust
+ * `Stall`.
+ *
+ * A relay of the previous release never answers the keys below the first group. A current one
+ * answers them once its own upstream does, which may take longer than the grace behind a slow or
+ * deep chain, so the grace restarts on every response and data stream instead of running from the
+ * cap.
+ */
+export class Stall {
+	#timer = new AbortController();
+	#deadline!: Instant;
+	// The tail's streams received and whether one is being read, when last seen.
+	#seen: [number, boolean];
+	/** Settles once the grace may have passed, to wake whoever polls it. */
+	wake!: Promise<void>;
+
+	/** Start the grace for a recovery reading `tail`. */
+	constructor(tail: Tail) {
+		this.#seen = [tail.streams, tail.reading];
+		this.restart();
+	}
+
+	/** Restart the grace, as the publisher made progress. */
+	restart(): void {
+		this.#timer.abort();
+		this.#timer = new AbortController();
+		this.#deadline = now().saturatingAdd(GRACE);
+		// Only a wake: whether the grace passed is read from the clock, so a timer that fired just
+		// before a restart counts for nothing.
+		this.wake = sleepUntil(this.#deadline, { signal: this.#timer.signal }).catch(() => undefined);
+	}
+
+	/** Whether the grace passed with no stream arriving, being read, or finishing. */
+	poll(tail: Tail): boolean {
+		const reading = tail.reading;
+		if (reading || tail.streams !== this.#seen[0] || reading !== this.#seen[1]) {
+			this.#seen = [tail.streams, reading];
+			this.restart();
+		}
+		return now().ge(this.#deadline);
+	}
+
+	/** Stop the timer. */
+	close(): void {
+		this.#timer.abort();
+	}
+}
+
 function answer(refusal: Refusal, fill: track.FillGroups, start: bigint, end: bigint): void {
 	if (refusal.lost) fill.dropGroups(start, end);
 	else fill.refuseGroups(start, end, refusal.error);

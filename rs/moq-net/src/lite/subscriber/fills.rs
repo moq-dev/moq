@@ -373,6 +373,13 @@ impl RangeFills {
 				self.refused.insert(groups.clone(), refusal.clone());
 			}
 		}
+		// What a recovery still out refused since the last poll answers the fills owing it now,
+		// rather than waiting on its other streams, including a fill handed to FETCH below.
+		let mut recoveries = std::mem::take(&mut self.recoveries);
+		for recovery in &mut recoveries {
+			self.take_refused(&mut recovery.fresh, &mut recovery.released);
+		}
+		self.recoveries = recoveries;
 		// TEMPORARY MIGRATION, see [`Recovery::walk`]: a fill owing keys a stalled recovery left
 		// goes to FETCH whole, as before per-run recoveries, once it takes what was refused
 		// already, which it may not have reached yet.
@@ -389,13 +396,6 @@ impl RangeFills {
 			}
 			self.walking.extend(walking);
 		}
-		// What a recovery still out refused since the last poll answers the fills owing it now,
-		// rather than waiting on its other streams.
-		let mut recoveries = std::mem::take(&mut self.recoveries);
-		for recovery in &mut recoveries {
-			self.take_refused(&mut recovery.fresh, &mut recovery.released);
-		}
-		self.recoveries = recoveries;
 		// Rebuilt from those still out, so one ending leaves a later one's coverage of the same
 		// groups intact.
 		self.cover();
