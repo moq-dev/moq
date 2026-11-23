@@ -1,4 +1,4 @@
-# [S] moq-ffi's failing-first-dial test hangs in the full gate
+# [S] moq-ffi's failing-first-dial test hangs in Nightly's gate
 
 ## Goal
 
@@ -15,9 +15,11 @@ others passed. It drives its own paused runtime clock
 points at a wait the manual clock never wakes, such as the dial's first
 packet or `state_changed`, not at load.
 
-High-risk PRs now run `just gate` in the merge queue, so this hang can drop
-them from the queue as well as fail Nightly.
+The hang fails Nightly's Gate on its own, and `check.yml` runs the same
+suite (`just ci --all`) on release PRs, so it can hold up a release too.
 
 Reproduce with `cargo nextest run -p moq-ffi --lib
 session_state_names_a_failing_first_dial --stress-count 200` under a
 loaded host before changing it.
+
+Decided 2026-11-23 (maintainer, /quest-run): keep.
