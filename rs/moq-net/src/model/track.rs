@@ -3550,6 +3550,9 @@ impl TrackState {
 				self.reclaim_aborted(key);
 				continue;
 			}
+			// A spared group counts too, as the expiry scan's do, so held groups never stretch
+			// one payment over the whole queue.
+			scanned += 1;
 			if self.spares(key) {
 				// The live edge is never enqueued, but tolerate finding it anyway; a group a
 				// fill holds waits for its reader, which takes it next.
@@ -3557,7 +3560,6 @@ impl TrackState {
 				continue;
 			}
 
-			scanned += 1;
 			// Protected: accessed more recently than the average (a fresh insert,
 			// an active reader, or a FETCH hit, which also covers a backfill still
 			// being filled). Rotate to the back, but shed its front below if the debt
@@ -8863,12 +8865,10 @@ impl Admitted {
 	}
 }
 
-/// `runs`, lowest first, below the exclusive `cap`.
-/// What a reader asks its fills with: read only once it asks, since every probe that asks
-/// nothing would otherwise take the subscription's lock for it.
-/// What a cursor asks its fills with. One behind an [`Ordered`] takes groups in key order
-/// whatever its subscription's order, so its fills serve the oldest first: a fill waits for
-/// its reader to take each group before the next.
+/// What a cursor asks its fills with, read only once it asks, since every probe that asks
+/// nothing would otherwise take the subscription's lock for it. One read in key order
+/// (`ordered`) takes groups oldest first whatever its subscription's order, so its fills serve
+/// the oldest first: a fill waits for its reader to take each group before the next.
 fn asking(subscription: &Preferences, ordered: bool) -> miss::Asking {
 	let subscription = subscription.read();
 	miss::Asking {
@@ -8881,6 +8881,7 @@ fn asking(subscription: &Preferences, ordered: bool) -> miss::Asking {
 	}
 }
 
+/// `runs`, lowest first, below the exclusive `cap`.
 fn below(runs: impl Iterator<Item = ops::RangeInclusive<u64>>, cap: Option<u64>) -> RangeInclusiveSet<u64> {
 	let mut below = RangeInclusiveSet::new();
 	let last = match cap {
@@ -9338,6 +9339,9 @@ struct Cursor {
 	/// widening took back from them, for it to forget. `None` for a wire publisher, which
 	/// told its peer of every drop it reported, for good.
 	withdrawn: Option<RangeSet<u64>>,
+	/// Read in key order, whatever the subscription's: behind an [`Ordered`], or a front's copy
+	/// its key-order reader reads. Its fills then serve the oldest first.
+	key_order: bool,
 	/// The heads a bounded window asked for, once it first finds a group missing one.
 	heads: Option<Box<Heads>>,
 	/// The group read that last parked, answered again without the walk until something
@@ -9849,6 +9853,7 @@ impl Cursor {
 			drops: None,
 			misses: None,
 			withdrawn: None,
+			key_order: false,
 			heads: None,
 			idle: None,
 			finished: None,
@@ -10715,7 +10720,7 @@ impl Cursor {
 		{
 			return false;
 		}
-		let asking = &asking(&self.subscription, self.withdrawn.is_some());
+		let asking = &asking(&self.subscription, self.key_order);
 		let fills = self.state.read().fills.clone();
 		let asked: BTreeSet<(u64, u64)> = self
 			.filter
@@ -10867,7 +10872,7 @@ impl Cursor {
 		};
 		// Nothing to ask, no fill to hear from, and no gap to time: no answer can arrive.
 		if fills.is_some() || !misses.is_idle() {
-			let asking = asking(&self.subscription, self.withdrawn.is_some());
+			let asking = asking(&self.subscription, self.key_order);
 			match &fills {
 				Some(fills) => misses.ask(&self.state, fills, &asks, &asking, &mut given_up),
 				// What the reader asks with still reaches the fills it joined.
@@ -10954,7 +10959,7 @@ impl Cursor {
 		let group = misses.next_filled(&self.state.read(), order, &mut lost, &mut given_up);
 		if !lost.is_empty() {
 			let fills = self.state.read().fills.clone();
-			let asking = asking(&self.subscription, self.withdrawn.is_some());
+			let asking = asking(&self.subscription, self.key_order);
 			misses.ask(&self.state, &fills, &lost, &asking, &mut given_up);
 		}
 		if self.drops.is_some() {
@@ -11826,6 +11831,8 @@ impl Subscriber {
 	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<Reserved>>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
+				// A front's copy learns it is read in key order only from the read.
+				cursor.key_order |= ordered;
 				let walk = idle::Walk::new(ordered);
 				if cursor.parked(walk, waiter) {
 					return Poll::Pending;
@@ -12211,6 +12218,7 @@ impl Subscriber {
 	pub fn ordered(mut self) -> Ordered {
 		if let Inner::Plain(cursor) = &mut self.inner {
 			cursor.withdrawn = Some(RangeSet::new());
+			cursor.key_order = true;
 		}
 		Ordered {
 			inner: self,
@@ -30485,6 +30493,46 @@ mod test {
 		assert_eq!(read, [0, 1, 2, 3, 4]);
 	}
 
+	/// A front's key-order reader subscribed newest first asks its copy's fills oldest first
+	/// too, as a direct one does: the copy is read in key order whatever its subscription's.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_front_fill_against_its_readers_order_still_finishes() {
+		let routes = super::super::resume::Producer::new();
+		let logical = Request::new(Arc::new(broadcast::Info::default()), "test")
+			.routes(routes.consume())
+			.accept(Info::timed());
+		let mut copy = track_producer("test", Info::timed());
+		let dynamic = copy.requests();
+		copy.start_at(4).unwrap();
+		write_group(&copy, 4);
+		routes.serve(copy.consume());
+		let subscription = replay().with_range(0..).with_order(Order::Descending);
+		let mut ordered = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let waiter = kio::Waiter::noop();
+		assert!(ordered.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asked for the batch");
+		};
+		assert_eq!(fill.order(), Order::Ascending);
+		let (mut served, mut read) = (Vec::new(), Vec::new());
+		while let Poll::Ready(Some(key)) = fill.poll_wanted_changed(&waiter) {
+			write_filled(fill.accept(key, None), key);
+			served.push(key);
+			while let Poll::Ready(Ok(Some(item))) = ordered.poll_next_group(&waiter) {
+				read.push(item.start);
+			}
+		}
+		assert_eq!(served, [0, 1, 2, 3]);
+		assert_eq!(read, [0, 1, 2, 3, 4]);
+	}
+
 	/// A publisher out of stream credit still forwards drops, whose probe takes in a fill's
 	/// answers: only a read picks a group up, so the fill never runs ahead of a publisher
 	/// that cannot send what it wrote.
@@ -34405,19 +34453,28 @@ mod test {
 			Poll::Pending => panic!("a flight is asked"),
 		};
 		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
-		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
-		flight
-			.write_frame(crate::Timestamp::unscaled(flight.start), payload.clone())
-			.unwrap();
+		let flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		let demand = flight.handle();
+		let mut flying = flight.create_frame(frame_info(&payload)).unwrap();
+		flying.write(payload.slice(..8)).unwrap();
 		assert!(flag.take(), "the flight woke the read");
 		let mut rest = Vec::new();
-		loop {
+		let mut read = |frame: &mut crate::frame::Consumer| loop {
 			match frame.poll_read_chunk(&noop) {
 				Poll::Ready(Ok(Some(chunk))) => rest.extend_from_slice(&chunk),
-				Poll::Ready(Ok(None)) => break,
+				Poll::Ready(Ok(None)) => return true,
+				Poll::Pending => return false,
 				other => panic!("the rest of the frame: {:?}", other.map(|res| res.map(|_| ()))),
 			}
-		}
+		};
+		assert!(!read(&mut frame), "the flight's frame is still arriving");
+		// The handler serves a flight its readers took for as long as its group is read.
+		assert!(
+			demand.poll_unwanted(&noop).is_pending(),
+			"the frame being read keeps its flight wanted"
+		);
+		flying.write(payload.slice(8..)).unwrap();
+		assert!(read(&mut frame), "the rest of the frame");
 		assert_eq!(rest, payload[2..], "past the bytes already read");
 		drop(arriving);
 	}
