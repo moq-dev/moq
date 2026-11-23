@@ -99,7 +99,9 @@
 //! * `wire_lost` / `cwnd_blocked_us` / `pacing_blocked_us` ([`Presence`]): cumulative
 //!   sent transport bytes declared lost, and microseconds the label's connections had
 //!   data ready to send held back by a full congestion window or by the pacer, read
-//!   from the same counters. Lost bytes over `wire_tx` is the loss rate.
+//!   from the same counters. Loss lands on the label and tier current when QUIC declares it,
+//!   so after a retag it need not be part of that row's `wire_tx`; summed over a node and a
+//!   window longer than a retag, lost bytes over `wire_tx` is the loss rate.
 //! * `routes_refused` ([`Presence`]): cumulative routes and claims that lite-07
 //!   sessions under the label forwarded and this node refused, each withdrawn while
 //!   the session stays open; [`Routes::refused`] splits it by reason.
@@ -628,7 +630,8 @@ pub struct Presence {
 	pub wire_tx: u64,
 	/// Cumulative transport bytes received, including transport framing.
 	pub wire_rx: u64,
-	/// Cumulative sent transport bytes declared lost, part of `wire_tx`.
+	/// Cumulative sent transport bytes declared lost, counted where the loss is declared, so a
+	/// retagged session's loss may land on a row whose `wire_tx` never held those bytes.
 	// Zero on every transport but QUIC, so a zero stays off the wire like the credit counters.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub wire_lost: u64,

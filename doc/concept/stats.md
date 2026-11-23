@@ -440,8 +440,10 @@ Other unsupported transports, including browsers, contribute zero. Unavailable
 counters are never estimated from payload. Readers default missing wire fields
 to zero for older relays.
 
-`wire_lost` counts the sent bytes QUIC declared lost, part of `wire_tx`, so
-their ratio is the loss rate. `cwnd_blocked_us` and `pacing_blocked_us` count
+`wire_lost` counts the sent bytes QUIC declared lost. It lands on the label and
+tier current when the loss is declared, so a session retagged in between moves
+loss away from the row that counted those bytes in `wire_tx`; across a whole
+node, the ratio of the two is the loss rate. `cwnd_blocked_us` and `pacing_blocked_us` count
 the microseconds a connection had data ready to send held back by its congestion
 controller: by a full congestion window, or by the pacer spreading sends at the
 controller's rate. Time growing here points at the path setting the pace,

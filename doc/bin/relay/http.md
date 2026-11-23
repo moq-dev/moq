@@ -71,7 +71,7 @@ contribute zero.
 `moq_relay_wire_lost_bytes_total`, `moq_relay_cwnd_blocked_microseconds_total`,
 and `moq_relay_pacing_blocked_microseconds_total` sum the per-session
 [congestion counters](/concept/stats#presence) by `tier`: the sent bytes
-declared lost, a share of `moq_relay_wire_tx_bytes_total`, and how long data
+declared lost, which over `moq_relay_wire_tx_bytes_total` is the loss rate, and how long data
 ready to send waited on a full congestion window or on the pacer. Wait time
 growing while credit stays flat points at the network rather than connection
 credit; a tier sums many sessions, and stream-level credit is not counted, so

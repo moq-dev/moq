@@ -829,7 +829,7 @@ impl Scrape {
 			),
 			(
 				"moq_relay_wire_lost_bytes",
-				"Transport bytes sent and declared lost, part of moq_relay_wire_tx_bytes.",
+				"Transport bytes sent and declared lost; over moq_relay_wire_tx_bytes, the loss rate.",
 				|p| p.wire_lost,
 			),
 			(
