@@ -3112,7 +3112,10 @@ mod tests {
 					continue;
 				}
 				let mut body = vec![0, 1, 1, b'a', 1, b'b', 1];
-				if nested {
+				if nested && version == Version::Draft23 {
+					// Draft-23 drops FILL_PARAMETERS' length: the count follows the key.
+					body.extend([0x23, 1, 0x22, value]);
+				} else if nested {
 					body.extend([0x23, 3, 1, 0x22, value]);
 				} else {
 					body.extend([0x22, value]);

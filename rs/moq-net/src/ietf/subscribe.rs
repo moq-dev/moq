@@ -456,9 +456,8 @@ mod tests {
 				"{version}: reader missed a planted RENDEZVOUS_TIMEOUT"
 			);
 
-			// Drafts 18 to 22 lead with FORWARD (0x10). Draft-23 has PAUSED (0x11) in its
-			// place and omits it at its default, so an unpaused SUBSCRIBE leads with a
-			// later key or carries none.
+			// Drafts 18 to 22 lead with FORWARD (0x10). Draft-23 leads with PAUSED (0x11)
+			// in its place.
 			let first = first_param_key(&encode_message(&msg, version), version);
 			match version {
 				Version::Draft18 | Version::Draft20 | Version::Draft22 => assert_eq!(
@@ -466,9 +465,10 @@ mod tests {
 					Some(0x10),
 					"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
 				),
-				Version::Draft23 => assert!(
-					first.is_none_or(|key| key > 0x04),
-					"{version}: RENDEZVOUS_TIMEOUT must not be advertised, got {first:?}"
+				Version::Draft23 => assert_eq!(
+					first,
+					Some(0x11),
+					"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
 				),
 			}
 		}

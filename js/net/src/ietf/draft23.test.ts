@@ -160,6 +160,17 @@ test("REQUEST_ERROR's Error Details are read and dropped at draft-23", async () 
 	// A detail cut short is malformed, not skipped.
 	await expect(RequestError.decode(reader(framed(body.slice(0, 7), NEW), NEW), NEW)).rejects.toThrow();
 
+	// Any number of details is valid: the framed message bounds them.
+	const many = [...body, ...Array.from({ length: 65 }, () => [0x00, 0x00]).flat()];
+	expect((await RequestError.decode(reader(framed(many, NEW), NEW), NEW)).errorCode).toBe(0x10);
+
+	// The summed type may reach 2^64 - 1 and stay there, but not pass it.
+	const step = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]; // a delta of 2^62 - 1
+	// From type 2: four steps reach 2^64 - 2, a delta of 1 reaches 2^64 - 1, and a delta of 0 stays.
+	const top = [...body, ...step, 0x00, ...step, 0x00, ...step, 0x00, ...step, 0x00, 0x01, 0x00, 0x00, 0x00];
+	expect((await RequestError.decode(reader(framed(top, NEW), NEW), NEW)).errorCode).toBe(0x10);
+	await expect(RequestError.decode(reader(framed([...top, 0x01, 0x00], NEW), NEW), NEW)).rejects.toThrow();
+
 	// Before draft-23 nothing follows the Reason Phrase, so the details are trailing bytes.
 	const draft22 = Version.DRAFT_22;
 	await expect(RequestError.decode(reader(framed(body, draft22), draft22), draft22)).rejects.toThrow();

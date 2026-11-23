@@ -6873,6 +6873,8 @@ enum FillStep {
 	Header,
 	/// Yielding before taking in the object just read.
 	Yield(FetchedObject),
+	/// Yielding after an End of Group, so a run of them is paced like objects.
+	Pace,
 	/// Reading past an object of a group the copy already owns.
 	Skip(SkipPayload, u64),
 	/// Writing an object's payload into the head.
@@ -6933,7 +6935,10 @@ impl RunFill {
 						None => return Poll::Ready(Ok(())),
 						// A fill ends where its subscription starts, which then says where
 						// the group ends.
-						Some(Fetched::End { .. }) => continue,
+						Some(Fetched::End { .. }) => {
+							self.step = FillStep::Pace;
+							continue;
+						}
 						Some(Fetched::Object(object)) => object,
 					};
 					self.first = false;
@@ -6945,6 +6950,10 @@ impl RunFill {
 						unreachable!()
 					};
 					self.step = self.take(object, track)?;
+				}
+				FillStep::Pace => {
+					ready!(self.budget.poll_yield(waiter));
+					self.step = FillStep::Header;
 				}
 				FillStep::Skip(skip, id) => {
 					ready!(skip.poll(waiter, stream))?;
@@ -7854,6 +7863,8 @@ struct GroupFetchObjects {
 	ended: bool,
 	/// The object whose payload is being read: its group, its Object ID, and where it goes.
 	payload: Option<(u64, u64, FetchPayloadRead)>,
+	/// Charged an entry at a time, so a stream of ready entries still yields.
+	budget: kio::coop::Budget,
 }
 
 /// Where a fetch object's payload goes.
@@ -7876,6 +7887,7 @@ impl GroupFetchObjects {
 			first: true,
 			ended: false,
 			payload: None,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -7904,6 +7916,7 @@ impl GroupFetchObjects {
 				}
 			}
 
+			ready!(self.budget.poll_yield(waiter));
 			let object = match ready!(poll_fetch_object(stream, self.first, waiter))? {
 				None => break,
 				Some(Fetched::End { track }) => {

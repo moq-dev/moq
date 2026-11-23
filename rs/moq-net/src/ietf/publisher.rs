@@ -7527,7 +7527,12 @@ impl FetchGroupWrite {
 		let res = match res {
 			Poll::Ready(Ok(())) => {
 				self.written = true;
-				self.poll_tail(waiter, stream)
+				// Parked on flow control with only the tail left, a group gone stale resets its
+				// stream rather than pin its credit and rank.
+				match self.poll_tail(waiter, stream) {
+					Poll::Pending if self.poll_stale(waiter) => Poll::Ready(Err(Error::Old)),
+					tail => tail,
+				}
 			}
 			other => other,
 		};
@@ -15134,6 +15139,97 @@ mod serve_tests {
 		assert_eq!(h.log.resets().len(), 1, "the fill's stream reset");
 	}
 
+	/// A draft-23 FETCH whose every object went out but whose End of Group is parked on flow
+	/// control resets once its group goes stale, as one parked on its FETCH_HEADER does.
+	#[kio::test]
+	async fn a_fetch_parked_on_its_end_of_group_resets_once_its_group_goes_stale() {
+		let version = Version::Draft23;
+		let budget = Duration::from_secs(2);
+		let fetch = || ietf::Fetch {
+			authorization_token: None,
+			request_id: FETCH_ID,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Ascending,
+			fetch_type: fetch_range(
+				version,
+				"video",
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 0 },
+			),
+			range_filters: false,
+			fill_timeout: true,
+			properties_wanted: false,
+		};
+		let answer = |session: ScriptedSession| {
+			let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
+			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			group.write_frame(group.key_time(), b"fetch".as_slice()).unwrap();
+			group.finish().unwrap();
+			h
+		};
+		let written = |h: &Serve| -> Vec<u8> {
+			data_streams(&h.log)
+				.into_values()
+				.flatten()
+				.filter_map(|sent| match sent {
+					Sent::Write(bytes) => Some(bytes),
+					_ => None,
+				})
+				.flatten()
+				.collect()
+		};
+
+		// The whole answer, read with credit to spare, ends with the two-byte End of Group.
+		let h = answer(ScriptedSession::per_stream(vec![Vec::new()]));
+		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+			.await
+			.unwrap();
+		let mut fetching = std::pin::pin!(h.publisher.clone().run_fetch_stream(stream, fetch()));
+		serve_until(fetching.as_mut(), "the answer went out whole", || {
+			data_streams(&h.log)
+				.values()
+				.flatten()
+				.any(|sent| *sent == Sent::Finish)
+		})
+		.await;
+		let whole = written(&h);
+		assert_eq!(
+			whole[whole.len() - 2],
+			0x40,
+			"the answer ends with End of Group: {whole:?}"
+		);
+
+		// One byte short, so every object goes out and only End of Group's last byte parks.
+		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_uni_send_window(whole.len() - 1);
+		let h = answer(session);
+		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+			.await
+			.unwrap();
+		let mut fetching = std::pin::pin!(h.publisher.clone().run_fetch_stream(stream, fetch()));
+		serve_until(fetching.as_mut(), "the objects went out", || {
+			written(&h).len() == whole.len() - 1
+		})
+		.await;
+
+		let mut next = h.track.create_group(group::Info { start: 1 }).unwrap();
+		next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
+		next.finish().unwrap();
+		kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
+		assert!(futures::poll!(fetching.as_mut()).is_pending(), "within the budget");
+		assert!(h.log.resets().is_empty());
+
+		kio::clock::sim::advance(Duration::from_millis(1)).await;
+		let _ = kio::clock::timeout(budget, fetching.as_mut())
+			.await
+			.expect("the stale fetch stayed parked on its End of Group");
+		let resets = data_streams(&h.log)
+			.into_values()
+			.flatten()
+			.filter(|sent| matches!(sent, Sent::Reset(_)))
+			.count();
+		assert_eq!(resets, 1, "the fetch stream reset");
+	}
+
 	/// A standalone FETCH whose FETCH_HEADER is parked on flow control resets once its group
 	/// goes stale, rather than hold the stream and its rank for a response nobody wants.
 	#[kio::test]
@@ -15807,15 +15903,20 @@ mod serve_tests {
 			let edge = Location { group: 4, object: 2 };
 			let buf = standalone_fetch(&h, whole, edge, GroupOrder::Ascending).await;
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(
-				ok.end_location,
-				if Filter::is_draft20(version) {
-					Location { group: 4, object: 1 }
-				} else {
-					edge
-				},
-				"{version}"
-			);
+			if names_its_end(version) {
+				assert_eq!(
+					ok.end_location,
+					if Filter::is_draft20(version) {
+						Location { group: 4, object: 1 }
+					} else {
+						edge
+					},
+					"{version}"
+				);
+			} else {
+				// Draft-23 has no End Location: the range reaches the Largest Object, which it names.
+				assert_eq!(ok.largest, Some(Location { group: 4, object: 1 }), "{version}");
+			}
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([4]), "{version}");
 		}

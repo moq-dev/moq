@@ -603,10 +603,15 @@ mod tests {
 	/// SUBSCRIBE_NAMESPACE's it closes the session.
 	#[test]
 	fn track_property_filter_on_namespace_update_closes() {
-		// REQUEST_UPDATE, 6 bytes: Request ID 2, one parameter: 0x29 with a two-byte value.
-		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
-			let mut buf = bytes::Bytes::from_static(FRAME);
+			// REQUEST_UPDATE: Request ID 2 and no parameters is a valid update, so the
+			// refusal below is the parameter's and not the framing's.
+			let mut buf = bytes::Bytes::from(framed(version, 0x02, &[2, 0]));
+			let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::decode(r, v));
+			assert!(decoded.is_ok(), "{version}");
+
+			// Request ID 2, one parameter: 0x29 with a two-byte value.
+			let mut buf = bytes::Bytes::from(framed(version, 0x02, &[2, 1, 0x29, 2, 0, 0]));
 			let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::decode(r, v));
 			assert!(decoded.is_err(), "{version}");
 		}

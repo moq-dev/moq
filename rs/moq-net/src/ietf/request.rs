@@ -104,9 +104,6 @@ impl<'a> RequestError<'a> {
 }
 
 impl RequestError<'_> {
-	/// The most Error Details one REQUEST_ERROR may carry before we refuse to walk them.
-	const MAX_DETAILS: usize = 64;
-
 	/// Whether Error Details follow the Reason Phrase (draft-23 section 9.4.2).
 	fn has_details(version: Version) -> bool {
 		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
@@ -116,15 +113,11 @@ impl RequestError<'_> {
 	///
 	/// We act on none of them (a REDIRECT is not followed), and unknown ones must be
 	/// ignored, so each only has to be a well-formed pair: an even type is a varint, an odd
-	/// one length-prefixed bytes. A type may repeat.
+	/// one length-prefixed bytes. A type may repeat, and nothing is kept, so the framed
+	/// message bounds the walk.
 	fn skip_details(r: &mut Decoder<'_>) -> Result<(), DecodeError> {
 		let mut kind = 0u64;
-		let mut count = 0;
 		while !r.is_empty() {
-			if count == Self::MAX_DETAILS {
-				return Err(DecodeError::TooMany);
-			}
-			count += 1;
 			// The first Delta Type counts from 0, so one sum covers every pair.
 			kind = kind.checked_add(r.varint()?).ok_or(DecodeError::BoundsExceeded)?;
 			match kind % 2 {
@@ -234,6 +227,12 @@ mod tests {
 		// A detail cut short is malformed, not skipped.
 		let mut buf = Decoder::new(&body[..7], version.into());
 		assert!(RequestError::decode_msg(&mut buf, version).is_err());
+
+		// Any number of details is valid: the framed message bounds them.
+		let many: Vec<u8> = body.iter().copied().chain([0x00, 0x00].repeat(65)).collect();
+		let mut buf = Decoder::new(&many, version.into());
+		RequestError::decode_msg(&mut buf, version).unwrap();
+		assert!(buf.is_empty());
 
 		// Before draft-23 nothing follows the Reason Phrase, so the same bytes are left over
 		// for the message framing to refuse.

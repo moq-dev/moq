@@ -80,20 +80,21 @@ export class RequestError {
 	}
 }
 
-/** The most Error Details one REQUEST_ERROR may carry before we refuse to walk them. */
-const MAX_DETAILS = 64;
+/** The largest Error Detail type: the summed Delta Types must fit in 64 bits, as in Rust. */
+const MAX_DETAIL_TYPE = 0xffff_ffff_ffff_ffffn;
 
 /**
  * Read past draft-23's Error Details (section 9.4.2): Key-Value-Pairs running to the end of
  * the message. None is acted on (a REDIRECT is not followed) and unknown ones must be ignored,
  * so each only has to be well formed: an even type is a varint, an odd one length-prefixed.
+ * A type may repeat, and nothing is kept, so the framed message bounds the walk.
  */
 async function skipDetails(r: Reader): Promise<void> {
 	let kind = 0n;
-	for (let count = 0; !(await r.done()); count++) {
-		if (count === MAX_DETAILS) throw new Error(`too many Error Details: more than ${MAX_DETAILS}`);
+	while (!(await r.done())) {
 		// The first Delta Type counts from 0, so one sum covers every pair.
 		kind += await r.u62();
+		if (kind > MAX_DETAIL_TYPE) throw new Error("Error Detail type overflows 64 bits");
 		if (kind % 2n === 0n) await r.u62();
 		else await r.read(await r.u53());
 	}
