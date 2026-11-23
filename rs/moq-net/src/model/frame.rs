@@ -1535,9 +1535,17 @@ pub struct Consumer {
 	// The parent subscription can expire after this frame handle is returned.
 	expiry: Option<Expiry>,
 	expired: bool,
-	// Read from a front's logical track: carries the read across route changes, with
-	// this frame's index in its group. Boxed: it is the rare case.
-	recover: Option<Box<(super::resume::Recover, u64)>>,
+	// What continues the read once its copy fails. Boxed: it is the rare case.
+	recover: Option<Box<Resume>>,
+}
+
+/// What carries a frame's read past the copy it reads.
+#[derive(Clone)]
+enum Resume {
+	/// A front's logical track, across route changes, with this frame's index in its group.
+	Route(super::resume::Recover, u64),
+	/// A flight of the group from this frame, once the pool evicted the copy mid-frame.
+	Flight(super::track::Refly),
 }
 
 impl std::ops::Deref for Consumer {
@@ -1567,18 +1575,27 @@ impl Consumer {
 
 	/// Carry this frame across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
-		self.recover = Some(Box::new((recover, index)));
+		self.recover = Some(Box::new(Resume::Route(recover, index)));
+		self
+	}
+
+	/// Continue this frame, handed out still arriving, on a flight once the pool evicts its
+	/// copy; see [`super::track::Refly`].
+	pub(super) fn with_refly(mut self, refly: super::track::Refly) -> Self {
+		self.recover = Some(Box::new(Resume::Flight(refly)));
 		self
 	}
 
 	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
 	/// serves, continue from the serving route's copy of the same frame, past the bytes
-	/// already read.
+	/// already read. A copy the pool evicted continues the same way on a flight.
 	fn poll_resumed<T>(
 		&mut self,
 		waiter: &kio::Waiter,
 		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<T>>,
 	) -> Poll<Result<T>> {
+		// A flight evicted before it gave a byte would fare no better asked again now.
+		let mut flown = false;
 		loop {
 			let res = read(self, waiter);
 			if self.expired {
@@ -1596,52 +1613,77 @@ impl Consumer {
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
-			let (recover, index) = &mut **recover;
-			if !recover.wants(failed.as_ref(), waiter) {
-				return res;
-			}
-			if self.state.read().sparse() {
-				return Poll::Ready(Err(Error::Unsupported));
-			}
-			let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
-			let mut replacement = match recover.poll(*index, &cause, waiter) {
-				Poll::Ready(Ok(group)) => group,
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Pending => return Poll::Pending,
-			};
-			// A cached group can precede this frame's header. Keep the old generation
-			// until the replacement frame is actually available.
-			if let Some(expiry) = &mut self.expiry {
-				expiry.policy = expiry.policy.for_track(&replacement.copy);
-			}
-			// A stored compressed frame continues from the replacement's stored form, where
-			// the byte offset means the same thing.
-			if self.inflated.is_some() {
-				replacement.group = replacement.group.compressed();
-			}
-			let frame = match replacement.group.poll_next_frame(waiter) {
-				Poll::Ready(Ok(Some(frame))) => frame,
-				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Pending => {
-					return match self.poll_expired(waiter) {
-						true => Poll::Ready(Err(Error::Old)),
-						false => Poll::Pending,
+			let (route, frame, index) = match &mut **recover {
+				Resume::Route(recover, index) => {
+					if !recover.wants(failed.as_ref(), waiter) {
+						return res;
+					}
+					if self.state.read().sparse() {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+					let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
+					let mut replacement = match recover.poll(*index, &cause, waiter) {
+						Poll::Ready(Ok(group)) => group,
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Poll::Pending => return Poll::Pending,
 					};
+					let index = *index;
+					// A cached group can precede this frame's header. Keep the old generation
+					// until the replacement frame is actually available.
+					if let Some(expiry) = &mut self.expiry {
+						expiry.policy = expiry.policy.for_track(&replacement.copy);
+					}
+					// A stored compressed frame continues from the replacement's stored form,
+					// where the byte offset means the same thing. A flight never carries one.
+					if self.inflated.is_some() {
+						replacement.group = replacement.group.compressed();
+					}
+					match replacement.group.poll_next_frame(waiter) {
+						Poll::Ready(Ok(Some(frame))) => (Some(replacement), frame, index),
+						Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Poll::Pending => return self.poll_expired_or(waiter, Poll::Pending),
+					}
+				}
+				// Only the pool's eviction: any other failure is the group's own.
+				Resume::Flight(refly) => {
+					if !matches!(failed, Some(Error::Evicted)) || flown {
+						return res;
+					}
+					let index = refly.frame();
+					match refly.poll_frame(waiter) {
+						Poll::Ready(Ok(frame)) => {
+							flown = true;
+							(None, frame, index)
+						}
+						Poll::Ready(Err(_)) => return res,
+						// A read waiting on its flight is stalled like one waiting on its bytes.
+						Poll::Pending => return self.poll_expired_or(waiter, Poll::Pending),
+					}
 				}
 			};
 			// This copy was dense through its frame, so the replacement's must be the same
 			// Object ID: a copy that begins past a gap holds different content there.
-			if frame.fields.as_ref().is_some_and(|fields| fields.id != *index) {
+			if frame.fields.as_ref().is_some_and(|fields| fields.id != index) {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size || frame.inflated != self.inflated {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
-			recover.adopt(&replacement);
+			if let (Some(replacement), Some(Resume::Route(recover, _))) = (&route, self.recover.as_deref_mut()) {
+				recover.adopt(replacement);
+			}
 			self.state = frame.state;
 			self.source = frame.source;
+		}
+	}
+
+	/// `Old` once the drift budget gives up on a stalled read, else `res`.
+	fn poll_expired_or<T>(&mut self, waiter: &kio::Waiter, res: Poll<Result<T>>) -> Poll<Result<T>> {
+		match self.poll_expired(waiter) {
+			true => Poll::Ready(Err(Error::Old)),
+			false => res,
 		}
 	}
 
@@ -1676,7 +1718,10 @@ impl Consumer {
 		let Some(expiry) = &self.expiry else {
 			return false;
 		};
-		let recover = self.recover.as_ref().map(|recover| &recover.0);
+		let recover = match self.recover.as_deref() {
+			Some(Resume::Route(recover, _)) => Some(recover),
+			_ => None,
+		};
 		if !expiry.policy.is_expired(recover, waiter) {
 			return false;
 		}

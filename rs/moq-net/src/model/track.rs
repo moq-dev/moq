@@ -4523,22 +4523,101 @@ pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer)
 	{
 		return Some(Board::Ride(copy, flight));
 	}
-	let fills = state.fills.clone();
 	drop(state);
+	let frame = if compress { 0 } else { reader.index() };
+	board_at(track, reader.start, frame, reader.asking()).map(Board::Wait)
+}
+
+/// Ask `track`'s [`Requests`] handlers for a flight of group `key` from `frame`.
+fn board_at(track: &kio::Producer<TrackState>, key: u64, frame: u64, asking: Asking) -> Option<Boarding> {
+	let fills = track.read().fills.clone();
 	// One group either way, so it never turns a wider fill it joins newest first.
 	let asking = fill::Asking {
 		order: Order::Ascending,
-		..reader.asking()
+		..asking
 	};
-	let (key, frame) = (reader.start, if compress { 0 } else { reader.index() });
 	let join = fills.lock().fly(&fills, key, frame, asking)?;
-	Some(Board::Wait(Boarding {
+	Some(Boarding {
 		join: Box::new(join),
 		fills,
 		asking,
 		key,
 		frame,
-	}))
+	})
+}
+
+/// Continues a frame handed out still arriving once the pool evicts its copy: a flight of
+/// its group from that frame, which holds the same bytes under the same name.
+pub(super) struct Refly {
+	cache: Arc<cache::Track>,
+	key: u64,
+	frame: u64,
+	asking: Asking,
+	state: ReflyState,
+}
+
+enum ReflyState {
+	Idle,
+	Boarding(Boarding),
+	Aboard(group::Consumer),
+}
+
+impl Clone for Refly {
+	/// A clone of the frame asks its own flight.
+	fn clone(&self) -> Self {
+		Self::new(self.cache.clone(), self.key, self.frame, self.asking)
+	}
+}
+
+impl Refly {
+	pub(super) fn new(cache: Arc<cache::Track>, key: u64, frame: u64, asking: Asking) -> Self {
+		Self {
+			cache,
+			key,
+			frame,
+			asking,
+			state: ReflyState::Idle,
+		}
+	}
+
+	/// The frame's index in its group.
+	pub(super) fn frame(&self) -> u64 {
+		self.frame
+	}
+
+	/// Poll for the frame on a flight, or [`Error::Evicted`] when nothing serves one: the
+	/// track is gone, has no handlers, or stores frames compressed, whose flights start at
+	/// the group's first frame. Each call after an answer asks a new flight.
+	pub(super) fn poll_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<crate::frame::Consumer>> {
+		loop {
+			match &mut self.state {
+				ReflyState::Idle => {
+					let Some(track) = self.cache.track() else {
+						return Poll::Ready(Err(Error::Evicted));
+					};
+					if track.read().info.as_ref().is_none_or(|info| info.compressed()) {
+						return Poll::Ready(Err(Error::Evicted));
+					}
+					let Some(boarding) = board_at(&track, self.key, self.frame, self.asking) else {
+						return Poll::Ready(Err(Error::Evicted));
+					};
+					self.state = ReflyState::Boarding(boarding);
+				}
+				ReflyState::Boarding(boarding) => {
+					let res = ready!(boarding.poll(waiter));
+					self.state = ReflyState::Idle;
+					let mut group = res.map_err(|_| Error::Evicted)?;
+					group.skip_to(self.frame);
+					self.state = ReflyState::Aboard(group);
+				}
+				ReflyState::Aboard(group) => {
+					let res = ready!(group.poll_next_frame(waiter));
+					self.state = ReflyState::Idle;
+					return Poll::Ready(res?.ok_or(Error::WrongSize));
+				}
+			}
+		}
+	}
 }
 
 /// Whether `track`'s [`Requests`] handlers can serve a flight, which [`board`] asks of them.
@@ -33213,6 +33292,95 @@ mod test {
 			matches!(reader.poll_finished(&kio::Waiter::noop()), Poll::Ready(Ok(2))),
 			"the flight's end"
 		);
+		drop(arriving);
+	}
+
+	/// A frame taken still arriving, partly read when the pool evicts its copy, reads the
+	/// rest of its bytes from a flight of the group from that frame.
+	#[test]
+	fn a_frame_evicted_while_arriving_resumes_on_a_flight() {
+		let noop = kio::Waiter::noop();
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		let handle = live.handle();
+		let payload = numbered(0);
+		let mut arriving = live.create_frame(frame_info(&payload)).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		let Poll::Ready(Ok(Some(mut frame))) = reader.poll_next_frame(&noop) else {
+			panic!("the arriving frame");
+		};
+		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(chunk))) if chunk == payload[..2]));
+		handle.shed_all();
+
+		let (flag, waiter) = Flag::waiter();
+		assert!(frame.poll_read_chunk(&waiter).is_pending(), "boarding a flight");
+		let fill = match requests.poll_requested_fill(&noop) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("a flight is asked"),
+		};
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
+		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		flight
+			.write_frame(crate::Timestamp::unscaled(flight.start), payload.clone())
+			.unwrap();
+		assert!(flag.take(), "the flight woke the read");
+		let mut rest = Vec::new();
+		loop {
+			match frame.poll_read_chunk(&noop) {
+				Poll::Ready(Ok(Some(chunk))) => rest.extend_from_slice(&chunk),
+				Poll::Ready(Ok(None)) => break,
+				other => panic!("the rest of the frame: {:?}", other.map(|res| res.map(|_| ()))),
+			}
+		}
+		assert_eq!(rest, payload[2..], "past the bytes already read");
+		drop(arriving);
+	}
+
+	/// A caller that only awaits the end of a group the pool evicted mid-frame boards the
+	/// flight for the rest itself, so the flight wakes it and the group ends when the flight
+	/// does.
+	#[test]
+	fn the_end_of_a_group_evicted_while_arriving_waits_on_its_flight() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		live.write_frame(crate::Timestamp::unscaled(live.start), numbered(0))
+			.unwrap();
+		assert_eq!(read_numbered(&mut reader), Some(0));
+		let handle = live.handle();
+		let payload = numbered(1);
+		let mut arriving = live.create_frame(frame_info(&payload)).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		handle.shed_all();
+
+		let (flag, waiter) = Flag::waiter();
+		assert!(
+			reader.poll_finished(&waiter).is_pending(),
+			"the copy's eviction is not the group's end"
+		);
+		let fill = match requests.poll_requested_fill(&kio::Waiter::noop()) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("the end asks a flight"),
+		};
+		assert_eq!(fill.start(), Position { group: 0, frame: 1 });
+		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		assert!(flag.take(), "the accepted flight woke the end");
+		assert!(reader.poll_finished(&waiter).is_pending(), "the flight is open");
+		flight
+			.write_frame(crate::Timestamp::unscaled(flight.start), numbered(1))
+			.unwrap();
+		flight.finish().unwrap();
+		assert!(flag.take(), "the flight's finish woke the end");
+		// The cursor's own index, as for any finished group, and the frame it has yet to
+		// read comes from the flight.
+		assert!(
+			matches!(reader.poll_finished(&waiter), Poll::Ready(Ok(1))),
+			"the flight's end"
+		);
+		assert_eq!(read_numbered(&mut reader), Some(1), "read from the flight");
 		drop(arriving);
 	}
 
