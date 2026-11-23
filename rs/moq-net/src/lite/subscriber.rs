@@ -3368,6 +3368,57 @@ mod tests {
 		assert_eq!(read(30), None, "its range ended before it");
 	}
 
+	/// A placed join under a max age may be answered past groups the publisher still holds,
+	/// stale for it alone, so its answer places no history reader at its group; one with no
+	/// max age skips nothing, so it does.
+	#[kio::test]
+	async fn only_an_unbounded_placed_join_answers_for_history() {
+		for (max, placed) in [(Some(Duration::ZERO), None), (None, Some(20))] {
+			let tail = kio::Producer::new(Tail::default());
+			let Sub::Active(mut active) = feed_sub(&tail).await else {
+				unreachable!("feed_sub is active")
+			};
+			active.live = lite::LiveRanges::new(
+				Version::Lite07,
+				&[lite::Range {
+					start: Some(lite::Anchor::Joined {
+						at: track::Position { group: 10, frame: 0 },
+						max,
+					}),
+					end: None,
+				}],
+			);
+			active.starts = [(0, Some(20))].into();
+			let info = track::Info::default().with_timescale(None).with_max_age(None);
+			let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+			serving.received();
+			serving.anchored();
+			serving
+				.create_group(group::Info { start: 20 })
+				.unwrap()
+				.finish()
+				.unwrap();
+			active.report_starts(&serving);
+
+			let mut ordered = serving
+				.subscribe(
+					track::Subscription::default()
+						.with_ranges([track::Range {
+							start: crate::track::Start::Time(10),
+							end: None,
+						}])
+						.with_max(None),
+				)
+				.ordered();
+			let read = match ordered.next_item().now_or_never() {
+				Some(Ok(Some(track::Item::Group(group)))) => Some(group.start),
+				None => None,
+				Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+			};
+			assert_eq!(read, placed, "max {max:?}");
+		}
+	}
+
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
 	/// A fetch held for group 1 keeps waiting through the grace and is served when it lands.
 	#[kio::test]
@@ -10692,7 +10743,10 @@ impl SubStream {
 				continue;
 			};
 			let asked = match range.start {
-				Some(lite::Anchor::Absolute(time) | lite::Anchor::Joined { at: time, .. }) => time.group,
+				Some(lite::Anchor::Absolute(time) | lite::Anchor::Joined { at: time, max: None }) => time.group,
+				// A max age may start it past groups the publisher still holds, as stale for this
+				// join alone, so its answer proves nothing of history. Its readers are placed already.
+				Some(lite::Anchor::Joined { max: Some(_), .. }) => continue,
 				None => 0,
 				Some(lite::Anchor::Live { min, max }) => {
 					// Recorded once, as it arrives: a reader that began waiting since takes only a

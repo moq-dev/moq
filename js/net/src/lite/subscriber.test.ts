@@ -3142,6 +3142,42 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 	}
 });
 
+// A placed join under a max age may be answered past groups the publisher still holds, stale for
+// it alone, so its answer places no history reader at its group; one with no max age skips nothing.
+// Mirrors the Rust `only_an_unbounded_placed_join_answers_for_history`.
+for (const max of [Duration.ZERO, null]) {
+	test(`a placed join with max ${max === null ? "none" : "0"} answers for history only without one`, async () => {
+		const version = Version.DRAFT_07;
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, toHop(1n));
+		const broadcast = subscriber.consume(Path.from("room"));
+		const reported: (readonly [bigint, bigint | undefined])[][] = [];
+		const timeStarts = hooks.timeStarts;
+		hooks.timeStarts = (producer, starts) => {
+			reported.push([...starts]);
+			timeStarts(producer, starts);
+		};
+		const track = broadcast.track("video").subscribe({
+			ranges: [{ start: { live: { min: Duration.ZERO, max } } }],
+			placed: new Map([[0, 10n]]),
+		});
+		try {
+			await opened(0);
+			await answerTrackInfo(streams[0], version);
+			const request = await opened(1);
+			await request.reading;
+			await respond(request, version, [{ start: new SubscribeStart([20n]) }]);
+			await drainReactions();
+			expect(reported.at(-1)).toEqual(max === null ? [[10n, 20n]] : []);
+		} finally {
+			hooks.timeStarts = timeStarts;
+			track.close();
+			broadcast.close();
+			subscriber.close();
+		}
+	});
+}
+
 // A lite-07 stale (OLD) drop accounts for its groups for good, whichever of it and a group's stream
 // lands first: an update owes none of them again, and a group still arriving, such as one another
 // subscription sharing the copy delivers, is never aborted by the drop.

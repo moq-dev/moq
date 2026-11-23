@@ -2901,8 +2901,8 @@ export class Subscriber {
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
-		// Where the publisher started each live range asked from a group's start, or from the oldest
-		// group as time 0, which a reader's time start there resolves to when the copy can't place it
+		// Where the publisher started each live range asked from a group's start, a placed join's
+		// with no max age, or from the oldest group as time 0, which a reader's time start there resolves to when the copy can't place it
 		// among its groups; and one asked as a live join, whose answer alone places that join for the
 		// copy's readers within the max it was asked under. Mirrors the Rust `SubStream::report_starts`.
 		const times: [bigint, bigint | undefined][] = [];
@@ -2920,7 +2920,11 @@ export class Subscriber {
 				}
 				continue;
 			}
-			const asked = range.start?.time ?? range.start?.absolute ?? range.start?.joined?.absolute ?? 0n;
+			// A max age may start a placed join past groups the publisher still holds, as stale for
+			// it alone, so its answer proves nothing of history. Its readers are placed already.
+			const joined = range.start?.joined;
+			if (joined !== undefined && joined.max !== null && joined.max < NO_MAX_DELAY) continue;
+			const asked = range.start?.time ?? range.start?.absolute ?? joined?.absolute ?? 0n;
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if (at !== undefined || reaches(range.end, asked)) times.push([asked, at]);
 		}
