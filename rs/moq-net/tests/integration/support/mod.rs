@@ -52,8 +52,7 @@ impl AtStart for group::Producer {
 /// The groups from the one containing `keys`' start through the one containing its end, as
 /// times: on a track whose groups start at consecutive keys, the groups with those keys.
 ///
-/// An omitted start is no start, which [`track::Delay::min`] places. `..0` holds nothing, so it
-/// panics.
+/// An omitted start is the oldest group held. `..0` holds nothing, so it panics.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub fn keys(keys: impl RangeBounds<u64>) -> track::Range {
 	let start = match keys.start_bound() {

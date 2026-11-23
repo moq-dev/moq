@@ -58,6 +58,7 @@ import {
 	Frame,
 	type Group as GroupMessage,
 	ObjectIdGap,
+	objectDeltaBias,
 	objectTime,
 	statusDefined,
 } from "./object.ts";
@@ -73,6 +74,7 @@ import { joinFilter, Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
+import { isDraft23 } from "./version.ts";
 
 /** A fetch stream the head cannot be stitched from, which costs only that head. */
 class JoinUnsupported extends Error {
@@ -1268,7 +1270,8 @@ export class Subscriber {
 				const err = await RequestError.decode(response.reader, version);
 				throw new Error(requestReason(err.errorCode, err.reasonPhrase, "fetch", version));
 			}
-			if (response?.type !== FetchOk.id) throw new ProtocolViolation("expected FETCH_OK");
+			// FETCH_OK through draft-22, REQUEST_OK from draft-23 on; each refuses the other's.
+			if (response?.type !== FetchOk.idFor(version)) throw new ProtocolViolation("expected FETCH_OK");
 			let ok: FetchOk;
 			try {
 				ok = await FetchOk.decode(response.reader, version);
@@ -1277,8 +1280,11 @@ export class Subscriber {
 			}
 			active.throwIfAborted();
 			const end = ok.endLocation;
-			const whole = !isDraft20(version) && end.group === last && end.object === 0n;
-			if (isDraft20(version) && (end.group < start || end.group > last))
+			// Draft-23 has no End Location: the answer ends at its LARGEST_OBJECT, inclusive like
+			// draft-22's End Location, or without one at the end this FETCH asked for (section 3.2).
+			const requested = isDraft23(version) && ok.largest === undefined;
+			const whole = requested || (!isDraft20(version) && end.group === last && end.object === 0n);
+			if (isDraft20(version) && !requested && (end.group < start || end.group > last))
 				throw new ProtocolViolation("FETCH_OK's End Location is outside the requested range");
 			if (!whole && (end.group < start || (end.group === start && end.object === 0n && !isDraft20(version))))
 				throw new NotFound("empty FETCH");
@@ -1309,7 +1315,7 @@ export class Subscriber {
 				timescale: info.timescale ?? undefined,
 				last: covered,
 				bound: bound === undefined ? undefined : Number(bound),
-				legacy: !isDraft20(version),
+				version,
 			});
 			accepted.resolve(receiving);
 			const ended = stream.next().then((message) => {
@@ -1372,7 +1378,13 @@ export class Subscriber {
 		}
 		const done = await PublishDone.decode(framed.reader, version);
 		// A revocation reads the same as one from a moq-lite peer.
-		if (done.statusCode === PublishDoneStatus.UNAUTHORIZED) throw unauthorized(broadcast);
+		// Draft-23's EXPIRED_AUTH_TOKEN reads as the UNAUTHORIZED an earlier publisher sends for
+		// the same end. Before draft-23 the value is unassigned and stays the peer's code.
+		if (
+			done.statusCode === PublishDoneStatus.UNAUTHORIZED ||
+			(done.statusCode === PublishDoneStatus.EXPIRED_AUTH_TOKEN && isDraft23(version))
+		)
+			throw unauthorized(broadcast);
 		// The peer's code, as a moq-lite MALFORMED_TRACK reset reads, so a consumer can tell a
 		// malformed upstream apart from a relay bug.
 		if (done.statusCode === PublishDoneStatus.MALFORMED_TRACK) {
@@ -1524,7 +1536,7 @@ export class Subscriber {
 				const why = requestReason(err.errorCode, err.reasonPhrase, "fetch", version);
 				throw new Error(`joining FETCH refused: ${why}`);
 			}
-			if (response.type !== FetchOk.id) {
+			if (response.type !== FetchOk.idFor(version)) {
 				throw new ProtocolViolation(`unexpected answer to FETCH: 0x${response.type.toString(16)}`);
 			}
 			try {
@@ -2149,6 +2161,8 @@ export class Subscriber {
 		// A whole group took the key first, or the join gave up: read the rest away.
 		let discarding = false;
 		let next = 0;
+		// The prior entry was an End of Group, so the head's group takes no more objects.
+		let ended = false;
 		try {
 			const decode = (c: Cursor) => decodeFetchObject(c);
 			for (let first = true; ; first = false) {
@@ -2169,6 +2183,16 @@ export class Subscriber {
 				if (object.kind === "endOfRange") {
 					throw new JoinUnsupported("a head with an End of Range cannot be stitched");
 				}
+				// A fill ends where its subscription starts, which then says where the group ends.
+				if (object.kind === "endOfGroup") {
+					if (first) throw new ProtocolViolation("a fetch stream starts with an End of Group");
+					ended = true;
+					continue;
+				}
+				// Past an End of Group only an object that names another group can follow, which a
+				// head of one group then refuses below.
+				if (ended && object.group === undefined)
+					throw new ProtocolViolation("a fetch object continues a group past its End of Group");
 				const inherits =
 					object.group === undefined ||
 					object.object === undefined ||
@@ -2191,7 +2215,7 @@ export class Subscriber {
 					if (object.object !== 0) throw new JoinUnsupported("the head does not start at object 0");
 				} else if (object.group !== undefined) {
 					throw new JoinUnsupported("a head spanning several groups cannot be stitched");
-				} else if (object.object !== undefined && object.object !== 1) {
+				} else if (object.object !== undefined && object.object + objectDeltaBias(version) !== 1) {
 					throw new JoinUnsupported("a gap in the head cannot be stitched");
 				}
 

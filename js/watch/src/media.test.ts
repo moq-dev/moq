@@ -7,7 +7,7 @@ import { nextMedia, subscribeMedia } from "./media";
 
 const flush = () => yieldNow();
 
-test("media joins live at its min delay, and retunes only the join's max", async () => {
+test("media joins live at its min delay, retunes only the join's max, and updates its priority", async () => {
 	let initial: Moq.Track.Subscription | undefined;
 	const updates: Moq.Track.Subscription[] = [];
 	const current = new Signal<Moq.Track.Subscription | undefined>(undefined);
@@ -30,14 +30,10 @@ test("media joins live at its min delay, and retunes only the join's max", async
 		}),
 	} as unknown as Moq.Broadcast.Consumer;
 	const delay = new Signal<Container.Delay>({ min: Duration.millis(100), max: Duration.millis(250) });
+	const priority = new Signal(7);
 	const effect = new Effect();
 
-	subscribeMedia(effect, {
-		broadcast,
-		track: "media",
-		priority: 7,
-		delay,
-	});
+	subscribeMedia(effect, { broadcast, track: "media", priority, delay });
 	// A live join its min delay behind the live edge, under its max.
 	const live = (max: number) => [{ start: { live: { min: Duration.millis(100), max: Duration.millis(max) } } }];
 	expect(initial).toEqual({ priority: 7, ranges: live(250) });
@@ -51,6 +47,10 @@ test("media joins live at its min delay, and retunes only the join's max", async
 	delay.set({ min: Duration.millis(300), max: Duration.millis(500) });
 	await flush();
 	expect(updates.at(-1)).toEqual({ priority: 7, ranges: live(500) });
+
+	priority.set(-3);
+	await flush();
+	expect(updates.at(-1)).toEqual({ priority: -3, ranges: live(500) });
 
 	effect.close();
 });

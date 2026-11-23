@@ -907,8 +907,9 @@ pub struct moq_subscription {
 /// `end`. A zeroed one has neither: a range with no start that follows the live edge.
 ///
 /// Every start is the first frame of its group, and every end includes its whole group. A time
-/// names the group containing it, the newest one starting at or before it, so a group's start
-/// names exactly it. Both are unscaled (`has_scale` false), with `value` in the track's
+/// names the group containing it, the newest one starting at or before it unless that group ended
+/// whole at or before the time, so a group's start names exactly it. A start in the pause past a
+/// whole group's end begins at the next group. Both are unscaled (`has_scale` false), with `value` in the track's
 /// timescale; a scaled one is refused with a timestamp mismatch.
 ///
 /// A range with no start is placed by the subscription's `delay`. A raw track consumer joins it

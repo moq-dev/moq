@@ -19,7 +19,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 const MB: usize = 1 << 20;
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// Receive windows whose stream credit, 64 MiB, is past the 16 MiB pacing cap.
 fn uncapped() -> ReceiveWindow {

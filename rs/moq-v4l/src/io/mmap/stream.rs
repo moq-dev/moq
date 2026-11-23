@@ -1,4 +1,3 @@
-use std::convert::TryInto;
 use std::time::Duration;
 use std::{io, mem, sync::Arc};
 
@@ -14,17 +13,19 @@ use crate::v4l2;
 /// Stream of mapped buffers
 ///
 /// An arena instance is used internally for buffer handling.
-pub struct Stream<'a> {
+pub struct Stream {
 	handle: Arc<Handle>,
-	arena: Arena<'a>,
+	arena: Arena,
 	arena_index: usize,
 	buf_type: Type,
 	buf_meta: Vec<Metadata>,
 	timeout: Option<i32>,
 	state: State,
+	/// Output only: how many buffers since start userspace has yet to fill.
+	unqueued: usize,
 }
 
-impl<'a> Stream<'a> {
+impl Stream {
 	/// Returns a stream for frame capturing
 	///
 	/// # Arguments
@@ -51,6 +52,12 @@ impl<'a> Stream<'a> {
 	pub fn with_buffers(dev: &Device, buf_type: Type, buf_count: u32) -> io::Result<Self> {
 		let mut arena = Arena::new(dev.handle(), buf_type);
 		let count = arena.allocate(buf_count)?;
+		if count == 0 {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"the driver granted no buffers",
+			));
+		}
 		let mut buf_meta = Vec::new();
 		buf_meta.resize(count as usize, Metadata::default());
 
@@ -62,6 +69,7 @@ impl<'a> Stream<'a> {
 			buf_meta,
 			timeout: None,
 			state: State::Stopped,
+			unqueued: 0,
 		})
 	}
 
@@ -72,7 +80,7 @@ impl<'a> Stream<'a> {
 
 	/// Sets a timeout of the v4l file handle.
 	pub fn set_timeout(&mut self, duration: Duration) {
-		self.timeout = Some(duration.as_millis().try_into().unwrap());
+		self.timeout = Some(crate::io::timeout_ms(duration));
 	}
 
 	/// Clears the timeout of the v4l file handle.
@@ -89,25 +97,14 @@ impl<'a> Stream<'a> {
 	}
 }
 
-impl<'a> Drop for Stream<'a> {
+impl Drop for Stream {
 	fn drop(&mut self) {
-		if let Err(e) = self.stop() {
-			if let Some(code) = e.raw_os_error() {
-				// ENODEV means the file descriptor wrapped in the handle became invalid, most
-				// likely because the device was unplugged or the connection (USB, PCI, ..)
-				// broke down. Handle this case gracefully by ignoring it.
-				if code == 19 {
-					/* ignore */
-					return;
-				}
-			}
-
-			panic!("{:?}", e)
-		}
+		// Fails once the device is gone (ENODEV), which stops the queue anyway.
+		let _ = self.stop();
 	}
 }
 
-impl<'a> StreamTrait for Stream<'a> {
+impl StreamTrait for Stream {
 	type Item = [u8];
 
 	fn start(&mut self) -> io::Result<()> {
@@ -123,7 +120,7 @@ impl<'a> StreamTrait for Stream<'a> {
 		// STREAMON on a streaming queue does nothing, and leaves a dequeued
 		// buffer with userspace.
 		if let State::Stopped = self.state {
-			self.state = State::Streaming { held: false };
+			self.state = State::Started;
 		}
 		Ok(())
 	}
@@ -143,7 +140,7 @@ impl<'a> StreamTrait for Stream<'a> {
 	}
 }
 
-impl<'a, 'b> CaptureStream<'b> for Stream<'a> {
+impl<'b> CaptureStream<'b> for Stream {
 	fn queue(&mut self, index: usize) -> io::Result<()> {
 		let mut v4l2_buf = v4l2_buffer {
 			index: index as u32,
@@ -196,18 +193,19 @@ impl<'a, 'b> CaptureStream<'b> for Stream<'a> {
 
 	fn next(&'b mut self) -> io::Result<(&'b Self::Item, &'b Metadata)> {
 		match self.state {
-			State::Stopped => {
-				// Enqueue all buffers once on stream start. A start that fails
-				// partway hands back what it queued, which STREAMOFF does even on a
-				// queue that never streamed, so the next call starts from the same
-				// place rather than queueing a buffer twice.
-				let started = (0..self.arena.bufs.len())
+			State::Stopped | State::Started => {
+				// Hand the driver every buffer once per start, however it started. A
+				// start that fails partway hands back what it queued, which STREAMOFF
+				// does even on a queue that never streamed, so the next call starts
+				// from the same place rather than queueing a buffer twice.
+				let started = (0..self.arena.len())
 					.try_for_each(|index| CaptureStream::queue(self, index))
 					.and_then(|()| self.start());
 				if let Err(err) = started {
 					self.stop()?;
 					return Err(err);
 				}
+				self.state = State::Streaming { held: false };
 			}
 			State::Streaming { held: true } => {
 				// After a timed-out dequeue the driver already holds every buffer, and
@@ -222,13 +220,13 @@ impl<'a, 'b> CaptureStream<'b> for Stream<'a> {
 
 		// The index used to access the buffer elements is given to us by v4l2, so we assume it
 		// will always be valid.
-		let bytes = &self.arena.bufs[self.arena_index];
+		let bytes = self.arena.get(self.arena_index);
 		let meta = &self.buf_meta[self.arena_index];
 		Ok((bytes, meta))
 	}
 }
 
-impl<'a, 'b> OutputStream<'b> for Stream<'a> {
+impl<'b> OutputStream<'b> for Stream {
 	fn queue(&mut self, index: usize) -> io::Result<()> {
 		let mut v4l2_buf = v4l2_buffer {
 			index: index as u32,
@@ -243,13 +241,6 @@ impl<'a, 'b> OutputStream<'b> for Stream<'a> {
 			v4l2_buf.bytesused = self.buf_meta[index].bytesused;
 			v4l2_buf.field = self.buf_meta[index].field;
 
-			if self.handle.poll(libc::POLLOUT, self.timeout.unwrap_or(-1))? == 0 {
-				// This condition can only happen if there was a timeout.
-				// A timeout is only possible if the `timeout` value is non-zero, meaning we should
-				// propagate it to the caller.
-				return Err(io::Error::new(io::ErrorKind::TimedOut, "VIDIOC_QBUF"));
-			}
-
 			v4l2::ioctl(
 				self.handle.fd(),
 				v4l2::vidioc::VIDIOC_QBUF,
@@ -260,6 +251,12 @@ impl<'a, 'b> OutputStream<'b> for Stream<'a> {
 
 	fn dequeue(&mut self) -> io::Result<usize> {
 		let mut v4l2_buf = self.buffer_desc();
+
+		// An output queue is writable once the driver hands a consumed buffer back;
+		// before the first QBUF it has none to hand back, so the wait goes here.
+		if self.handle.poll(libc::POLLOUT, self.timeout.unwrap_or(-1))? == 0 {
+			return Err(io::Error::new(io::ErrorKind::TimedOut, "VIDIOC_DQBUF"));
+		}
 
 		unsafe {
 			v4l2::ioctl(
@@ -282,23 +279,143 @@ impl<'a, 'b> OutputStream<'b> for Stream<'a> {
 	}
 
 	fn next(&'b mut self) -> io::Result<(&'b mut Self::Item, &'b mut Metadata)> {
-		let init = self.state == State::Stopped;
-		if init {
-			self.start()?;
+		match self.state {
+			State::Stopped | State::Started => {
+				// After start every buffer is userspace's to fill, however it started.
+				self.start()?;
+				self.arena_index = 0;
+				self.unqueued = self.arena.len().saturating_sub(1);
+			}
+			State::Streaming { held } => {
+				// A queue that failed leaves the filled buffer held for the retry, and
+				// a dequeue that failed leaves it with the driver, so neither queues a
+				// buffer twice.
+				if held {
+					OutputStream::queue(self, self.arena_index)?;
+					self.state = State::Streaming { held: false };
+				}
+				// Fill every buffer once before waiting on one: a driver may not start
+				// until several are queued.
+				if self.unqueued > 0 {
+					self.arena_index = self.arena.len() - self.unqueued;
+					self.unqueued -= 1;
+				} else {
+					self.arena_index = OutputStream::dequeue(self)?;
+				}
+			}
 		}
-
-		// Only queue and dequeue once the buffer has been filled at the call site. The initial
-		// call to this function from the call site will happen just after the buffers have been
-		// allocated, meaning we need to return the empty buffer initially so it can be filled.
-		if !init {
-			OutputStream::queue(self, self.arena_index)?;
-			self.arena_index = OutputStream::dequeue(self)?;
-		}
+		self.state = State::Streaming { held: true };
 
 		// The index used to access the buffer elements is given to us by v4l2, so we assume it
 		// will always be valid.
-		let bytes = &mut self.arena.bufs[self.arena_index];
+		let bytes = self.arena.get_mut(self.arena_index);
 		let meta = &mut self.buf_meta[self.arena_index];
 		Ok((bytes, meta))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use super::*;
+	use crate::capability::Flags;
+
+	/// Against the kernel's `vivid` virtual driver, which nightly loads with
+	/// `modprobe vivid`; run with `just rs v4l2`.
+	mod vivid {
+		use super::*;
+
+		const FRAMES: usize = 8;
+
+		/// The first `vivid` node streaming `flag`, found by driver name rather
+		/// than a fixed `/dev/videoN`. A host without one skips, unless CI_STRICT
+		/// makes that a failure.
+		fn node(flag: Flags) -> Option<Device> {
+			let mut nodes = crate::context::enum_devices();
+			nodes.sort_by_key(crate::context::Node::index);
+			let device = nodes.into_iter().find_map(|node| {
+				let device = Device::with_path(node.path()).ok()?;
+				let caps = device.query_caps().ok()?;
+				(caps.driver == "vivid" && caps.capabilities.contains(flag | Flags::STREAMING)).then_some(device)
+			});
+			if device.is_none() {
+				assert!(
+					std::env::var_os("CI_STRICT").is_none(),
+					"no vivid node; load it with `sudo modprobe vivid`"
+				);
+				eprintln!("skipping: no vivid node; load it with `sudo modprobe vivid`");
+			}
+			device
+		}
+
+		fn stream(device: &Device, buf_type: Type) -> Stream {
+			let mut stream = Stream::with_buffers(device, buf_type, 4).expect("allocate buffers");
+			stream.set_timeout(Duration::from_secs(2));
+			stream
+		}
+
+		fn capture(stream: &mut Stream) {
+			for _ in 0..FRAMES {
+				let (buf, meta) = CaptureStream::next(stream).expect("capture a frame");
+				assert!(meta.bytesused > 0 && buf.len() >= meta.bytesused as usize);
+			}
+		}
+
+		fn output(stream: &mut Stream) {
+			for i in 0..FRAMES {
+				let (buf, _) = OutputStream::next(stream).expect("output a frame");
+				buf.fill(i as u8);
+			}
+		}
+
+		#[test]
+		#[ignore = "needs the vivid kernel module"]
+		fn capture_streams_however_it_starts() {
+			let Some(device) = node(Flags::VIDEO_CAPTURE) else {
+				return;
+			};
+			let mut stream = stream(&device, Type::VideoCapture);
+			capture(&mut stream);
+			stream.stop().expect("stop");
+			stream.start().expect("start");
+			capture(&mut stream);
+		}
+
+		#[test]
+		#[ignore = "needs the vivid kernel module"]
+		fn output_streams_however_it_starts() {
+			let Some(device) = node(Flags::VIDEO_OUTPUT) else {
+				return;
+			};
+			let mut stream = stream(&device, Type::VideoOutput);
+			output(&mut stream);
+			stream.stop().expect("stop");
+			stream.start().expect("start");
+			output(&mut stream);
+			stream.stop().expect("stop");
+			output(&mut stream);
+		}
+
+		/// A wait shorter than a frame makes most dequeues fail; a retry must
+		/// neither queue a buffer twice (EINVAL) nor lose one.
+		#[test]
+		#[ignore = "needs the vivid kernel module"]
+		fn output_retries_a_timed_out_dequeue() {
+			let Some(device) = node(Flags::VIDEO_OUTPUT) else {
+				return;
+			};
+			let mut stream = stream(&device, Type::VideoOutput);
+			stream.set_timeout(Duration::from_millis(1));
+			let (mut frames, mut timeouts) = (0, 0);
+			while frames < 3 * FRAMES {
+				match OutputStream::next(&mut stream) {
+					Ok(_) => frames += 1,
+					Err(err) if err.kind() == io::ErrorKind::TimedOut => timeouts += 1,
+					Err(err) => panic!("after {frames} frames and {timeouts} timeouts: {err}"),
+				}
+			}
+			assert!(timeouts > 0, "no dequeue timed out, so no retry was exercised");
+		}
 	}
 }

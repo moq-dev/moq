@@ -35,8 +35,3 @@ before any read, as the Rust model's synchronous polling does. Fix it, with a
 unit test, and add the case to the JS `regressions`.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Short continuation](/quest/m0/nightly/js-resume-short-continuation.md) - another JS
-  group continued across failed copies that ends where it should not

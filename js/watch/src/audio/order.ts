@@ -1,4 +1,4 @@
-import type { Duration } from "@moq/clock";
+import { type Duration, type Instant, now } from "@moq/clock";
 
 /**
  * Puts one subscription's frames in timestamp order for the audio decoder.
@@ -13,7 +13,9 @@ import type { Duration } from "@moq/clock";
  * A buffered subscription holds its head and releases it sorted. The head is complete once a newer
  * group than the first arrives, or once the first group alone runs past the floor: the ring could not
  * start playing before holding that much, so waiting for the head costs no startup latency. It is
- * also released once it spans the subscription's live join max, since nothing older is served. After
+ * also released once it spans the subscription's live join max, since nothing older is served, or
+ * once it has waited that long, which bounds what it keeps by arrival time whatever the timestamps
+ * say. After
  * that, and throughout when not holding, a frame older than one already decoded is not admitted.
  */
 export class Order<T extends { group: bigint; frame: { timestamp: Duration } }> {
@@ -21,8 +23,8 @@ export class Order<T extends { group: bigint; frame: { timestamp: Duration } }> 
 	#hold: (() => { floor: number; maxDelay: number }) | undefined;
 	// The head, in arrival order.
 	#held: T[] = [];
-	// The group the head started with, and its own first frame.
-	#first?: { group: bigint; timestamp: number };
+	// The group the head started with, its own first frame, and when that arrived.
+	#first?: { group: bigint; timestamp: number; arrived: Instant };
 	// The oldest and newest held timestamps.
 	#span?: { oldest: number; newest: number };
 	// The newest frame admitted since the decoder was last reset.
@@ -40,7 +42,7 @@ export class Order<T extends { group: bigint; frame: { timestamp: Duration } }> 
 
 		const { group, frame } = read;
 		const timestamp = frame.timestamp.asMicros();
-		this.#first ??= { group, timestamp };
+		this.#first ??= { group, timestamp, arrived: now() };
 		if (group > this.#first.group) return [...this.flush(), read];
 
 		this.#held.push(read);
@@ -49,7 +51,8 @@ export class Order<T extends { group: bigint; frame: { timestamp: Duration } }> 
 		this.#span = { oldest, newest };
 
 		const ran = group === this.#first.group && timestamp - this.#first.timestamp > hold.floor;
-		if (ran || newest - oldest >= hold.maxDelay) return this.flush();
+		const waited = now().since(this.#first.arrived).asMicros();
+		if (ran || newest - oldest >= hold.maxDelay || waited >= hold.maxDelay) return this.flush();
 		return [];
 	}
 

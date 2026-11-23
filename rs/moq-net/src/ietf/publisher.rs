@@ -270,16 +270,7 @@ impl PrepareFetch {
 	/// Judge the range against the track, now that its info resolved.
 	fn judge(&mut self, track: &track::Consumer) -> Result<FetchRange, (Error, String)> {
 		let range = &mut self.range;
-		// The cache's newest object is Largest Object while a live feed writes the track, or once
-		// the track ended at its newest group. A fetch-only copy retains its publisher's report
-		// independently. A joining FETCH ends where its subscription starts instead.
-		let finished = track.final_key();
-		let known =
-			track.is_live() || finished.is_some_and(|end| Some(end) == track.latest_key().map(|latest| latest + 1));
-		let largest = match !self.joined && (known || track.reported_object().is_some()) {
-			true => live_edge(track).largest,
-			false => None,
-		};
+		let largest = fetch_largest(track, self.joined);
 		if let Some(filter) = self.largest_filter {
 			let Some(largest) = largest else {
 				return Err((
@@ -332,6 +323,19 @@ impl PrepareFetch {
 			}
 		}
 		Ok(*range)
+	}
+}
+
+/// The track's Largest Object as a FETCH is answered against it. The cache's newest object
+/// is Largest Object while a live feed writes the track, or once the track ended at its
+/// newest group. A fetch-only copy retains its publisher's report independently. A joining
+/// FETCH ends where its subscription starts instead.
+fn fetch_largest(track: &track::Consumer, joined: bool) -> Option<Location> {
+	let finished = track.final_key();
+	let known = track.is_live() || finished.is_some_and(|end| Some(end) == track.latest_key().map(|latest| latest + 1));
+	match !joined && (known || track.reported_object().is_some()) {
+		true => live_edge(track).largest,
+		false => None,
 	}
 }
 
@@ -843,8 +847,8 @@ enum Subscribed {
 }
 
 impl Served {
-	/// The PUBLISH_DONE status and reason this end reports.
-	fn status(&self) -> (ietf::PublishDoneStatus, &'static str) {
+	/// The PUBLISH_DONE status and reason this end reports on `version`.
+	fn status(&self, version: Version) -> (ietf::PublishDoneStatus, &'static str) {
 		match self {
 			Self::Track(Ok(())) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
 			Self::Track(Err(
@@ -852,11 +856,12 @@ impl Served {
 				| Error::Session(crate::SessionError::Unauthorized)
 				| Error::Stream(crate::StreamError::Unauthorized),
 			)) => (ietf::PublishDoneStatus::Unauthorized, "not granted"),
-			// PUBLISH_DONE registers no token expiry, and its EXPIRED means the subscription's
-			// own lifetime ran out, so an expired token is reported as no longer granted. Its
-			// group streams said EXPIRED_AUTH_TOKEN (see [`Lapse`]).
+			// Draft-23 registers EXPIRED_AUTH_TOKEN for this. Before it PUBLISH_DONE registers
+			// no token expiry, and its EXPIRED means the subscription's own lifetime ran out,
+			// so an expired token is reported as no longer granted. Its group streams said
+			// EXPIRED_AUTH_TOKEN on every draft (see [`Lapse`]).
 			Self::Track(Err(err)) if super::error::token_expired(err) => {
-				(ietf::PublishDoneStatus::Unauthorized, "token expired")
+				(ietf::PublishDoneStatus::token_expired(version), "token expired")
 			}
 			// The code its group streams reset with, so a relay passes a malformed upstream on
 			// rather than hiding it behind INTERNAL_ERROR.
@@ -1293,7 +1298,7 @@ impl SubscribeRequest {
 			_slot: slot,
 		});
 		SubscribeServe::PublishDone {
-			done: WritePublishDone::new(self.stream, served, streams, retain),
+			done: WritePublishDone::new(self.stream, self.publisher.version, served, streams, retain),
 			publisher: self.publisher,
 			credit: self.credit,
 		}
@@ -2536,8 +2541,14 @@ enum PublishDoneState {
 }
 
 impl WritePublishDone {
-	fn new(mut stream: Stream<Transport, Version>, served: Served, streams: u64, retain: Option<Retain>) -> Self {
-		let (status, reason) = served.status();
+	fn new(
+		mut stream: Stream<Transport, Version>,
+		version: Version,
+		served: Served,
+		streams: u64,
+		retain: Option<Retain>,
+	) -> Self {
+		let (status, reason) = served.status(version);
 		let res = match served {
 			Served::Track(res) => res,
 			Served::UpdateFailed(err) => Err(err),
@@ -3480,11 +3491,12 @@ impl Publisher {
 				priority: Some(priority),
 				properties,
 			},
-			// Same group and priority; the Object ID is the prior one plus one.
-			FetchPrior::Same(delta) => ietf::FetchObject::Object {
+			// Same group and priority; the Object ID is the prior one plus one, or across a
+			// gap plus the step, which is at least two and which draft-23 writes less two.
+			FetchPrior::Same(step) => ietf::FetchObject::Object {
 				subgroup: ietf::FetchSubgroup::Zero,
 				group: None,
-				object: delta,
+				object: step.map(|step| step - ietf::FetchObject::object_delta_bias(version)),
 				priority: None,
 				properties,
 			},
@@ -5150,6 +5162,13 @@ impl FetchOpen {
 			range.end
 		};
 
+		// Draft-23 (section 3.2) names the Largest Object when the requested range reaches it,
+		// and the answer then ends there. A one-group range reaches it only in the group that
+		// holds it, read past it.
+		let largest = fetch_largest(&track, joined)
+			.filter(|_| ietf::FetchOk::id(version) != ietf::FetchOk::ID)
+			.filter(|largest| largest.group == key && until.is_none_or(|until| largest.object < until));
+
 		// Capped only where the range ends inside the group: a finished group read to its end
 		// has nothing missing.
 		let slice = GroupSlice {
@@ -5157,20 +5176,26 @@ impl FetchOpen {
 			until: until.filter(|until| end.is_none_or(|end| *until < end)),
 		};
 		let priority = super::priority::to_wire(info.priority);
+		// Draft-23 has no End Of Track in the answer: the fetch stream says where the Track
+		// or the Group ends, after the last object (section 3.2.2).
+		let tail = (ietf::FetchObject::has_group_end(version) && complete)
+			.then_some(ietf::FetchObject::EndOfGroup { track: end_of_track });
 		let write = match FetchGroupWrite::new(group, key, slice, version, priority) {
-			Ok(write) => write,
+			Ok(write) => write.ending(tail),
 			Err(err) => return self.reject(&err, &err.to_string()),
 		};
 
-		// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
-		// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
-		// requests it answers without ever naming this one.
+		// FETCH_OK through draft-22, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK
+		// or REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the
+		// other requests it answers without naming this one. Draft-23 reserves FETCH_OK's type
+		// and answers with REQUEST_OK (section 9.3), which `FetchOk` encodes as.
 		self.state = FetchState::Answer {
 			admitted,
 			track,
 			ok: Some(ietf::FetchOk {
 				end_of_track,
 				end_location,
+				largest,
 				properties,
 			}),
 			start: range.start,
@@ -5384,7 +5409,9 @@ impl FetchOpen {
 							break 'ok Err(Error::Unauthorized);
 						}
 						if let Some(ok) = ok.take()
-							&& let Err(err) = stream.writer.buffer_message(ietf::FetchOk::ID, &ok)
+							&& let Err(err) = stream
+								.writer
+								.buffer_message(ietf::FetchOk::id(self.publisher.version), &ok)
 						{
 							break 'ok Err(err);
 						}
@@ -7396,6 +7423,10 @@ struct FetchGroupWrite {
 	state: FetchGroupState,
 	/// Bills the group's payload once the first poll has the stream to bill it on.
 	meter: Option<crate::stats::Meter>,
+	/// What follows the last object once every object is written: see [`Self::ending`].
+	tail: Option<ietf::FetchObject>,
+	/// Every object is written, and only the tail is left to flush.
+	written: bool,
 }
 
 enum FetchGroupState {
@@ -7441,7 +7472,16 @@ impl FetchGroupWrite {
 			buf: arrayvec::ArrayVec::new(),
 			budget: kio::coop::Budget::new(32),
 			state: FetchGroupState::Yield,
+			tail: None,
+			written: false,
 		})
+	}
+
+	/// Follow the last object with `tail`: draft-23 (section 3.2.2) makes a publisher mark
+	/// an object known to end its Group, or the Track. Nothing is written after no object.
+	fn ending(mut self, tail: Option<ietf::FetchObject>) -> Self {
+		self.tail = tail;
+		self
 	}
 
 	/// The cap is the Largest Object snapshot: the group may keep growing, but everything
@@ -7450,9 +7490,14 @@ impl FetchGroupWrite {
 		slice.until.is_some_and(|until| index >= until)
 	}
 
-	/// The result once writing stops: a slice that ends before its cap lost objects.
+	/// The result once writing stops: a slice that ends before its cap lost objects. A cap
+	/// past the group's terminal object ends at it, since that status is no frame.
 	fn finish(&self) -> Result<(), Error> {
-		match self.slice.until.is_some_and(|until| self.index < until) {
+		let cap = self
+			.slice
+			.until
+			.filter(|until| self.group.end_object().is_none_or(|end| *until <= end.id));
+		match cap.is_some_and(|until| self.index < until) {
 			true => Err(Error::NotFound),
 			false => Ok(()),
 		}
@@ -7479,13 +7524,41 @@ impl FetchGroupWrite {
 		if let Some(meter) = self.meter.take() {
 			stream.bill(meter);
 		}
-		let res = self.poll_objects(waiter, stream);
+		let res = match self.written {
+			true => Poll::Ready(Ok(())),
+			false => self.poll_objects(waiter, stream),
+		};
+		let res = match res {
+			Poll::Ready(Ok(())) => {
+				self.written = true;
+				// Parked on flow control with only the tail left, a group gone stale resets its
+				// stream rather than pin its credit and rank.
+				match self.poll_tail(waiter, stream) {
+					Poll::Pending if self.poll_stale(waiter) => Poll::Ready(Err(Error::Old)),
+					tail => tail,
+				}
+			}
+			other => other,
+		};
 		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
 		// bill it.
 		if res.is_pending() {
 			stream.poll_settle(waiter);
 		}
 		res
+	}
+
+	/// Write what follows the last object, if anything does, and flush it: the caller
+	/// finishes the stream next, which wants nothing left buffered.
+	fn poll_tail(
+		&mut self,
+		waiter: &kio::Waiter,
+		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
+	) -> Poll<Result<(), Error>> {
+		if let Some(tail) = self.tail.take().filter(|_| self.prior.is_some()) {
+			stream.buffer(&tail)?;
+		}
+		stream.poll_flush(waiter)
 	}
 
 	/// Whether the group expired, so a written stream awaiting its acknowledgement resets
@@ -8586,7 +8659,7 @@ mod group_priority_test {
 	#[kio::test]
 	async fn exact_end_of_track_survives_the_final_group_fin() {
 		use crate::lite::test_transport::Sent;
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for finished in [false, true] {
 				let log = crate::lite::test_transport::Log::default();
 				let mut track = track::Producer::new(
@@ -9713,9 +9786,9 @@ mod serve_tests {
 
 	#[kio::test]
 	async fn a_subscription_keeps_its_goaway_count_until_the_final_marker() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
-			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
+			let session = ScriptedSession::new(ietf::message::framed(0x10, &[0, 0], version));
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
@@ -9741,7 +9814,7 @@ mod serve_tests {
 			}
 			// The same reader now watches cancellation while the final marker waits for credit,
 			// where a second GOAWAY still closes the session.
-			session.push(&[0x10, 0, 2, 0, 0]);
+			session.push(&ietf::message::framed(0x10, &[0, 0], version));
 			let waiter = &kio::Waiter::noop();
 			assert!(
 				h.publisher
@@ -9814,7 +9887,7 @@ mod serve_tests {
 
 	#[kio::test]
 	async fn requester_fin_is_version_gated_for_subscriptions() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			let session = ScriptedSession::per_stream_eof(vec![vec![]]);
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
@@ -9858,7 +9931,7 @@ mod serve_tests {
 	/// A reset request stream still cancels the subscription on every draft.
 	#[kio::test]
 	async fn requester_reset_cancels_subscriptions() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			let session = ScriptedSession::per_stream_reset(vec![vec![]]);
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
@@ -9888,7 +9961,7 @@ mod serve_tests {
 	/// when a dispatched task is cancelled or its message is refused.
 	#[kio::test]
 	async fn drain_counts_dispatched_subscribe_and_fetch() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			let mut subscribe_body = Vec::new();
 			subscribe(Filter::NextObject, None)
@@ -9902,16 +9975,16 @@ mod serve_tests {
 				group_order: GroupOrder::Ascending,
 				// Draft-20 dropped the Fetch Type tag, leaving only the filtered form.
 				fetch_type: match version {
-					Version::Draft20 | Version::Draft22 => FetchType::Filtered {
-						namespace: crate::Path::from_static("missing"),
-						track: "video".into(),
-						filter: Filter::Unfiltered,
-					},
-					_ => FetchType::Standalone {
+					Version::Draft18 => FetchType::Standalone {
 						namespace: crate::Path::from_static("missing"),
 						track: "video".into(),
 						start: Location { group: 0, object: 0 },
 						end: Location { group: 0, object: 1 },
+					},
+					_ => FetchType::Filtered {
+						namespace: crate::Path::from_static("missing"),
+						track: "video".into(),
+						filter: Filter::Unfiltered,
 					},
 				},
 				range_filters: false,
@@ -10082,7 +10155,8 @@ mod serve_tests {
 				let mut rest = &bytes[offset..];
 				let id = crate::coding::decode_varint(&mut rest, version).unwrap();
 				let body = bytes.len() - rest.len();
-				let end = body + 2 + usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+				let (len, width) = ietf::message::peek_length(rest, version);
+				let end = body + width + len;
 				if id == ietf::PublishDone::ID {
 					let done = ietf::PublishDone::decode(&mut Decoder::new(&bytes[body..end], version.into()), version)
 						.unwrap();
@@ -10223,7 +10297,7 @@ mod serve_tests {
 	/// A moq-lite or JS upstream's MALFORMED_TRACK reset says the same.
 	#[kio::test]
 	async fn publish_done_after_a_malformed_track_says_so() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			for err in [Error::MalformedTrack, Error::Stream(crate::StreamError::MalformedTrack)] {
 				let h = serve(version);
 				let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
@@ -10383,9 +10457,9 @@ mod serve_tests {
 			.await
 			.expect("the track's error ends the subscription");
 		assert!(matches!(served, Served::Track(Err(Error::Unsupported))), "{served:?}");
-		assert_eq!(served.status().0, ietf::PublishDoneStatus::InternalError);
+		assert_eq!(served.status(version).0, ietf::PublishDoneStatus::InternalError);
 		assert_eq!(
-			Served::UpdateFailed(Error::Unsupported).status().0,
+			Served::UpdateFailed(Error::Unsupported).status(version).0,
 			ietf::PublishDoneStatus::UpdateFailed
 		);
 		// A revocation bridged from upstream, however it was received, is still one.
@@ -10395,7 +10469,7 @@ mod serve_tests {
 			Error::Stream(crate::StreamError::Unauthorized),
 		] {
 			assert_eq!(
-				Served::Track(Err(err)).status().0,
+				Served::Track(Err(err)).status(version).0,
 				ietf::PublishDoneStatus::Unauthorized
 			);
 		}
@@ -10490,16 +10564,14 @@ mod serve_tests {
 		}
 		.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 		.unwrap();
-		let mut frame = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
-		frame.extend(body);
-		frame
+		ietf::message::framed(ietf::SubscribeUpdate::ID, &body, version)
 	}
 
 	/// FORWARD=0 drops the subscription, and its upstream demand, while the request stays
 	/// established; FORWARD=1 subscribes again as a new SUBSCRIBE would, at the live edge.
 	#[kio::test]
 	async fn a_subscribe_pauses_and_resumes_as_a_new_subscriber() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for start_paused in [false, true] {
 				let h = serve(version);
 				let mut request = ScriptedSession::new(Vec::new());
@@ -10597,7 +10669,7 @@ mod serve_tests {
 	/// A datagram-only name resumes through the same kind selection as its first request.
 	#[kio::test]
 	async fn a_datagram_only_subscription_releases_demand_on_pause_and_resumes() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			for start_paused in [false, true] {
 				let h = serve_session(
 					version,
@@ -10683,7 +10755,7 @@ mod serve_tests {
 	/// PUBLISH_DONE says UPDATE_FAILED.
 	#[kio::test]
 	async fn a_failed_resume_answers_its_update() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			let mut request = ScriptedSession::new(Vec::new());
 			request.log = h.log.clone();
@@ -10731,9 +10803,7 @@ mod serve_tests {
 		}
 		.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 		.unwrap();
-		let mut frame = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
-		frame.extend(body);
-		frame
+		ietf::message::framed(ietf::SubscribeUpdate::ID, &body, version)
 	}
 
 	/// The SUBSCRIBE_OK written on the request stream.
@@ -10749,8 +10819,8 @@ mod serve_tests {
 		let mut rest = bytes.as_slice();
 		let id = crate::coding::decode_varint(&mut rest, version).unwrap();
 		assert_eq!(id, ietf::SubscribeOk::ID, "not a SUBSCRIBE_OK");
-		let size = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
-		ietf::SubscribeOk::decode_msg(&mut Decoder::new(&rest[2..2 + size], version.into()), version).unwrap()
+		let (size, width) = ietf::message::peek_length(rest, version);
+		ietf::SubscribeOk::decode_msg(&mut Decoder::new(&rest[width..width + size], version.into()), version).unwrap()
 	}
 
 	/// Group 4 of `h`'s track: a 3 byte first frame and a 5 byte delta, over a refresh
@@ -10766,7 +10836,7 @@ mod serve_tests {
 	/// wants the group past one over its ratio, and SUBSCRIBE_OK advertises DYNAMIC_GROUPS.
 	#[kio::test]
 	async fn a_subscribe_joins_under_the_refresh_ratio() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for refresh in [Some(1), None] {
 				let h = serve_track(
 					version,
@@ -10853,7 +10923,7 @@ mod serve_tests {
 	/// REQUEST_OK. One naming a group the track holds asks nothing.
 	#[kio::test]
 	async fn a_new_group_update_joins_a_refreshing_track() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
 				let h = serve_track(
 					version,
@@ -10898,7 +10968,7 @@ mod serve_tests {
 	/// subscription like any update it cannot apply.
 	#[kio::test]
 	async fn a_new_group_update_without_refresh_fails() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			let session = ScriptedSession::new(new_group_update(version, 10, 9));
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
@@ -10930,20 +11000,18 @@ mod serve_tests {
 
 	/// An update whose only parameters are AUTHORIZATION TOKENs holding `tokens`, framed for
 	/// the subscription's stream.
-	fn update_with_tokens(tokens: &[&[u8]]) -> Vec<u8> {
+	fn update_with_tokens(version: Version, tokens: &[&[u8]]) -> Vec<u8> {
 		// Every parameter but the token is left as it is.
 		let mut body = vec![2];
 		body.extend(token_params(tokens));
-		let mut frame = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
-		frame.extend(body);
-		frame
+		ietf::message::framed(ietf::SubscribeUpdate::ID, &body, version)
 	}
 
 	/// An update's AUTHORIZATION TOKEN that this endpoint cannot use closes the session with
 	/// the draft's code, as it would on the SUBSCRIBE, not only the subscription.
 	#[kio::test]
 	async fn an_update_token_that_cannot_be_used_closes_the_session() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for (token, expected, why) in [
 				(
 					&[0x01, 0x07, 0x00][..],
@@ -10967,7 +11035,7 @@ mod serve_tests {
 				),
 			] {
 				let h = serve(version);
-				let session = ScriptedSession::per_stream(vec![update_with_tokens(&[token])]);
+				let session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[token])]);
 				let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
 					.unwrap();
@@ -11019,7 +11087,7 @@ mod serve_tests {
 	/// a single token is answered as usual.
 	#[kio::test]
 	async fn a_request_with_repeated_or_several_tokens_is_refused_alone() {
-		for (version, malformed) in [(Version::Draft22, 0x4)] {
+		for (version, malformed) in [(Version::Draft22, 0x4), (Version::Draft23, 0x4)] {
 			let request = |tokens: &[&[u8]]| {
 				let mut body = track_status("room", true, version);
 				assert_eq!(body.pop(), Some(0), "{version}");
@@ -11065,9 +11133,11 @@ mod serve_tests {
 		for (version, tokens, code) in [
 			(Version::Draft22, [TOKEN, TOKEN], 0x4),
 			(Version::Draft22, [TOKEN, other], 0x3),
+			(Version::Draft23, [TOKEN, TOKEN], 0x4),
+			(Version::Draft23, [TOKEN, other], 0x3),
 		] {
 			let h = serve(version);
-			let session = ScriptedSession::per_stream(vec![update_with_tokens(&tokens)]);
+			let session = ScriptedSession::per_stream(vec![update_with_tokens(version, &tokens)]);
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
@@ -11115,9 +11185,9 @@ mod serve_tests {
 
 	#[kio::test]
 	async fn subscription_track_property_filter_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
-			let session = ScriptedSession::new(vec![0x02, 0, 6, 2, 1, 0x29, 2, 0, 0]);
+			let session = ScriptedSession::new(ietf::message::framed(0x02, &[2, 1, 0x29, 2, 0, 0], version));
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
@@ -11153,7 +11223,7 @@ mod serve_tests {
 	/// A source track failing to decode ends only the subscriptions it feeds, not the requester's session.
 	#[kio::test]
 	async fn source_decode_failure_keeps_the_session() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			let session = ScriptedSession::new(Vec::new());
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
@@ -11186,7 +11256,7 @@ mod serve_tests {
 
 	#[kio::test]
 	async fn namespace_updates_do_not_postpone_an_auth_withdrawal() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			settle().await;
 			let session = ScriptedSession::new(Vec::new());
@@ -11206,7 +11276,7 @@ mod serve_tests {
 			let mark = session.log.writes.lock().unwrap().len();
 			h.publisher.auth.handle().authorize(&crate::auth::Grant::default());
 			// An otherwise valid no-op update is ready at the same time as revocation.
-			session.push(&[0x02, 0, 2, 2, 0]);
+			session.push(&ietf::message::framed(0x02, &[2, 0], version));
 			assert!(futures::poll!(running.as_mut()).is_pending());
 			let answer = session.log.writes.lock().unwrap().clone();
 			let mut wire = Decoder::new(&answer[mark..], version.into());
@@ -11266,7 +11336,7 @@ mod serve_tests {
 
 	#[kio::test]
 	async fn namespace_updates_move_the_prefix_after_acknowledgement() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			let _old = h
 				._origin
@@ -11300,7 +11370,7 @@ mod serve_tests {
 			);
 			assert!(wire.is_empty());
 			// Request ID 2; TRACK_NAMESPACE_PREFIX is the one-field tuple "new".
-			let update = [0x02, 0, 8, 2, 1, 0x34, 1, 3, b'n', b'e', b'w'];
+			let update = ietf::message::framed(0x02, &[2, 1, 0x34, 1, 3, b'n', b'e', b'w'], version);
 			// Partial messages do not consume the update or change the current prefix.
 			session.push(&update[..6]);
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -11419,10 +11489,10 @@ mod serve_tests {
 	/// nor withdrawals on its stream; it is answered once the acceptor decides.
 	#[kio::test]
 	async fn a_pending_update_token_does_not_hold_up_announcements() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let (h, mut requests, session, mut running, _issued) = token_namespaces(version).await;
 			let mark = session.log.writes.lock().unwrap().len();
-			session.push(&update_with_tokens(&[TOKEN]));
+			session.push(&update_with_tokens(version, &[TOKEN]));
 			let request = taken_token(&mut running, &mut requests).await;
 
 			let other = h._origin.announce("other", crate::origin::RouteInfo::new()).unwrap();
@@ -11454,13 +11524,17 @@ mod serve_tests {
 	/// keep the order they were asked in.
 	#[kio::test]
 	async fn updates_behind_a_pending_token_are_answered_in_order() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let (_h, mut requests, session, mut running, _issued) = token_namespaces(version).await;
 			let mark = session.log.writes.lock().unwrap().len();
-			session.push(&update_with_tokens(&[TOKEN]));
+			session.push(&update_with_tokens(version, &[TOKEN]));
 			let request = taken_token(&mut running, &mut requests).await;
 			// Request ID 4; TRACK_NAMESPACE_PREFIX is the one-field tuple "room".
-			session.push(&[0x02, 0, 9, 4, 1, 0x34, 1, 4, b'r', b'o', b'o', b'm']);
+			session.push(&ietf::message::framed(
+				0x02,
+				&[4, 1, 0x34, 1, 4, b'r', b'o', b'o', b'm'],
+				version,
+			));
 			for _ in 0..10 {
 				assert!(futures::poll!(running.as_mut()).is_pending());
 				settle().await;
@@ -11489,10 +11563,10 @@ mod serve_tests {
 	/// being verified; the renewal, once admitted, covers it again.
 	#[kio::test]
 	async fn narrowing_withdraws_while_an_update_token_is_pending() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let (_h, mut requests, session, mut running, issued) = token_namespaces(version).await;
 			let mark = session.log.writes.lock().unwrap().len();
-			session.push(&update_with_tokens(&[TOKEN]));
+			session.push(&update_with_tokens(version, &[TOKEN]));
 			let request = taken_token(&mut running, &mut requests).await;
 
 			issued.update(crate::auth::Grant {
@@ -11524,7 +11598,7 @@ mod serve_tests {
 	/// that never changes.
 	#[kio::test]
 	async fn a_token_on_a_session_namespace_update_is_refused() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let auth = crate::auth::Link::new(false);
 			let mut requests = auth.handle().requests();
 			let h = serve_with_auth(version, auth, Vec::new());
@@ -11541,7 +11615,7 @@ mod serve_tests {
 			};
 			let mut running: Running = Box::pin(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
 			assert!(futures::poll!(running.as_mut()).is_pending());
-			session.push(&update_with_tokens(&[TOKEN]));
+			session.push(&update_with_tokens(version, &[TOKEN]));
 			for _ in 0..10 {
 				if futures::poll!(running.as_mut()).is_ready() {
 					break;
@@ -11569,7 +11643,7 @@ mod serve_tests {
 	async fn a_withdrawn_namespace_update_keeps_its_stream_until_the_application_answers() {
 		let version = Version::Draft22;
 		let (_h, mut requests, session, mut running, _issued) = token_namespaces(version).await;
-		session.push(&update_with_tokens(&[TOKEN]));
+		session.push(&update_with_tokens(version, &[TOKEN]));
 		let request = taken_token(&mut running, &mut requests).await;
 
 		session.close(crate::lite::test_transport::Close::Reset);
@@ -11593,7 +11667,7 @@ mod serve_tests {
 	async fn a_failed_write_keeps_a_verifying_update_stream_until_the_application_answers() {
 		let version = Version::Draft22;
 		let (h, mut requests, session, mut running, _issued) = token_namespaces(version).await;
-		session.push(&update_with_tokens(&[TOKEN]));
+		session.push(&update_with_tokens(version, &[TOKEN]));
 		let request = taken_token(&mut running, &mut requests).await;
 
 		session.log.fail_writes();
@@ -11621,7 +11695,7 @@ mod serve_tests {
 		let (_h, mut requests, session, mut running, _issued) =
 			token_namespaces_expiring(version, Some(Duration::from_secs(1))).await;
 		// A renewal naming another token.
-		session.push(&update_with_tokens(&[TOKEN]));
+		session.push(&update_with_tokens(version, &[TOKEN]));
 		let request = taken_token(&mut running, &mut requests).await;
 
 		kio::clock::sim::advance(Duration::from_secs(2)).await;
@@ -11648,7 +11722,7 @@ mod serve_tests {
 		let (h, mut requests, session, mut running, _issued) =
 			token_namespaces_expiring(version, Some(Duration::from_secs(1))).await;
 		// A renewal naming another token.
-		session.push(&update_with_tokens(&[TOKEN]));
+		session.push(&update_with_tokens(version, &[TOKEN]));
 		let request = taken_token(&mut running, &mut requests).await;
 
 		h.publisher.withdrawal.begin();
@@ -11676,7 +11750,7 @@ mod serve_tests {
 
 	#[kio::test]
 	async fn namespace_requester_fin_is_version_gated() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			kio::clock::sim::yield_now().await;
 			let session = ScriptedSession::per_stream_eof(vec![vec![]]);
@@ -11774,7 +11848,7 @@ mod serve_tests {
 	/// publisher may still come up, so the refusal invites a retry.
 	#[kio::test]
 	async fn a_missing_broadcast_is_refused_with_the_draft_s_code() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let error_code = 0x10;
 
 			let h = serve(version);
@@ -11816,7 +11890,7 @@ mod serve_tests {
 		}
 	}
 
-	const ALL_VERSIONS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+	const ALL_VERSIONS: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 	fn track_status(namespace: &str, wanted: bool, version: Version) -> Vec<u8> {
 		let msg = ietf::TrackStatus {
@@ -12183,7 +12257,7 @@ mod serve_tests {
 
 	#[kio::test]
 	async fn range_filters_over_the_default_limit_get_invalid_filter() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let h = serve(version);
 			for fetch in [false, true] {
 				let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
@@ -12238,7 +12312,7 @@ mod serve_tests {
 
 	#[kio::test]
 	async fn rendezvous_wait_is_capped_at_zero_but_answers_timeout() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			// A wait applies only to a missing publisher; a missing track on a live one does not exist.
 			for (namespace, track, publisher) in [("missing", "video", false), ("room", "audio", true)] {
 				for wait in [None, Some(0), Some(7)] {
@@ -12985,7 +13059,7 @@ mod serve_tests {
 			start: Location::default(),
 			end: Some(EndLocation { group: 1, object: None }),
 		};
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
 				let mut h = serve(version);
 				for (key, payload) in [(0, b"history"), (1, b"latest!")] {
@@ -13015,7 +13089,7 @@ mod serve_tests {
 			start: Location::default(),
 			end: Some(EndLocation { group: 1, object: None }),
 		};
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
 				let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 				let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
@@ -13235,7 +13309,7 @@ mod serve_tests {
 	/// request id breaking ties, whatever group and GROUP_ORDER it asks for.
 	#[kio::test]
 	async fn a_standalone_fetch_ranks_by_its_priority() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for (group, group_order) in [(1, GroupOrder::Ascending), (3, GroupOrder::Descending)] {
 				let mut h = serve(version);
 				publish_groups(&mut h, 3);
@@ -13381,7 +13455,7 @@ mod serve_tests {
 	/// compares wire IDs rather than discarding that many locally received frames.
 	#[kio::test]
 	async fn a_cold_reported_copy_serves_its_first_wire_object() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			for streamed in [false, true] {
 				let h = serve(version);
 				h.track.report_object(3, 4);
@@ -13997,7 +14071,7 @@ mod serve_tests {
 			finish_and_retain(&h, serving.as_mut()).await;
 
 			// REQUEST_UPDATE, Request ID 2, no parameters.
-			h.session.push(&[0x02, 0, 2, 2, 0]);
+			h.session.push(&ietf::message::framed(0x02, &[2, 0], version));
 			for _ in 0..10 {
 				assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
 				kio::clock::sim::yield_now().await;
@@ -14225,7 +14299,8 @@ mod serve_tests {
 
 	/// A token subscription's group stream still open when its grant ends resets with
 	/// EXPIRED_AUTH_TOKEN once the token expired, so the subscriber knows to renew it, and
-	/// with CANCELLED when it was revoked. PUBLISH_DONE says UNAUTHORIZED either way.
+	/// with CANCELLED when it was revoked. PUBLISH_DONE says UNAUTHORIZED either way through
+	/// draft-22; draft-23 says EXPIRED_AUTH_TOKEN for the expired token (section 12.4).
 	#[kio::test]
 	async fn a_lapsed_token_resets_its_groups_as_expired() {
 		for version in ALL_VERSIONS {
@@ -14279,11 +14354,11 @@ mod serve_tests {
 				assert_eq!(resets, vec![expected], "{version} {end:?}");
 				let wire = Wire::read(&h.log, version);
 				let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
-				assert_eq!(
-					status,
-					ietf::PublishDoneStatus::Unauthorized.code(),
-					"{version} {end:?}"
-				);
+				let done = match (end, version) {
+					(TokenEnd::Revoked, _) | (_, Version::Draft18 | Version::Draft20 | Version::Draft22) => 0x1,
+					(TokenEnd::Lapsed | TokenEnd::RevokedExpired, _) => 0x7,
+				};
+				assert_eq!(status, done, "{version} {end:?}");
 				wire.assert_streams_closed_before_publish_done();
 				drop(group);
 			}
@@ -14379,7 +14454,7 @@ mod serve_tests {
 	}
 
 	/// Every draft, each carrying a standalone FETCH or draft-22's filtered one.
-	const FETCH_DRAFTS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+	const FETCH_DRAFTS: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 	/// A bounded FETCH_OK's End Location: one past `last` before draft 22,
 	/// and the object itself from then on. Whole-group answers use Object 0 before draft 22.
@@ -14513,6 +14588,13 @@ mod serve_tests {
 		bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec())
 	}
 
+	/// Whether `version` answers a FETCH with FETCH_OK. Its End Location and End Of Track have
+	/// no counterpart in draft-23's REQUEST_OK, which decodes them as their defaults: there the
+	/// fetch stream's own End of Group or End of Track says where the response ends.
+	fn names_its_end(version: Version) -> bool {
+		ietf::FetchOk::id(version) == ietf::FetchOk::ID
+	}
+
 	/// Decode a FETCH_OK and the ascending fetch stream after it, as `(group, object, payload)`.
 	fn fetch_answer(wire: bytes::Bytes, version: Version) -> (ietf::FetchOk, Vec<(u64, u64, String)>) {
 		fetch_answer_in(wire, version, GroupOrder::Ascending)
@@ -14524,25 +14606,48 @@ mod serve_tests {
 		version: Version,
 		order: GroupOrder,
 	) -> (ietf::FetchOk, Vec<(u64, u64, String)>) {
+		let (ok, objects, _) = fetch_answer_tail(wire, version, order);
+		(ok, objects)
+	}
+
+	/// Decode the answer to a FETCH and the fetch stream after it, its groups in `order`,
+	/// with draft-23's End of Group (`false`) or End of Track (`true`) if one ends the stream.
+	fn fetch_answer_tail(
+		wire: bytes::Bytes,
+		version: Version,
+		order: GroupOrder,
+	) -> (ietf::FetchOk, Vec<(u64, u64, String)>, Option<bool>) {
 		let mut buf = Decoder::new(&wire, version.into());
-		assert_eq!(buf.varint().unwrap(), ietf::FetchOk::ID, "{version}: not a FETCH_OK");
+		assert_eq!(
+			buf.varint().unwrap(),
+			ietf::FetchOk::id(version),
+			"{version}: not a FETCH_OK"
+		);
 		let ok = ietf::FetchOk::decode(&mut buf, version).unwrap();
 		assert_eq!(buf.varint().unwrap(), FetchHeader::TYPE);
 		assert_eq!(FetchHeader::decode(&mut buf, version).unwrap().request_id, FETCH_ID);
 
 		let mut objects = Vec::new();
 		let mut prior: Option<(u64, u64)> = None;
+		let mut tail = None;
 		while !buf.is_empty() {
 			let (group, object) = {
-				let ietf::FetchObject::Object { group, object, .. } =
-					ietf::FetchObject::decode(&mut buf, version).unwrap()
-				else {
-					panic!("{version}: unexpected End of Range");
+				let (group, object) = match ietf::FetchObject::decode(&mut buf, version).unwrap() {
+					ietf::FetchObject::Object { group, object, .. } => (group, object),
+					ietf::FetchObject::EndOfGroup { track } => {
+						assert!(buf.is_empty(), "{version}: objects after the group's end");
+						tail = Some(track);
+						break;
+					}
+					ietf::FetchObject::EndOfRange { .. } => panic!("{version}: unexpected End of Range"),
 				};
 				match (prior, group) {
 					(None, group) => (group.unwrap(), object.unwrap()),
 					// No Group ID: the same group, and an absent Object ID Delta is one.
-					(Some((group, prior)), None) => (group, prior + object.unwrap_or(1)),
+					(Some((group, prior)), None) => (
+						group,
+						prior + object.map_or(1, |delta| delta + ietf::FetchObject::object_delta_bias(version)),
+					),
 					(Some((prior, _)), Some(group)) => {
 						let group = match (version, order) {
 							(_, GroupOrder::Descending) => prior - group - 1,
@@ -14557,7 +14662,7 @@ mod serve_tests {
 			objects.push((group, object, payload));
 			prior = Some((group, object));
 		}
-		(ok, objects)
+		(ok, objects, tail)
 	}
 
 	/// The `(group, object, payload)` a range of two-frame groups holds.
@@ -14589,11 +14694,47 @@ mod serve_tests {
 				true => Location { group: 2, object: 1 },
 				false => Location { group: 2, object: 0 },
 			};
-			assert_eq!(ok.end_location, end, "{version}");
+			if names_its_end(version) {
+				assert_eq!(ok.end_location, end, "{version}");
+			}
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([2]), "{version}");
 			assert!(h.log.resets().is_empty(), "{version}");
 		}
+	}
+
+	/// Draft-23 answers with REQUEST_OK, which has no End Location and no End Of Track. A
+	/// group below the newest ends at the requested end, so the answer names no Largest
+	/// Object, and End of Group follows its last object. The last group of a finished track
+	/// reaches the Largest Object, which the answer names, and End of Track follows.
+	#[kio::test]
+	async fn a_draft23_fetch_is_answered_with_request_ok() {
+		let version = Version::Draft23;
+		let mut h = serve(version);
+		publish_pairs(&mut h, 5, None);
+		settle().await;
+
+		let whole = Location { group: 2, object: 0 };
+		let buf = standalone_fetch(&h, whole, whole, GroupOrder::Ascending).await;
+		let (ok, objects, tail) = fetch_answer_tail(buf, version, GroupOrder::Ascending);
+		assert_eq!(ok.largest, None, "an older group ends below the Largest Object");
+		assert_eq!(objects, pairs([2]));
+		assert_eq!(tail, Some(false), "End of Group follows the group's last object");
+
+		h.track.finish_shared().unwrap();
+		settle().await;
+		let buf = standalone_fetch(
+			&h,
+			Location { group: 4, object: 1 },
+			Location { group: 4, object: 0 },
+			GroupOrder::Any,
+		)
+		.await;
+		let (ok, objects, tail) = fetch_answer_tail(buf, version, GroupOrder::Ascending);
+		assert_eq!(ok.largest, Some(Location { group: 4, object: 1 }));
+		assert_eq!(objects, pairs([4])[1..].to_vec());
+		assert_eq!(tail, Some(true), "End of Track follows the track's last object");
+		assert!(h.log.resets().is_empty());
 	}
 
 	/// Where a token FETCH waits when its grant ends.
@@ -14847,8 +14988,15 @@ mod serve_tests {
 		FetchHeader::decode(buf, version).unwrap();
 		let mut priorities = Vec::new();
 		while !buf.is_empty() {
-			let ietf::FetchObject::Object { priority, .. } = ietf::FetchObject::decode(buf, version).unwrap() else {
-				panic!("{version}: unexpected End of Range");
+			let priority = match ietf::FetchObject::decode(buf, version).unwrap() {
+				ietf::FetchObject::Object { priority, .. } => priority,
+				// Draft-23 follows a group read to its end with End of Group, the last thing
+				// on the stream.
+				ietf::FetchObject::EndOfGroup { .. } => {
+					assert!(buf.is_empty(), "{version}: objects after the group's end");
+					break;
+				}
+				ietf::FetchObject::EndOfRange { .. } => panic!("{version}: unexpected End of Range"),
 			};
 			let size = buf.varint().unwrap() as usize;
 			buf.slice(size).unwrap();
@@ -14880,7 +15028,7 @@ mod serve_tests {
 			)
 			.await;
 			let mut buf = Decoder::new(&wire, version.into());
-			assert_eq!(buf.varint().unwrap(), ietf::FetchOk::ID, "{version}");
+			assert_eq!(buf.varint().unwrap(), ietf::FetchOk::id(version), "{version}");
 			ietf::FetchOk::decode(&mut buf, version).unwrap();
 			assert_eq!(
 				fetch_object_priorities(&mut buf, version),
@@ -14926,6 +15074,76 @@ mod serve_tests {
 		let wire = bytes::Bytes::from(h.log.writes.lock().unwrap().to_vec());
 		let mut buf = Decoder::new(&wire, version.into());
 		assert_eq!(fetch_object_priorities(&mut buf, version), [Some(55)]);
+	}
+
+	/// A fill reaching the Largest Object of a group a relay holds with its END_OF_GROUP, which
+	/// Largest names, ends cleanly at that status rather than resetting: it is no frame, so the
+	/// objects below it are the whole fill.
+	#[kio::test]
+	async fn a_fill_through_the_terminal_object_is_served_whole() {
+		let h = serve(Version::Draft22);
+		let group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		let key_time = group.key_time();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: 4,
+					timestamp: key_time,
+				},
+				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+					id: 0,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		frame.write(&b"head"[..]).unwrap();
+		let group = frame.finish().unwrap();
+		group
+			.set_end_object(crate::model::object::Fields {
+				id: 1,
+				properties: Default::default(),
+			})
+			.unwrap();
+		group.finish().unwrap();
+
+		let ranking = Ranking {
+			queue: h.publisher.priority.clone(),
+			group: None,
+			request_id: RequestId(REQUEST_ID),
+			priority: kio::Producer::new(PRIORITY).consume(),
+			publisher: 0,
+			order: Order::Descending,
+			lapse: Lapse::default(),
+		};
+		let opened = AtomicU64::new(0);
+		// The wire still names the terminal object as Largest, as a relay preserves it, so the
+		// fill's cap lands one past it.
+		assert_eq!(
+			super::live_edge(&h.track.consume()).largest,
+			Some(Location { group: 4, object: 1 })
+		);
+		let fill = FillServe::Group {
+			key: 4,
+			skip: 0,
+			until: Some(2),
+		};
+		h.publisher
+			.run_fill(fill, &ranking, h.track.consume(), &opened, ranking.request_id)
+			.await;
+		assert_eq!(occurrences(&h.log, b"head"), 1);
+		assert!(h.log.resets().is_empty(), "{:?}", h.log.resets());
 	}
 
 	/// A fill sent whole whose FIN the subscriber never acknowledges resets once its group goes
@@ -14981,6 +15199,108 @@ mod serve_tests {
 		kio::clock::sim::advance(Duration::from_millis(1)).await;
 		kio::clock::timeout(budget, run).await.expect("the stale fill resets");
 		assert_eq!(h.log.resets().len(), 1, "the fill's stream reset");
+	}
+
+	/// A draft-23 FETCH whose every object went out but whose End of Group is parked on flow
+	/// control resets once its group goes stale, as one parked on its FETCH_HEADER does.
+	#[kio::test]
+	async fn a_fetch_parked_on_its_end_of_group_resets_once_its_group_goes_stale() {
+		let version = Version::Draft23;
+		let budget = Duration::from_secs(2);
+		let fetch = || ietf::Fetch {
+			authorization_token: None,
+			request_id: FETCH_ID,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Ascending,
+			fetch_type: fetch_range(
+				version,
+				"video",
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 0 },
+			),
+			range_filters: false,
+			fill_timeout: true,
+			properties_wanted: false,
+		};
+		let answer = |session: ScriptedSession| {
+			let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
+			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			group.write_frame(group.key_time(), b"fetch".as_slice()).unwrap();
+			group.finish().unwrap();
+			h
+		};
+		let written = |h: &Serve| -> Vec<u8> {
+			data_streams(&h.log)
+				.into_values()
+				.flatten()
+				.filter_map(|sent| match sent {
+					Sent::Write(bytes) => Some(bytes),
+					_ => None,
+				})
+				.flatten()
+				.collect()
+		};
+
+		// The whole answer, read with credit to spare, ends with End of Group. It can finish on
+		// the very poll that sends the FIN, so a ready answer ends the wait too.
+		let h = answer(ScriptedSession::per_stream(vec![Vec::new()]));
+		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+			.await
+			.unwrap();
+		let mut fetching = std::pin::pin!(h.publisher.clone().run_fetch_stream(stream, fetch()));
+		let finished = |h: &Serve| {
+			data_streams(&h.log)
+				.values()
+				.flatten()
+				.any(|sent| *sent == Sent::Finish)
+		};
+		kio::clock::timeout(Duration::from_secs(10), async {
+			while !finished(&h) && futures::poll!(fetching.as_mut()).is_pending() {
+				kio::clock::sleep(Duration::from_millis(1)).await;
+			}
+		})
+		.await
+		.expect("the answer went out whole");
+		assert!(finished(&h), "the answer was finished");
+		let whole = written(&h);
+		let mut marker = Vec::new();
+		crate::coding::Encode::encode(
+			&ietf::FetchObject::EndOfGroup { track: false },
+			&mut crate::coding::Encoder::new(&mut marker, version.into()),
+			version,
+		)
+		.unwrap();
+		assert!(whole.ends_with(&marker), "the answer ends with End of Group: {whole:?}");
+
+		// One byte short, so every object goes out and only End of Group's last byte parks.
+		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_uni_send_window(whole.len() - 1);
+		let h = answer(session);
+		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+			.await
+			.unwrap();
+		let mut fetching = std::pin::pin!(h.publisher.clone().run_fetch_stream(stream, fetch()));
+		serve_until(fetching.as_mut(), "the objects went out", || {
+			written(&h).len() == whole.len() - 1
+		})
+		.await;
+
+		let mut next = h.track.create_group(group::Info { start: 1 }).unwrap();
+		next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
+		next.finish().unwrap();
+		kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
+		assert!(futures::poll!(fetching.as_mut()).is_pending(), "within the budget");
+		assert!(h.log.resets().is_empty());
+
+		kio::clock::sim::advance(Duration::from_millis(1)).await;
+		let _ = kio::clock::timeout(budget, fetching.as_mut())
+			.await
+			.expect("the stale fetch stayed parked on its End of Group");
+		let resets = data_streams(&h.log)
+			.into_values()
+			.flatten()
+			.filter(|sent| matches!(sent, Sent::Reset(_)))
+			.count();
+		assert_eq!(resets, 1, "the fetch stream reset");
 	}
 
 	/// A standalone FETCH whose FETCH_HEADER is parked on flow control resets once its group
@@ -15069,7 +15389,7 @@ mod serve_tests {
 	/// unchanged, beside the ones it does, on every draft with a Track Properties block.
 	#[kio::test]
 	async fn unknown_track_properties_are_forwarded() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let upstream = unknown_properties(version);
 			let info = track::Info {
 				properties: Some(Arc::new(crate::model::object::TrackProperties {
@@ -15243,7 +15563,9 @@ mod serve_tests {
 			)
 			.await;
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(ok.end_location, end_location(version, 2, 0), "{version}");
+			if names_its_end(version) {
+				assert_eq!(ok.end_location, end_location(version, 2, 0), "{version}");
+			}
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([2])[..1].to_vec(), "{version}");
 		}
@@ -15269,7 +15591,7 @@ mod serve_tests {
 				.await;
 				let (ok, objects) = fetch_answer(buf, version);
 				assert_eq!(objects, Vec::new(), "{version} end={end}");
-				if Filter::is_draft20(version) {
+				if Filter::is_draft20(version) && names_its_end(version) {
 					assert_eq!(
 						ok.end_location,
 						Location {
@@ -15498,13 +15820,17 @@ mod serve_tests {
 				GroupOrder::Any,
 			)
 			.await;
-			let (ok, objects) = fetch_answer(buf, version);
-			let end = match Filter::is_draft20(version) {
-				true => end_location(version, 4, 1),
-				false => Location { group: 4, object: 0 },
-			};
-			assert_eq!(ok.end_location, end, "{version}");
-			assert!(ok.end_of_track, "{version}");
+			let (ok, objects, tail) = fetch_answer_tail(buf, version, GroupOrder::Ascending);
+			if names_its_end(version) {
+				let end = match Filter::is_draft20(version) {
+					true => end_location(version, 4, 1),
+					false => Location { group: 4, object: 0 },
+				};
+				assert_eq!(ok.end_location, end, "{version}");
+				assert!(ok.end_of_track, "{version}");
+			} else {
+				assert_eq!(tail, Some(true), "{version}: End of Track ends the fetch stream");
+			}
 			assert_eq!(objects, pairs([4])[1..].to_vec(), "{version}");
 		}
 	}
@@ -15527,9 +15853,17 @@ mod serve_tests {
 					GroupOrder::Ascending,
 				)
 				.await;
-				let (ok, objects) = fetch_answer(buf, version);
-				assert_eq!(ok.end_location, end_location(version, 4, end - 1), "{version}");
-				assert_eq!(ok.end_of_track, end == 2, "{version}: exclusive end {end}");
+				let (ok, objects, tail) = fetch_answer_tail(buf, version, GroupOrder::Ascending);
+				if names_its_end(version) {
+					assert_eq!(ok.end_location, end_location(version, 4, end - 1), "{version}");
+					assert_eq!(ok.end_of_track, end == 2, "{version}: exclusive end {end}");
+				} else {
+					assert_eq!(
+						tail == Some(true),
+						end == 2,
+						"{version}: exclusive end {end}, tail {tail:?}"
+					);
+				}
 				assert_eq!(objects, pairs([4])[..end as usize].to_vec(), "{version}");
 			}
 		}
@@ -15540,7 +15874,7 @@ mod serve_tests {
 	/// a relative filter when it has not learned that report.
 	#[kio::test]
 	async fn a_draft22_fetch_relative_to_largest_object_resolves_against_it() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for (filter, groups) in [
 				(Filter::Unfiltered, Some(vec![0, 1, 2])),
 				(Filter::Relative(1), Some(vec![2])),
@@ -15642,15 +15976,20 @@ mod serve_tests {
 			let edge = Location { group: 4, object: 2 };
 			let buf = standalone_fetch(&h, whole, edge, GroupOrder::Ascending).await;
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(
-				ok.end_location,
-				if Filter::is_draft20(version) {
-					Location { group: 4, object: 1 }
-				} else {
-					edge
-				},
-				"{version}"
-			);
+			if names_its_end(version) {
+				assert_eq!(
+					ok.end_location,
+					if Filter::is_draft20(version) {
+						Location { group: 4, object: 1 }
+					} else {
+						edge
+					},
+					"{version}"
+				);
+			} else {
+				// Draft-23 has no End Location: the range reaches the Largest Object, which it names.
+				assert_eq!(ok.largest, Some(Location { group: 4, object: 1 }), "{version}");
+			}
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([4]), "{version}");
 		}
@@ -15678,15 +16017,17 @@ mod serve_tests {
 			};
 			let (buf, ()) = futures::join!(fetch, finish);
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(
-				ok.end_location,
-				if Filter::is_draft20(version) {
-					Location { group: 4, object: 1 }
-				} else {
-					whole
-				},
-				"{version}"
-			);
+			if names_its_end(version) {
+				assert_eq!(
+					ok.end_location,
+					if Filter::is_draft20(version) {
+						Location { group: 4, object: 1 }
+					} else {
+						whole
+					},
+					"{version}"
+				);
+			}
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([4]), "{version}");
 		}
@@ -17108,7 +17449,7 @@ mod serve_tests {
 	/// subscription asked for.
 	#[kio::test]
 	async fn subscribe_ok_announces_the_default_order() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for requested in [GroupOrder::Ascending, GroupOrder::Descending, GroupOrder::Any] {
 				let mut h = serve(version);
 				let mut msg = subscribe(Filter::NextObject, None);
@@ -17598,7 +17939,7 @@ mod serve_tests {
 	/// Pausing with a token waits for verification, drops demand, and keeps the new grant.
 	#[kio::test]
 	async fn a_pause_carrying_a_token_changes_authority() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			for queue_resume in [false, true] {
 				let (auth, mut requests, _cred) = auth_covering_other();
 				let mut script = subscribe_update_with_token(version, false).await;
@@ -18605,7 +18946,7 @@ mod serve_tests {
 	/// token, and that never changes. The subscription ends, REQUEST_ERROR then PUBLISH_DONE.
 	#[kio::test]
 	async fn a_token_on_a_session_subscription_update_is_refused() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			for initially_forwarding in [false, true] {
 				for forwarding in [false, true] {
 					let case = format!("{version} initial={initially_forwarding} forward={forwarding}");
@@ -19465,7 +19806,7 @@ mod tests {
 	/// plus STOP_SENDING. A FIN there is a protocol violation some peers close on.
 	#[kio::test]
 	async fn publish_namespace_withdraws_by_reset() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let local = origin.announce("local-cam", crate::origin::RouteInfo::new()).unwrap();
 			settle().await;
@@ -19715,7 +20056,7 @@ mod tests {
 
 	#[kio::test]
 	async fn hidden_discovery_obeys_peer_setup_and_requested_prefix() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for declared in [false, true] {
 				for solicit in [Some(false), Some(true)] {
 					for scoped in [false, true] {
@@ -21098,7 +21439,7 @@ mod tests {
 			Refused,
 		}
 
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			for stage in [Stage::FirstWrite, Stage::FirstAnswer, Stage::UpdateWrite] {
 				for partial in [0, 1] {
 					if matches!(stage, Stage::FirstAnswer) && partial == 1 {
@@ -21453,7 +21794,7 @@ mod tests {
 	/// on a request we already refused. Finishing first makes the drop-time reset a no-op.
 	#[kio::test]
 	async fn missing_broadcast_is_refused_without_resetting_the_stream() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let (writes, resets) = subscribe_missing(version).await;
 
 			assert!(!writes.is_empty(), "{version}: nothing was sent");
@@ -21493,7 +21834,7 @@ mod tests {
 			]
 		};
 
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for (label, fetch_type) in refused() {
 				let (writes, resets) = fetch_refused(version, fetch_type).await;
 
@@ -22088,6 +22429,77 @@ mod range_tests {
 		);
 	}
 
+	/// A fill reaching the Largest Object of a group a relay holds with its END_OF_GROUP
+	/// ends at that status, which is no frame: the objects below it are the whole fill.
+	#[test]
+	fn a_fill_through_the_terminal_object_is_complete() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"catalog",
+			crate::track::Info::timed(),
+		);
+		let group = track.create_group(group::Info { start: 7 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: false,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_object(crate::frame::Header {
+				info: crate::frame::Info {
+					size: 1,
+					timestamp: crate::Timestamp::from_millis(0).unwrap(),
+				},
+				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+					id: 0,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		frame.write(&b"x"[..]).unwrap();
+		let group = frame.finish().unwrap();
+		group
+			.set_end_object(crate::model::object::Fields {
+				id: 1,
+				properties: Default::default(),
+			})
+			.unwrap();
+		let group = group.finish().unwrap();
+
+		// The frame at object 0 is written, so the writer stands at object 1.
+		for (until, ok) in [(Some(1), true), (Some(2), true), (Some(3), true), (None, true)] {
+			let mut write =
+				FetchGroupWrite::new(group.consume(), 7, GroupSlice { skip: 0, until }, Version::Draft22, 0).unwrap();
+			write.index = 1;
+			assert_eq!(write.finish().is_ok(), ok, "until {until:?}");
+		}
+
+		// Without the terminal object the same cap lost an object.
+		let mut bare = track.create_group(group::Info { start: 8 }).unwrap();
+		bare.write_frame(bare.key_time(), &b"x"[..]).unwrap();
+		let bare = bare.finish().unwrap();
+		let mut write = FetchGroupWrite::new(
+			bare.consume(),
+			8,
+			GroupSlice {
+				skip: 0,
+				until: Some(2),
+			},
+			Version::Draft22,
+			0,
+		)
+		.unwrap();
+		write.index = 1;
+		assert!(matches!(write.finish(), Err(Error::NotFound)));
+	}
+
 	/// Anything received past the upstream's last reported Largest Object outdates it, a
 	/// later object of its group or a newer group, even once the cache evicted what arrived,
 	/// so the edge never moves back to the report. A report that lands after a frame past it
@@ -22437,7 +22849,7 @@ mod compression_tests {
 	use crate::coding::Encoder;
 	#[test]
 	fn sealed_compression_refuses_incompatible_egress() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut sealed = Vec::new();
 			let mut encoder = Encoder::new(&mut sealed, version.into());
 			encoder.varint(super::super::flate::COMPRESSION).unwrap();

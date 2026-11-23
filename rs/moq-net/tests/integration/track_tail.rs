@@ -355,7 +355,7 @@ async fn draft18_a_join_reaching_a_finished_track_keeps_its_head() {
 }
 
 /// IETF drafts with a joining FETCH (18) and with subscription fills (22).
-const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const IETF: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 /// A subscriber that leaves while END_OF_TRACK waits for stream credit ends the publisher's
 /// request, instead of parking it until credit that may never come.

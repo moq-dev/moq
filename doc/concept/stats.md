@@ -389,7 +389,7 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
     "wire_tx": 2048, "wire_rx": 1024, "credit_stalls": 2, "credit_stalled_us": 350000,
-    "credit_held_readers_us": 120000,
+    "credit_held_readers_us": 120000, "pacing_blocked_us": 40000,
     "routes_refused": 0,
     "routes": {
       "changed": 4, "rewritten": 120,
@@ -440,6 +440,16 @@ Other unsupported transports, including browsers, contribute zero. Unavailable
 counters are never estimated from payload. Readers default missing wire fields
 to zero for older relays.
 
+`wire_lost` counts the sent bytes QUIC declared lost. It lands on the label and
+tier current when the loss is declared, so a session retagged in between moves
+loss away from the row that counted those bytes in `wire_tx`; across a whole
+node, the ratio of the two is the loss rate. `cwnd_blocked_us` and `pacing_blocked_us` count
+the microseconds a connection had data ready to send held back by its congestion
+controller: by a full congestion window, or by the pacer spreading sends at the
+controller's rate. Time growing here points at the path setting the pace,
+though a peer's stream-level credit can still hold other streams back. Native QUIC and WebTransport report them, at the
+same lag as the credit counters below; other transports contribute zero.
+
 `credit_stalls` and `credit_stalled_us` count how often, and for how many
 microseconds, a connection had a write blocked with all of the peer's
 connection-level flow-control credit (QUIC `MAX_DATA`) spent. An episode starts
@@ -460,8 +470,8 @@ yet to stop its stream, keeping the credit of the bytes it took. A window held
 by a rate cap rather than by readers counts in neither. The same transports
 report them, at the same lag.
 
-The four credit fields are omitted while zero, as they are on most labels, and
-readers default a missing one to zero.
+The four credit fields and the three congestion fields above are omitted while
+zero, as they are on most labels, and readers default a missing one to zero.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
 They never start a session. `expired` counts a verified credential that expired

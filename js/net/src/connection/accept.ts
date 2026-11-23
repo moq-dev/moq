@@ -110,6 +110,9 @@ async function acceptInner(
 		implementation: props.implementation ?? IMPLEMENTATION,
 	};
 
+	if (protocol === Ietf.ALPN.DRAFT_23) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_23, wiring);
+	}
 	if (protocol === Ietf.ALPN.DRAFT_22) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_22, wiring);
 	}

@@ -642,7 +642,7 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, request: &ht
 /// moq-transport-18 and newer require qmux-01, so we never pair them with qmux-00.
 /// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns
 /// `&[]`, which qmux expands to every draft it knows about.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-20", "moqt-22"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-20", "moqt-22", "moqt-23"];
 
 fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
 	if QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -694,21 +694,23 @@ impl Error {
 /// alongside QUIC connections on a separate port.
 pub struct Listener {
 	listener: tokio::net::TcpListener,
-	protocols: Vec<String>,
+	/// The subprotocols [`with_protocols`](Self::with_protocols) named, or `None` to accept
+	/// the versions of the [`crate::Server`] it joins (every default ALPN on its own).
+	protocols: Option<Vec<String>>,
 	health: crate::accept::Health,
 	/// The settings each accepted qmux session starts with.
 	session: qmux::Config,
 }
 
 impl Listener {
-	/// Bind a listener to the given address, accepting every moq ALPN we know about.
+	/// Bind a listener to the given address, accepting the versions of the [`crate::Server`]
+	/// it joins, or every default moq ALPN on its own.
 	pub async fn bind(addr: net::SocketAddr) -> Result<Self> {
 		crate::runtime::scope(async move {
 			let listener = tokio::net::TcpListener::bind(addr).await?;
-			let protocols = supported_subprotocols(moq_net::ALPNS);
 			Ok(Self {
 				listener,
-				protocols,
+				protocols: None,
 				health: crate::accept::Health::new("websocket"),
 				session: crate::qmux_default(),
 			})
@@ -731,8 +733,17 @@ impl Listener {
 		for protocol in &protocols {
 			http::HeaderValue::from_str(protocol).map_err(|err| Error::ProtocolHeader(crate::error::message(err)))?;
 		}
-		self.protocols = protocols;
+		self.protocols = Some(protocols);
 		Ok(self)
+	}
+
+	/// Accept `versions`, a [`crate::Server`]'s `listen.version`, unless
+	/// [`with_protocols`](Self::with_protocols) already named the subprotocols.
+	pub(crate) fn with_versions(mut self, versions: &moq_net::Versions) -> Self {
+		if self.protocols.is_none() {
+			self.protocols = Some(supported_subprotocols(&versions.alpns()));
+		}
+		self
 	}
 
 	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
@@ -779,7 +790,10 @@ impl Listener {
 
 		let accepted = Arc::new(Mutex::new(None::<(String, Url)>));
 		let accepted_callback = accepted.clone();
-		let protocols = self.protocols.clone();
+		let protocols = self
+			.protocols
+			.clone()
+			.unwrap_or_else(|| supported_subprotocols(moq_net::ALPNS));
 		let session = self.session.clone();
 		#[expect(
 			clippy::result_large_err,
@@ -1332,10 +1346,15 @@ mod tests {
 	fn moqt_18_and_newer_pin_to_qmux01() {
 		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
 		// otherwise the pin silently stops matching.
-		let drafts: Vec<_> = ["moq-transport-18", "moq-transport-20", "moq-transport-22"]
-			.into_iter()
-			.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
-			.collect();
+		let drafts: Vec<_> = [
+			"moq-transport-18",
+			"moq-transport-20",
+			"moq-transport-22",
+			"moq-transport-23",
+		]
+		.into_iter()
+		.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
+		.collect();
 		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 		for &alpn in QMUX01_ONLY_ALPNS {
 			assert_eq!(qmux_versions_for(alpn), &[qmux::Version::QMux01]);

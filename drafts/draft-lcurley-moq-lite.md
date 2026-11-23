@@ -1532,7 +1532,7 @@ A relay asking for the union of several subscriptions' Ranges, whose exact union
 Which fields follow, and what the Anchor names:
 
 - None (0x0): no fields. As a `Start`, the oldest Group the publisher holds; as an `End`, the live edge (unbounded).
-- Time (0x1): `Timestamp`, the Group containing that time: the one whose start (see [Group](#group)) is the highest at or below it.
+- Time (0x1): `Timestamp`, the Group containing that time: the one whose span (see [Group](#group)) holds it, where a Group not yet known whole spans up to the next Group's start. A time past a whole Group's End and before the next Group's start belongs to no Group: as a `Start` it starts at the next Group, and as an `End` it stops after the whole Group.
 - Position (0x2): `Timestamp` then `Frame`, as Time, except that a Group starting exactly at `Timestamp` is delivered from frame `Frame` as a `Start`, and up to but excluding frame `Frame` as an `End` (see [Positions](#positions)). `Frame` is never 0, which a Time `Start`, or a Time `End` naming the Group before, says: a 0 is a PROTOCOL_VIOLATION.
 - Live (0x3): `Min Age` then `Max Age`: a live join, starting at the Group containing the live edge minus `Min Age` (see below), whose Groups expire once their age reaches `Max Age` (see [Expiration](#expiration)). `Min Age` is in milliseconds: the subscriber's target latency behind the live edge, such as the playout or jitter-buffer delay it holds, so its buffer arrives full. `Max Age` is in milliseconds plus one, `0` meaning no limit beyond `Publisher Max Age`: how long a non-latest Group the join reaches may remain in flight before it is stale, so an encoded `1` wants only the latest Group (older ones are stale once a newer one arrives). The latest Group is never stale. A `Start` only: as an `End` it is a PROTOCOL_VIOLATION.
 - Joined (0x4): `Timestamp`, `Frame`, then `Max Age`: a live join already placed, starting at the Group with that start, from frame `Frame` (`0` for the whole Group), whose Groups expire as a Live Anchor's do under `Max Age`, encoded as there. A subscriber resuming a live join on a new subscription, such as a relay moving to another route, names where the join landed, so it keeps its `Max Age` without being placed at the live edge again. A `Start` only: as an `End` it is a PROTOCOL_VIOLATION.
@@ -1541,8 +1541,11 @@ Any other value is a PROTOCOL_VIOLATION.
 Both ends include the Group they name, so a Range from Time `a` to Time `b` delivers every Group from the one containing `a` through the one containing `b`; a Position `End` includes only the frames of its Group before `Frame`.
 The publisher resolves a Time Anchor, a Live Anchor, and a `Start` of None, against the Track as it holds it.
 A Range resolves once: an update that leaves it live does not resolve it again.
-A relay's copy places a Time `Start` only where it can show its origin would: at the highest Group it holds starting at or below the time once every start between is known not to be a Group, or at the Range Start a Range of its own subscription from that time was answered with.
-A Range Start past the time, or 0, shows only that its upstream held no Group at or below the time when it answered.
+A relay's copy places a Time `Start` only where it can show its origin would: at the highest Group it holds starting at or below the time once every start between is known not to be a Group, or at that Group's End once it is whole and the time is at or past its End, or at the Range Start a Range of its own subscription from that time was answered with.
+A whole Group's GROUP_END accounts for every start inside its span, so the Group alone places every time in its span, with no later Group.
+A Range Start past the time places it there: the time lies in the pause past a whole Group, or its upstream held no Group at or below the time when it answered.
+A Range Start of 0 shows only that its upstream held no Group at or below the time when it answered.
+A Joined Range's Range Start shows either only if every `Max Age` it was asked under is unlimited: under a limit, the publisher may start it past Groups it still holds.
 Otherwise the relay adds a Range from that time to its subscription and waits for the answer.
 
 A `Start` other than Live or Joined is a floor for history: the publisher starts at the oldest group it holds at or above the floor, MUST NOT deliver an older one, and delivers every group the Range covers, none of which expires for staleness.
@@ -1875,6 +1878,7 @@ A subscriber joining a Track whose newest group ended knows at once that the gro
 
 **Range Start**:
 One per Range of the SUBSCRIBE, in Range ID order: the start of the Group where the Range's delivery starts, plus one, so a subscriber learns where a Time Anchor, or a live join, landed.
+For a Time `Start` that no Group's span holds, it names the End of the whole Group before it when delivery started below that End: no Group starts from there up to the next Group.
 0 means the Range has no Group to deliver, including one an update retired before the answer.
 The Range's Groups from this one are owed as described in [SUBSCRIBE_DROP](#subscribe-drop); an earlier one is not, though it MAY still arrive.
 A subscriber MUST treat a `Range Start Count` other than the SUBSCRIBE's `Range Count` as a PROTOCOL_VIOLATION.
@@ -2339,7 +2343,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME carries an `Inflated Size` when it is not none.
 - A `Timescale` of 0 in TRACK_INFO declares a scale-less Track, whose Group starts are bare numbers; its frames carry no timestamp, each taking its Group's start.
 - A publisher must not start a Group's frame 0 at or before that of a Group with a lower start, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
-- Replaced Group sequence numbers with Group starts: a Group is addressed by its frame 0's timestamp, or a bare number on a scale-less Track, and no field carries a sequence. A Time Anchor names the Group with the highest start at or below it.
+- Replaced Group sequence numbers with Group starts: a Group is addressed by its frame 0's timestamp, or a bare number on a scale-less Track, and no field carries a sequence. A Time Anchor names the Group whose span holds it.
 - Bounded every timestamp below 2^61. A larger one is a malformed Track.
 - Reserved Group start 2^64-1: a publisher never creates it, and a Group Stream naming it is a malformed Track.
 - TRACKS_ADD, TRACKS_REMOVE, and TRACKS_FINISH carry a `Kind`, so a listing names datagram Tracks too, each with its DATAGRAMS_INFO.
@@ -2380,7 +2384,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - FRAME carries a `Timestamp Delta` only on a Track with a `Timescale`, and the first FRAME on a stream counts it from the Group Start, so frame 0's is 0. Datagrams always carry a timestamp, a bare number on a scale-less Track.
 - Replaced GROUP's `Group Sequence` with `Group Start`.
 - Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive End, as a non-negative delta from the highest frame timestamp on the stream, or from the Group Start: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own End bounds its reach.
-- A Group's span runs from its start to its End, [start, End), and spans never overlap; every frame of a lower Group presents before every frame of a higher one. The publisher names the starts between one Group's End and the next Group's start with SUBSCRIBE_SKIP. A GROUP_END accounts for the starts strictly between its Group Start and End, and a drop of a Group the publisher holds whole names its span.
+- A Group's span runs from its start to its End, [start, End), and spans never overlap; every frame of a lower Group presents before every frame of a higher one. The publisher names the starts between one Group's End and the next Group's start with SUBSCRIBE_SKIP. A GROUP_END accounts for the starts strictly between its Group Start and End, and a drop of a Group the publisher holds whole names its span. A time past a whole Group's End and before the next Group's start belongs to no Group: a Time `Start` there starts at the next Group, a Time `End` there stops after the whole Group, a relay's copy places a time inside a whole Group's span from that Group alone, and a Range Start past the time places it there.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop, and only that on a scale-less Track.
 - A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.

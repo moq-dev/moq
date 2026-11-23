@@ -1543,9 +1543,8 @@ test("regressions", async () => {
 			finish: false,
 		},
 		// A group the local floor keeps out of where an earlier copy placed a range, below where the
-		// serving copy places it: the read runs without a stall. The oracle owes nothing below the
-		// serving copy's placement, so it does not check that group yet; see
-		// quest/m0/nightly/resume-model-placement.md. Mirrors the Rust case.
+		// serving copy places it: the read runs without a stall, and stays open for that group, which
+		// every live route held when the range placed, so the oracle owes it. Mirrors the Rust case.
 		{
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },
@@ -1601,6 +1600,23 @@ test("regressions", async () => {
 				{ kind: "write", instance: 0, slot: 1, group: 5, frames: 1 },
 				{ kind: "down", instance: 0, slot: 0 },
 				{ kind: "close", instance: 0, slot: 1, group: undefined, down: false },
+			],
+			finish: false,
+		},
+		// The same once the read moved onto a failed copy that holds fewer frames than it read: that
+		// copy cannot continue the group, so the group fails instead of ending at its close.
+		{
+			ops: [
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 3, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 2 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "close", instance: 0, slot: 1, group: undefined, down: true },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "ranges", reader: 0, range: undefined },
 			],
 			finish: false,
 		},
@@ -1689,6 +1705,101 @@ test("regressions", async () => {
 				{ kind: "close", instance: 1, slot: 2, group: undefined, down: false },
 				{ kind: "end", instance: 1, slot: 2 },
 				{ kind: "down", instance: 1, slot: 2 },
+			],
+			finish: false,
+		},
+		// A serving copy whose floor lies above every group the reader's range now names was asked for
+		// nothing, so its own resolution is empty: the copy replacing it, from a lower boundary, is
+		// asked from where the reader placed the range instead. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 3, spec: spec(false, "hour", [0, 1], false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "ranges", reader: 3, range: [0, 6] },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "write", instance: 0, slot: 2, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// The same once a failover moves the boundary below a time start the replaced copy placed at a
+		// lower group. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [6, 7], false) },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "write", instance: 1, slot: 2, group: 7, frames: 1 },
+				{ kind: "down", instance: 1, slot: 2 },
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "write", instance: 1, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", instance: 1, slot: 2, group: 1, frames: 1 },
+			],
+			finish: false,
+		},
+		// A backfill passed a group outside the reader's range, which a widening then owes: the serving
+		// route is asked for it, since the backfill will not hand it out again. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [3, 4], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 4, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "ranges", reader: 0, range: undefined },
+			],
+			finish: false,
+		},
+		// A received route places a time start at the newest group it holds at or before it, so the
+		// group holding it is handed out before a switch, not placed later at the time's own key.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "ranges", reader: 0, range: [1, 2] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "down", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// The same with the switch's route closing the group as it fails.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
+				{ kind: "write", instance: 1, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "close", instance: 1, slot: 1, group: 0, down: true },
+				{ kind: "up", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// A route's give-up outlives an expiry, as a Rust route's does, so an ordered read joining
+		// after it is not held on the group given up.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "short", [2, 3], false) },
+				{ kind: "giveUp", instance: 0, slot: 0, group: 1 },
+				{ kind: "expire" },
+				{ kind: "join", reader: 1, spec: spec(true, "hour", undefined, false) },
+				{ kind: "advance", ms: 1 },
+			],
+			finish: false,
+		},
+		// An ordered read waiting below a group its route then closes short and fails takes that
+		// group from the failed copy, still buffered for it, and reads on from the next route.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 5], false) },
+				{ kind: "write", instance: 1, slot: 1, group: 4, frames: 1 },
+				{ kind: "close", instance: 1, slot: 1, group: undefined, down: true },
 			],
 			finish: false,
 		},

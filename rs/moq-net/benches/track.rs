@@ -2072,7 +2072,8 @@ impl Fills {
 	/// Every reader reads what is cached and asks for its misses, then raises its priority,
 	/// which reaches every fill it waits on. A run past the first starts at a time below the
 	/// feed's start, whose group each reader asks a fill of its own for first: the handler
-	/// can't resolve times, so it refuses each, and the readers then ask that run as a miss.
+	/// can't resolve times, so it closes each unanswered, and the readers then ask that run
+	/// as a miss.
 	/// The handler drops each fill they share, and every reader settles the drops.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
@@ -2092,7 +2093,7 @@ impl Fills {
 				assert_eq!(fill.priority(), 1, "the update reached the fill");
 				match fill.floor() < fill.start().group {
 					true => {
-						fill.refuse_groups(fill.start().group..fill.end(), moq_net::Error::NotFound);
+						drop(fill);
 						lookups += 1;
 					}
 					false => {
@@ -2173,7 +2174,8 @@ impl RangeFills {
 	/// The readers ask for their misses, the handler accepts every group of every fill once,
 	/// and each reader drains what they filled. Each range starts at a time below the feed's
 	/// start, whose group each reader asks a fill of its own for first: the handler can't
-	/// resolve times, so it refuses each, and the readers then ask that range as a miss.
+	/// resolve times, so it closes each unanswered, and the readers then ask that range as a
+	/// miss.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for reader in &mut self.readers {
@@ -2183,8 +2185,8 @@ impl RangeFills {
 		// The time starts go out first, and the misses they leave behind them.
 		for _ in 0..2 {
 			while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
+				// A refusal would fail the reader instead.
 				if fill.floor() < fill.start().group {
-					fill.refuse_groups(fill.start().group..fill.end(), moq_net::Error::NotFound);
 					continue;
 				}
 				while let Some(key) = fill.wanted() {

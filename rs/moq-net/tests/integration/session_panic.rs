@@ -102,7 +102,7 @@ async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 
 #[kio::test]
 async fn a_panicking_session_leaves_the_others_serving() {
-	for version in ["moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: Version = version.parse().unwrap();
 		let relay = produce_origin(100);
 		let mut announced = relay.consume().routes();

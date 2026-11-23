@@ -157,8 +157,10 @@ pub enum Start {
 	/// delivered in full, bounded only by how long the publisher keeps them
 	/// ([`Info::max_age`](crate::track::Info::max_age)).
 	Oldest,
-	/// The group containing this time: the newest one starting at or before it. A floor for
-	/// history, like [`Self::Oldest`]: its groups never go stale.
+	/// The group containing this time: the newest one starting at or before it, unless that group
+	/// ended whole at or before the time ([`group::Producer::finish_at`](crate::group::Producer::finish_at)).
+	/// A time past a whole group's span lies in a pause no group contains, so the range starts at
+	/// the next group. A floor for history, like [`Self::Oldest`]: its groups never go stale.
 	///
 	/// A time resolves at the hop that serves it, from the starts of the groups it holds. When
 	/// none does, a hop whose [`Requests`](crate::track::Requests) handler serves its history

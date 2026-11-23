@@ -22,7 +22,7 @@ fn origin(hop: u64) -> origin::Producer {
 
 #[kio::test]
 async fn one_stream_credit_serves_every_backlogged_group() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
@@ -92,7 +92,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 /// for it to finish, on each protocol.
 #[kio::test]
 async fn a_newer_group_resets_an_unfinished_older_one() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);

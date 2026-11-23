@@ -273,6 +273,8 @@ pub struct Connection {
 	bandwidth_probe: BandwidthProbe,
 	/// Holds sending to a cap below whatever the congestion controller allows
 	send_rate: Option<rate::Bucket>,
+	/// Since when the congestion controller has held back data ready to send, and how
+	congestion_wait: Option<(Instant, CongestionLimit)>,
 
 	streams: StreamsState,
 	/// Surplus remote CIDs for future use on new paths
@@ -389,6 +391,7 @@ impl Connection {
 
 			app_limited: false,
 			send_rate: None,
+			congestion_wait: None,
 			acked: Vec::new(),
 			receive_timestamps: None,
 			arrival: None,
@@ -558,8 +561,9 @@ impl Connection {
 	#[must_use]
 	pub(crate) fn transmit(&mut self, now: Instant, max_datagrams: usize, buf: &mut Vec<u8>) -> Option<Transmit> {
 		assert!(max_datagrams != 0);
-		// A write that blocked on the peer's credit woke this call: date its wait from here.
-		self.observe_credit(now);
+		// A write that blocked on the peer's credit, or the congestion controller, woke this call:
+		// date its wait from here.
+		self.observe_waits(now);
 		let max_datagrams = match self.config.segmentation_offload {
 			false => 1,
 			true => max_datagrams,
@@ -682,6 +686,9 @@ impl Connection {
 		// Set when the send rate cap held a send back: a local policy, not the path, so the
 		// controller hears it as application-limited.
 		let mut rate_blocked = false;
+		// When the pacer releases data ready to send it held back; a held bandwidth probe
+		// resends data already in flight, so it is not one.
+		let mut pacing_until = None;
 
 		// Iterate over all spaces and find data to send
 		let mut space_idx = 0;
@@ -811,6 +818,7 @@ impl Connection {
 					if ack_eliciting && let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
 						self.timers.set(Timer::Pacing, delay);
 						send_blocked = true;
+						pacing_until = Some(delay);
 						// Loss probes should be subject to pacing, even though
 						// they are not congestion controlled.
 						trace!("blocked by pacing");
@@ -1181,6 +1189,15 @@ impl Connection {
 		if cwnd_blocked {
 			self.path.congestion.on_cwnd_limited();
 		}
+		// A full window outranks the pacer: the pacer only matters once the window opens. The
+		// check charged a packet still being built a whole segment, so the window is full only if
+		// the finished packets left no room for another.
+		let limit = match (cwnd_blocked && self.window_full(), pacing_until) {
+			(true, _) => Some(CongestionLimit::Window),
+			(false, Some(until)) => Some(CongestionLimit::Pacing { until }),
+			(false, None) => None,
+		};
+		self.congestion_wait = limit.map(|limit| (now, limit));
 
 		// Send MTU probe if necessary. Only probe validated paths: probes bypass the
 		// anti-amplification check above, and until a migrated path is validated, its budget is
@@ -1398,7 +1415,7 @@ impl Connection {
 					// the server's first flight is lost.
 					self.set_loss_detection_timer(now);
 				}
-				self.observe_credit(now);
+				self.observe_waits(now);
 			}
 			NewIdentifiers(ids, now) => {
 				self.local_cid_state.new_cids(&ids, now);
@@ -1465,6 +1482,8 @@ impl Connection {
 				Timer::PathValidation => {
 					debug!("path validation failed");
 					if let Some((_, prev)) = self.prev_path.take() {
+						// The failed path's congestion wait ends with it.
+						self.observe_congestion(now, true);
 						self.path = prev;
 						self.set_loss_detection_timer(now);
 					}
@@ -1490,13 +1509,41 @@ impl Connection {
 				}
 			}
 		}
-		self.observe_credit(now);
+		self.observe_waits(now);
 	}
 
-	/// Accrue a writer's wait on the peer's credit, and a hold on the spent receive window, up to `now`
-	fn observe_credit(&mut self, now: Instant) {
+	/// Accrue a writer's wait on the peer's credit or the congestion controller, and a hold on the
+	/// spent receive window, up to `now`
+	fn observe_waits(&mut self, now: Instant) {
 		let closed = self.state.is_closed();
 		self.streams.observe_credit(now, closed);
+		// A closed connection sends nothing more, so its wait ends here.
+		self.observe_congestion(now, closed);
+	}
+
+	/// Accrue the congestion wait up to `now`, ending it once its limit clears or at `end`, as
+	/// when the path that imposed it is replaced
+	fn observe_congestion(&mut self, now: Instant, end: bool) {
+		if let Some((since, limit)) = self.congestion_wait {
+			// A wait ends once its limit clears, whether or not a transmit follows at once, as
+			// one may not while a driver's send buffers are full.
+			let (until, cleared) = match limit {
+				CongestionLimit::Window => (now, end || !self.window_full()),
+				CongestionLimit::Pacing { until } => (now.min(until), end || now >= until),
+			};
+			let total = match limit {
+				CongestionLimit::Window => &mut self.stats.path.cwnd_blocked,
+				CongestionLimit::Pacing { .. } => &mut self.stats.path.pacing_blocked,
+			};
+			*total += until.saturating_duration_since(since);
+			self.congestion_wait = (!cleared).then_some((until, limit));
+		}
+	}
+
+	/// Whether the congestion window has no room for another datagram
+	fn window_full(&self) -> bool {
+		let room = self.path.congestion.window().saturating_sub(self.path.in_flight.bytes);
+		room < u64::from(self.path.current_mtu())
 	}
 
 	/// Close a connection immediately
@@ -1519,7 +1566,7 @@ impl Connection {
 			});
 		}
 		self.close_inner(now, Close::Application(frame::ApplicationClose { error_code, reason }));
-		self.observe_credit(now);
+		self.observe_waits(now);
 	}
 
 	/// Report that a send to the peer found no route, such as `ENETUNREACH`
@@ -3597,6 +3644,8 @@ impl Connection {
 		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
+		// The old path's congestion wait ends with it.
+		self.observe_congestion(now, true);
 		let mut prev = mem::replace(&mut self.path, new_path);
 		self.datagrams().drop_oversized();
 
@@ -4379,6 +4428,15 @@ impl fmt::Debug for Connection {
 			.field("handshake_cid", &self.handshake_cid)
 			.finish()
 	}
+}
+
+/// What the congestion controller held data back on
+#[derive(Debug, Clone, Copy)]
+enum CongestionLimit {
+	/// The congestion window had no room for another datagram
+	Window,
+	/// The pacer holds the next send until then
+	Pacing { until: Instant },
 }
 
 /// Fields of `Connection` specific to it being client-side or server-side

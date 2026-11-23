@@ -1856,12 +1856,13 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 // A relay receives the newest group first while its source still promises older groups.
 // START must preserve that promise, bounded by the downstream floor and first served group.
 // Lite-07 asks for the group containing time 2, which the source's start places, so no floor
-// raises it: a source starting at group 0 contains time 2.
+// raises it: a source starting at group 0 contains time 2, and one starting past it starts the
+// range there, so a group below that never goes out.
 for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	for (const [source, expected] of [
 		[0n, hasRanges(version) ? 0n : 2n],
 		[3n, 3n],
-		[9n, 6n],
+		[9n, hasRanges(version) ? 9n : 6n],
 	]) {
 		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
 			const sub = await servedSubscription({ version, startGroup: 2n });
@@ -1870,12 +1871,13 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 				// A lite-07 source reports where it started the time asked for.
 				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]]);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
-				sub.serve(6n);
-				expect(await sub.servedSequence()).toBe(6n);
+				const first = expected > 6n ? expected : 6n;
+				sub.serve(first);
+				expect(await sub.servedSequence()).toBe(first);
 				const response = await decodeSubscribeResponse(sub.client.reader, version);
 				if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 				expect(response.start.starts[0]).toBe(expected);
-				if (expected < 6n) {
+				if (expected < first) {
 					sub.serve(expected);
 					expect(await sub.servedSequence()).toBe(expected);
 				}

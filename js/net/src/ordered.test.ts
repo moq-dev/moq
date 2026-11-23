@@ -112,6 +112,19 @@ test("keys below where a session's feed starts are no gap unless a fill owed the
 	expect(items(ordered)).toEqual(["group 0", "group 10"]);
 });
 
+test("a read waits on a START pending at no floor rather than hand out the first arrival", () => {
+	const producer = receivedTrack();
+	hooks.startTrack(producer, {});
+	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	// Groups arrive newest first, so the feed may start below the first to arrive.
+	put(producer, 1n, false);
+	expect(items(ordered)).toEqual([]);
+	hooks.startTrack(producer, { start: 0n });
+	expect(items(ordered)).toEqual([]);
+	put(producer, 0n, false);
+	expect(items(ordered)).toEqual(["group 0", "group 1"]);
+});
+
 test("a group held behind a gap is not returned once the reader closes", () => {
 	const producer = new TrackProducer("test");
 	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
@@ -464,9 +477,9 @@ test("an answered time start places whatever the budget", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
 	const subscriber = producer.subscribe({ ranges: [{ start: 1500n }] });
-	// The publisher started the range asked from 1500 past it.
+	// The publisher started the range asked from 1500 past it, so the range starts there.
 	hooks.timeStarts(producer, [[1500n, 2000n]]);
-	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 2000n, end: undefined, floored: true }]);
 	subscriber.close();
 });
 
@@ -501,9 +514,9 @@ test("a time start no answer for its own time places asks upstream for it", () =
 		[1000n, 1000n],
 	]);
 	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
-	// Its own range started past it: no group at or before it.
+	// Its own range started past it, there.
 	hooks.timeStarts(producer, [[1500n, 2000n]]);
-	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 2000n, end: undefined, floored: true }]);
 	expect(hooks.requested(producer).asks()).toEqual([]);
 	subscriber.close();
 });
