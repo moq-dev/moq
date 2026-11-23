@@ -17382,11 +17382,10 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_received_copy_places_a_time_from_a_whole_groups_span() {
 		let from = |time| {
-			Subscription::default()
-				.with_ranges([Range {
-					start: crate::track::Start::Time(time),
-					end: None,
-				}])
+			Subscription::default().with_ranges([Range {
+				start: crate::track::Start::Time(time),
+				end: None,
+			}])
 		};
 		let start = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
 		let producer = track_producer("test", Info::timed());
@@ -17433,11 +17432,10 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_received_copy_waits_for_an_open_group_to_reach_a_time() {
 		let start = |producer: &Producer, time| {
-			let from = Subscription::default()
-				.with_ranges([Range {
-					start: crate::track::Start::Time(time),
-					end: None,
-				}]);
+			let from = Subscription::default().with_ranges([Range {
+				start: crate::track::Start::Time(time),
+				end: None,
+			}]);
 			producer
 				.subscribe(from)
 				.resolved_range(0)
@@ -23546,9 +23544,7 @@ mod test {
 		elapse(&producer, Duration::from_millis(100));
 		put(&producer, 4, None);
 		elapse(&producer, Duration::from_millis(100));
-		let mut ordered = producer
-			.subscribe(Subscription::default().with_max(budget))
-			.ordered();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(budget)).ordered();
 		let landing = producer.clone();
 		set_before_owed(move || {
 			put(&landing, 0, None);
@@ -33123,9 +33119,7 @@ mod test {
 		assert!(!subscriber.taking().may_take(1), "skipped as stale under this budget");
 		assert!(subscriber.taking().may_take(5), "not arrived yet");
 
-		subscriber
-			.update(narrow.with_max(Duration::from_secs(10)))
-			.unwrap();
+		subscriber.update(narrow.with_max(Duration::from_secs(10))).unwrap();
 		assert!(subscriber.taking().may_take(1), "a wider budget offers it again");
 		assert_eq!(drain(&mut subscriber), vec![2, 1]);
 		assert!(!subscriber.taking().may_take(1), "handed out");
@@ -33150,9 +33144,7 @@ mod test {
 		assert!(!subscriber.taking().may_take(1), "skipped, and no wider budget yet");
 		assert!(!subscriber.taking().may_take(2), "skipped, and no wider budget yet");
 
-		subscriber
-			.update(narrow.with_max(Duration::from_secs(10)))
-			.unwrap();
+		subscriber.update(narrow.with_max(Duration::from_secs(10))).unwrap();
 		assert!(subscriber.taking().may_take(1), "a wider budget offers it again");
 	}
 
@@ -33173,9 +33165,7 @@ mod test {
 		}
 		assert_eq!(drain(&mut subscriber), vec![3, 4]);
 
-		subscriber
-			.update(narrow.with_max(Duration::from_secs(10)))
-			.unwrap();
+		subscriber.update(narrow.with_max(Duration::from_secs(10))).unwrap();
 		assert_eq!(drain(&mut subscriber), Vec::<u64>::new(), "still stale at the bound");
 		assert!(!subscriber.taking().may_take(1));
 		assert!(!subscriber.taking().may_take(2));

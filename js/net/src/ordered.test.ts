@@ -115,7 +115,7 @@ test("keys below where a session's feed starts are no gap unless a fill owed the
 test("a read waits on a START pending at no floor rather than hand out the first arrival", () => {
 	const producer = receivedTrack();
 	hooks.startTrack(producer, {});
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
 	// Groups arrive newest first, so the feed may start below the first to arrive.
 	put(producer, 1n, false);
 	expect(items(ordered)).toEqual([]);

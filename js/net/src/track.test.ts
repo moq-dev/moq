@@ -1521,7 +1521,7 @@ test("time anchors resolve against group spans", () => {
 		else group.finishAt(end);
 	};
 	const from = (start: bigint, end?: bigint) =>
-		producer.subscribe({ delay: { max: null }, ranges: [end === undefined ? { start } : { start, end }] });
+		producer.subscribe(withMax({ delay: { max: null }, ranges: [end === undefined ? { start } : { start, end }] }));
 	append(0, 1000n);
 	append(1000, 1400n);
 
@@ -1558,7 +1558,7 @@ test("a received copy places a time from a whole group's span", () => {
 	group.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
 	group.finishAt(1400n);
 	hooks.skipTrackGroups(producer, 1001n, 1400n);
-	const paused = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1700n }] });
+	const paused = producer.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1700n }] }));
 	const holdings = hooks.subscriberHoldings(paused);
 	expect(holdings.containing(1300n, NO_MAX_DELAY)).toEqual({ at: 1000n });
 	expect(holdings.containing(1700n, NO_MAX_DELAY)).toBe("unknown");
@@ -1580,7 +1580,7 @@ test("a received copy places a time from a whole group's End once its skip is go
 	const group = producer.createGroup(1000n);
 	group.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
 	group.finishAt(1400n);
-	const reader = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1300n }] });
+	const reader = producer.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1300n }] }));
 	const holdings = hooks.subscriberHoldings(reader);
 	expect(holdings.containing(1300n, NO_MAX_DELAY)).toEqual({ at: 1000n });
 	expect(holdings.containing(1700n, NO_MAX_DELAY)).toBe("unknown");
@@ -5412,7 +5412,7 @@ test("a widened maxDelay re-offers what it skipped as stale", () => {
 // until the budget widens past the one it was judged under. Mirrors the Rust test.
 test("a stale skip may be taken only once the budget widens", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
-	const subscriber = producer.subscribe({ delay: { max: Duration.millis(1500) } });
+	const subscriber = producer.subscribe(withMax({ delay: { max: Duration.millis(1500) } }));
 	stampGroup(producer, 0n, 0);
 	expect(drainGroups(subscriber)).toEqual([0n]);
 	for (const [key, ms] of [
@@ -5428,7 +5428,7 @@ test("a stale skip may be taken only once the budget widens", () => {
 	expect(hooks.taking(subscriber)(1n)).toBe(false);
 	expect(hooks.taking(subscriber)(5n)).toBe(true);
 
-	subscriber.update({ delay: { max: Duration.millis(10_000) } });
+	subscriber.update(withMax({ delay: { max: Duration.millis(10_000) } }));
 	expect(hooks.taking(subscriber)(1n)).toBe(true);
 	expect(drainGroups(subscriber)).toEqual([1n, 2n]);
 	expect(hooks.taking(subscriber)(1n)).toBe(false);
@@ -5442,7 +5442,7 @@ test("a stale skip may not be taken once its successors leave", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	try {
 		const window = CACHE_WINDOW_MS;
-		const subscriber = producer.subscribe({ delay: { max: Duration.millis(4 * window) } });
+		const subscriber = producer.subscribe(withMax({ delay: { max: Duration.millis(4 * window) } }));
 		for (const [key, ms] of [
 			[1n, window],
 			[2n, 2 * window],
@@ -5457,7 +5457,7 @@ test("a stale skip may not be taken once its successors leave", async () => {
 		// Another reader keeps group 1 cached while 2 and 3 idle out, leaving the edge to bound
 		// its reach.
 		await clock.advance(10_000 + window - 1);
-		const keeper = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1n, end: 2n }] });
+		const keeper = producer.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1n, end: 2n }] }));
 		expect(keeper.tryRecvGroup()?.start).toBe(1n);
 		await clock.advance(10_000 + window + SWEEP_LAG_MS + 1);
 		await settle();
@@ -5466,7 +5466,7 @@ test("a stale skip may not be taken once its successors leave", async () => {
 		expect(hooks.holdsGroup(subscriber, 3n, false)).toBe(false);
 		expect(hooks.taking(subscriber)(1n)).toBe(false);
 
-		subscriber.update({ delay: { max: Duration.millis(100 * window) } });
+		subscriber.update(withMax({ delay: { max: Duration.millis(100 * window) } }));
 		expect(hooks.taking(subscriber)(1n)).toBe(true);
 		keeper.close();
 	} finally {
@@ -5486,7 +5486,7 @@ test("a stale skip at the max age bound may not be taken", async () => {
 		maxAge: Duration.millis(5 * window),
 	});
 	try {
-		const subscriber = producer.subscribe({ delay: { max: Duration.millis(4 * window) } });
+		const subscriber = producer.subscribe(withMax({ delay: { max: Duration.millis(4 * window) } }));
 		for (const [key, ms] of [
 			[1n, window],
 			[2n, 2 * window],
@@ -5497,14 +5497,14 @@ test("a stale skip at the max age bound may not be taken", async () => {
 		}
 		expect(drainGroups(subscriber)).toEqual([3n, 4n]);
 
-		subscriber.update({ delay: { max: Duration.millis(100 * window) } });
+		subscriber.update(withMax({ delay: { max: Duration.millis(100 * window) } }));
 		expect(drainGroups(subscriber)).toEqual([]);
 		expect(hooks.taking(subscriber)(1n)).toBe(false);
 		expect(hooks.taking(subscriber)(2n)).toBe(false);
 
 		// Another reader keeps group 1 cached while 2 and 3 idle out.
 		await clock.advance(10_000 + window - 1);
-		const keeper = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1n, end: 2n }] });
+		const keeper = producer.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1n, end: 2n }] }));
 		expect(keeper.tryRecvGroup()?.start).toBe(1n);
 		await clock.advance(10_000 + window + SWEEP_LAG_MS + 1);
 		await settle();
