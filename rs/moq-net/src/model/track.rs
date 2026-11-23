@@ -11815,13 +11815,14 @@ impl Subscriber {
 	/// owes and its track cannot prove skipped, once its feed no longer delivers them, as
 	/// [`Cursor::ask_kept_out`] does for a cursor's own: its track forgets a skip it was told
 	/// once the pool's expiry window passes, and only a fill asks upstream again. A copy that
-	/// is another front's logical track asks through its own routes instead.
+	/// is another front's logical track asks its serving copy the same way, one level per nesting.
 	///
 	/// Returns the keys of `unproven` those fills gave up (refused, unfillable, or stale), which
 	/// the reader counts as accounted, as one cursor does.
 	pub(super) fn ask_unproven(&mut self, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
-		let Inner::Plain(cursor) = &mut self.inner else {
-			return RangeSet::new();
+		let cursor = match &mut self.inner {
+			Inner::Plain(cursor) => cursor,
+			Inner::Resume(resume, _) => return resume.ask_unproven(unproven, waiter),
 		};
 		let mut kept = cursor.routed_out.take().unwrap_or_default();
 		cursor.judge_unproven(&mut kept, unproven.clone(), waiter);

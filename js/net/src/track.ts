@@ -5052,10 +5052,11 @@ export class Subscriber {
 				.map((run) => ({ start: max(run.start, start), end: min(run.end, end) }));
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		// Mirrors the Rust `Subscriber::ask_unproven`: a copy that is another front's logical track
-		// asks through its own routes instead.
+		// asks its serving copy the same way, one level per nesting.
 		hooks.askUnproven = (subscriber, unproven) => {
+			if (subscriber.#resume) return subscriber.#resume.askUnproven(unproven);
 			const producer = subscriber.#state.producer;
-			if (subscriber.#resume || !producer) return [];
+			if (!producer) return [];
 			subscriber.#routedOut ??= subscriber.#keptOutOf();
 			const unfed = subscriber.#unfed(producer, unproven);
 			const out = subscriber.#askUnproven(subscriber.#routedOut, unfed);

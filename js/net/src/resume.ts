@@ -2203,6 +2203,16 @@ class Reader implements ResumeSource {
 		return this.#serving() !== undefined;
 	}
 
+	/**
+	 * Ask the serving copy's fills for `unproven`, kept-out keys a containing front's reader owes, as
+	 * that reader asks a plain copy, returning what they gave up, so a key this front's route cannot
+	 * fill ends the outer read too. Mirrors the Rust `Resume::ask_unproven`.
+	 */
+	askUnproven(unproven: Run[]): Run[] {
+		const serving = this.#copies.at(-1);
+		return serving ? hooks.askUnproven(serving.sub, unproven) : [];
+	}
+
 	// What the reader recorded or any copy held now declared skipped: a skip is final for the whole
 	// track, so an outer front reading this one as a copy counts it, and asks for the rest as it would
 	// of any route.

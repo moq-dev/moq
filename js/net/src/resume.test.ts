@@ -1484,61 +1484,73 @@ test("a kept-out skip the asked copy forgot is asked again", async () => {
 
 /**
  * A single kept-out key the asked copy's track forgot, which its fill (a one-group FETCH on a
- * session) refuses, is given up as on one cursor, so the resumed read ends. Mirrors the Rust
- * `a_forgotten_kept_out_key_a_fill_refused_ends_the_resumed_read`.
+ * session) refuses, is given up as on one cursor, so the resumed read ends. An asked copy that is
+ * another front's logical track asks its own serving copy and passes back what it gave up. Mirrors
+ * the Rust `a_forgotten_kept_out_key_a_fill_refused_ends_the_resumed_read`.
  */
-test("a forgotten kept-out key a fill refused ends the resumed read", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	const tb = copy(b);
-	ta.write(0n);
-	hooks.dropTrackGroups(ta.producer, 1n, 5n, { error: new StreamError(StreamCode.NotFound) });
-	ta.write(5n);
-	const front = new Front();
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 6n }] });
-	try {
-		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([0n, 5n]);
-		tb.write(6n);
-		tb.write(5n);
-		front.serve(b.consume());
-		sub.withRange({ start: { included: 5n }, end: { excluded: 7n } });
-		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([6n]);
-		const requests = tb.producer.requests();
-		const fills: FillGroups[] = [];
-		void (async () => {
-			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill())
-				fills.push(fill);
-		})();
-		const ended = sub.recvGroup();
-		await clock.advance(Duration.millis(3_600_000));
-		expect(await isPending(ended)).toBe(true);
-		expect(askedFor(tb.producer, 1n)).toBe(true);
-		// The upstream answers all but 4, then the rest once the copy's track forgot it.
-		tb.producer.skipGroups(4n, 5n);
-		await clock.advance(Duration.ZERO);
-		expect(await isPending(ended)).toBe(true);
-		await clock.advance(Duration.millis(60_000));
-		tb.producer.skipGroups(1n, 4n);
-		await clock.advance(Duration.ZERO);
-		expect(await isPending(ended)).toBe(true);
-		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[4n, 5n]]);
-		fills[0].refuseGroups(4n, 5n, new Error("not found"));
-		expect(await ended).toBeUndefined();
-		requests.close();
-	} finally {
-		sub.close();
-		front.consumer.close();
-		a.close();
-		b.close();
-		installed.close();
-	}
-});
+for (const nested of [false, true]) {
+	test(`a forgotten kept-out key a fill refused ends the resumed read${nested ? " through an inner front" : ""}`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		ta.write(0n);
+		hooks.dropTrackGroups(ta.producer, 1n, 5n, { error: new StreamError(StreamCode.NotFound) });
+		ta.write(5n);
+		const front = new Front();
+		const inners: Front[] = [];
+		const serve = (broadcast: BroadcastProducer) => {
+			if (!nested) return front.serve(broadcast.consume());
+			const inner = new Front();
+			inner.serve(broadcast.consume());
+			front.serve(inner.consumer);
+			inners.push(inner);
+		};
+		serve(a);
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 6n }] });
+		try {
+			await clock.advance(Duration.ZERO);
+			expect(drain(sub)).toEqual([0n, 5n]);
+			tb.write(6n);
+			tb.write(5n);
+			serve(b);
+			sub.withRange({ start: { included: 5n }, end: { excluded: 7n } });
+			await clock.advance(Duration.ZERO);
+			expect(drain(sub)).toEqual([6n]);
+			const requests = tb.producer.requests();
+			const fills: FillGroups[] = [];
+			void (async () => {
+				for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill())
+					fills.push(fill);
+			})();
+			const ended = sub.recvGroup();
+			await clock.advance(Duration.millis(3_600_000));
+			expect(await isPending(ended)).toBe(true);
+			expect(askedFor(tb.producer, 1n)).toBe(true);
+			// The upstream answers all but 4, then the rest once the copy's track forgot it.
+			tb.producer.skipGroups(4n, 5n);
+			await clock.advance(Duration.ZERO);
+			expect(await isPending(ended)).toBe(true);
+			await clock.advance(Duration.millis(60_000));
+			tb.producer.skipGroups(1n, 4n);
+			await clock.advance(Duration.ZERO);
+			expect(await isPending(ended)).toBe(true);
+			expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[4n, 5n]]);
+			fills[0].refuseGroups(4n, 5n, new Error("not found"));
+			expect(await ended).toBeUndefined();
+			requests.close();
+		} finally {
+			sub.close();
+			front.consumer.close();
+			for (const inner of inners) inner.consumer.close();
+			a.close();
+			b.close();
+			installed.close();
+		}
+	});
+}
 
 /**
  * A kept-out key the serving route answers with a group stays owed, as on one cursor, and is asked

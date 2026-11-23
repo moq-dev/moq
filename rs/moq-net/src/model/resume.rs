@@ -1300,6 +1300,18 @@ impl Subscriber {
 		self.reader().skipped_in(groups, waiter)
 	}
 
+	/// Ask the serving copy's fills for `unproven`, kept-out keys a containing front's reader
+	/// owes, as that reader asks a plain copy; see [`track::Subscriber::ask_unproven`]. Returns
+	/// what those fills gave up, so a key this front's route cannot fill ends the outer read too.
+	pub(super) fn ask_unproven(&self, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let mut reader = self.reader();
+		let groups = reader.groups;
+		match reader.copies.last_mut().map(|copy| copy.poll_ready(groups, waiter)) {
+			Some(Poll::Ready(Ok(sub))) => sub.ask_unproven(unproven, waiter),
+			_ => RangeSet::new(),
+		}
+	}
+
 	/// Whether this reader accounts for every key of `gaps`, which none of the readers that
 	/// handed out `taken` did, the first of which is its own; see [`Reader::accounts`].
 	pub(super) fn accounts(
@@ -13704,63 +13716,89 @@ mod test {
 	}
 
 	/// A single kept-out key the asked copy's track forgot, which its fill (a one-group FETCH on a
-	/// session) refuses, is given up as on one cursor, so the resumed read ends.
+	/// session) refuses, is given up as on one cursor, so the resumed read ends. An asked copy that
+	/// is another front's logical track asks its own serving copy and passes back what it gave up.
 	#[kio::test]
 	async fn a_forgotten_kept_out_key_a_fill_refused_ends_the_resumed_read() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		write(&a, 0);
-		a.drop_groups(1..5, StreamError::NotFound);
-		write(&a, 5);
-		routes.serve(a.consume());
-		let subscription = Subscription::default().with_ranges([track::Range {
-			start: track::Start::Time(0),
-			end: Some(6),
-		}]);
-		let mut sub = logical
-			.consume()
-			.subscribe(subscription)
-			.now_or_never()
-			.unwrap()
-			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 5]);
-		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
-		let b = track::Producer::new(
-			Arc::new(broadcast::Info {
-				pool: pool.clone(),
-				..Default::default()
-			}),
-			"video",
-			crate::track::Info::timed(),
-		);
-		b.received();
-		let dynamic = b.requests();
-		write(&b, 6);
-		write(&b, 5);
-		routes.serve(b.consume());
-		let mut sub = sub.with_range(5..7);
-		assert_eq!(drain(&mut sub, false), [6]);
-		kio::clock::sleep(HOUR).await;
-		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 to 4 are owed");
-		let Poll::Ready(Ok(overdue)) = dynamic.poll_requested_fill(&fresh()) else {
-			panic!("the overdue keys are asked of the copy's fills");
-		};
-		assert_eq!(overdue.start().group..overdue.end(), 1..5);
-		b.skip_groups(4..5);
-		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 to 3 are owed");
+		for nested in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let mut fronts = Vec::new();
+			let mut serve = |copy: &track::Producer| match nested {
+				false => routes.serve(copy.consume()),
+				true => {
+					let inner_routes = Producer::new();
+					let inner = self::logical(&inner_routes);
+					inner_routes.serve(copy.consume());
+					routes.serve(inner.consume());
+					fronts.push((inner_routes, inner));
+				}
+			};
+			let a = copy();
+			write(&a, 0);
+			a.drop_groups(1..5, StreamError::NotFound);
+			write(&a, 5);
+			serve(&a);
+			let subscription = Subscription::default().with_ranges([track::Range {
+				start: track::Start::Time(0),
+				end: Some(6),
+			}]);
+			let mut sub = logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			assert_eq!(drain(&mut sub, false), [0, 5]);
+			let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
+			let b = track::Producer::new(
+				Arc::new(broadcast::Info {
+					pool: pool.clone(),
+					..Default::default()
+				}),
+				"video",
+				crate::track::Info::timed(),
+			);
+			b.received();
+			let dynamic = b.requests();
+			write(&b, 6);
+			write(&b, 5);
+			serve(&b);
+			let mut sub = sub.with_range(5..7);
+			assert_eq!(drain(&mut sub, false), [6]);
+			kio::clock::sleep(HOUR).await;
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 1 to 4 are owed"
+			);
+			let Poll::Ready(Ok(overdue)) = dynamic.poll_requested_fill(&fresh()) else {
+				panic!("nested={nested}: the overdue keys are asked of the copy's fills");
+			};
+			assert_eq!(overdue.start().group..overdue.end(), 1..5);
+			b.skip_groups(4..5);
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 1 to 3 are owed"
+			);
 
-		pool.step(Duration::from_secs(60));
-		pool.sweep();
-		b.skip_groups(1..4);
-		drop(overdue);
-		assert!(sub.poll_recv_group(&fresh()).is_pending(), "4 was forgotten");
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&fresh()) else {
-			panic!("the forgotten key is asked of the copy's fills");
-		};
-		assert_eq!(fill.start().group..fill.end(), 4..5);
-		fill.reject_groups(4..5, Error::NotFound);
-		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+			pool.step(Duration::from_secs(60));
+			pool.sweep();
+			b.skip_groups(1..4);
+			drop(overdue);
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 4 was forgotten"
+			);
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&fresh()) else {
+				panic!("nested={nested}: the forgotten key is asked of the copy's fills");
+			};
+			assert_eq!(fill.start().group..fill.end(), 4..5);
+			fill.reject_groups(4..5, Error::NotFound);
+			let res = sub
+				.poll_recv_group(&fresh())
+				.map(|res| res.map(|group| group.map(|group| group.start)));
+			assert!(matches!(res, Poll::Ready(Ok(None))), "nested={nested}: {res:?}");
+		}
 	}
 
 	/// A kept-out key the serving route answers with a group stays owed, as on one cursor, and is
