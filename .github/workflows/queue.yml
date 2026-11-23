@@ -68,6 +68,9 @@ jobs:
       # The runner keeps each workspace's target between groups, so Cargo finds
       # most units fresh without asking mbx. A group's mbx misses are then the
       # crates its change dirtied, which no cache holds; 0 hits is normal.
+      # Only a group whose target is gone asks mbx for every unit: mbx evicted
+      # it past target.max_size, or rust-cache cleaned it for a new mbx
+      # version. Its misses include dependencies aged out of the local store.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
 
