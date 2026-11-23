@@ -87,6 +87,17 @@ pub struct Config {
 	#[usage(long = "stats-linger", env = "MOQ_STATS_LINGER", setting = "stats.linger")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub linger: Option<moq_tokio::cli::Duration>,
+
+	/// Also publish each root's own stats inside that root. Defaults to false.
+	///
+	/// A session scoped to a root reads that root's view at `<prefix>/node/<node>`
+	/// under the root, with a grant on the root alone: the traffic on the root's
+	/// paths and the sessions scoped to it or beneath it, and nothing of any other
+	/// root. The relay publishes it at [`moq_stats::root_prefix`] and mounts it there
+	/// read-only, so no session can publish at `<root>/<prefix>` and reading it counts
+	/// as no root's traffic. Requires `enabled`.
+	#[usage(long = "stats-roots", env = "MOQ_STATS_ROOTS", setting = "stats.roots", bool_value)]
+	pub roots: bool,
 }
 
 impl Default for Config {
@@ -98,6 +109,7 @@ impl Default for Config {
 			node: None,
 			depth: 0,
 			linger: None,
+			roots: false,
 		}
 	}
 }
@@ -119,6 +131,7 @@ impl Config {
 	/// which embedders call directly.
 	pub(crate) fn check(&self, cluster: &crate::cluster::Config) -> anyhow::Result<()> {
 		if !self.enabled {
+			anyhow::ensure!(!self.roots, "--stats-roots requires --stats-enabled");
 			return Ok(());
 		}
 		// A malformed node was set, so it gets its own error rather than the missing-flag one.
@@ -138,13 +151,17 @@ impl Config {
 		Ok(())
 	}
 
-	/// The prefix stats publish under, reserved for the relay's own publisher, or
-	/// `None` when publishing is disabled.
-	pub(crate) fn reserved(&self) -> anyhow::Result<Option<Path>> {
+	/// The prefix stats publish under, reserved for the relay's own publisher, and
+	/// whether each root's view is mounted under the root too; `None` when
+	/// publishing is disabled.
+	pub(crate) fn reserved(&self) -> anyhow::Result<Option<crate::cluster::StatsPaths>> {
 		if !self.enabled {
 			return Ok(None);
 		}
-		Ok(Some(Path::new(&self.prefix).context("invalid stats.prefix")?))
+		Ok(Some(crate::cluster::StatsPaths {
+			prefix: Path::new(&self.prefix).context("invalid stats.prefix")?,
+			roots: self.roots,
+		}))
 	}
 
 	/// Build a [`moq_stats::Producer`] and its [`moq_stats::Publisher`] from this
@@ -172,12 +189,14 @@ impl Config {
 			.context("invalid stats.node")?;
 		let depth = self.depth;
 		let linger = self.linger();
-		tracing::info!(%prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
+		let roots = self.roots;
+		tracing::info!(%prefix, ?interval, node = ?node, depth, ?linger, roots, "stats publishing enabled");
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_node(node)
-			.with_depth(depth);
+			.with_depth(depth)
+			.with_roots(roots);
 		if let Some(interval) = interval {
 			config = config.with_interval(interval);
 		}

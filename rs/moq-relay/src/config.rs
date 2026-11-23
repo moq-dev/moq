@@ -1017,6 +1017,8 @@ max_streams = 64
 			resolve(cluster);
 		}
 		resolve("[stats]\nenabled = true\n");
+		refuse("[stats]\nroots = true\n", "--stats-roots requires --stats-enabled");
+		resolve("[stats]\nenabled = true\nroots = true\n");
 
 		// A setting only a dialed peer or API reads is refused with none to read it.
 		refuse(

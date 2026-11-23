@@ -847,7 +847,8 @@ type Wire = {
 	starts: FillStarts;
 	// The first group its live feed serves (see `hooks.startTrack`), unset until its START
 	// resolves it, null for a resolved-empty range, and the floor its SUBSCRIBE requested.
-	served?: { start?: bigint | null; requested?: bigint };
+	// `resolved` when the publisher placed the start itself, whatever the wire.
+	served?: { start?: bigint | null; requested?: bigint; resolved?: boolean };
 };
 
 // Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
@@ -1614,9 +1615,8 @@ export class Producer {
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
 			joins: producer.#joinAnswers,
-			// Once the end is declared, nothing more is answered: a join places as the groups held
-			// measure it, as its upstream's would, holding the same final groups. Mirrors the Rust
-			// `TrackState::joins_answered`.
+			// Once the end is declared, nothing more is answered: a join with no answer naming a group
+			// places as the groups held measure it. Mirrors the Rust `TrackState::joins_answered`.
 			answersJoins:
 				producer.#answersJoins &&
 				producer.#state.end.peek() === undefined &&
@@ -2912,7 +2912,7 @@ export class Producer {
 		const ranges = this.#requested.peek()?.ranges;
 		const served = wire.served;
 		const resolved =
-			wire.starts.resolvesStart === true &&
+			(wire.starts.resolvesStart === true || served?.resolved === true) &&
 			typeof served?.start === "bigint" &&
 			served.requested === (ranges && wireSpan(ranges).start);
 		if (resolved) return undefined;
@@ -3885,6 +3885,12 @@ export class Subscriber {
 		// reader's: the live edge is the upstream's, which no group held here measures. Mirrors the
 		// Rust `Holdings::answers_joins for TrackState`.
 		const answers = anchors.answersJoins;
+		// The upstream's answer to a live join, recorded after the reader's range was added, under a
+		// budget at least as wide as the reader's. Mirrors the Rust `TrackState::join_answer`.
+		const joinAnswer = (min: Duration, end: bigint | undefined, budget: number, since: number) => {
+			const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
+			return answer && answer.tick > since && budget <= answer.budget ? answer : undefined;
+		};
 		// The times from `from` on that the drops from there leave open.
 		const uncovered = (from: bigint): Run | undefined => {
 			const start = drops.coveredFrom(from);
@@ -3951,11 +3957,12 @@ export class Subscriber {
 						wire && !anchors.atKeys,
 						anchors.ended,
 					);
-				const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
-				if (answer === undefined || answer.tick <= since || budget > answer.budget) return undefined;
+				const answer = joinAnswer(min, end, budget, since);
+				if (answer === undefined) return undefined;
 				return answer.start === undefined ? "empty" : { group: answer.start };
 			},
 			answersJoins: () => answers,
+			answeredJoin: joinAnswer,
 			// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 			// evicted a group inside it.
 			neverProduced: (start, end) => {
@@ -3981,7 +3988,7 @@ export class Subscriber {
 	// ranges start, but not where each join does) places it only where the groups it holds prove, and
 	// waits otherwise. A copy whose wire keys groups otherwise starts at a group held, by when each
 	// one's first frame presented, as its publisher resolved the join already. A lite-07 copy places
-	// none itself (see {@link Holdings.answersJoins}). A `wire` copy whose declared end settled
+	// none itself until its end is declared (see {@link Holdings.answersJoins}). A `wire` copy whose declared end settled
 	// (`ended`) gets no more groups to prove it by, so it leaves an unproven join to a time start,
 	// which asks its upstream.
 	// Mirrors the Rust `TrackState::join`.
@@ -4790,6 +4797,7 @@ export class Subscriber {
 			};
 		};
 		hooks.mayLand = (subscriber, land) => {
+			if (subscriber.#resume) return subscriber.#resume.mayLand(land);
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && mayLand(producer, land);
 		};

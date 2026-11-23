@@ -8,13 +8,6 @@ use crate::Error;
 /// The audioObjectType of AAC-LC (ISO 14496-3 Table 1.17), the one profile we decode.
 const PROFILE_LC: u8 = 2;
 
-/// The audioObjectTypes that mean HE-AAC: SBR alone, and SBR plus parametric stereo.
-const OBJECT_TYPE_SBR: u8 = 5;
-const OBJECT_TYPE_PS: u8 = 29;
-
-/// The 11-bit pattern introducing an AudioSpecificConfig extension (ISO 14496-3).
-const SYNC_EXTENSION: u32 = 0x2B7;
-
 /// The widest sample rate an AudioSpecificConfig can name: the escape from the
 /// frequency table is a 24-bit field.
 const MAX_SAMPLE_RATE: u32 = 0xFF_FFFF;
@@ -86,91 +79,14 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 
 	let parsed = moq_mux::codec::aac::Config::parse(&mut description.as_ref())
 		.map_err(|err| Error::Unsupported(format!("invalid AAC description: {err}")))?;
+	// HE-AAC has two spellings: one leads with SBR or PS, and the backward-compatible one
+	// leads with LC and hides SBR in a sync extension after the core. The parse reports both
+	// as profile 5 or 29, so `validate` refuses either. Symphonia reads that extension only
+	// when the leading object type is already SBR or PS, so a stream accepted here would be
+	// quietly half-decoded.
 	validate(&parsed)?;
 
-	// HE-AAC has two spellings. `validate` catches the one that leads with SBR or
-	// PS; this catches the backward-compatible one, which leads with LC so that an
-	// LC-only decoder can play the core and hides the SBR in a sync extension
-	// after it. Symphonia reads that extension only when the leading object type
-	// is already SBR or PS, so without this the same stream would be rejected or
-	// quietly half-decoded depending on how its encoder chose to signal it.
-	if declares_sbr(&description) {
-		return Err(Error::Unsupported(
-			"only AAC-LC is supported (the config declares SBR after the core)".into(),
-		));
-	}
-
 	Ok(description)
-}
-
-/// Whether an AudioSpecificConfig carries a sync extension declaring SBR or PS.
-///
-/// Anything it can't walk reads as no: the config is then whatever the leading
-/// object type said it was, which is what the rest of this module already acts on.
-fn declares_sbr(description: &[u8]) -> bool {
-	fn scan(bits: &mut Bits) -> Option<bool> {
-		// Only an LC-leading config gets this far, the others being rejected above.
-		if object_type(bits)? != PROFILE_LC {
-			return Some(false);
-		}
-
-		if bits.read(4)? == 15 {
-			// samplingFrequencyIndex 15 escapes to an explicit rate.
-			bits.read(24)?;
-		}
-
-		// channelConfiguration 0 means a program config element follows, whose
-		// length this doesn't walk. Symphonia rejects that config anyway.
-		if bits.read(4)? == 0 {
-			return Some(false);
-		}
-
-		// GASpecificConfig, in the shape AAC-LC gives it: frameLengthFlag, then a
-		// core coder delay only when one is declared, then an extension flag that
-		// carries a single further bit for this object type.
-		bits.read(1)?;
-		if bits.read(1)? == 1 {
-			bits.read(14)?;
-		}
-		if bits.read(1)? == 1 {
-			bits.read(1)?;
-		}
-
-		// The sync extension itself. Padding can't be mistaken for it: the pattern
-		// has to match, name SBR or PS, and then set the flag.
-		if bits.read(11)? != SYNC_EXTENSION {
-			return Some(false);
-		}
-		if !matches!(object_type(bits)?, OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
-			return Some(false);
-		}
-
-		Some(bits.read(1)? == 1)
-	}
-
-	scan(&mut Bits::endian(description, bitstream_io::BigEndian)).unwrap_or(false)
-}
-
-/// An audioObjectType, which escapes to a second field once it runs out of room.
-fn object_type(bits: &mut Bits) -> Option<u8> {
-	match bits.read(5)? {
-		31 => Some(32 + bits.read(6)? as u8),
-		value => Some(value as u8),
-	}
-}
-
-/// A big-endian bit cursor, which is how an AudioSpecificConfig is packed.
-type Bits<'a> = bitstream_io::BitReader<&'a [u8], bitstream_io::BigEndian>;
-
-/// Reads the next `count` bits, or `None` when the config is shorter than that.
-trait ReadBits {
-	fn read(&mut self, count: u32) -> Option<u32>;
-}
-
-impl ReadBits for Bits<'_> {
-	fn read(&mut self, count: u32) -> Option<u32> {
-		bitstream_io::BitRead::read_var(self, count).ok()
-	}
 }
 
 #[cfg(test)]
@@ -202,7 +118,7 @@ mod tests {
 	#[test]
 	fn rejects_he_aac() {
 		// HE-AAC (5), 44100 Hz, stereo: the form that says so up front. The
-		// backward-compatible spelling is caught by `declares_sbr` instead.
+		// backward-compatible spelling parses as profile 5 too.
 		let err = description(&catalog(5, 44_100, 2), 5).unwrap_err();
 		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("mp4a.40.5")));
 	}
@@ -245,7 +161,18 @@ mod tests {
 		config.description = Some(bytes::Bytes::from_static(&[0x12, 0x10, 0x56, 0xE5, 0x98]));
 
 		let err = description(&config, 2).unwrap_err();
-		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("SBR")));
+		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("mp4a.40.5")));
+	}
+
+	#[test]
+	fn rejects_sbr_followed_by_an_unknown_field() {
+		// The backward-compatible SBR signaling, then padding where a PS sync extension could
+		// follow: the SBR still counts.
+		let mut config = catalog(2, 44_100, 2);
+		config.description = Some(bytes::Bytes::from_static(&[0x12, 0x10, 0x56, 0xE5, 0x98, 0x00, 0x00]));
+
+		let err = description(&config, 2).unwrap_err();
+		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("mp4a.40.5")));
 	}
 
 	#[test]

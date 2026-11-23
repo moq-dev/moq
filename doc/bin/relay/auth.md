@@ -468,8 +468,9 @@ is refused too, because neither can safely win, so a peer presents
 
 Nothing is re-checked or closed by default: a session lives until its token's
 `exp` or its certificate's notAfter. `--expires D` bounds a grant with no bound
-of its own. `--revalidate D` has the relay re-check each grant on that cadence,
-and needs `--expires` so an outage still has a bound. Without `--revalidate`,
+of its own. `--revalidate D` has the relay re-check each grant on that cadence
+(at least `1s`, the finest the grant's whole seconds write), and needs
+`--expires` so an outage still has a bound. Without `--revalidate`,
 rotating or deleting a key does not close live sessions.
 
 `--limit-token N` and `--limit-remote N` cap live sessions per token and per

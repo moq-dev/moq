@@ -65,6 +65,11 @@ if [[ -n "$archive" ]]; then
     fi
 else
     prefix="$PWD/$build/prefix"
+    # Cargo under `mbx exec` compiles Rust uncached, so build moq-ffi's shared default
+    # (.cargo/config.toml) first, where mbx caches it, and CMake's cargo finds it fresh.
+    if [[ -z "$ffi_dir" && "${cmake_command[0]}" == mbx ]]; then
+        (cd .. && cargo build-ffi)
+    fi
     "${cmake_command[@]}" -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR="$libdir" -DMOQ_FFI_DIR="$ffi_dir"
     "${cmake_command[@]}" --build "$build/package" --config Release
     rm -rf "$prefix"

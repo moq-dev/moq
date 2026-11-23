@@ -42,7 +42,3 @@ a time start ([moq-dev/moq#9307](https://github.com/moq-dev/moq/pull/9307)),
 should not narrow what the next copy is asked for. Decide per case whether
 the code or the oracle (`Reader::place`) is wrong. Add each case to both
 models' `regressions` once it passes.
-
-## Related
-
-- [Route close](/quest/m0/nightly/resume-model-route-close.md) - the sweep's other open Rust failures
