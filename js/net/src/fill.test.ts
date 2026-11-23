@@ -1920,6 +1920,70 @@ test("fill: a looked-up group is read while its writer paces on readers", async 
 	broadcast.close();
 });
 
+// A looked-up group aborting before it reaches the time proves nothing of where it ends, so the read
+// fails rather than start at it. Mirrors the Rust
+// `a_looked_up_group_aborting_before_the_time_fails_the_read`.
+test("fill: a looked-up group aborting before the time fails the read", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const requests = track.requests();
+	let answered: ReturnType<typeof track.createGroup> | undefined;
+	void (async () => {
+		const fill = await requests.requestedFill();
+		if (!fill) return;
+		answered = defined(fill.accept(1000n));
+		fill.close();
+	})();
+	for (const start of [0, 3000]) {
+		const held = track.createGroup(BigInt(start));
+		held.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(start) });
+		held.finishAt(BigInt(start + 400));
+	}
+	const reader = track.subscribe(fromTime(1700n));
+	const next = reader.ordered().nextGroup();
+	while (answered === undefined) await yieldNow();
+	answered.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1000) });
+	const abort = new StreamError(StreamCode.Cancel, { message: "upstream gone" });
+	answered.abort(abort);
+	await expect(next).rejects.toBe(abort);
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A subscriber closing mid-lookup lets its probe go, so the looked-up group is no longer wanted.
+test("fill: a subscriber closing mid-lookup stops wanting the looked-up group", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const requests = track.requests();
+	let answered: ReturnType<typeof track.createGroup> | undefined;
+	void (async () => {
+		const fill = await requests.requestedFill();
+		if (!fill) return;
+		answered = defined(fill.accept(1000n));
+		fill.close();
+	})();
+	for (const start of [0, 3000]) {
+		const held = track.createGroup(BigInt(start));
+		held.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(start) });
+		held.finishAt(BigInt(start + 400));
+	}
+	const reader = track.subscribe(fromTime(1700n));
+	const next = reader.ordered().nextGroup();
+	while (answered === undefined) await yieldNow();
+	const group = answered;
+	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1000) });
+	for (let i = 0; i < 20 && !group.demand().wanted.peek(); i++) await yieldNow();
+	expect(group.demand().wanted.peek()).toBe(true);
+	reader.close();
+	await next.catch(() => undefined);
+	for (let i = 0; i < 20 && group.demand().wanted.peek(); i++) await yieldNow();
+	expect(group.demand().wanted.peek()).toBe(false);
+	group.finishAt(1400n);
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a time start dropped after its floor's group is evicted starts at that group", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

@@ -9204,11 +9204,12 @@ impl Probe {
 		Self { key, handle, reader }
 	}
 
-	/// Ready with where a range from `time` starts once the group places it, or aborts.
-	fn poll(&mut self, waiter: &kio::Waiter, time: u64) -> Poll<u64> {
+	/// Ready with where a range from `time` starts once the group places it, or with the abort
+	/// that left where it ends unknown.
+	fn poll(&mut self, waiter: &kio::Waiter, time: u64) -> Poll<Result<u64>> {
 		while let Poll::Ready(Ok(Some(_))) = self.reader.poll_next_frame(waiter) {}
-		ready!(self.handle.poll_past(waiter, time));
-		Poll::Ready(reached(self.key, time, self.handle.end()))
+		ready!(self.handle.poll_past(waiter, time))?;
+		Poll::Ready(Ok(reached(self.key, time, self.handle.end())))
 	}
 }
 
@@ -10469,9 +10470,9 @@ impl Cursor {
 			}
 			let time = lookup.time;
 			let found = match &mut lookup.stage {
-				Look::Done | Look::Asked { join: None, .. } => Found::Unanswered,
+				Look::Done | Look::Asked { join: None, .. } => Ok(Found::Unanswered),
 				Look::Placing(probe) => match probe.poll(waiter, time) {
-					Poll::Ready(start) => Found::Group(start),
+					Poll::Ready(start) => start.map(Found::Group),
 					Poll::Pending => continue,
 				},
 				Look::Asked {
@@ -10506,27 +10507,32 @@ impl Cursor {
 							let polled = probe.poll(waiter, time);
 							lookup.stage = Look::Placing(probe);
 							match polled {
-								Poll::Ready(start) => Found::Group(start),
+								Poll::Ready(start) => start.map(Found::Group),
 								Poll::Pending => continue,
 							}
 						}
-						(None, fill::TimeStart::Group(group)) => Found::Group(group),
+						(None, fill::TimeStart::Group(group)) => Ok(Found::Group(group)),
 						// No group from the floor and none held below it: from 0, before every
 						// group; otherwise the group the floor was past is gone, so look again
 						// from lower down rather than guess where it ended.
-						(None, fill::TimeStart::Dropped) if lookup.floor == 0 => Found::Dropped { floor: 0 },
-						(None, fill::TimeStart::Dropped | fill::TimeStart::Unanswered) => Found::Unanswered,
-						// Where the time falls is unknown, so the reads fail rather than guess from
-						// the cache. The ranges resolve afresh once they change, asking again.
-						(None, fill::TimeStart::Refused(err)) => {
-							(self.filter.refused, self.filter.stale) = (Some(err), true);
-							*moved = true;
-							return false;
-						}
+						(None, fill::TimeStart::Dropped) if lookup.floor == 0 => Ok(Found::Dropped { floor: 0 }),
+						(None, fill::TimeStart::Dropped | fill::TimeStart::Unanswered) => Ok(Found::Unanswered),
+						(None, fill::TimeStart::Refused(err)) => Err(err),
 					}
 				}
 			};
 			lookup.stage = Look::Done;
+			// Refused, or the group placing it aborted first: where the time falls is unknown, so
+			// the reads fail rather than guess from the cache. The ranges resolve afresh once they
+			// change, asking again.
+			let found = match found {
+				Ok(found) => found,
+				Err(err) => {
+					(self.filter.refused, self.filter.stale) = (Some(err), true);
+					*moved = true;
+					return false;
+				}
+			};
 			let state = self.state.read();
 			*moved |= self.filter.window.found(lookup.time, found, &*state);
 			again |= self.filter.window.lookups().any(|(time, _)| time == lookup.time);
@@ -28835,6 +28841,43 @@ mod test {
 				"cached: {cached}, evicted: {evicted}"
 			);
 		}
+	}
+
+	/// A looked-up group aborting before it reaches the time proves nothing of where it ends, so
+	/// the read fails rather than start at it: a refill may yet show it ended before the time.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_looked_up_group_aborting_before_the_time_fails_the_read() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		for (start, end) in [(0, 400), (1000, 1400), (3000, 3400)] {
+			let mut group = producer.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(start).unwrap(), &b"x"[..])
+				.unwrap();
+			drop(group.finish_at(end).unwrap());
+		}
+		evict(&producer, 1000);
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
+			start: crate::track::Start::Time(1700),
+			end: None,
+		}]));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		let mut group = start.accept(1000, None).unwrap().expect("a fresh group");
+		group
+			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"x"[..])
+			.unwrap();
+		drop(start);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "waits for its End");
+		group.abort(Error::Timeout).unwrap();
+		assert!(
+			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Err(Error::Timeout))),
+			"not group 1000, which may end before the time"
+		);
 	}
 
 	/// A looked-up group still open is read once it holds a frame past the time, which puts its

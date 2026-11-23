@@ -1038,11 +1038,12 @@ interface Probe {
 	reader: GroupConsumer;
 }
 
-// Where a range from `time` starts once the probed group places it, or aborts; undefined until then.
-function probed(probe: Probe, time: bigint): bigint | undefined {
+// Where a range from `time` starts once the probed group places it, or the abort that left where it
+// ends unknown; undefined until then. Mirrors the Rust `Probe::poll`.
+function probed(probe: Probe, time: bigint): bigint | Error | undefined {
 	while (probe.reader.tryReadFrame() !== undefined) {}
 	const from = hooks.groupUnplacedFrom(probe.group);
-	if (from !== undefined && time >= from && probe.group.closed.peek() === undefined) return undefined;
+	if (from !== undefined && time >= from) return probe.group.closed.peek() ?? undefined;
 	return reached(probe.key, time, hooks.groupWholeEnd(probe.group));
 }
 
@@ -4161,7 +4162,7 @@ export class Subscriber {
 	// once, and take in the answers. A refused one fails the reads until the ranges change. Returns
 	// whether the groups in range moved. Mirrors the Rust `Cursor::look_up`.
 	#lookUp(): boolean {
-		if (this.#refusal) return false;
+		if (this.#refusal || this.#left) return false;
 		let moved = false;
 		// An answer the window takes in may look its time up again from lower down.
 		for (let again = true; again; ) {
@@ -4194,11 +4195,11 @@ export class Subscriber {
 		let again = false;
 		for (const lookup of [...this.#lookups]) {
 			const { time, stage } = lookup;
-			let found: Found;
+			let found: Found = { kind: "unanswered" };
+			let start: bigint | Error | undefined;
 			if (stage.kind === "placing") {
-				const start = probed(stage.probe, time);
+				start = probed(stage.probe, time);
 				if (start === undefined) continue;
-				found = { kind: "group", group: start };
 			} else {
 				const answer = stage.lookup?.answer();
 				if (answer === undefined && stage.lookup && !stage.lookup.done()) continue;
@@ -4215,23 +4216,24 @@ export class Subscriber {
 				if (placing) {
 					const probe = { ...placing, reader: placing.group.consume() };
 					lookup.stage = { kind: "placing", probe };
-					const start = probed(probe, time);
+					start = probed(probe, time);
 					if (start === undefined) continue;
-					found = { kind: "group", group: start };
-				} else if (answer?.kind === "refused") {
-					// Where the time falls is unknown, so the reads fail rather than guess from the cache.
-					// The ranges resolve afresh once they change, asking again.
-					this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
-					this.#refusal = answer.error;
-					return { moved: true, again: false };
-				} else if (answer?.kind === "group") found = { kind: "group", group: answer.group };
+				} else if (answer?.kind === "refused") start = answer.error;
+				else if (answer?.kind === "group") start = answer.group;
 				// No group from the floor and none held below it: from 0, before every group; otherwise
 				// the group the floor was past is gone, so look again from lower down rather than guess.
 				else if (answer?.kind === "dropped" && lookup.floor === 0n) found = { kind: "dropped", floor: 0n };
-				else found = { kind: "unanswered" };
 			}
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			leaveLook(lookup.stage);
+			// Refused, or the group placing it aborted first: where the time falls is unknown, so the
+			// reads fail rather than guess from the cache. The ranges resolve afresh once they change,
+			// asking again.
+			if (start instanceof Error) {
+				this.#refusal = start;
+				return { moved: true, again: false };
+			}
+			if (start !== undefined) found = { kind: "group", group: start };
 			if (this.#window.found(time, found, this.#holdings())) moved = true;
 			if (this.#window.lookups().some((want) => want.time === time)) again = true;
 		}
@@ -5247,6 +5249,9 @@ export class Subscriber {
 		if (this.#items?.held) hooks.releaseGroupReader(this.#items.held, abort);
 		if (this.#items) this.#items.held = undefined;
 		this.#state.timeline.length = 0;
+		// A lookup still out holds a fill, or a probe whose reader keeps its group wanted.
+		for (const { stage } of this.#lookups) leaveLook(stage);
+		this.#lookups = [];
 		this.#wall.timer?.abort();
 		this.#wall.timer = undefined;
 		// A deadline kept in #arrivals may still arm a wakeup.

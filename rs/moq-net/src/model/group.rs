@@ -3406,16 +3406,21 @@ impl Handle {
 		settle(self.state.poll_ref(waiter, |state| state.poll_outcome()))
 	}
 
-	/// Poll until the group places `time` (see [`Self::unplaced_from`]) or aborts: a frame past the
-	/// time puts its End past the time too, so it contains the time whatever it ends at.
-	pub(crate) fn poll_past(&self, waiter: &kio::Waiter, time: u64) -> Poll<()> {
-		(self.state.poll_ref(waiter, |state| {
-			match state.places(time) || state.poll_outcome().is_ready() {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		}))
-		.map(|_| ())
+	/// Poll until the group places `time` (see [`Self::unplaced_from`]): a frame past the time
+	/// puts its End past the time too, so it contains the time whatever it ends at. Fails with
+	/// the abort when the group aborts first, which proves nothing of where it ends.
+	pub(crate) fn poll_past(&self, waiter: &kio::Waiter, time: u64) -> Poll<Result<()>> {
+		let placed = |state: &GroupState| match state.places(time) {
+			true => Poll::Ready(Ok(())),
+			false => state.poll_outcome(),
+		};
+		Poll::Ready(match ready!(self.state.poll_ref(waiter, |state| placed(state))) {
+			Ok(outcome) => outcome,
+			Err(closed) => match placed(&closed) {
+				Poll::Ready(outcome) => outcome,
+				Poll::Pending => Err(Error::Dropped),
+			},
+		})
 	}
 
 	/// The first time the group can't place now, `None` once it finished: it places a time
