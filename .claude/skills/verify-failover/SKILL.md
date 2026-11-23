@@ -36,13 +36,13 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `46059266ec9e149c37147577bc40ca3a7cea556a`, plus the splice-stall fix, which holds a track while a dead relay's route still shows, since a session closes its sources before it fails their copies (`Shows`, `Withdraw`), [moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276), which splits a switch at one boundary (`Boundary`, `CapAt`), and [moq-dev/moq#9402](https://github.com/moq-dev/moq/pull/9402), which stops the boundary group on a replaced copy where the new one resumes it (`StopAt`). Run `git log 46059266ec.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs rs/moq-net/src/lite/subscriber.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `46059266ec9e149c37147577bc40ca3a7cea556a`, plus the splice-stall fix, which holds a track while a dead relay's route still shows, since a session closes its sources before it fails their copies (`Shows`, `Withdraw`), [moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276), which splits a switch at one boundary (`Boundary`, `CapAt`), so a reader may join a copy asked from a later group and waits for the rest to be asked and to land, a fetch landing after the end too (`Askable`, `MayLand`), and [moq-dev/moq#9402](https://github.com/moq-dev/moq/pull/9402), which stops the boundary group on a replaced copy where the new one resumes it (`StopAt`). Run `git log 46059266ec.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs rs/moq-net/src/lite/subscriber.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/model/resume.rs` `Reader::sync`, `boundary`, `Copy::cap`, `backfill_gaps`, `Producer::subscription`; `rs/moq-net/src/model/track/demand.rs` the folded `cap` | `Boundary`, `CapAt`, `StopAt`, `Stopped`, `Unstopped`, `ResumeAsk`, `Demand`, `Switch`, `Subscribe`, `Frame` |
 | `rs/moq-net/src/model/resume.rs` `Reader::resume_at`, `held_at`, `Resumed`; `rs/moq-net/src/model/track.rs` `Consumer::lend_head`, the loan taken in `create_group_at` | `Resume`, `Lend`, `HandOut` |
-| `rs/moq-net/src/model/resume.rs` `Reader::take`, `poll_end` | `HandOut`, `Drained`, `EndOk` |
+| `rs/moq-net/src/model/resume.rs` `Reader::take`, `poll_end`; `rs/moq-net/src/model/track.rs` a recovery outliving the track's finish | `HandOut`, `Drained`, `Askable`, `MayLand`, `EndOk` |
 | `rs/moq-net/src/model/resume.rs` `Reader::let_go`, `Copy::retains`, `Producer::park` | `LetGo`, `Park` |
 | `rs/moq-net/src/model/resume.rs` `Recover::wants`, `poll`, `held`, `poll_serving` | `Recover`, `Holders`, `Exhausted`, `Abort` |
 | `rs/moq-net/src/model/resume.rs` `Recover::poll_fetch`, `Fetching`; `rs/moq-net/src/model/track.rs` `fetch_group` | `Ask` |
