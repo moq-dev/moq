@@ -96,6 +96,27 @@ function copy(source: BroadcastProducer) {
 	};
 }
 
+/**
+ * {@link copy} on a track timed in milliseconds, each group stamped a second per key, so a live
+ * join's max judges it by presentation time, as the Rust tests' timed copies do.
+ */
+function timedCopy(source: BroadcastProducer) {
+	const producer = defined(source.createTrack("seq", { ...INFO, timescale: Timescale.MILLI }));
+	return {
+		producer,
+		write(key: bigint, frames = 1, close = true) {
+			const group = producer.createGroup(key);
+			for (let frame = 0; frame < frames; frame++)
+				group.writeFrame({
+					payload: enc.encode(`${key}.${frame}`),
+					timestamp: Timestamp.fromMillis(Number(key) * 1000),
+				});
+			if (close) group.finish();
+			return group;
+		},
+	};
+}
+
 /** Expect `read` to fail as past its budget, not with some other stream error. */
 async function expectOld(read: Promise<unknown>) {
 	const err = await read.then(
@@ -1880,8 +1901,8 @@ for (const [name, end, held, newer, expires] of [
 ] as const) {
 	test(`a recovered group expires only within the reader's window (${name})`, async () => {
 		const { a, b, swap, active, close } = await setup();
-		const ta = copy(a);
-		const tb = copy(b);
+		const ta = timedCopy(a);
+		const tb = timedCopy(b);
 		// A live join from the first group, whose groups go stale past its max.
 		const sub = active
 			.track("seq")
@@ -1921,8 +1942,8 @@ for (const [name, end, held, newer, expires] of [
 ] as const) {
 	test(`a pending recovery expires within the reader's window (${name})`, async () => {
 		const { a, b, swap, active, close } = await setup();
-		const ta = copy(a);
-		const tb = copy(b);
+		const ta = timedCopy(a);
+		const tb = timedCopy(b);
 		// A live join from the first group, whose groups go stale past its max.
 		const sub = active
 			.track("seq")
