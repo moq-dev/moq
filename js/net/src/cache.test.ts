@@ -186,16 +186,18 @@ test("a forgotten run is asked only by a reader that never judged it", async () 
 		producer.createGroup(2n).finish();
 		expect((await reader.recvGroup())?.start).toBe(0n);
 		expect((await reader.recvGroup())?.start).toBe(2n);
+		// Waiting for more, the reader judges what it misses: the drop settles it.
+		const next = reader.recvGroup();
 		expect(await asked()).toEqual([]);
 
 		await clock.advance(40_000);
 		pool.sweep();
 		expect(dropsHeld(producer)).toEqual([]);
-		const next = reader.recvGroup();
 		expect(await asked()).toEqual([]);
 
-		// With group 0, which expired too.
+		// With group 0, which expired too, once it waits past the group still cached.
 		const later = patient();
+		expect((await later.recvGroup())?.start).toBe(2n);
 		const first = later.recvGroup();
 		expect(await asked()).toEqual([[0n, 2n]]);
 
