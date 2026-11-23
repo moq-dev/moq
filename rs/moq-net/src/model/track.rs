@@ -1271,14 +1271,10 @@ impl Holdings for TrackState {
 		let wire = self.anchors == Anchors::Wire;
 		let Some(scale) = info.timescale else {
 			let aged = self.walked(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
-			// Once every group below the declared end arrived or was given up, no answer comes,
-			// and one past every group starts as a time start from 0 does, as on a timed track.
-			let past_final =
-				min >= subscription::PAST_EVERY_GROUP && (self.outcome.is_final() || self.is_settled());
 			return match aged {
 				Some((&key, _)) => Join::Group(key),
 				// This copy's arrivals don't reach back that far, but its upstream's may.
-				None if wire && !past_final => Join::Unknown,
+				None if wire => Join::Unknown,
 				// It reaches back past every arrival, so it starts where a time start from 0
 				// does, taking a lower group that arrives late as the oldest group would.
 				None => Join::Time(0),
