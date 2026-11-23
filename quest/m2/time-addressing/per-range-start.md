@@ -50,7 +50,3 @@ start beyond the cursor's floor. The change touches how drops wait for the
 first START, so rerun `/verify-subscribe` (`SubscribeAccounting.tla`) and
 extend the model if a range's start moves an invariant. Remove the
 per-range-copy special case once every track answers per range.
-
-## Related
-
-- [Time anchors by group spans](/quest/m2/time-addressing/span-time-anchors.md) - how a time start resolves to a group, which each range's placement uses
