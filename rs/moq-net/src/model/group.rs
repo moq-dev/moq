@@ -4694,7 +4694,8 @@ impl Consumer {
 	}
 
 	/// Wait for the flight this reader is boarding, if any, and move onto it. Fails with
-	/// [`Error::Evicted`] when nothing serves the frame: the shed read stands.
+	/// [`Error::Evicted`] when nothing serves the frame, so the shed read stands, or
+	/// [`Error::Old`] when its handler judged the group stale.
 	fn poll_boarding(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		let Some(ride) = self.ride_mut() else {
 			return Poll::Ready(Ok(()));
@@ -4705,9 +4706,12 @@ impl Consumer {
 		let Some(boarding) = &mut ride.boarding else {
 			return Poll::Ready(Ok(()));
 		};
-		let Ok(copy) = ready!(boarding.poll(waiter)) else {
-			self.set_ride(None);
-			return Poll::Ready(Err(Error::Evicted));
+		let copy = match ready!(boarding.poll(waiter)) {
+			Ok(copy) => copy,
+			Err(err) => {
+				self.set_ride(None);
+				return Poll::Ready(Err(track::flight_failed(err)));
+			}
 		};
 		let start = usize::try_from(boarding.frame()).unwrap_or(usize::MAX);
 		let start = start.min(self.cursor.index);

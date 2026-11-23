@@ -20,7 +20,7 @@
 //! reader may still want is a hole: see [`Misses::judge`].
 
 use std::{
-	collections::{BTreeMap, BTreeSet},
+	collections::{BTreeMap, BTreeSet, VecDeque},
 	ops::{self, RangeInclusive},
 	sync::{Arc, Mutex, PoisonError},
 	task::{Poll, Wake, Waker},
@@ -634,7 +634,7 @@ impl Misses {
 							}
 						}
 						for run in evicted.gaps(&groups) {
-							self.settle(&state, run, given_up);
+							retry.extend(self.settle(&state, run, given_up));
 						}
 						for (&key, slot) in state.lookup.range(groups) {
 							if slot.serves_end() {
@@ -658,8 +658,13 @@ impl Misses {
 							self.give_up_skipped(hole, given_up);
 						}
 					}
-					// A drop the track recorded is named by the drop cursor already.
-					Err(_) => self.settle(&state, groups, given_up),
+					// A drop the track recorded is named by the drop cursor already. The source
+					// answered, so a group lost to the cache since is its verdict too.
+					Err(_) => {
+						for run in self.settle(&state, groups, given_up).iter() {
+							self.give_up(run.clone(), given_up);
+						}
+					}
 				}
 			}
 			drop(state);
@@ -1074,8 +1079,13 @@ impl Misses {
 			}
 			for hole in holes(state, run.clone()) {
 				for hole in self.unclaimed(state, hole, drift) {
-					let (unfed, awaited) = state.unfed(hole, now);
-					for run in unfed.iter() {
+					let Unfed { never, lost, awaited } = state.unfed(hole, now);
+					// Delivered since a fill refused it, so the refusal is no verdict on the feed.
+					for run in lost.iter() {
+						self.refused.remove(run.clone());
+						asks.insert(run.clone());
+					}
+					for run in never.iter() {
 						asks.insert(run.clone());
 						// Refused already: given up now the feed gave up too, not asked again.
 						for refused in self.refused.overlapping(run).cloned().collect::<Vec<_>>() {
@@ -1378,7 +1388,11 @@ impl Misses {
 			self.wanted.insert(run.clone());
 			for groups in unfillable {
 				self.wanted.remove(groups.clone());
-				self.settle(&state.read(), groups, given_up);
+				// No fill can bring back a group lost to the cache either.
+				let lost = self.settle(&state.read(), groups, given_up);
+				for run in lost.iter() {
+					self.give_up(run.clone(), given_up);
+				}
 			}
 			self.hold(joins);
 		}
@@ -1417,15 +1431,24 @@ impl Misses {
 
 	/// Take in a fill's refusal of `groups`: final where the feed gave up on them too,
 	/// otherwise held until it does, since the live feed may still deliver them.
-	fn settle(&mut self, state: &TrackState, groups: ops::Range<u64>, given_up: &mut GivenUp) {
+	/// Returns what the feed delivered and the pool evicted before this reader took it, for
+	/// the caller to ask again.
+	#[must_use = "a group lost to the cache is asked again"]
+	fn settle(&mut self, state: &TrackState, groups: ops::Range<u64>, given_up: &mut GivenUp) -> RangeSet<u64> {
 		let now = state.cache.pool().now_wall();
+		let mut lost = RangeSet::new();
 		// What arrived meanwhile is the feed's to serve.
 		for hole in holes(state, groups) {
 			let mut left = RangeSet::new();
 			left.insert(hole.clone());
-			for run in state.unfed(hole, now).0.iter() {
+			let unfed = state.unfed(hole, now);
+			for run in unfed.never.iter() {
 				left.remove(run.clone());
 				self.give_up(run.clone(), given_up);
+			}
+			for run in unfed.lost.iter() {
+				left.remove(run.clone());
+				lost.insert(run.clone());
 			}
 			for run in left.iter() {
 				self.refused.insert(run.clone());
@@ -1433,6 +1456,7 @@ impl Misses {
 					.insert(run.clone(), state.arrivals.folds_at(run.start, state.miss_grace()));
 			}
 		}
+		lost
 	}
 
 	pub(super) fn give_up(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
@@ -1604,60 +1628,130 @@ impl TrackState {
 	}
 
 	/// Split `hole`, which the cache holds nothing for, into what the live feed will never
-	/// deliver and the gaps it still waits for, with when each stops being waited for.
+	/// deliver, what it delivered and the pool evicted since, and the gaps it still waits
+	/// for, with when each stops being waited for.
 	///
-	/// Never: accounted for by its arrivals (evicted, or a gap it skipped), or in a gap its
-	/// grace gave up on, or anything once the feed is over. A declared start is no promise:
-	/// a group below it may still arrive.
-	#[expect(
-		clippy::type_complexity,
-		reason = "the never-fed runs and the awaited gaps are returned together; naming them would only move the type"
-	)]
-	pub(super) fn unfed(
-		&self,
-		hole: ops::Range<u64>,
-		now: crate::time::Instant,
-	) -> (RangeSet<u64>, Vec<(ops::Range<u64>, Option<crate::time::Instant>)>) {
-		let mut unfed = RangeSet::new();
-		let mut awaited = Vec::new();
+	/// Never: accounted for by its arrivals (a gap it skipped, or a group evicted longer
+	/// ago than [`Lost`] keeps), or in a gap its grace gave up on, or anything once the feed
+	/// is over. A declared start is no promise: a group below it may still arrive.
+	pub(super) fn unfed(&self, hole: ops::Range<u64>, now: crate::time::Instant) -> Unfed {
+		let mut out = Unfed::default();
+		let grace = self.miss_grace();
+		// Delivered, so no verdict on the feed: a reader that never took one asks for it again.
+		let fed = |arrived: ops::Range<u64>, out: &mut Unfed| {
+			out.never.insert(arrived.clone());
+			for key in self.lost.within(arrived, now, grace) {
+				out.never.remove(key..key + 1);
+				out.lost.insert(key..key + 1);
+			}
+		};
 		// Nothing more arrives after an abort, a seal, once the live edge reached a declared
 		// end with no tail owed, or while no subscription feeds the copy: until then, a group
 		// below the end may still arrive.
 		if self.nothing_arrives() {
-			unfed.insert(hole);
-			return (unfed, awaited);
+			fed(hole, &mut out);
+			return out;
 		}
-		let grace = self.miss_grace();
-		let mut gap =
-			|groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self.arrivals.folds_at(groups.start, grace) {
-				Some(at) if at <= now => unfed.insert(groups),
-				folds => awaited.push((groups, folds)),
-			};
+		let gap = |groups: ops::Range<u64>, out: &mut Unfed| match self.arrivals.folds_at(groups.start, grace) {
+			Some(at) if at <= now => out.never.insert(groups),
+			folds => out.awaited.push((groups, folds)),
+		};
 		// The upstream accounted for a received stale run, so the feed brings none of it unless
 		// a new upstream subscription supersedes the run.
-		let mut fed = RangeSet::new();
-		fed.insert(hole.clone());
+		let mut rest = RangeSet::new();
+		rest.insert(hole.clone());
 		for (run, given) in self.drops.overlapping(&hole) {
 			if given.stale_budget().is_some() {
 				let run = run.start.max(hole.start)..run.end.min(hole.end);
-				fed.remove(run.clone());
-				unfed.insert(run);
+				rest.remove(run.clone());
+				out.never.insert(run);
 			}
 		}
-		for hole in fed.iter() {
+		for hole in rest.iter() {
 			let mut from = hole.start;
 			for arrived in self.arrivals.accounted(hole.clone()) {
 				if from < arrived.start {
-					gap(from..arrived.start, &mut unfed);
+					gap(from..arrived.start, &mut out);
 				}
 				from = arrived.end;
-				unfed.insert(arrived);
+				fed(arrived, &mut out);
 			}
 			if from < hole.end {
-				gap(from..hole.end, &mut unfed);
+				gap(from..hole.end, &mut out);
 			}
 		}
-		(unfed, awaited)
+		out
+	}
+}
+
+/// [`TrackState::unfed`]'s split of a hole.
+#[derive(Default)]
+pub(super) struct Unfed {
+	/// What the live feed will never deliver.
+	pub never: RangeSet<u64>,
+	/// What it delivered and the pool evicted before a reader took it, asked again.
+	pub lost: RangeSet<u64>,
+	/// The gaps it still waits for, and when each stops being waited for.
+	pub awaited: Vec<(ops::Range<u64>, Option<crate::time::Instant>)>,
+}
+
+/// The live groups the pool evicted after they arrived, by when it did. The feed delivered
+/// them, so a reader that had not taken one yet asks for it again, whatever a fill told it
+/// before it arrived, instead of giving it up as never sent.
+///
+/// Kept a miss grace, the window the arrivals hold a gap for: a group's successor arrived
+/// before it, so by then every reader's budget has given up on the group anyway. Evictions
+/// come in time order, so expiring is a pop from the front.
+#[derive(Default)]
+pub(super) struct Lost {
+	keys: BTreeMap<u64, crate::time::Instant>,
+	// Every eviction still within the grace, one re-arrived since included until it expires,
+	// which bounds this by the evictions in a grace.
+	order: VecDeque<(crate::time::Instant, u64)>,
+}
+
+impl Lost {
+	/// Record `key`, evicted at `now`.
+	pub fn evicted(&mut self, key: u64, now: crate::time::Instant) {
+		self.keys.insert(key, now);
+		self.order.push_back((now, key));
+	}
+
+	/// The cache holds `key` again.
+	pub fn cached(&mut self, key: u64) {
+		self.keys.remove(&key);
+	}
+
+	/// Forget what was evicted a full `grace` ago.
+	pub fn expire(&mut self, now: crate::time::Instant, grace: Duration) {
+		while let Some(&(at, key)) = self.order.front() {
+			if now.duration_since(at) < grace {
+				break;
+			}
+			self.order.pop_front();
+			if self.keys.get(&key) == Some(&at) {
+				self.keys.remove(&key);
+			}
+		}
+	}
+
+	/// How many evictions it holds.
+	#[cfg(test)]
+	pub fn len(&self) -> usize {
+		self.order.len()
+	}
+
+	/// The keys in `hole` evicted less than `grace` before `now`.
+	fn within(
+		&self,
+		hole: ops::Range<u64>,
+		now: crate::time::Instant,
+		grace: Duration,
+	) -> impl Iterator<Item = u64> + '_ {
+		self.keys
+			.range(hole)
+			.filter(move |(_, at)| now.duration_since(**at) < grace)
+			.map(|(key, _)| *key)
 	}
 }
 
@@ -2043,6 +2137,105 @@ mod tests {
 			vec![(2..3, Hole::missed(None))],
 			"a refusal is no stale verdict"
 		);
+	}
+
+	/// A group a fill refused that then arrives live and is evicted before the reader takes
+	/// it was delivered, not passed over: the reader asks for it again rather than giving it
+	/// up as never sent.
+	#[kio::test]
+	async fn a_refused_group_evicted_after_it_arrived_is_asked_again() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let mut track = broadcast
+			.create_track("evicted", crate::track::Info::default())
+			.unwrap();
+		let budget = Duration::from_secs(5);
+		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+		// Newest first, so the publisher skips nothing below it: group 2 is a live gap a fill
+		// may answer.
+		for key in [4, 0] {
+			track
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		track.start_at(3).unwrap();
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		let waiter = kio::Waiter::noop();
+		let state = track.state.read();
+		let drift = Drift {
+			budget,
+			bounded: false,
+			edge: state.drift_edge(&Servable::ALL),
+			coverage: None,
+		};
+		let asks = misses.judge(
+			&state,
+			(0, 0, None),
+			None,
+			None,
+			None,
+			|span| [span].into_iter().collect(),
+			&Delivered::default(),
+			&drift,
+			&mut given_up,
+			&waiter,
+		);
+		let fills = state.fills.clone();
+		drop(state);
+		let asking = Asking {
+			priority: 0,
+			max_delay: Some(budget),
+			order: Order::Ascending,
+		};
+		misses.ask(&track.state.consume(), &fills, &asks, &asking, &mut given_up);
+		assert!(misses.refused.contains(&2));
+
+		// Group 2 arrives whole and the pool evicts it before this reader judges again.
+		track
+			.create_group(crate::group::Info { start: 2 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		track.modify().unwrap().evict_group(2, Error::Evicted);
+		let state = track.state.read();
+		assert!(!state.lookup.contains_key(&2));
+		let asks = misses.judge(
+			&state,
+			(0, 0, None),
+			None,
+			None,
+			None,
+			|_| panic!("the edge has not moved"),
+			&Delivered::default(),
+			&drift,
+			&mut given_up,
+			&waiter,
+		);
+		assert!(given_up.is_empty(), "a delivered group is never given up as unsent");
+		assert!(asks.contains(&2), "the evicted group is asked again");
+		assert!(!misses.refused.contains(&2), "its arrival lifted the refusal");
+	}
+
+	/// What the pool evicted is kept a grace, so a flood of evicted groups holds only those
+	/// of the last grace, and a key cached again is no longer lost.
+	#[test]
+	fn lost_groups_are_kept_a_grace() {
+		let grace = Duration::from_millis(500);
+		let start = crate::time::Instant::ZERO;
+		let mut lost = Lost::default();
+		lost.evicted(1, start);
+		lost.evicted(2, start.saturating_add(Duration::from_millis(100)));
+		lost.evicted(3, start.saturating_add(Duration::from_millis(200)));
+		lost.cached(3);
+		let at = start.saturating_add(Duration::from_millis(550));
+		assert_eq!(lost.within(0..10, at, grace).collect::<Vec<_>>(), vec![2], "1 aged out, 3 cached again");
+		lost.expire(at, grace);
+		assert_eq!(lost.len(), 2, "the eviction still within the grace and the re-cached one wait");
+		lost.expire(start.saturating_add(Duration::from_millis(700)), grace);
+		assert_eq!(lost.len(), 0);
+		assert!(lost.keys.is_empty());
 	}
 	#[kio::test]
 	async fn unchanged_probes_and_late_arrivals_keep_other_gap_deadlines() {

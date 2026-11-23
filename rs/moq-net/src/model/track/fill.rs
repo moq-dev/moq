@@ -1753,7 +1753,10 @@ impl TrackState {
 		let now = self.cache.pool().now_wall();
 		let mut dropped = RangeSet::new();
 		for hole in super::miss::holes(self, groups) {
-			for groups in self.unfed(hole, now).0.iter() {
+			// A group lost to the cache since it arrived is the source's to name too: the live
+			// feed delivers it no more.
+			let unfed = self.unfed(hole, now);
+			for groups in unfed.never.iter().chain(unfed.lost.iter()) {
 				dropped.insert(groups.clone());
 			}
 		}

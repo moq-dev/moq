@@ -772,6 +772,10 @@ pub(crate) struct TrackState {
 	// debt folds its oldest gaps early, so an unbounded grace holds no more gaps than the
 	// pool would.
 	arrivals_bill: cache::Extra,
+	// The live groups the pool evicted after they arrived, which readers that had yet to take
+	// one ask for again. Kept a grace: each entry is far smaller than the eviction that made
+	// it, so this holds less than the pool freed within one.
+	lost: miss::Lost,
 
 	// The first key the live feed serves, as the publisher declared it (the wire's
 	// SUBSCRIBE_START). Lower groups are not waited for, though one may still arrive late
@@ -1651,6 +1655,12 @@ impl TrackState {
 	/// it for the readers that judged it cached to judge again.
 	fn evict_group(&mut self, key: u64, err: Error) {
 		let slot = self.uncache(key).expect("a cached group");
+		// An expired group is stale for every reader; only the pool's eviction loses one.
+		if slot.visible && matches!(err, Error::Evicted) {
+			let now = self.cache.pool().now_wall();
+			self.lost.expire(now, self.miss_grace());
+			self.lost.evicted(key, now);
+		}
 		slot.abort(err);
 		let landed = self
 			.inboxes
@@ -3066,6 +3076,7 @@ impl TrackState {
 			self.arrivals.set_grace(self.arrival_grace());
 			self.arrivals.expire(now);
 		}
+		self.lost.expire(now, self.miss_grace());
 		self.bill_arrivals();
 	}
 
@@ -3207,6 +3218,7 @@ impl TrackState {
 	fn insert_group(&mut self, group: &group::Handle, visible: bool) {
 		self.latch_settled();
 		let key = group.start;
+		self.lost.cached(key);
 		if visible {
 			self.contents.remove(key);
 		}
@@ -4606,7 +4618,7 @@ impl Refly {
 				ReflyState::Boarding(boarding) => {
 					let res = ready!(boarding.poll(waiter));
 					self.state = ReflyState::Idle;
-					let mut group = res.map_err(|_| Error::Evicted)?;
+					let mut group = res.map_err(flight_failed)?;
 					group.skip_to(self.frame);
 					self.state = ReflyState::Aboard(group);
 				}
@@ -4682,6 +4694,15 @@ impl Boarding {
 		};
 		*self.join = join;
 		self.poll(waiter)
+	}
+}
+
+/// Why a reader's frames are gone once the flight it boarded for them failed: the group is
+/// stale when its handler judged it too old, else the cache's eviction stands.
+pub(super) fn flight_failed(err: Error) -> Error {
+	match err {
+		Error::Old => Error::Old,
+		_ => Error::Evicted,
 	}
 }
 
@@ -33386,6 +33407,40 @@ mod test {
 		drop(arriving);
 	}
 
+	/// A group the pool evicted while it arrived, whose flight the handler refuses as too
+	/// old, ends `Old`: the frames are gone because the group is stale, which a reader skips
+	/// as within its budget, not because the cache lost them.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_flight_refused_as_stale_ends_the_group_old() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		live.write_frame(crate::Timestamp::unscaled(live.start), numbered(0))
+			.unwrap();
+		assert_eq!(read_numbered(&mut reader), Some(0));
+		let handle = live.handle();
+		let payload = numbered(1);
+		let mut arriving = live.create_frame(frame_info(&payload)).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		handle.shed_all();
+
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_finished(&waiter).is_pending(), "boarding a flight");
+		let fill = match requests.poll_requested_fill(&kio::Waiter::noop()) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("the end asks a flight"),
+		};
+		fill.refuse_groups(0..1, Error::Old);
+		assert!(flag.take(), "the refusal woke the end");
+		assert!(
+			matches!(reader.poll_finished(&waiter), Poll::Ready(Err(Error::Old))),
+			"stale, not evicted"
+		);
+		drop(arriving);
+	}
+
 	/// The end of a group evicted while it arrives waits on a flight from past the frames
 	/// the reader already prefetched, rather than failing the group with them in hand.
 	#[test]
@@ -33757,7 +33812,8 @@ mod test {
 		assert!(requests.requested_fill_group().now_or_never().is_none(), "one flight");
 
 		req.reject(Error::Old);
-		assert!(matches!(tight.read_frame().now_or_never(), Some(Err(Error::Evicted))));
+		// Stale under its own budget.
+		assert!(matches!(tight.read_frame().now_or_never(), Some(Err(Error::Old))));
 		assert_eq!(read_numbered(&mut loose), None, "asks again");
 		let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(req.max_delay(), Some(Duration::from_secs(10)));
