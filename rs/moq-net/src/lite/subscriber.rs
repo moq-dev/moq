@@ -6076,6 +6076,55 @@ mod tests {
 		assert_eq!(group.start, 0);
 	}
 
+	/// A group recovered once already is refused rather than recovered again while no hold
+	/// fits, as in a pool its live edges fill: the pool would evict the copy landing unheld,
+	/// and each recovery after it would go the same way.
+	#[kio::test]
+	async fn a_recovered_group_is_not_recovered_again_without_hold_room() {
+		let (serve, _serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let pool = crate::cache::Pool::unbounded();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		for key in 0..3 {
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		copy.evict(0);
+		let mut reader = copy
+			.subscribe(crate::track::Subscription::default().with_range(0..1))
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "group 0 is owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("group 0 is a miss");
+		};
+		let mut fills = fills::RangeFills::default();
+		fills.push(fill);
+		let Ok(mut accounted) = tail.write() else {
+			unreachable!("the tail is open");
+		};
+		accounted.account(0..1, serve.subscriber.runtime.now());
+		drop(accounted);
+		fills.recovered_once(0..1);
+		// What a pool its live edges fill leaves for holds.
+		pool.resize(0);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		assert!(!fills.recovering(), "not recovered again");
+		assert!(fills.is_empty(), "the fill is refused");
+	}
+
 	/// A group evicted after the subscription delivered it is recovered again even when the
 	/// run owing it starts with keys a recovery answered skipped: a refusal answers only its
 	/// own keys.

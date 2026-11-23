@@ -1576,9 +1576,10 @@ impl Inner {
 			}
 		};
 		let front = self.untaken_front();
+		let fronted = self.fills.read().fronted(self.id);
 		// Cache the group before answering: readers resolve an accept through the cache. Held
-		// as it is cached, if it is the first a reader has yet to take: the pool may evict
-		// anything else before the reader gets to it. A time start answered below its time
+		// as it is cached, if it is the first a reader has yet to take and this is that
+		// reader's front fill: the pool may evict anything else before the reader gets to it. A time start answered below its time
 		// holds the group it names, created or cached, under the same lock, so its End stays
 		// known once the cache lets it go.
 		let mut answer = None;
@@ -1587,7 +1588,7 @@ impl Inner {
 				true => state.insert_flight(key, frames, info).map(Some),
 				false => state.insert_group_request(key, frames, info),
 			};
-			if !self.flight && matches!(res, Ok(Some(_))) {
+			if !self.flight && fronted && matches!(res, Ok(Some(_))) {
 				state.hold_fill(self.id, front, None);
 			}
 			if key < self.start.group {

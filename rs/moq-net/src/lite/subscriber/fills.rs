@@ -324,10 +324,13 @@ impl RangeFills {
 			}
 		}
 		// The groups the subscription already accounted for, which it never sends again, are
-		// recovered on their own, as often as the cache evicts them before a reader takes them:
-		// a fill holds the first to land until its reader takes it, so each recovery serves at
-		// least that one. A fill whose answer no reader picked up yet asks for nothing more.
+		// recovered on their own, as often as the cache evicts them before a reader takes them
+		// while a hold fits: a fill holds the first to land until its reader takes it, so each
+		// recovery serves at least that one. Past that, the pool would evict a recovered group
+		// unheld before a fill saw it, so one recovered already is refused rather than recovered
+		// again without end. A fill whose answer no reader picked up yet asks for nothing more.
 		if let Some(accounted) = accounted {
+			let again = serving.hold_room();
 			let tail = accounted.read();
 			let mut asked = RangeSet::new();
 			for fill in self.held.iter().filter(|fill| !fill.is_paced()) {
@@ -339,7 +342,15 @@ impl RangeFills {
 				for gone in tail.accounted(run.clone()) {
 					for gap in self.recovering.gaps(&gone).collect::<Vec<_>>() {
 						for owed in self.unrefused(gap) {
-							self.recover.insert(owed);
+							if !again {
+								for once in self.recovered.overlapping(&owed).cloned().collect::<Vec<_>>() {
+									let once = once.start.max(owed.start)..once.end.min(owed.end);
+									self.refused.insert(once, Refusal::passing(StreamError::NotFound));
+								}
+							}
+							for fresh in self.refused.gaps(&owed).collect::<Vec<_>>() {
+								self.recover.insert(fresh);
+							}
 						}
 					}
 				}

@@ -5706,6 +5706,13 @@ impl Producer {
 		self.state.read().skipped_in(groups)
 	}
 
+	/// Whether the pool could hold one more answered group for its reader (see
+	/// [`cache::Pool::hold_room`]): a group recovered again past that is evicted unheld.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn hold_room(&self) -> bool {
+		self.state.read().cache.pool().hold_room()
+	}
+
 	/// Forget every run held as stale: a new upstream subscription judges them afresh, and
 	/// may deliver them, so they are unknown again, and a reader that wants one fills it.
 	/// Returns the runs forgotten; a group that arrived since its stale drop replaced it, so
@@ -30480,6 +30487,41 @@ mod test {
 		assert!(most <= SIZE as u64 + 2_000, "one reader held {most} bytes");
 		assert_eq!(read, (0..41).collect::<Vec<_>>(), "every group once, in order");
 		assert!(drained_drops(&mut subscriber).is_empty(), "nothing given up");
+	}
+
+	/// A fill other than its reader's front holds none of what it accepts, even before its
+	/// handler polls again: counted held, it would crowd out the front's hold.
+	#[test]
+	#[cfg(feature = "async")]
+	fn only_the_front_fill_holds_what_it_accepts() {
+		const SIZE: usize = 100_000;
+		let (producer, pool) = pooled_producer(u64::MAX - 1);
+		let requests = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for key in 0..5 {
+			write_sized(producer.create_group(group::Info { start: key }).map(Some), key, SIZE);
+		}
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(_))) = subscriber.poll_next_group(&waiter) else {
+			panic!("group 0 is cached");
+		};
+		for key in [1, 3] {
+			producer.evict(key);
+		}
+		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 1 is missed");
+		let mut fills = Vec::new();
+		while let Poll::Ready(Ok(mut fill)) = requests.poll_requested_fill(&waiter) {
+			let Poll::Ready(Some(key)) = fill.poll_wanted_changed(&waiter) else {
+				panic!("a fill wants its group");
+			};
+			fills.push((key, fill));
+		}
+		fills.sort_by_key(|(key, _)| *key);
+		assert_eq!(fills.iter().map(|(key, _)| *key).collect::<Vec<_>>(), [1, 3]);
+		write_sized(fills[1].1.accept(3, None), 3, SIZE);
+		assert_eq!(pool.held(), 0, "group 3's fill is not the reader's front");
+		write_sized(fills[0].1.accept(1, None), 1, SIZE);
+		assert!(pool.held() >= SIZE as u64, "the front's answer is held");
 	}
 
 	/// Readers whose holds outgrow the room the live edge leaves keep none of them past the
