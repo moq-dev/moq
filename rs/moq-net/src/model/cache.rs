@@ -673,10 +673,11 @@ const EDGE_SLACK: usize = 64;
 /// track keeps whatever the pool's budget, so a publisher holding many quiet tracks would
 /// otherwise hold one group each past any capacity. A frame write that leaves the session
 /// past its limit sheds its live edges in the order delivery would give up on them: the
-/// lowest priority first, as [`crate::priority::Priority`] ranks a track, and among equals
-/// the edge that moved longest ago, so the cost stays with the session causing it. Each edge
-/// first sheds the frames its readers took, then everything; the one being written keeps
-/// its newest frame. The default is unbounded and costs nothing.
+/// lowest priority first, as delivery ranks a track (its subscriber's priority, then its
+/// publisher's), and among equals the edge that moved longest ago, so the cost stays with
+/// the session causing it. Each edge first sheds the frames its readers took, then
+/// everything; the one being written keeps its newest frame. The default is unbounded and
+/// costs nothing.
 #[derive(Clone, Default)]
 pub(crate) struct Edges(Option<Arc<EdgesInner>>);
 
@@ -1147,13 +1148,11 @@ impl Track {
 		}
 	}
 
-	/// The track's rank among its session's live edges, as [`crate::priority::group`] ranks
-	/// its subscription for delivery: higher pays later.
+	/// The track's rank among its session's live edges, packed as delivery ranks its
+	/// subscription (the subscriber's priority always dominates the publisher's): higher
+	/// pays later.
 	fn rank(&self) -> i64 {
-		crate::priority::group(
-			self.subscriber.load(Ordering::Relaxed),
-			self.publisher.load(Ordering::Relaxed),
-		)
+		i64::from(self.subscriber.load(Ordering::Relaxed)) * 256 + i64::from(self.publisher.load(Ordering::Relaxed))
 	}
 
 	/// Whether the live edge still sits at `key` after its `moves`th move.
