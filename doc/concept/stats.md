@@ -444,8 +444,8 @@ to zero for older relays.
 their ratio is the loss rate. `cwnd_blocked_us` and `pacing_blocked_us` count
 the microseconds a connection had data ready to send held back by its congestion
 controller: by a full congestion window, or by the pacer spreading sends at the
-controller's rate. Time growing here means the path, not the peer or the
-application, set the pace. Native QUIC and WebTransport report them, at the
+controller's rate. Time growing here points at the path setting the pace,
+though a peer's stream-level credit can still hold other streams back. Native QUIC and WebTransport report them, at the
 same lag as the credit counters below; other transports contribute zero.
 
 `credit_stalls` and `credit_stalled_us` count how often, and for how many

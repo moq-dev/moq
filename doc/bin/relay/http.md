@@ -73,8 +73,9 @@ and `moq_relay_pacing_blocked_microseconds_total` sum the per-session
 [congestion counters](/concept/stats#presence) by `tier`: the sent bytes
 declared lost, a share of `moq_relay_wire_tx_bytes_total`, and how long data
 ready to send waited on a full congestion window or on the pacer. Wait time
-growing while credit stays flat means the network, not a peer, held delivery
-back.
+growing while credit stays flat points at the network rather than connection
+credit; a tier sums many sessions, and stream-level credit is not counted, so
+it cannot rule a peer out.
 
 `moq_relay_credit_stalls_total` and `moq_relay_credit_stalled_microseconds_total`
 sum the per-session [credit stalls](/concept/stats#presence) by `tier`: how often

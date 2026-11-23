@@ -1168,8 +1168,10 @@ impl Connection {
 		if cwnd_blocked {
 			self.path.congestion.on_cwnd_limited();
 		}
-		// A full window outranks the pacer: the pacer only matters once the window opens.
-		let limit = match (cwnd_blocked, pacing_until) {
+		// A full window outranks the pacer: the pacer only matters once the window opens. The
+		// check charged a packet still being built a whole segment, so the window is full only if
+		// the finished packets left no room for another.
+		let limit = match (cwnd_blocked && self.window_full(), pacing_until) {
 			(true, _) => Some(CongestionLimit::Window),
 			(false, Some(until)) => Some(CongestionLimit::Pacing { until }),
 			(false, None) => None,
@@ -1459,6 +1461,8 @@ impl Connection {
 				Timer::PathValidation => {
 					debug!("path validation failed");
 					if let Some((_, prev)) = self.prev_path.take() {
+						// The failed path's congestion wait ends with it.
+						self.observe_congestion(now, true);
 						self.path = prev;
 						self.set_loss_detection_timer(now);
 					}
@@ -1492,24 +1496,33 @@ impl Connection {
 	fn observe_waits(&mut self, now: Instant) {
 		let closed = self.state.is_closed();
 		self.streams.observe_credit(now, closed);
+		// A closed connection sends nothing more, so its wait ends here.
+		self.observe_congestion(now, closed);
+	}
+
+	/// Accrue the congestion wait up to `now`, ending it once its limit clears or at `end`, as
+	/// when the path that imposed it is replaced
+	fn observe_congestion(&mut self, now: Instant, end: bool) {
 		if let Some((since, limit)) = self.congestion_wait {
 			// A wait ends once its limit clears, whether or not a transmit follows at once, as
-			// one may not while a driver's send buffers are full. A closed connection sends
-			// nothing more, so its wait ends here.
-			let (end, cleared) = match limit {
-				CongestionLimit::Window => {
-					let room = self.path.congestion.window().saturating_sub(self.path.in_flight.bytes);
-					(now, closed || room >= u64::from(self.path.current_mtu()))
-				}
-				CongestionLimit::Pacing { until } => (now.min(until), closed || now >= until),
+			// one may not while a driver's send buffers are full.
+			let (until, cleared) = match limit {
+				CongestionLimit::Window => (now, end || !self.window_full()),
+				CongestionLimit::Pacing { until } => (now.min(until), end || now >= until),
 			};
 			let total = match limit {
 				CongestionLimit::Window => &mut self.stats.path.cwnd_blocked,
 				CongestionLimit::Pacing { .. } => &mut self.stats.path.pacing_blocked,
 			};
-			*total += end.saturating_duration_since(since);
-			self.congestion_wait = (!cleared).then_some((end, limit));
+			*total += until.saturating_duration_since(since);
+			self.congestion_wait = (!cleared).then_some((until, limit));
 		}
+	}
+
+	/// Whether the congestion window has no room for another datagram
+	fn window_full(&self) -> bool {
+		let room = self.path.congestion.window().saturating_sub(self.path.in_flight.bytes);
+		room < u64::from(self.path.current_mtu())
 	}
 
 	/// Close a connection immediately
@@ -3519,6 +3532,8 @@ impl Connection {
 		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
+		// The old path's congestion wait ends with it.
+		self.observe_congestion(now, true);
 		let mut prev = mem::replace(&mut self.path, new_path);
 		self.datagrams().drop_oversized();
 

@@ -7115,7 +7115,8 @@ fn congestion_waits_time_the_pacer() {
 }
 
 /// A wait ends when its limit clears, though the driver holds transmits back past it, as while
-/// its send buffers are full: an ACK that opens the window, or the pacer's deadline passing.
+/// its send buffers are full: an ACK that opens the window, the pacer's deadline passing, or the
+/// path that imposed it being replaced.
 #[test]
 fn congestion_waits_end_when_the_limit_clears() {
 	let backlog = |factory| {
@@ -7162,6 +7163,38 @@ fn congestion_waits_end_when_the_limit_clears() {
 	pair.client_conn_mut(ch).handle_timeout(now);
 	let stats = pair.client_conn_mut(ch).stats().path;
 	assert_eq!(stats.pacing_blocked - start.pacing_blocked, until - blocked);
+
+	// A path change ends the wait the old path imposed: the server, held by its pacer, hears the
+	// client from a new address before the pacer's deadline.
+	let _guard = subscribe();
+	let (mut pair, client_ch, _log) = recorded_pair(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
+	pair.drive();
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	let start = pair.server_conn_mut(server_ch).stats().path;
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.drive_server();
+	let blocked = pair.time;
+	let until = pair.server_conn_mut(server_ch).poll_timeout().unwrap();
+	pair.time = blocked.saturating_add((until - blocked) / 2);
+	let moved = pair.time;
+	pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	pair.server.receive_only(moved, pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	pair.time = until.saturating_add(held);
+	let now = pair.time;
+	pair.server_conn_mut(server_ch).handle_timeout(now);
+	let stats = pair.server_conn_mut(server_ch).stats().path;
+	assert_eq!(stats.pacing_blocked - start.pacing_blocked, moved - blocked);
 }
 
 /// The last packet in a poll can drain the application while bytes remain in flight.
