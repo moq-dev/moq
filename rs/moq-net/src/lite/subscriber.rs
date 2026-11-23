@@ -8210,13 +8210,18 @@ mod tests {
 		}
 	}
 
-	/// Malformed bytes on a lite-07 Subscribe Stream close the session at once, even with a
-	/// group stream still being read: the close never waits on a drain that a reader leaving
-	/// meanwhile would cut short.
+	/// Malformed bytes on a Subscribe Stream close the session at once, on every version, even
+	/// with a group stream still being read: the close never waits on a drain that a reader
+	/// leaving meanwhile would cut short.
 	#[kio::test]
 	async fn a_malformed_subscribe_response_closes_the_session_at_once() {
+		for version in [Version::Lite06, Version::Lite07] {
+			malformed_subscribe_response_closes_at_once(version).await;
+		}
+	}
+
+	async fn malformed_subscribe_response_closes_at_once(version: Version) {
 		use crate::transport::poll::{SendStream as _, Session as _};
-		let version = Version::Lite07;
 		let (session, peer) = crate::transport::memory::pair(Default::default());
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -8268,11 +8273,12 @@ mod tests {
 		let _ = poll_run(&mut running, &kio::Waiter::noop());
 		let closed = peer.poll_closed(&kio::Waiter::noop());
 		let Poll::Ready(err) = closed else {
-			panic!("the session is still open");
+			panic!("{version:?}: the session is still open");
 		};
 		assert_eq!(
 			crate::transport::Error::session_error(&err).map(|(code, _)| code),
-			Some(crate::SessionError::ProtocolViolation.to_code())
+			Some(crate::SessionError::ProtocolViolation.to_code()),
+			"{version:?}"
 		);
 	}
 
