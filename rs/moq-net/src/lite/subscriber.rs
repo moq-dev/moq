@@ -5823,6 +5823,42 @@ mod tests {
 		(serve, serving, tail, broadcast)
 	}
 
+	/// A run no fill owes stays asked while a stream of it still arrives, judged by the copy
+	/// alone: one the pool evicts mid-stream lets the run go without asking a flight of the
+	/// group, which nobody here would read.
+	#[kio::test]
+	#[expect(clippy::single_range_in_vec_init, reason = "the asked runs are a list, here one")]
+	async fn a_drained_run_asks_no_flight_for_an_evicted_stream() {
+		let (serve, _serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		let mut arriving = copy.create_group(group::Info { start: 0 }).unwrap();
+		arriving
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		let mut fills = fills::RangeFills::default();
+		fills.ask.groups.insert(0..1);
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert_eq!(
+			fills.ask.groups.iter().cloned().collect::<Vec<_>>(),
+			[0..1],
+			"its stream still arrives"
+		);
+
+		copy.evict(0);
+		assert!(fills.poll(&serve, &copy, None, true, &waiter).unwrap());
+		assert!(fills.ask.groups.is_empty(), "the stream ended with its copy");
+		assert!(requests.poll_requested_fill(&waiter).is_pending(), "no flight is asked");
+		drop(arriving);
+	}
+
 	/// A stale drop of part of a fill's run recovers that part on its own subscription, which
 	/// takes it out of the copy's ranges at once, though the rest of the run stays asked: the
 	/// subscription that dropped it never delivers it.

@@ -297,9 +297,9 @@ pub(super) enum Outcome {
 	/// Finished with this many frames and the end it finished at, then aborted to free its
 	/// cache: a reader that took every frame got every frame the group finished with, and one
 	/// short of it gets the error.
-	Released(usize, Option<u64>, Error),
+	Released(usize, Option<u64>, Abort),
 	/// Aborted before it finished.
-	Aborted(Error),
+	Aborted(Abort),
 }
 
 impl Outcome {
@@ -314,9 +314,43 @@ impl Outcome {
 	/// The error the group was aborted with, before or after it finished.
 	pub(super) fn error(&self) -> Option<&Error> {
 		match self {
-			Self::Released(.., err) | Self::Aborted(err) => Some(err),
+			Self::Released(.., abort) | Self::Aborted(abort) => Some(abort.error()),
 			Self::Open | Self::Finished(..) => None,
 		}
+	}
+
+	/// Whether the pool evicted this copy, so a reader short of its end is owed the frames
+	/// it freed, which a flight of the group brings.
+	pub(super) fn evicted(&self) -> bool {
+		matches!(self, Self::Released(.., Abort::Evicted) | Self::Aborted(Abort::Evicted))
+	}
+}
+
+/// Why a copy was aborted: recorded where the abort is decided, so a reader never tells the
+/// pool's eviction from a failure by the error it reads.
+#[derive(Clone, Debug)]
+pub(super) enum Abort {
+	/// The pool evicted it, read as [`Error::Evicted`].
+	Evicted,
+	/// Anything else: the copy failed, was given up, or aged out.
+	Failed(Error),
+}
+
+// What a reader of an evicted copy reads, borrowed like any other abort's error.
+static EVICTED: Error = Error::Evicted;
+
+impl Abort {
+	fn error(&self) -> &Error {
+		match self {
+			Self::Evicted => &EVICTED,
+			Self::Failed(err) => err,
+		}
+	}
+}
+
+impl From<Error> for Abort {
+	fn from(err: Error) -> Self {
+		Self::Failed(err)
 	}
 }
 
@@ -1302,9 +1336,9 @@ impl GroupState {
 			return Poll::Ready(Err(Error::Evicted));
 		}
 		match &self.outcome {
-			Outcome::Released(total, _, err) if index < *total => Poll::Ready(Err(err.clone())),
+			Outcome::Released(total, _, abort) if index < *total => Poll::Ready(Err(abort.error().clone())),
 			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
-			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
+			Outcome::Aborted(abort) => Poll::Ready(Err(abort.error().clone())),
 			Outcome::Open => {
 				// Waiting on frames the writer has yet to commit, wherever the reader skipped
 				// to, so it holds the writer back from none of them.
@@ -1362,7 +1396,7 @@ impl GroupState {
 	fn poll_outcome(&self) -> Poll<Result<()>> {
 		match &self.outcome {
 			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
-			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
+			Outcome::Aborted(abort) => Poll::Ready(Err(abort.error().clone())),
 			Outcome::Open => Poll::Pending,
 		}
 	}
@@ -1456,6 +1490,11 @@ impl GroupState {
 		entry.frame.payload = row.freeze();
 		*entry.owner.lock().unwrap_or_else(PoisonError::into_inner) = Some(row);
 		Ok(())
+	}
+
+	/// The cache account of the track this copy belongs to, kept after its frames are freed.
+	pub(super) fn account(&self) -> Option<&Arc<cache::Track>> {
+		self.charge.account()
 	}
 
 	/// Whether Object IDs left the frame ordinals, so ordinal recovery cannot stitch.
@@ -2842,7 +2881,7 @@ impl Handle {
 			.as_ref()
 			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
 		{
-			self.commit_abort(state, Error::Evicted);
+			self.commit_abort(state, Abort::Evicted);
 		}
 	}
 
@@ -3028,12 +3067,14 @@ impl Handle {
 		}
 	}
 
-	fn close_aborted(&self, err: Error) -> Result<()> {
-		self.commit_abort(modify(&self.state)?, err);
+	pub(super) fn close_aborted(&self, abort: impl Into<Abort>) -> Result<()> {
+		self.commit_abort(modify(&self.state)?, abort);
 		Ok(())
 	}
 
-	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
+	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, abort: impl Into<Abort>) {
+		let abort = abort.into();
+		let err = abort.error();
 		let policy = matches!(err, Error::Old | Error::Timeout | Error::Evicted);
 		// Cache policy frees the frames, as does an oversized group whichever write found
 		// it; a copy that failed or was given up lends them on.
@@ -3068,8 +3109,8 @@ impl Handle {
 		}
 		let finished = guard.outcome.frames().is_some();
 		guard.outcome = match guard.outcome {
-			Outcome::Finished(frames, end) => Outcome::Released(frames, end, err),
-			_ => Outcome::Aborted(err),
+			Outcome::Finished(frames, end) => Outcome::Released(frames, end, abort),
+			_ => Outcome::Aborted(abort),
 		};
 		// After the outcome exists, so a scan reading the mirror never hides a live group.
 		// The group lock admits one abort, so this is the only store.
@@ -4005,6 +4046,19 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 	fn asking(&self) -> super::track::Asking;
 }
 
+/// What a reader under `expiry` asks a fill with: its subscription's or fetch's, else the
+/// defaults.
+pub(super) fn asking(expiry: Option<&Arc<dyn Expiry>>) -> track::Asking {
+	expiry.map_or(
+		track::Asking {
+			priority: 0,
+			max_delay: None,
+			order: super::subscription::Order::Ascending,
+		},
+		|expiry| expiry.asking(),
+	)
+}
+
 /// The read cursor over a [`Producer`]'s shared state.
 struct Cursor {
 	// Shared state with the producer.
@@ -4195,14 +4249,7 @@ impl Consumer {
 
 	/// What this reader asks a fill with: its subscription's or fetch's, else the defaults.
 	pub(super) fn asking(&self) -> super::track::Asking {
-		self.expiry.as_ref().map_or(
-			super::track::Asking {
-				priority: 0,
-				max_delay: None,
-				order: super::subscription::Order::Ascending,
-			},
-			|expiry| expiry.asking(),
-		)
+		asking(self.expiry.as_ref())
 	}
 
 	/// The hand-off of this copy's head, shared by every reader that could resume it
@@ -4605,8 +4652,7 @@ impl Consumer {
 				// flight of the group from that frame brings instead.
 				Poll::Ready(Ok(Some(frame))) if self.cursor.partial => {
 					let index = self.cursor.index as u64 - 1;
-					let refly = track::Refly::new(self.cursor.cache.clone(), self.start, index, self.asking());
-					Poll::Ready(Ok(Some(frame.with_refly(refly))))
+					Poll::Ready(Ok(Some(frame.with_flight(self.start, index))))
 				}
 				res => self.ended_on(res),
 			},
@@ -4754,13 +4800,7 @@ impl Consumer {
 	) -> Poll<Result<Option<T>>> {
 		let mut boarded = false;
 		loop {
-			match self.poll_boarding(waiter) {
-				Poll::Ready(Ok(())) => {}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				// A read waiting on its flight is blocked like one at the edge, so the
-				// reader's budget still gives up on it.
-				Poll::Pending => return self.poll_expired_if_blocked(waiter, Poll::Pending),
-			}
+			ready!(self.poll_boarding(waiter))?;
 			if let Some(ride) = self.ride_mut()
 				&& ride.aboard
 				&& self.cursor.prefetch.is_drained()
@@ -4821,8 +4861,13 @@ impl Consumer {
 
 	/// Wait for the flight this reader is boarding, if any, and move onto it. Fails with
 	/// [`Error::Evicted`] when nothing serves the frame, so the shed read stands, or
-	/// [`Error::Old`] when its handler judged the group stale.
+	/// [`Error::Old`] when its handler judged the group stale or the reader's budget gave up
+	/// on the wait. A reader capped where it stands needs nothing from the flight, so it
+	/// waits only once its cap is raised.
 	fn poll_boarding(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		if self.cursor.capped() {
+			return Poll::Ready(Ok(()));
+		}
 		let Some(ride) = self.ride_mut() else {
 			return Poll::Ready(Ok(()));
 		};
@@ -4832,11 +4877,19 @@ impl Consumer {
 		let Some(boarding) = &mut ride.boarding else {
 			return Poll::Ready(Ok(()));
 		};
-		let copy = match ready!(boarding.poll(waiter)) {
-			Ok(copy) => copy,
-			Err(err) => {
+		let copy = match boarding.poll(waiter) {
+			Poll::Ready(Ok(copy)) => copy,
+			Poll::Ready(Err(err)) => {
 				self.set_ride(None);
 				return Poll::Ready(Err(track::flight_failed(err)));
+			}
+			// The copy read brings the reader nothing more, even one its pool evicted, which
+			// leaves no frame to expire: the budget judges the wait itself.
+			Poll::Pending => {
+				return match self.poll_expiry(waiter, true) {
+					true => Poll::Ready(Err(Error::Old)),
+					false => Poll::Pending,
+				};
 			}
 		};
 		let start = usize::try_from(boarding.frame()).unwrap_or(usize::MAX);
@@ -4989,18 +5042,19 @@ impl Consumer {
 	/// boards a flight. A plain read of a compressed copy also loses a frame its inflated copy
 	/// shed, which the decoder, already past it, cannot inflate again. A group handed out
 	/// from a front recovers a frame its copy started past from a route instead. A copy the
-	/// pool evicted with a frame still arriving lacks every frame from the reader's on, as if
-	/// shed: the reader is owed the rest of the group, which a flight brings.
+	/// pool evicted, such as with a frame still arriving, lacks every frame from the reader's
+	/// on, as if shed: the reader is owed the rest of the group, which a flight brings.
 	fn shed_next(&self) -> bool {
 		let state = self.cursor.state.read();
 		let index = self.cursor.index;
 		if state.sparse() {
 			return false;
 		}
-		match state.outcome.error() {
-			Some(Error::Evicted) => return true,
-			Some(_) => return false,
-			None => {}
+		if state.outcome.evicted() {
+			return true;
+		}
+		if state.outcome.error().is_some() {
+			return false;
 		}
 		if index < state.offset {
 			return self.recover().is_none();

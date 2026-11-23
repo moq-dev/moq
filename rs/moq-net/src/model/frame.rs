@@ -1535,17 +1535,24 @@ pub struct Consumer {
 	// The parent subscription can expire after this frame handle is returned.
 	expiry: Option<Expiry>,
 	expired: bool,
-	// What continues the read once its copy fails. Boxed: it is the rare case.
-	recover: Option<Box<Resume>>,
+	// What continues the read once its copy fails.
+	resume: Resume,
 }
 
-/// What carries a frame's read past the copy it reads.
+/// What carries a frame's read past the copy it reads. The rare cases are boxed: a frame
+/// handed out still arriving, as most a relay forwards are, allocates nothing until its copy
+/// fails.
 #[derive(Clone)]
 enum Resume {
+	/// Nothing: a failure ends the read.
+	None,
+	/// Handed out still arriving as frame `frame` of group `key`, which a flight of the group
+	/// from it continues once the pool evicts the copy.
+	Arriving { key: u64, frame: u64 },
 	/// A front's logical track, across route changes, with this frame's index in its group.
-	Route(super::resume::Recover, u64),
-	/// A flight of the group from this frame, once the pool evicted the copy mid-frame.
-	Flight(super::track::Refly),
+	Route(Box<(super::resume::Recover, u64)>),
+	/// The flight continuing it since the pool evicted the copy.
+	Flight(Box<super::track::Refly>),
 }
 
 impl std::ops::Deref for Consumer {
@@ -1569,21 +1576,34 @@ impl Consumer {
 			stats: stats::Meter::default(),
 			expiry: None,
 			expired: false,
-			recover: None,
+			resume: Resume::None,
 		}
 	}
 
 	/// Carry this frame across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
-		self.recover = Some(Box::new(Resume::Route(recover, index)));
+		self.resume = Resume::Route(Box::new((recover, index)));
 		self
 	}
 
-	/// Continue this frame, handed out still arriving, on a flight once the pool evicts its
-	/// copy; see [`super::track::Refly`].
-	pub(super) fn with_refly(mut self, refly: super::track::Refly) -> Self {
-		self.recover = Some(Box::new(Resume::Flight(refly)));
+	/// Continue this frame, handed out still arriving as frame `frame` of group `key`, on a
+	/// flight of the group once the pool evicts its copy; see [`super::track::Refly`].
+	pub(super) fn with_flight(mut self, key: u64, frame: u64) -> Self {
+		self.resume = Resume::Arriving { key, frame };
 		self
+	}
+
+	/// The flight continuing this frame, asked of its track once the pool evicted the copy.
+	fn flight(&mut self) -> Option<&mut super::track::Refly> {
+		if let Resume::Arriving { key, frame } = self.resume {
+			let cache = self.state.read().account()?.clone();
+			let asking = super::group::asking(self.expiry.as_ref().map(|expiry| &expiry.policy));
+			self.resume = Resume::Flight(Box::new(super::track::Refly::new(cache, key, frame, asking)));
+		}
+		match &mut self.resume {
+			Resume::Flight(refly) => Some(refly),
+			_ => None,
+		}
 	}
 
 	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
@@ -1603,18 +1623,17 @@ impl Consumer {
 			}
 			// Read to its end: no route is needed for it any more.
 			if matches!(res, Poll::Ready(Ok(_))) && self.read_idx >= self.size() {
-				self.recover = None;
+				self.resume = Resume::None;
 			}
-			let Some(recover) = self.recover.as_mut() else {
-				return res;
-			};
 			let failed = match &res {
 				Poll::Ready(Ok(_)) => return res,
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
-			let (route, frame, index) = match &mut **recover {
-				Resume::Route(recover, index) => {
+			let (route, frame, index) = match &mut self.resume {
+				Resume::None => return res,
+				Resume::Route(route) => {
+					let (recover, index) = &mut **route;
 					if !recover.wants(failed.as_ref(), waiter) {
 						return res;
 					}
@@ -1645,11 +1664,19 @@ impl Consumer {
 						Poll::Pending => return self.poll_expired_or(waiter, Poll::Pending),
 					}
 				}
-				// Only the pool's eviction: any other failure is the group's own.
-				Resume::Flight(refly) => {
-					if !matches!(failed, Some(Error::Evicted)) || flown {
+				// Only the pool's eviction: any other failure is the group's own. A flight asks
+				// from the frame's ordinal, which names the frame only on a dense copy.
+				Resume::Arriving { .. } | Resume::Flight(_) => {
+					let evicted = {
+						let state = self.state.read();
+						state.outcome.evicted() && !state.sparse()
+					};
+					if failed.is_none() || !evicted || flown {
 						return res;
 					}
+					let Some(refly) = self.flight() else {
+						return res;
+					};
 					let index = refly.frame();
 					match refly.poll_frame(waiter) {
 						Poll::Ready(Ok(frame)) => {
@@ -1671,8 +1698,8 @@ impl Consumer {
 			if frame.info.size != self.info.size || frame.inflated != self.inflated {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
-			if let (Some(replacement), Some(Resume::Route(recover, _))) = (&route, self.recover.as_deref_mut()) {
-				recover.adopt(replacement);
+			if let (Some(replacement), Resume::Route(route)) = (&route, &mut self.resume) {
+				route.0.adopt(replacement);
 			}
 			self.state = frame.state;
 			self.source = frame.source;
@@ -1718,8 +1745,8 @@ impl Consumer {
 		let Some(expiry) = &self.expiry else {
 			return false;
 		};
-		let recover = match self.recover.as_deref() {
-			Some(Resume::Route(recover, _)) => Some(recover),
+		let recover = match &self.resume {
+			Resume::Route(route) => Some(&route.0),
 			_ => None,
 		};
 		if !expiry.policy.is_expired(recover, waiter) {
@@ -1742,7 +1769,7 @@ impl Consumer {
 	/// Returns `None` once the frame is finished and all bytes have been consumed.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		if self.recover.is_none() {
+		if matches!(self.resume, Resume::None) {
 			return self.poll_read_chunk_once(waiter);
 		}
 		self.poll_resumed(waiter, Self::poll_read_chunk_once)
@@ -1805,7 +1832,7 @@ impl Consumer {
 	/// Return all remaining bytes once the frame is finished.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
-		if self.recover.is_none() {
+		if matches!(self.resume, Resume::None) {
 			return self.poll_read_all_once(waiter);
 		}
 		self.poll_resumed(waiter, Self::poll_read_all_once)

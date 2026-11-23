@@ -1149,9 +1149,10 @@ impl Slot {
 	}
 
 	/// Abort every copy this slot holds.
-	fn abort(&self, err: Error) {
+	fn abort(&self, abort: impl Into<group::Abort>) {
+		let abort = abort.into();
 		for group in self.copies() {
-			let _ = group.clone().abort(err.clone());
+			let _ = group.close_aborted(abort.clone());
 		}
 	}
 }
@@ -1729,14 +1730,14 @@ impl TrackState {
 			self.lost.expire(now, self.miss_grace());
 			self.lost.evicted(key, now);
 		}
-		self.evict_group(key, Error::Evicted);
+		self.evict_group(key, group::Abort::Evicted);
 	}
 
-	/// [`Self::uncache`] a servable group to free the cache and abort it with `err`, recording
+	/// [`Self::uncache`] a servable group to free the cache and abort it with `abort`, recording
 	/// it for the readers that judged it cached to judge again.
-	fn evict_group(&mut self, key: u64, err: Error) {
+	fn evict_group(&mut self, key: u64, abort: impl Into<group::Abort>) {
 		let slot = self.uncache(key).expect("a cached group");
-		slot.abort(err);
+		slot.abort(abort);
 		let landed = self
 			.inboxes
 			.get_mut()
@@ -5896,7 +5897,7 @@ impl Producer {
 	/// Evict group `key` from the cache, as expiry does.
 	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn evict(&self, key: u64) {
-		self.modify().unwrap().evict_group(key, Error::Evicted);
+		self.modify().unwrap().evict_group(key, group::Abort::Evicted);
 	}
 
 	/// The exclusive end, once [`Self::finish`] or [`Self::finish_at`] declared one.
@@ -13968,7 +13969,7 @@ mod test {
 					4 => {
 						let held = producer.state.read().lookup.range(start..).next().map(|(&key, _)| key);
 						if let Some(key) = held {
-							producer.modify().unwrap().evict_group(key, Error::Evicted);
+							producer.modify().unwrap().evict_group(key, group::Abort::Evicted);
 						}
 					}
 					// A group at the last key that can start one, past every time but the last.
@@ -25646,7 +25647,7 @@ mod test {
 				.unwrap();
 			newer.finish().unwrap();
 			if evict {
-				producer.modify().unwrap().evict_group(0, Error::Evicted);
+				producer.modify().unwrap().evict_group(0, group::Abort::Evicted);
 			}
 			let group = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
 				.await
@@ -31569,7 +31570,7 @@ mod test {
 
 	/// Take group `key` out of the cache as eviction does.
 	fn evict(producer: &Producer, key: u64) {
-		producer.modify().unwrap().evict_group(key, Error::Evicted);
+		producer.modify().unwrap().evict_group(key, group::Abort::Evicted);
 	}
 
 	/// A rewound first frame is refused and leaves the group as it was, so the publisher can
@@ -33797,7 +33798,7 @@ mod test {
 			.unwrap()
 			.uncache(0)
 			.unwrap()
-			.abort(Error::Evicted);
+			.abort(group::Abort::Evicted);
 		assert!(
 			!tails[0].handle().is_aborted(),
 			"the replaced delivery is held outside the Slot"
@@ -34227,7 +34228,7 @@ mod test {
 			.unwrap()
 			.uncache(0)
 			.unwrap()
-			.abort(Error::Evicted);
+			.abort(group::Abort::Evicted);
 		drop(live);
 		assert!(
 			identity.upgrade().is_some(),
@@ -34606,6 +34607,135 @@ mod test {
 			assert_eq!(read_numbered(&mut reader), Some(index));
 		}
 		drop(arriving);
+	}
+
+	/// A reader of a group evicted mid-frame, boarding a flight for the rest, needs nothing
+	/// from it once capped where it stands: its end and its reads stop there at once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_capped_while_boarding_ends_at_its_cap() {
+		let noop = kio::Waiter::noop();
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		live.write_frame(crate::Timestamp::unscaled(live.start), numbered(0))
+			.unwrap();
+		assert_eq!(read_numbered(&mut reader), Some(0));
+		let handle = live.handle();
+		let payload = numbered(1);
+		let mut arriving = live.create_frame(frame_info(&payload)).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		handle.shed_all();
+
+		assert!(reader.poll_finished(&noop).is_pending(), "boarding a flight");
+		let _fill = asked(&requests).expect("a flight is asked");
+		reader.end_at(1);
+		assert!(
+			matches!(reader.poll_finished(&noop), Poll::Ready(Ok(1))),
+			"the cap's end"
+		);
+		assert!(matches!(reader.poll_next_frame(&noop), Poll::Ready(Ok(None))));
+		drop(arriving);
+	}
+
+	/// A read or end waiting on the flight for a group evicted mid-frame gives up once the
+	/// reader's budget does: the evicted copy has no frame left for the budget to judge.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_wait_on_a_flight_ends_on_the_budget() {
+		for end_only in [false, true] {
+			let noop = kio::Waiter::noop();
+			let mut producer = track_producer("test", Info::timed());
+			let requests = producer.requests();
+			let mut subscriber = producer.subscribe(None);
+			let mut live = producer.append_next().unwrap();
+			live.write_frame(live.key_time(), numbered(0)).unwrap();
+			let mut reader = subscriber
+				.recv_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.expect("group 0");
+			assert_eq!(read_numbered(&mut reader), Some(0));
+			let handle = live.handle();
+			let payload = numbered(1);
+			let info = frame::Info {
+				size: payload.len() as u64,
+				timestamp: live.key_time(),
+			};
+			let mut arriving = live.create_frame(info).unwrap();
+			arriving.write(payload.slice(..2)).unwrap();
+			handle.shed_all();
+
+			let poll = |reader: &mut group::Consumer| match end_only {
+				true => reader.poll_finished(&noop).map(|res| res.map(drop)),
+				false => reader.poll_next_frame(&noop).map(|res| res.map(drop)),
+			};
+			assert!(poll(&mut reader).is_pending(), "boarding a flight");
+			let _fill = asked(&requests).expect("a flight is asked");
+			append_at(&mut producer, 1000);
+			assert!(
+				matches!(poll(&mut reader), Poll::Ready(Err(Error::Old))),
+				"end only: {end_only}"
+			);
+			drop(arriving);
+		}
+	}
+
+	/// A frame of a sparse copy, taken still arriving, ends with its copy's eviction: a
+	/// flight asks from the frame's ordinal, which names another Object on that copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_sparse_frame_evicted_while_arriving_asks_no_flight() {
+		let noop = kio::Waiter::noop();
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let live = producer.append_next().unwrap();
+		live.set_wire(group::Wire {
+			sparse: true,
+			first_object: true,
+			first_id: 0,
+			extensions: false,
+			has_end: false,
+			fetchable: true,
+			last: None,
+		})
+		.unwrap();
+		let mut reader = live.consume();
+		let handle = live.handle();
+		let payload = numbered(0);
+		let mut arriving = live.create_frame(frame_info(&payload)).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		let Poll::Ready(Ok(Some(mut frame))) = reader.poll_next_frame(&noop) else {
+			panic!("the arriving frame");
+		};
+		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(_)))));
+		handle.shed_all();
+
+		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Err(Error::Evicted))));
+		assert!(asked(&requests).is_none(), "no flight is asked");
+		drop(arriving);
+	}
+
+	/// Only the pool's eviction boards a flight, not an abort that merely carries its error.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_abort_with_the_eviction_error_asks_no_flight() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		live.write_frame(crate::Timestamp::unscaled(live.start), numbered(0))
+			.unwrap();
+		assert_eq!(read_numbered(&mut reader), Some(0));
+		live.abort(Error::Evicted).unwrap();
+
+		assert!(matches!(
+			reader.poll_finished(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Evicted))
+		));
+		assert!(asked(&requests).is_none(), "no flight is asked");
 	}
 
 	/// A late joiner of a live group that shed its front boards a flight from frame 0,

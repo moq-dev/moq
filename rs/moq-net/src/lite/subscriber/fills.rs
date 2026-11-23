@@ -506,8 +506,9 @@ impl RangeFills {
 		// A run stays asked whole while a fill still owes any of it, so the subscription
 		// changes once as a run is asked and once as it is done, and the streams of its
 		// answered groups keep arriving. One no fill owes stays while any of its streams is
-		// still being read, each group searched for once.
-		self.reading.retain(|_, group| group.poll_finished(waiter).is_pending());
+		// still being read, each group searched for once. The copy's own outcome says so: a
+		// reader's end would ask a flight for what the copy lacks, which nobody here reads.
+		self.reading.retain(|_, group| group.poll_closed(waiter).is_pending());
 		let edge = serving.consume();
 		let mut groups = ask.groups.clone();
 		let mut draining = RangeSet::new();
@@ -519,8 +520,8 @@ impl RangeFills {
 			// Only the groups the cache holds, so a wide run costs what it holds.
 			for gap in self.draining.gaps(run) {
 				for key in edge.cached_groups(gap) {
-					if let Some(mut group) = edge.peek_group(key)
-						&& group.poll_finished(waiter).is_pending()
+					if let Some(group) = edge.peek_group(key)
+						&& group.poll_closed(waiter).is_pending()
 					{
 						self.reading.insert(key, group);
 					}
