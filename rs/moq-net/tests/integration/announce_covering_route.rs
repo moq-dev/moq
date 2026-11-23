@@ -21,9 +21,11 @@ const SERVED: &str = ".dash";
 const REQUESTED: &str = ".dash/nobody";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Drain every event the cursor has pending, as `kind prefix` lines.
@@ -105,7 +107,7 @@ async fn remote_lite_peer_hears_the_covering_route() {
 async fn remote_ietf_peer_hears_the_covering_route() {
 	let mut expected = EXPECTED.to_vec();
 	expected.push("session open: true");
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		assert_eq!(covering(Some(version)).await, expected, "{version}");
 	}
 }

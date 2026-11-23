@@ -134,6 +134,18 @@ pub struct Config {
 	/// leaving each track's own window in force.
 	pub cache_duration: Option<Duration>,
 
+	/// Whether a moq-lite-07 session on this origin carries its peer's traffic to other
+	/// origins: off (the default), a peer is sent only the routes to this node's own
+	/// claims; on, the routes it learned from other peers too.
+	///
+	/// A relay turns it on. An application publishing its own broadcasts leaves it off,
+	/// so a peer never routes through it to reach anyone else. On a proxying origin, a
+	/// [`Link::Upstream`] session still gets routes learned from peers, just none from
+	/// other upstreams; a session that must forward nothing needs its own origin with
+	/// this off. Older versions advertise everything either way, since their hop chains
+	/// cannot tell this node's claims from what it forwards.
+	pub proxy: bool,
+
 	/// How long an announce cursor holds a changed route that arrived over a hop chain
 	/// before delivering it: a [`lite06_churn`] mitigation. A moq-lite-07 route and one
 	/// published here never wait.
@@ -191,6 +203,7 @@ impl Default for Config {
 			max_hops: MAX_HOP_LIMIT,
 			pool,
 			cache_duration: None,
+			proxy: false,
 			update_hold: DEFAULT_UPDATE_HOLD,
 		}
 	}
@@ -862,28 +875,17 @@ fn fnv(seed: u64, path: &str, bytes: impl IntoIterator<Item = u8>) -> u64 {
 	hash
 }
 
-/// The hash moq-lite-06 and earlier rank by. Its basis is theirs, so a relay on the
-/// previous release picks the same route as this one.
-fn fnv_key(path: &str, bytes: impl IntoIterator<Item = u8>) -> u64 {
-	fnv(0x420C0DECB00B, path, bytes)
-}
-
 /// The draft's Rendezvous Hash: standard FNV-1a 64 of the requested path, then the
 /// instance, which reads the same on every node, so every relay picks the same one.
 fn rendezvous(path: &str, instance: &Instance) -> u64 {
 	fnv(0xcbf2_9ce4_8422_2325, path, instance.as_str().bytes())
 }
 
-/// The hash that spreads a pool's instances over `path`s: the instance, unlike the hop
-/// chain, reads the same on every node, so every relay picks the same one.
+/// The hash that spreads a pool's named instances over `path`s: a named instance reads
+/// the same on every node, so every relay picks the same one. Its basis is
+/// `spreadHash`'s in `js/net`.
 fn instance_key(path: &str, instance: &Instance) -> u64 {
-	fnv_key(path, instance.as_str().bytes())
-}
-
-/// The hash that settles among the routes of one instance: their hop chains, so a node
-/// converges on one path rather than following each newer announcement of an equal one.
-fn chain_key(path: &str, hops: &Hops) -> u64 {
-	fnv_key(path, hops.iter().flat_map(|hop| hop.id().to_le_bytes()))
+	fnv(0x420C0DECB00B, path, instance.as_str().bytes())
 }
 
 /// The highest epoch each instance reaches among a set of candidates, per claim: an older
@@ -915,32 +917,55 @@ impl<'a> Epochs<'a> {
 	}
 }
 
-/// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]).
-/// Lower wins: first the route layer's narrowest route covering the claim, so a wider
-/// lite-07 route ranks below every narrowest one, even a draining or unavailable one, and
-/// serves only while a closing session leaves no narrowest route. Then a route that is
-/// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
-/// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
-/// every other eligible route and serves only as a last resort. Then the route layer's
-/// closest way to a broadcast ahead of its others ([`Lane::primary`]). Then the higher
-/// link [`Priority`], so metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
-/// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
-/// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
-/// of the instance and `path`, so every node converges on the same winner, then, among
-/// the routes of that instance, a hash of the chain, and finally the newest announcement,
-/// so a reconnect wins the moment it lands instead of after the transport retires the
-/// old session.
+/// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]): its
+/// [`route_rank`], then how a tie between equally ranked routes breaks, then the newest
+/// announcement. Lower wins. `path` is what is being resolved: the requested path for a
+/// request, the prefix itself for an advertisement.
 ///
-/// `path` is what is being resolved: the requested path for a request, the prefix
-/// itself for an advertisement. Keying the hash on the requested path is what
-/// spreads a pool of instances at one prefix: each path picks its own winner, rather
-/// than every path under the prefix hashing alike.
+/// A tie between two lite-07 claims goes by a rendezvous hash of the instance and `path`,
+/// then the node claiming it, as every node that knows the claim ranks it. Any other tie
+/// beneath `path` goes first by a hash of a named instance and `path`, which spreads a pool
+/// of instances at one prefix: each path picks its own winner, and a named instance reads
+/// alike on every node, so every node picks the same one. Then, between the routes of one
+/// instance, or of instances a session minted (which no other node shares, so a hash of
+/// them agrees with nothing), the route that has held its rank longest
+/// ([`RouteEntry::since`]): a route of equal rank that arrives later never displaces the
+/// one in use, which would restart it downstream, and in turn at every relay downstream
+/// that ranks it alike. When the route in use leaves, the next oldest takes over. The hop
+/// chain refuses loops, not this order, so keeping a route forms none.
 ///
-/// A route that entered here for exactly `path` is not hashed: no other node ranks
-/// it, so convergence does not need the hash, and a restarted publisher announces
-/// under a new instance, so a hash would keep its dead session winning half the time
-/// until the transport times out.
+/// A route that entered here for exactly `path` ties to the newest announcement: no other
+/// node ranks it, and a restarted publisher announces under a new instance, so the restart
+/// takes over at once instead of after the transport retires its old session.
 fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
+	let tie = match (entry.node, entry.link == Link::Local && entry.prefix == *path) {
+		(_, true) => (0, 0),
+		// Every node that knows the claim ranks its instance alike, and then the nodes
+		// claiming it: one publisher reaches several over several sessions.
+		(Some(node), false) => (rendezvous(path.as_str(), &entry.instance), node.relay),
+		(None, false) => match entry.instance.is_minted() {
+			true => (0, entry.since),
+			false => (instance_key(path.as_str(), &entry.instance), entry.since),
+		},
+	};
+	(route_rank(entry), tie, Reverse(entry.id))
+}
+
+/// The key [`route_order`] ranks an entry by: lower wins.
+type RouteOrder = (RouteRank, (u64, u64), Reverse<u64>);
+
+/// How good a route is, ties aside: lower wins. First the route layer's narrowest route
+/// covering the claim, so a wider lite-07 route ranks below every narrowest one, even a
+/// draining or unavailable one, and serves only while a closing session leaves no
+/// narrowest route. Then a route that is neither draining (see [`RouteInfo::draining`])
+/// nor unavailable (see [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held
+/// route ranks below every other eligible route and serves only as a last resort. Then the
+/// route layer's closest way to a broadcast ahead of its others ([`Lane::primary`]). Then
+/// the higher link [`Priority`], so metrics from different operators are never compared.
+/// Then an identified chain (no 0) outranks an anonymous one regardless of cost, then the
+/// cheapest cost, then a broadcast published on this origin (it serves what is here, not a
+/// claim that has to ask), then the shortest hop chain.
+fn route_rank(entry: &RouteEntry) -> RouteRank {
 	// A lite-07 claim ranks as the one hop to its origin node: the rest of its hops are
 	// the moq-lite-06 chain it carries only for loop detection and translation.
 	let (anonymous, hops) = match entry.node {
@@ -967,33 +992,11 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		entry.cost,
 		!entry.local,
 		hops,
-		match (entry.node, entry.link == Link::Local && entry.prefix == *path) {
-			(_, true) => (0, 0),
-			// Every node that knows the claim ranks its instance alike, and then the
-			// nodes claiming it: one publisher reaches several over several sessions.
-			(Some(node), false) => (rendezvous(path.as_str(), &entry.instance), node.relay),
-			(None, false) => (
-				instance_key(path.as_str(), &entry.instance),
-				chain_key(path.as_str(), &entry.hops),
-			),
-		},
-		Reverse(entry.id),
 	)
 }
 
-/// The key [`route_order`] ranks an entry by: lower wins.
-type RouteOrder = (
-	u8,
-	bool,
-	bool,
-	Reverse<Priority>,
-	bool,
-	Cost,
-	bool,
-	usize,
-	(u64, u64),
-	Reverse<u64>,
-);
+/// The key [`route_rank`] ranks an entry by: lower wins.
+type RouteRank = (u8, bool, bool, Reverse<Priority>, bool, Cost, bool, usize);
 
 /// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata
 /// an announce cursor delivers alongside a prefix.
@@ -1433,6 +1436,10 @@ impl OriginConsumerState {
 /// One announced route in the origin's table, absolute prefix.
 struct RouteEntry {
 	id: u64,
+	/// When the entry last became [live](Self::live), changed its [`route_rank`], or moved to
+	/// another instance or epoch, from the counter [`Self::id`] comes from: of equally ranked
+	/// routes, the one held longest keeps winning (see [`route_order`]).
+	since: u64,
 	/// The stream this route serves; see [`RouteInfo::instance`].
 	instance: Instance,
 	/// Which incarnation of the instance; see [`RouteInfo::epoch`].
@@ -2246,6 +2253,7 @@ fn hides(heads: &[Path], prefix: &Path) -> bool {
 
 /// What a [`Routes`] yields: how the route covering a prefix changed, and that route.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RouteEvent {
 	/// How the route changed.
 	pub kind: RouteKind,
@@ -2255,6 +2263,7 @@ pub struct RouteEvent {
 
 /// How the route covering a prefix changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteKind {
 	/// A route now covers the prefix; the cursor had none there.
 	Start,
@@ -2286,6 +2295,7 @@ pub enum RouteKind {
 /// [`Consumer::request`]; the application decides which paths name
 /// broadcasts, and filters with a [`Pattern`] locally when it wants a subset.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Announce {
 	/// The prefix the route covers, relative to the consuming cursor's root.
 	pub prefix: Path,
@@ -2335,7 +2345,7 @@ pub struct Producer {
 	// The rank of that link; see [`Self::with_priority`].
 	priority: Priority,
 
-	// Whether the consumers taken from this handle proxy; see [`Self::with_proxy`].
+	// Whether this origin forwards; see [`Config::proxy`].
 	proxy: bool,
 
 	// Submission handle to the origin's [`Driver`]: source watchers, fronts, and
@@ -2379,7 +2389,7 @@ impl Producer {
 			stats: stats::Session::default(),
 			link: Link::Local,
 			priority: Priority::default(),
-			proxy: false,
+			proxy: config.proxy,
 			tasks,
 			timers: timers.clone(),
 			frames: Default::default(),
@@ -2451,21 +2461,7 @@ impl Producer {
 		self
 	}
 
-	/// Whether a moq-lite-07 session publishing through a consumer of this handle (and
-	/// of any handle derived from it) carries its peer's traffic to other origins: off,
-	/// the peer is sent only the routes to this node's own claims; on, the routes it
-	/// learned from other peers too.
-	///
-	/// A relay turns it on for every session. An application publishing its own
-	/// broadcasts leaves it off, so a peer never routes through it to reach anyone
-	/// else. Older versions advertise everything either way, since their hop chains
-	/// cannot tell this node's claims from what it forwards.
-	pub fn with_proxy(mut self, proxy: bool) -> Self {
-		self.proxy = proxy;
-		self
-	}
-
-	/// Whether this handle forwards what it learns; see [`Self::with_proxy`].
+	/// Whether this origin forwards what it learns; see [`Config::proxy`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn proxy(&self) -> bool {
 		self.proxy
@@ -2498,6 +2494,7 @@ impl Producer {
 			max_hops: self.max_hops,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
+			proxy: self.proxy,
 			update_hold: shared.update_hold,
 		}
 	}
@@ -3123,6 +3120,7 @@ impl Announcing {
 			};
 			shared.routes.insert(RouteEntry {
 				id,
+				since: id,
 				instance,
 				epoch,
 				prefix: prefix.clone(),
@@ -3743,10 +3741,13 @@ impl AnnounceProducer {
 			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
 			let lent = lender.and_then(|server| shared.lender(prefix, server));
+			let stamp = shared.next_route;
+			shared.next_route += 1;
 			// Each entry keeps its advertised prefix; only the metadata moves.
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				return Err(Error::Closed);
 			};
+			let held = (entry.live(), route_rank(entry), entry.instance.clone(), entry.epoch);
 			let next = match &lent {
 				Some(lent) => Some((lent.instance.clone(), lent.epoch)),
 				None => route.instance.clone().map(|instance| (instance, route.epoch)),
@@ -3786,6 +3787,9 @@ impl AnnounceProducer {
 			entry.available = route.available;
 			entry.marked = route.marked;
 			entry.advertised = true;
+			if held != (true, route_rank(entry), entry.instance.clone(), entry.epoch) {
+				entry.since = stamp;
+			}
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
 			if let Some(((lender, lender_id), instance)) = spent {
@@ -6651,6 +6655,11 @@ impl OriginState {
 			if entry.stale != stale {
 				entry.stale = stale;
 				changed = Some(entry.claim.clone());
+				// Back in contention, it ranks as newly arrived.
+				if entry.live() {
+					entry.since = self.next_route;
+					self.next_route += 1;
+				}
 			}
 		}
 		if let Some(claim) = changed {
@@ -7751,8 +7760,7 @@ pub struct Consumer {
 	// for a session serving its peer (see `Self::serving`).
 	interested: bool,
 
-	// Whether a lite-07 session publishing through this handle sends its peer the
-	// routes this node learned from other peers (see `Self::with_proxy`).
+	// Whether this origin forwards; see [`Config::proxy`].
 	proxy: bool,
 
 	// The cache policy remote fronts inherit, mirroring what
@@ -7880,8 +7888,7 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		// A relay forwards on every handle (`with_proxy`), and an application on none, so
-		// the creating handle speaks for the origin here, as for `OwnClaims::proxy`.
+		// Whether the origin forwards is fixed in its config, so every handle agrees here.
 		let node = crate::route::Node::origin(self.node(), self.proxy, self.timers.clone());
 		let claims = OwnClaims {
 			routes: own(false).routes(),
@@ -7918,8 +7925,8 @@ impl Consumer {
 		created
 	}
 
-	/// Whether this handle carries its peer's traffic to other origins, taken from
-	/// the [`Producer::with_proxy`] it was consumed from.
+	/// Whether this origin carries its peer's traffic to other origins; see
+	/// [`Config::proxy`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn proxy(&self) -> bool {
 		self.proxy
@@ -10581,8 +10588,6 @@ mod tests {
 	async fn spread_hash_matches_js() {
 		assert_eq!(instance_key("pool/job-0", &"a".parse().unwrap()), 0x3df8f75a44f8eefb);
 		assert_eq!(instance_key("pool/job-0", &"b".parse().unwrap()), 0x3df8f85a44f8f0ae);
-		assert_eq!(chain_key("pool/job-0", &hops(&[10])), 0xefb5e20a66101c32);
-		assert_eq!(chain_key("pool/job-0", &hops(&[11])), 0x0eb0a91370ff6653);
 	}
 
 	/// Pinned so `js/net` breaks a tie between lite-07 claims as this does: by the
@@ -10850,6 +10855,67 @@ mod tests {
 		request.serve(&second);
 		let replaced = pending.await.expect("the replacement resolves");
 		assert!(!replaced.is_clone(&resolved));
+	}
+
+	/// A peer route that arrives after an equally ranked one in use never displaces it,
+	/// whichever hashes lower: neither between the instances two sessions minted for one
+	/// broadcast (moq-lite-06 carries none), nor between two chains of one named instance.
+	/// It takes over only when the route in use leaves or ranks worse, and keeps the tie
+	/// when that one recovers.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_equal_route_keeps_the_one_in_use() {
+		for minted in [true, false] {
+			let named = instance();
+			for job in 0..16 {
+				let path = format!("pool/job-{job}");
+				let producer = Config {
+					update_hold: Duration::ZERO,
+					..Config::from(origin(1))
+				}
+				.produce();
+				let consumer = producer.consume();
+				let mut announced = consumer.routes();
+				let peer = producer.clone().with_link(Link::Peer);
+				let instances = match minted {
+					true => [Instance::minted(), Instance::minted()],
+					false => [named.clone(), named.clone()],
+				};
+				let route = |hop: u64| {
+					let instance = instances[usize::from(hop == 11)].clone();
+					RouteInfo::new().with_instance(instance, 0).with_hops(hops(&[hop]))
+				};
+				let resolved = || {
+					let table = producer.shared.read();
+					let path = Path::new(&path).unwrap();
+					let entry = table.best_route(&path, Horizon::default(), &HashSet::new(), |_| true);
+					entry.map(|entry| entry.hops.clone())
+				};
+
+				let first = peer.forward(path.as_str(), route(10)).unwrap();
+				assert_eq!(announced.expect_next_active(path.as_str()).await.hops, hops(&[10]));
+				let second = peer.forward(path.as_str(), route(11)).unwrap();
+				announced.assert_next_wait();
+				assert_eq!(resolved(), Some(hops(&[10])), "{path}: the later route took requests");
+
+				// The one in use ranks worse: the other takes over, and keeps the tie once
+				// the first recovers.
+				first.update(route(10).with_cost(2)).unwrap();
+				let moved = announced.expect_next().await;
+				assert_eq!(moved.announce.route.hops, hops(&[11]), "{path}: {moved:?}");
+				first.update(route(10)).unwrap();
+				announced.assert_next_wait();
+				assert_eq!(
+					resolved(),
+					Some(hops(&[11])),
+					"{path}: the recovered route took requests"
+				);
+
+				drop(second);
+				assert_eq!(announced.expect_next().await.announce.route.hops, hops(&[10]));
+				drop(first);
+			}
+		}
 	}
 
 	/// A publisher that restarts while its old session lingers announces its own path under
@@ -11922,12 +11988,12 @@ mod tests {
 
 	/// A route node already fed by its driver still answers a new stream with the table as
 	/// it stands, including a claim announced since the driver last ran, whichever handle
-	/// created it: one scoped away from the claim, upstream, proxying, and hiding hidden
+	/// created it: one scoped away from the claim, upstream, and hiding hidden
 	/// routes sees the whole table all the same.
 	#[test]
 	fn the_route_node_answers_with_the_table_as_it_stands() {
 		let producer = origin(1).produce();
-		(producer.clone().with_link(Link::Upstream).with_proxy(true).consume())
+		(producer.clone().with_link(Link::Upstream).consume())
 			.scope("elsewhere", &Prefixes::all())
 			.unwrap()
 			.with_hidden(false)

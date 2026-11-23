@@ -27,9 +27,11 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes, over a new session.
@@ -99,6 +101,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => {
 			assert_eq!(announce.prefix.as_str(), "cam");
 			let carried = announce.route.instance();
@@ -141,6 +144,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		Some(origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		}) => assert_eq!(announce.prefix.as_str(), "cam"),
 		other => panic!("{version}: expected the restart, got {other:?}"),
 	}
@@ -181,7 +185,7 @@ async fn carried_lite07() {
 /// does over older lite.
 #[kio::test]
 async fn minted_ietf() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, replace(version, Some("cam".parse().unwrap())))
 			.await
 			.expect("timed out");
@@ -311,7 +315,7 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 
 #[kio::test]
 async fn restart_while_the_old_session_lingers_wins() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		for (old_hop, new_hop) in [(1, 4), (4, 1)] {
 			kio::clock::timeout(
 				TEST_TIMEOUT,

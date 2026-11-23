@@ -19,14 +19,12 @@ const PEER: NodeId = NodeId {
 };
 
 fn subscriber() -> (Subscriber, crate::origin::Consumer) {
-	super::super::tests::restart_subscriber(SinkSession::new(Default::default()))
+	super::super::tests::restart_subscriber(SinkSession::new(Default::default()), false)
 }
 
 /// A subscriber whose origin forwards, as a relay's does.
 fn forwarding() -> (Subscriber, crate::origin::Consumer) {
-	let (mut subscriber, consumer) = subscriber();
-	subscriber.origin = subscriber.origin.with_proxy(true);
-	(subscriber, consumer)
+	super::super::tests::restart_subscriber(SinkSession::new(Default::default()), true)
 }
 
 /// The peer's route to `node`, which it reaches itself or through the hops after it.

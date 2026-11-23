@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
 						announce::Event::Absent(update) => {
 							tracing::warn!(broadcast = %update.prefix, "broadcast ended, waiting...");
 						}
+						_ => {}
 					},
 					res = reconnect.closed() => return Ok(res?),
 					// Drops the previous subscriber on each new announce.

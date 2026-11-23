@@ -152,8 +152,6 @@ winit = { version = "0.30.13", optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
-# Decodes the interop matrix's audio tone (the `interop-audio` example).
-moq-audio = { path = "../moq-audio" }
 # `test_relay` stands up a real relay for the `fetch` and `announced` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 # The scripted RTSP server `import rtsp` pulls from.
@@ -181,38 +179,6 @@ libc = { workspace = true }
 [[bench]]
 name = "play_buffer"
 harness = false
-
-[[example]]
-name = "interop-tail"
-path = "../../test/interop/clients/rust/tail.rs"
-
-[[example]]
-name = "interop-catalog"
-path = "../../test/interop/clients/rust/catalog.rs"
-
-[[example]]
-name = "interop-goaway"
-path = "../../test/interop/clients/rust/goaway.rs"
-
-[[example]]
-name = "interop-control"
-path = "../../test/interop/clients/rust/control.rs"
-
-[[example]]
-name = "interop-goaway-client"
-path = "../../test/interop/clients/rust/goaway-client.rs"
-
-[[example]]
-name = "interop-finish"
-path = "../../test/interop/clients/rust/finish.rs"
-
-[[example]]
-name = "interop-hls"
-path = "../../test/interop/clients/rust/hls.rs"
-
-[[example]]
-name = "interop-audio"
-path = "../../test/interop/clients/rust/audio.rs"
 
 [lints]
 workspace = true

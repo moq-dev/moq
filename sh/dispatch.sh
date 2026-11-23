@@ -9,8 +9,14 @@
 # CHECK_TIMES=FILE also writes each phase's wall seconds, CPU milliseconds, and
 # label there, one per line, ending with the whole run's.
 # `--query` prints the selection before CI installs its toolchain and caches.
+# A local check skips a `memo` module's phase that last passed in this worktree
+# on the same inputs; CHECK_RERUN=1 runs it anyway. CI never skips one.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
+
+# The environment as the caller passed it, for the memo below. Taken first: the
+# dev shell exports names such as `name` and `phases` that this script reuses.
+inherited=$(export -p)
 
 usage="usage: sh/dispatch.sh check|fix|ci [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
@@ -75,7 +81,13 @@ fi
 #   alone           Its lane runs with no other lane beside it, so it waits for
 #                   the rest.
 #   fix             `just fix` runs it too; check and ci run every module.
-declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=()
+#   memo            A local check skips a phase of it that passed before in this
+#                   worktree when no file in the working tree, nor the diff, its
+#                   tools, or the environment, changed since (see memo_key). It
+#                   is for modules that cost minutes even on a rerun: Rust's
+#                   tests, and its builds once mbx evicts an idle worktree's
+#                   target directory.
+declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=() memo=()
 checks=()
 fixes=()
 module() {
@@ -91,6 +103,7 @@ module() {
             lane=*) lane[$name]=${option#lane=} ;;
             alone) solo=1 ;;
             fix) fixes+=("$name") ;;
+            memo) memo[$name]=1 ;;
             *)
                 echo "error: module $name has an unknown option '$option'" >&2
                 exit 2
@@ -119,14 +132,14 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # which sh/rs/reads.sh lists and select.test.py holds this scope to, come
 # last: the relay's configs, unit, and NixOS module, the scripts the tests
 # run, and the vectors the tests share with JS and the docs.
-module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
-    tools='cargo jq cc' compiles='check fix' fix
+module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/(nextest|hakari)\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
+    tools='cargo jq cc' compiles='check fix' fix memo
 # Clippy for macOS and Windows over rs's selection, so a platform-gated error
 # fails here rather than in the nightly native lanes. The flake pins its
 # toolchain and the zig that compiles its build scripts' C, so a change there
 # lints the whole workspace (see sh/rs/select.sh).
 module rs_cross "${scope[rs]%)}|flake\.(nix|lock)$)" \
-    tools='cargo jq nix zig' compiles=check
+    tools='cargo jq nix zig' compiles=check memo
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
 # from. The pinned crate2nix comes from flake.lock.
@@ -186,7 +199,7 @@ module carla '^demo/carla/(sim/|justfile$)' \
 # rs/, narrowed after the tool check to the crates it path-depends on, so their
 # API changes compile it while other rs/ changes skip it.
 module carla_bridge '^(\.cargo/config\.toml$|Cargo\.toml$|clippy\.toml$|rust-toolchain\.toml$|demo/carla/(bridge/|justfile$)|rs/)' \
-    tools='cargo jq' compiles='check fix' fix
+    tools='cargo jq' compiles='check fix' fix memo
 # Reads the bridge's manifest and the root workspace's, so it needs cargo and
 # runs only after setup. Dev-dependencies of the crates it reaches never build
 # into it, so they are left out.
@@ -574,6 +587,76 @@ lane_cpu() {
     done
 }
 
+# A tree of the working tree as `git add -A` would stage it, tracked and new
+# files alike, written without touching the real index.
+# Errexit does not reach into a command substitution, so it is set here.
+snapshot() (
+    set -e
+    index=$(mktemp "$logs/index.XXXXXX")
+    trap 'rm -f "$index"' EXIT
+    cat "$(git rev-parse --git-path index)" >"$index"
+    GIT_INDEX_FILE=$index git add -A
+    GIT_INDEX_FILE=$index git write-tree
+)
+
+# A hash of everything one phase of a module could read, from a snapshot: the
+# whole working tree, not the files its pattern matches, since a phase reads
+# more than selects it (moq-net's unit tests run test/interop's scripts, which
+# import js/), and no list of those reads stays complete. Beside the tree: the
+# diff, which picks the crates a phase covers, its tools, and the environment.
+# Every exported variable counts but the shell's and systemd's per-run
+# bookkeeping (`quest gate` runs a command as a systemd unit) and the
+# dispatcher's own CHECK_* controls, so an unforeseen one that steers a build or
+# a test can only cost a rerun. Ignored files are left out: what they hold, such
+# as node_modules, follows from tracked ones like bun.lock.
+memo_key() (
+    set -e
+    phase=$1 module=$2 tree=$3
+    {
+        echo "$phase $module $tree ${all:+all}"
+        [[ -n "$all" ]] || cat "$changed"
+        grep -Ev '^declare -x (PWD|OLDPWD|SHLVL|_|INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_EXEC_PID|MANAGERPID|CHECK_[A-Za-z0-9_]*)(=|$)' <<<"$inherited"
+        read -ra list <<<"${tools[$module]}"
+        tool_identity "${list[@]}"
+    } | git hash-object --stdin
+)
+
+# What each tool resolves to. A Nix store path names its contents; any other
+# binary, such as a shim or a distribution's compiler, is hashed, since an
+# upgrade replaces it in place. Cargo brings the toolchain it drives, which a
+# rustup shim hides behind the same file, so rustc reports its own version.
+tool_identity() (
+    set -e
+    for tool in "$@"; do
+        [[ "$tool" != cargo ]] || set -- "$@" rustc rustdoc clippy-driver cargo-nextest
+    done
+    for tool in "$@"; do
+        if ! path=$(command -v "$tool"); then
+            echo "$tool absent"
+            continue
+        fi
+        path=$(realpath "$path")
+        case "$path" in
+            /nix/store/*) echo "$tool $path" ;;
+            *) echo "$tool $path $(git hash-object --no-filters "$path")" ;;
+        esac
+    done
+    if [[ " $* " == *" rustc "* ]] && command -v rustc >/dev/null; then
+        rustc -vV
+    fi
+)
+
+# The phases a module runs for this verb: a check also runs the tests of the
+# modules that have them.
+phases_of() {
+    phases=("$verb")
+    if [[ "$verb" == check ]]; then
+        case "$1" in
+            rs | js | py) phases+=(test) ;;
+        esac
+    fi
+}
+
 # Run one lane's modules in order, appending each phase's wall seconds and CPU
 # milliseconds to the lane's times file and announcing each phase's start and
 # end on fd 3. A failed phase skips the rest of that module, but independent
@@ -587,12 +670,7 @@ run_lane() {
     lane_status=0
     trap 'stop; cancelled; exit 143' TERM
     for module in "$@"; do
-        phases=("$verb")
-        if [[ "$verb" == check ]]; then
-            case "$module" in
-                rs | js | py) phases+=(test) ;;
-            esac
-        fi
+        phases_of "$module"
         for phase in "${phases[@]}"; do
             current="$phase $module"
             began=$SECONDS
@@ -600,6 +678,14 @@ run_lane() {
             cpu_began=$cpu
             if github; then echo "::group::$current"; else echo "==> $current"; fi
             echo "$action: $current started" >&3
+            key=${keys["$phase $module"]:-}
+            if [[ -n "$key" && -z "${CHECK_RERUN:-}" && -f "$memo_dir/$phase-$module" &&
+                "$(<"$memo_dir/$phase-$module")" == "$key" ]]; then
+                echo "$action: $current passed on these same inputs; skipping it (CHECK_RERUN=1 runs it)"
+                record unchanged
+                current=
+                continue
+            fi
             # A job, as `run` explains; errexit stays on inside it. Untrapped,
             # the phase would die on TERM at once, orphaning its commands.
             # Trapped, it exits once they do, so a cancel returns only after
@@ -621,6 +707,7 @@ run_lane() {
                 break
             fi
             if ((status)); then
+                [[ -z "$memo_dir" || ! -v "memo[$module]" ]] || rm -f "$memo_dir/$phase-$module"
                 record failed
                 ((lane_status)) || lane_status=$status
                 current=
@@ -629,6 +716,13 @@ run_lane() {
             fi
             record
             current=
+            # Recorded only when nothing it reads changed while it ran.
+            if [[ -n "$key" ]] && after=$(snapshot) && after=$(memo_key "$phase" "$module" "$after") &&
+                [[ "$after" == "$key" ]]; then
+                mkdir -p "$memo_dir"
+                echo "$key" >"$memo_dir/$phase-$module.$BASHPID"
+                mv -f "$memo_dir/$phase-$module.$BASHPID" "$memo_dir/$phase-$module"
+            fi
         done
     done
     return "$lane_status"
@@ -686,6 +780,61 @@ cancel() {
 }
 
 logs=$(mktemp -d)
+
+# The memo lives in this worktree's git directory, so it goes with the worktree.
+# CI and `just ci` (CI_STRICT) always run every phase.
+# Each memo phase's key is taken here, before any phase runs, where errexit
+# stops the run if one cannot be computed. Only a local check reads or writes
+# a pass, and CHECK_RERUN=1 only writes one; any local run, `just ci` included,
+# forgets the pass of a phase that fails, so a flaky failure is never skipped.
+memo_dir=
+tree=
+declare -A keys=()
+if [[ -z "${GITHUB_ACTIONS:-}" ]]; then
+    for module in "${selected[@]}"; do
+        [[ -v "memo[$module]" ]] || continue
+        memo_dir=$(git rev-parse --path-format=absolute --git-path moq-check)
+        [[ "$action" == check && -z "${CI_STRICT:-}" ]] || break
+        [[ -n "$tree" ]] || tree=$(snapshot)
+        phases_of "$module"
+        for phase in "${phases[@]}"; do
+            keys["$phase $module"]=$(memo_key "$phase" "$module" "$tree")
+        done
+    done
+fi
+# Prints the process tree under PID, one indented line per process.
+processes() {
+    local -A kids=() lines=()
+    local pid ppid row
+    while read -r pid ppid row; do
+        kids[$ppid]+=" $pid"
+        lines[$pid]=$row
+    done < <(ps -A -o pid= -o ppid= -o etime= -o args=)
+    walk() {
+        local each
+        printf '%*s%s %.240s\n' "$2" '' "$1" "${lines[$1]-}"
+        for each in ${kids[$1]-}; do walk "$each" $(($2 + 2)); done
+    }
+    walk "$1" 0
+}
+
+# A TERM is a cancel or a job timeout, and those come when a lane hangs, whose
+# output would otherwise die with it in its buffer. So before stopping the
+# lanes, print each running lane's processes and buffered output, naming what
+# it waits on. This comes first because a runner kills the job seconds after
+# its TERM, so each log prints only its tail, whose last lines name the wait.
+# An INT is a local Ctrl-C, which needs neither.
+stopped() {
+    local pid name
+    for pid in "${!running[@]}"; do
+        name=${running[$pid]}
+        if github; then echo "::error::$action: lane $name was still running"; else echo "$action: lane $name was still running" >&2; fi
+        processes "$pid"
+        tail -c 65536 "$logs/$name.log"
+        ! github || echo "::endgroup::"
+    done
+}
+
 declare -A running=()
 lone=
 next=0
@@ -696,14 +845,14 @@ failed_status=0
 # trap already ran; the next wait blocks until every lane has exited.
 trap 'cancel; until wait; do :; done; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
 trap 'exit 130' INT
-trap 'exit 143' TERM
+trap '((limit == 1)) || stopped; exit 143' TERM
 
 # Each lane runs in its own process group, so a cancel reaches its whole tree;
 # a lane shell stops its running phase and waits for it before it exits.
 # Concurrent lanes buffer their output and print it whole when they finish; a
 # serial run streams instead. A buffered lane still announces each phase on the
-# run's stderr as it starts and ends, so a run cut off mid-phase, such as by a
-# job timeout that never reaches this script, names the phase it stopped in.
+# run's stderr as it starts and ends, so even a run killed mid-phase without a
+# signal it traps names the phase it stopped in.
 # Every lane completes even when another fails, so one unavailable check cannot
 # hide unrelated failures; under CHECK_FAIL_FAST the first failure cancels the
 # running lanes and starts no more.

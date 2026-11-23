@@ -86,6 +86,15 @@ impl Skipped {
 		widened
 	}
 
+	/// Whether `key` is skipped under a budget narrower than `budget`, which widening to it
+	/// offers again.
+	pub fn widens(&self, key: u64, budget: Duration) -> bool {
+		self.0
+			.as_ref()
+			.and_then(|skipped| skipped.runs.get(&key))
+			.is_some_and(|judged| *judged < budget)
+	}
+
 	/// Whether no run is recorded.
 	pub fn is_empty(&self) -> bool {
 		self.0.as_ref().is_none_or(|skipped| skipped.runs.is_empty())

@@ -19,7 +19,7 @@ use crate::{Color, Device, Error, Frame, FrameRate, Size};
 /// (VideoToolbox on macOS and iOS today). Building an [`Encoder`] returns
 /// [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode the
 /// requested codec on this machine.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Codec {
 	/// H.264 / AVC, Annex-B with in-band SPS/PPS, published as avc3 with no
@@ -33,6 +33,14 @@ pub enum Codec {
 }
 
 impl Codec {
+	/// The codec's lowercase name, such as `h264`.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::H264 => "h264",
+			Self::H265 => "h265",
+		}
+	}
+
 	/// What this codec needs against H.264 for the same picture, which scales the default cap.
 	fn bitrate_scale(self) -> f64 {
 		match self {
@@ -184,6 +192,23 @@ pub struct Config {
 	/// How the encoder trades latency for compression. Defaults to
 	/// [`Preset::LowLatency`].
 	pub preset: Preset,
+	/// The finest quantizer (0-51, lower is finer) the rate control may pick.
+	/// `None` (the default) keeps the backend's own floor, which keeps quality
+	/// constant under the cap, so a calm scene spends less than it rather than
+	/// buying detail no one sees: 22 for openh264, 25 (H.264) or 23 (H.265) for
+	/// VideoToolbox.
+	///
+	/// Lower it to let the rate control code a picture finer when the cap
+	/// allows, or set `Some(0)` for no floor beyond the codec's own (openh264
+	/// never codes finer than 12). What that costs depends on the content: a
+	/// detailed calm scene spends more of the cap, while very simple content
+	/// can come out smaller and cheaper to encode and decode. Values above 51
+	/// act as 51. [`Applied`]'s controls name the floor that took effect.
+	///
+	/// openh264 and VideoToolbox read it; VideoToolbox before macOS 13 and iOS
+	/// 16 has no floor at all. The other backends keep their own quality
+	/// controls, tuned per device.
+	pub qp_floor: Option<u8>,
 	/// The color space of the input frames, written into the bitstream's VUI so a
 	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
 	/// what the crate's own RGB conversions produce and what a player falls back
@@ -239,6 +264,7 @@ impl Config {
 			codec: Codec::default(),
 			kind: Kind::Auto,
 			preset: Preset::default(),
+			qp_floor: None,
 			color: None,
 			resize: None,
 			#[cfg(target_os = "linux")]

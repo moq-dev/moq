@@ -24,10 +24,11 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn read_all(group: &mut group::Consumer) -> moq_net::Result<Vec<Vec<u8>>> {
@@ -378,7 +379,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 /// downstream, rather than wait on a head that is never coming.
 #[kio::test]
 async fn rejoin_goes_live_without_the_join_head() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
@@ -692,7 +693,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 /// the empty block the second one carries.
 #[kio::test]
 async fn rejoin_keeps_source_timestamps() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let client = produce_origin(2);

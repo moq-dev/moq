@@ -70,9 +70,11 @@ fn requests(transport: &support::mock::MockSession) -> usize {
 }
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A server publishing `a/x` and `b/y`, and a client fed into `subscriber` asking
@@ -156,15 +158,18 @@ async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
 				announce,
+				..
 			} => seen.push(announce.prefix.to_string()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
+				..
 			} => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	seen.sort();
@@ -486,7 +491,7 @@ async fn an_unwatched_missing_path_is_unroutable_after_sync() {
 }
 
 /// Every moq-transport draft. These read what arrived once everything in flight has.
-const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const IETF: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 /// Apply what `announced` reports once everything in flight has arrived to `held`, and
 /// say whether any of it ended a prefix.
@@ -498,10 +503,12 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
 				announce,
+				..
 			} => held.push(announce.prefix.to_string()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
+				..
 			} => {
 				ended = true;
 				held.retain(|prefix| *prefix != announce.prefix.as_str())
@@ -510,6 +517,7 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 				kind: origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	held.sort();

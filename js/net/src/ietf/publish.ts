@@ -119,13 +119,15 @@ export class Publish {
 	}
 }
 
-/** PUBLISH_DONE status codes this implementation distinguishes. Stable across drafts 18 through 22. */
+/** PUBLISH_DONE status codes this implementation distinguishes. Stable across drafts 18 through 22; draft-23 adds EXPIRED_AUTH_TOKEN. */
 export const PublishDoneStatus = {
 	INTERNAL_ERROR: 0x0,
 	UNAUTHORIZED: 0x1,
 	TRACK_ENDED: 0x2,
 	/** Unassigned in draft-22. */
 	SUBSCRIPTION_ENDED: 0x3,
+	/** The subscription's authorization token expired. Registered from draft-23 (section 12.4). */
+	EXPIRED_AUTH_TOKEN: 0x7,
 	UPDATE_FAILED: 0x8,
 	/** A relay found the track malformed, so it ended every subscription to it. */
 	MALFORMED_TRACK: 0x12,

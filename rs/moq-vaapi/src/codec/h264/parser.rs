@@ -789,7 +789,7 @@ pub struct Sps {
 
 	// Calculated
 	/// Same as ExpectedDeltaPerPicOrderCntCycle, see 7-12 in the specification.
-	pub expected_delta_per_pic_order_cnt_cycle: i32,
+	pub expected_delta_per_pic_order_cnt_cycle: i64,
 
 	pub vui_parameters_present_flag: bool,
 	pub vui_parameters: VuiParams,
@@ -1810,7 +1810,8 @@ impl Parser {
 
 		for j in 0..scaling_list.as_mut().len() {
 			if next_scale != 0 {
-				let delta_scale = r.read_se::<i32>()?;
+				// 7.4.2.1.1.1 bounds it, which keeps the sum below from overflowing.
+				let delta_scale = r.read_se_bounded::<i32>(-128, 127)?;
 				next_scale = ((last_scale as i32 + delta_scale + 256) % 256) as u8;
 				*use_default = j == 0 && next_scale == 0;
 				if *use_default {
@@ -2101,14 +2102,14 @@ impl Parser {
 			sps.delta_pic_order_always_zero_flag = r.read_bit()?;
 			sps.offset_for_non_ref_pic = r.read_se()?;
 			sps.offset_for_top_to_bottom_field = r.read_se()?;
-			sps.num_ref_frames_in_pic_order_cnt_cycle = r.read_ue_max(254)?;
+			sps.num_ref_frames_in_pic_order_cnt_cycle = r.read_ue_max(255)?;
 
-			let mut offset_acc = 0;
+			// (7-12) in the spec, which bounds only the order counts derived
+			// from it, so it is kept wide: 255 `i32` offsets never overflow an `i64`.
+			let mut offset_acc: i64 = 0;
 			for i in 0..usize::from(sps.num_ref_frames_in_pic_order_cnt_cycle) {
 				sps.offset_for_ref_frame[i] = r.read_se()?;
-
-				// (7-12) in the spec.
-				offset_acc += sps.offset_for_ref_frame[i];
+				offset_acc += i64::from(sps.offset_for_ref_frame[i]);
 			}
 
 			sps.expected_delta_per_pic_order_cnt_cycle = offset_acc;
@@ -2669,5 +2670,82 @@ impl Header for NaluHeader {
 
 	fn len(&self) -> usize {
 		1
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::Cursor;
+
+	use super::*;
+	use crate::codec::h264::synthesizer::Synthesizer;
+
+	/// Writes `sps` as a NAL unit and parses it back.
+	fn round_trip(sps: &Sps) -> Result<Rc<Sps>, String> {
+		let mut bytes = Vec::new();
+		Synthesizer::<Sps, _>::synthesize(3, sps, &mut bytes, true).map_err(|e| e.to_string())?;
+		let nalu = Nalu::next(&mut Cursor::new(&bytes[..]))?;
+		Parser::default().parse_sps(&nalu).cloned()
+	}
+
+	/// 7.4.2.1.1.1: a scaling list delta outside its range fails the SPS.
+	#[test]
+	fn a_scaling_delta_out_of_range_fails() {
+		let parse = |code| {
+			let mut list = [0u8; 1];
+			let bits = crate::bitstream_utils::exp_golomb(code);
+			Parser::parse_scaling_list(&mut BitReader::new(&bits, false), &mut list, &mut false).map(|()| list[0])
+		};
+		// Deltas of 127 and -128 from the initial 8.
+		assert_eq!(parse(253), Ok(135));
+		assert_eq!(parse(256), Ok(136));
+		// i32::MAX, which once overflowed the sum.
+		assert!(parse(u32::MAX - 2).is_err());
+		// 128 and -129.
+		assert!(parse(255).is_err());
+		assert!(parse(258).is_err());
+	}
+
+	/// Scaling lists whose steps span more than 127 survive a round trip, the
+	/// synthesizer writing each delta modulo 256 within the parser's bound.
+	#[test]
+	fn wide_scaling_lists_round_trip() {
+		let mut sps = Sps {
+			profile_idc: 100,
+			chroma_format_idc: 1,
+			frame_mbs_only_flag: true,
+			seq_scaling_matrix_present_flag: true,
+			..Default::default()
+		};
+		let alternating: [u8; 16] = std::array::from_fn(|i| if i % 2 == 0 { 255 } else { 1 });
+		// A repeated tail of 255, and steps of 254 both ways.
+		sps.scaling_lists_4x4[0] = [255; 16];
+		sps.scaling_lists_4x4[1] = alternating;
+		let parsed = round_trip(&sps).expect("the SPS parses");
+		assert_eq!(parsed.scaling_lists_4x4[0], [255; 16]);
+		assert_eq!(parsed.scaling_lists_4x4[1], alternating);
+	}
+
+	/// (7-12): the cycle's sum is kept whole, whatever range its prefixes or it
+	/// reach, since only the order counts derived from it must fit an `i32`, and
+	/// a cycle may hold the full 255 offsets.
+	#[test]
+	fn the_cycle_sum_is_kept_whole() {
+		let cycle = |offsets: &[i32]| {
+			let mut sps = Sps {
+				profile_idc: 66,
+				chroma_format_idc: 1,
+				frame_mbs_only_flag: true,
+				pic_order_cnt_type: 1,
+				num_ref_frames_in_pic_order_cnt_cycle: offsets.len() as u8,
+				..Default::default()
+			};
+			sps.offset_for_ref_frame[..offsets.len()].copy_from_slice(offsets);
+			round_trip(&sps).map(|sps| sps.expected_delta_per_pic_order_cnt_cycle)
+		};
+		let half = 1 << 30;
+		assert_eq!(cycle(&[half, half, -half, -half]), Ok(0));
+		assert_eq!(cycle(&[half, half]), Ok(1 << 31));
+		assert_eq!(cycle(&[i32::MIN + 1; 255]), Ok(255 * i64::from(i32::MIN + 1)));
 	}
 }

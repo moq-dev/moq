@@ -106,11 +106,13 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> u64 {
 						| moq_net::origin::RouteKind::Update
 						| moq_net::origin::RouteKind::Restart,
 					announce,
+					..
 				} => announce,
 				moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					..
 				} => continue,
+				other => panic!("unexpected route event {other:?}"),
 			};
 			if announce.prefix.as_str() == path {
 				return announce;
@@ -176,6 +178,7 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [NonZeroU
 	let moq_net::origin::RouteEvent {
 		kind: moq_net::origin::RouteKind::Start,
 		announce: subscriber_saw,
+		..
 	} = subscriber_saw
 	else {
 		panic!("the other edge's first event was not the namespace: {subscriber_saw:?}");

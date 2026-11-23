@@ -2176,7 +2176,11 @@ pub(crate) mod tests {
 			.value;
 		let clock = catalog.sync.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
-		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+		// The import already finished, so the default zero budget would age its last group out
+		// as the wall clock passes its span: reach back for the whole clip instead.
+		let history =
+			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
+		let track = consumer.track(name).unwrap().subscribe(history).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 		let first = next_frame(&mut Consumer::new(track, container)).await.timestamp;
 		assert!(

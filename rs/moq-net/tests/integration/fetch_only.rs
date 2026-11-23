@@ -28,10 +28,11 @@ fn timed() -> moq_net::track::Info {
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
@@ -91,7 +92,7 @@ fn frames(key: u64) -> Vec<Vec<u8>> {
 	(0..2).map(|frame| format!("{key}-{frame}").into_bytes()).collect()
 }
 
-const VERSIONS: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 async fn direct(version: &str) {
 	let version: Version = version.parse().unwrap();
@@ -158,7 +159,7 @@ async fn relayed(version: &str) {
 /// declared, so the group is keyed by its time.
 #[kio::test]
 async fn a_subscribe_after_track_status_keeps_timestamps() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher
@@ -479,7 +480,12 @@ async fn a_relay_answers_a_live_subscribe_on_a_fetched_copy() {
 /// Every supported draft serves the bounded absolute range on the subscription itself.
 #[kio::test]
 async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
-	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
+	for version in [
+		"moq-transport-18",
+		"moq-transport-20",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		kio::clock::timeout(TIMEOUT, async {
 			let version: Version = version.parse().unwrap();
 			let publisher = produce_origin(1);

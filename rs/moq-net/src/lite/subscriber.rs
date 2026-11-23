@@ -5994,6 +5994,189 @@ mod tests {
 		assert_eq!(group.start, 1);
 	}
 
+	/// What a lite-06 copy holds and what its reader owes.
+	struct Missing {
+		/// The groups written to the copy.
+		written: Vec<u64>,
+		/// Those evicted again.
+		evicted: std::ops::Range<u64>,
+		/// The keys the reader reads in order.
+		read: std::ops::Range<u64>,
+	}
+
+	impl Missing {
+		/// Groups 0..6 written, 2..4 evicted and read.
+		fn evicted() -> Self {
+			Self {
+				written: (0..6).collect(),
+				evicted: 2..4,
+				read: 2..4,
+			}
+		}
+	}
+
+	/// A lite-06 copy over `session` whose reader owes `missing`, its run already recovered on a
+	/// SUBSCRIBE of its own.
+	struct Recovering {
+		serve: TrackServe,
+		copy: crate::track::Producer,
+		fills: fills::RangeFills,
+		/// The reader, the session, and the copy's requests, held for the test.
+		held: (
+			crate::track::Ordered,
+			crate::lite::test_transport::ScriptedSession,
+			crate::track::Requests,
+		),
+	}
+
+	fn recovering(session: crate::lite::test_transport::ScriptedSession, missing: Missing) -> Recovering {
+		let version = Version::Lite06;
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_node: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			node: None,
+			name: "video".to_string(),
+		};
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		for &key in &missing.written {
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		for key in missing.evicted {
+			copy.evict(key);
+		}
+		let mut reader = copy
+			.subscribe(
+				crate::track::Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(None))
+					.with_range(missing.read),
+			)
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "the read is owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("the read is a miss");
+		};
+		let mut fills = fills::RangeFills::new(version);
+		fills.push(fill);
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert!(fills.recovering(), "the miss is recovered on its own subscription");
+		Recovering {
+			serve,
+			copy,
+			fills,
+			held: (reader, session, requests),
+		}
+	}
+
+	/// Encode lite-06 subscribe `responses`.
+	fn lite06_responses(responses: impl IntoIterator<Item = lite::SubscribeResponse>) -> Vec<u8> {
+		let version = Version::Lite06;
+		let mut bytes = Vec::new();
+		for response in responses {
+			response
+				.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
+				.unwrap();
+		}
+		bytes
+	}
+
+	/// TEMPORARY MIGRATION, delete with `fills::Recovery::walk`: a relay of the previous release
+	/// starts a lite-06 recovery at its floor, sends the next group it holds, and never accounts
+	/// for the keys between. Once the grace passes, the fill owing them goes to FETCH instead.
+	#[kio::test]
+	async fn a_stalled_recovery_walks_its_keys() {
+		let responses = lite06_responses([lite::SubscribeResponse::Start(lite::SubscribeStart {
+			largest: None,
+			starts: vec![Some(2)],
+		})]);
+		let Recovering {
+			serve,
+			copy,
+			mut fills,
+			held: _held,
+		} = recovering(
+			crate::lite::test_transport::ScriptedSession::new(responses),
+			Missing::evicted(),
+		);
+		let waiter = kio::Waiter::noop();
+
+		// The relay sends group 4, the next it holds, and nothing for 2 or 3.
+		{
+			let subscribes = serve.subscriber.subscribes.lock();
+			let (_, entry) = subscribes.iter().next().expect("the recovery subscribed");
+			Reading::open(&entry.tail, Some(4), serve.subscriber.runtime.now());
+		}
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert!(fills.take_walks().is_empty(), "the grace has not passed");
+		assert!(fills.recovering());
+
+		kio::clock::sleep(crate::tail::GRACE * 2).await;
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		let walks = fills.take_walks();
+		assert_eq!(walks.len(), 1, "the fill owing 2..4 goes to FETCH");
+		assert_eq!(walks[0].wanted(), Some(2));
+		assert!(!fills.recovering(), "the stalled recovery ended");
+	}
+
+	/// A lite-06 publisher that finished the track FINs a recovery before the group streams
+	/// it opened land. Nothing names a key after that FIN, so one that never lands is given up
+	/// after the grace, even when no max delay bounds the copy's own.
+	#[kio::test]
+	async fn a_drained_recovery_gives_up_a_missing_key() {
+		let responses = lite06_responses([
+			lite::SubscribeResponse::Start(lite::SubscribeStart {
+				largest: None,
+				starts: vec![Some(2)],
+			}),
+			lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 6, error: None }),
+		]);
+		let Recovering {
+			serve,
+			copy,
+			mut fills,
+			held: _held,
+		} = recovering(
+			crate::lite::test_transport::ScriptedSession::eof(responses),
+			Missing::evicted(),
+		);
+		let waiter = kio::Waiter::noop();
+
+		// The FIN is read, and group 2 never lands.
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert!(fills.recovering(), "group 2 may still land");
+
+		kio::clock::sleep(crate::tail::GRACE * 2).await;
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert!(!fills.recovering(), "the drained recovery gave up group 2");
+	}
+
 	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the narrowest budget
 	/// the subscription asked: a SUBSCRIBE_UPDATE widening the budget reopens nothing, and an
 	/// OLD drop arriving after it may have been judged before the publisher read it.
@@ -8327,6 +8510,78 @@ mod tests {
 		}
 	}
 
+	/// Malformed bytes on a Subscribe Stream close the session at once, on every version, even
+	/// with a group stream still being read: the close never waits on a drain that a reader
+	/// leaving meanwhile would cut short.
+	#[kio::test]
+	async fn a_malformed_subscribe_response_closes_the_session_at_once() {
+		for version in [Version::Lite06, Version::Lite07] {
+			malformed_subscribe_response_closes_at_once(version).await;
+		}
+	}
+
+	async fn malformed_subscribe_response_closes_at_once(version: Version) {
+		use crate::transport::poll::{SendStream as _, Session as _};
+		let (session, peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_node: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			node: None,
+			name: "video".into(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
+		let reader = serving.serving.subscribe(None);
+		assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+		let Sub::Active(active) = &serving.sub else {
+			panic!("the SUBSCRIBE is on the wire");
+		};
+		// A group stream the publisher has yet to finish keeps the tail busy.
+		let _reading = Reading::open(&active.tail, Some(0), serve.subscriber.runtime.now());
+
+		// The publisher answers with an unknown response type.
+		let (mut send, _recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
+		kio::wait(|waiter| send.poll_write(waiter, &[0x3f, 0x00]))
+			.await
+			.unwrap();
+		let _reader = reader;
+
+		let gate = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Serve(serving),
+			gate,
+			datagrams: None,
+			finished: None,
+		};
+		let _ = poll_run(&mut running, &kio::Waiter::noop());
+		let closed = peer.poll_closed(&kio::Waiter::noop());
+		let Poll::Ready(err) = closed else {
+			panic!("{version:?}: the session is still open");
+		};
+		assert_eq!(
+			crate::transport::Error::session_error(&err).map(|(code, _)| code),
+			Some(crate::SessionError::ProtocolViolation.to_code()),
+			"{version:?}"
+		);
+	}
+
 	/// A PROBE stream the peer ends, by FIN or reset, leaves no estimate behind: the
 	/// session gives up probing, so a held consumer must not keep its last rate.
 	#[kio::test]
@@ -8491,6 +8746,33 @@ mod tests {
 
 		// No start goes out as none, for the max age to place upstream.
 		assert_eq!(wire_ranges(&Subscription::default()), Some(vec![lite::Range::OPEN]));
+	}
+
+	/// A wire without ranges has no Position end, so a switch's frame cap goes out as the whole
+	/// group, the update byte for byte the one an uncapped switch sends: lite-06 is the wire a
+	/// relay of the previous release speaks.
+	#[test]
+	fn lite06_caps_a_switch_by_whole_group() {
+		use crate::coding::Encoder;
+		use crate::lite::Message;
+		let uncapped = Subscription::default().with_range(3..6);
+		let mut capped = uncapped.clone();
+		capped.cap = Some(Position::new(5, 2));
+		let update = |subscription: &Subscription| {
+			let ranges = wire_ranges(&wire_span(subscription.clone())).unwrap();
+			let msg = lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay: None,
+				ranges: lite::RangeEdit::Replace(ranges),
+				order: track::Order::default(),
+			};
+			let mut buf = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
+				.unwrap();
+			buf
+		};
+		assert_eq!(update(&capped), update(&uncapped));
 	}
 
 	/// A wire without ranges asks from group 0 when no single start covers both a range
@@ -9363,7 +9645,7 @@ mod tests {
 	/// reprice on the same connection keeps it and updates in place.
 	#[kio::test]
 	async fn an_unnamed_publisher_stays_anonymous() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()), false);
 
 		let mut announced = Announced::default();
 		subscriber
@@ -9401,8 +9683,11 @@ mod tests {
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 	}
 
-	pub(super) fn restart_subscriber(session: SinkSession) -> (Subscriber, crate::origin::Consumer) {
-		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+	/// A subscriber on a fresh origin, which forwards what it learned when `proxy`.
+	pub(super) fn restart_subscriber(session: SinkSession, proxy: bool) -> (Subscriber, crate::origin::Consumer) {
+		let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
+		config.proxy = proxy;
+		let origin = config.produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -9483,6 +9768,26 @@ mod tests {
 		assert!(announced.contains(&path.clone()), "the announce was not recorded");
 		announced.withdraw(&path);
 		cursor.expect_next_ended("room/host").await;
+	}
+
+	/// lite-07 defines every message its Announce Stream carries, so an unknown type closes
+	/// the session instead of being skipped as on lite-06.
+	#[kio::test]
+	async fn an_unknown_lite07_announce_type_closes_the_session() {
+		const VERSION: Version = Version::Lite07;
+		let mut script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &announce_start(VERSION, "a")]);
+		// An unknown type with an empty body, then a start that must never be read.
+		script.extend([0x3f, 0x00]);
+		script.extend(announce_script(VERSION, &[&announce_start(VERSION, "b")]));
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let log = session.log.clone();
+		let (mut routes, _consumer) = root_prefix(VERSION, session);
+		let result = routes.poll(&kio::Waiter::noop());
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
+			"{result:?}"
+		);
+		assert_eq!(log.closes()[0].0, crate::SessionError::ProtocolViolation.to_code());
 	}
 
 	/// An unknown announce type between two starts is skipped without ending the
@@ -10408,7 +10713,8 @@ mod tests {
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
 /// on every version: a time start as the start, from the frame it resumes at (see
 /// [`Subscription::resume`]), and a time end as the exclusive group past it, which lite-07
-/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
+/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]), or before the frame
+/// it is capped at (see [`Subscription::cap`]).
 /// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
@@ -10432,10 +10738,12 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 				_ => Position::group(time),
 			})),
 		};
-		let end = range
-			.end
-			.and_then(|time| time.checked_add(1))
-			.map(|end| lite::Anchor::Absolute(Position::group(end)));
+		// A switch caps the copy it replaces where the new one resumes, before a frame of the
+		// group it ends at.
+		let end = range.end.and_then(|time| match subscription.cap {
+			Some(cap) if cap.group == time && cap.frame != 0 => Some(lite::Anchor::Absolute(cap)),
+			_ => Some(lite::Anchor::Absolute(Position::group(time.checked_add(1)?))),
+		});
 		ranges.push(lite::Range { start, end });
 	}
 	(!ranges.is_empty()).then_some(ranges)
@@ -10448,7 +10756,12 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 /// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor.
 /// One mixing the two asks from group 0, since no single start covers both: the latest
 /// group may sit below the start.
-fn wire_span(subscription: Subscription) -> Subscription {
+///
+/// It ends at a group's end, never at a Position: a publisher without ranges caps its cursor
+/// there and FINs the group, which would read as the group finishing short. A copy a switch
+/// replaces sends its boundary group whole there instead (see [`Subscription::cap`]).
+fn wire_span(mut subscription: Subscription) -> Subscription {
+	subscription.cap = None;
 	let start = match subscription.start() {
 		Some(start) => Some(start),
 		None if subscription.ranges.iter().any(|range| range.time().is_some()) => Some(0),
@@ -12505,9 +12818,15 @@ impl TrackServeRun {
 							let _ = serve_loop.serving.finish_shared();
 							// No FETCH before lite-05: nothing but the subscription fills a group.
 							if serve_loop.supports_fetch {
-								// A reader's miss in flight is settled by the tail instead.
+								// A reader's miss in flight is settled by the tail instead, except one a
+								// stalled recovery handed to FETCH.
 								let mut fetches = serve_loop.fetches;
-								fetches.retain(|run| run.fill.is_fetch());
+								fetches.retain(|run| run.fill.is_fetch() || run.walk);
+								let mut range_fills = serve_loop.range_fills;
+								for fill in range_fills.take_fetches() {
+									let info = FetchInfo::Known(serve_loop.serving.info().clone());
+									fetches.push(FillServeRun::new(self.serve.clone(), fill, info));
+								}
 								self.finished = Some(FinishedServe {
 									serving: Some(serve_loop.serving),
 									demand: serve_loop.demand,
@@ -13029,6 +13348,22 @@ impl FeedFetches {
 }
 
 impl ServeLoop {
+	/// TEMPORARY MIGRATION, delete at the next version cut with `fills::Recovery::walk`: FETCH
+	/// what a recovery stalled on behind a relay of the previous release, a key at a time.
+	fn walk_fills(
+		serve: &TrackServe,
+		range_fills: &mut RangeFills,
+		fetches: &mut kio::Tasks<FillServeRun>,
+		serving: &track::Producer,
+	) {
+		for fill in range_fills.take_walks() {
+			let info = FetchInfo::Known(serving.info().clone());
+			let mut run = FillServeRun::new(serve.clone(), fill, info);
+			run.walk = true;
+			fetches.push(run);
+		}
+	}
+
 	fn new(serve: &TrackServe, request: track::Request, info: track::Info) -> Self {
 		// Register the fetch handler before accepting: `accept` releases the request's own
 		// fetch gate, and a cache-miss fetch queued in the gap would be drained as NotFound.
@@ -13080,7 +13415,7 @@ impl ServeLoop {
 			sub: Sub::None,
 			fetches,
 			feed_fetches: FeedFetches::new(&serve.subscriber.runtime),
-			range_fills: RangeFills::default(),
+			range_fills: RangeFills::new(serve.subscriber.version),
 			closed: serve.subscriber.session.clone(),
 			supports_update: !matches!(serve.subscriber.version, Version::Lite01 | Version::Lite02),
 			supports_fetch: serve.subscriber.version.has_track_stream(),
@@ -13490,6 +13825,7 @@ impl ServeLoop {
 						Ok(changed) => est.fills_changed |= changed,
 						Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
 					}
+					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
 					// TRACK requesters own a Resolving handle through metadata acceptance
 					// until they attach a reader or cancel. That ownership is demand too,
 					// so no observed-arrival history is needed to bridge the handoff.
@@ -13567,12 +13903,27 @@ impl ServeLoop {
 					let _ = self.fetches.poll(waiter);
 					self.feed_fetches
 						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
+					// Before lite-07 each run is recovered on a subscription of its own, which
+					// outlives this one: nothing here changes with it.
+					let accounted = match &self.sub {
+						Sub::Active(active) => Some(active.tail.clone()),
+						Sub::None => None,
+					};
+					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
+					if let Err(err) = self
+						.range_fills
+						.poll(serve, &self.serving, accounted.as_ref(), read, waiter)
+					{
+						return Poll::Ready(ServeEnd::GiveBack(err));
+					}
+					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
+					// Ending drops a recovery still out, as a lite-07 track waits for them too.
 					if settle
 						.poll(waiter, |tail| {
 							owed.as_ref()
 								.is_some_and(|owed| owed.iter().all(|owed| tail.covers(owed.clone())))
 						})
-						.is_ready()
+						.is_ready() && !self.range_fills.recovering()
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}
@@ -13635,13 +13986,14 @@ impl ServeLoop {
 					// subscription churn.
 					match self.dynamic.poll_requested_fill(waiter) {
 						Poll::Ready(Ok(fill)) => {
-							// Lite-07 asks for more than one group through the subscription. One
-							// group, or a slice of one, is what FETCH carries.
+							// More than one group is asked through a subscription: lite-07's own, or
+							// earlier, one of its own per run (see `RangeFills`). One group, or a
+							// slice of one, is what FETCH carries.
 							let last = fill.end().saturating_sub(1);
 							let groups = fill.start().frame == 0
 								&& fill.start().group < last
 								&& fill.group(last).frame_end().is_none();
-							if serve.subscriber.version.has_ranges() && groups {
+							if serve.subscriber.version.has_track_stream() && groups {
 								self.range_fills.push(fill);
 							} else if self.supports_fetch {
 								self.fetches.push(FillServeRun::new(
@@ -13706,10 +14058,11 @@ impl ServeLoop {
 					};
 					// A stream still arriving on a recovery is kept only for someone reading it.
 					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
-					match self
+					let polled = self
 						.range_fills
-						.poll(serve, &self.serving, accounted.as_ref(), read, waiter)
-					{
+						.poll(serve, &self.serving, accounted.as_ref(), read, waiter);
+					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
+					match polled {
 						Ok(true) => {
 							if let Err(err) = self.begin(serve, self.serving.subscription()) {
 								return Poll::Ready(ServeEnd::GiveBack(err));
@@ -13829,17 +14182,12 @@ impl ServeLoop {
 										requested_end: self.serving.subscription().and_then(|sub| sub.end()),
 									};
 								}
-								// Malformed bytes are a protocol violation, which closes the session; a
-								// reset gives up the subscription with its reason.
+								// Malformed bytes are a protocol violation, which closes the session at
+								// once: draining the groups first would drop the close if every reader
+								// left meanwhile. A reset gives up the subscription with its reason.
 								Recv::Malformed(err) => {
-									let Sub::Active(active) = &mut self.sub else {
-										break;
-									};
 									tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-									self.mode = ServeMode::Failed {
-										err: Error::ProtocolViolation,
-										tail: active.tail.consume(),
-									};
+									return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
 								}
 								Recv::Reset(err) => {
 									let Sub::Active(active) = &mut self.sub else {
@@ -13893,6 +14241,9 @@ struct FillServeRun {
 	run: Option<(u64, FetchServeRun)>,
 	/// The group the last run answered.
 	last: Option<u64>,
+	/// TEMPORARY MIGRATION, see `fills::Recovery::walk`: a reader's fill a stalled recovery
+	/// handed back, which the subscription's tail no longer settles.
+	walk: bool,
 }
 
 impl Drop for FillServeRun {
@@ -13913,6 +14264,7 @@ impl FillServeRun {
 			info,
 			run: None,
 			last: None,
+			walk: false,
 		}
 	}
 }

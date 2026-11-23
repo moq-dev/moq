@@ -65,14 +65,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # manylinux_2_28 (AlmaLinux 8) on both Linux targets: manylinux2014
-          # (CentOS 7) only packages clang 3.4, too old for the bindgen that
-          # moq-vaapi and v4l2-sys run at build time.
+          # manylinux_2_28 (AlmaLinux 8) on both Linux targets: its newer toolchain
+          # builds the vendored OpenH264 C++, and it is the glibc floor the wheels
+          # advertise. Dropping to manylinux2014 is untested.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             manylinux: 2_28
           - target: aarch64-unknown-linux-gnu
-            # Native headers and compiler keep bindgen on the target ABI.
+            # A native runner, so no cross toolchain is needed.
             os: ubuntu-24.04-arm
             manylinux: 2_28
           - target: aarch64-apple-darwin
@@ -96,8 +96,6 @@ jobs:
           args: --locked --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          # moq-vaapi and v4l2-sys generate bindings inside the container.
-          before-script-linux: yum install -y clang-devel
 
       - name: Upload wheels
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

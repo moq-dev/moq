@@ -33,6 +33,9 @@
 #   ./run.sh --loss 10             # drop 10% of the relay's datagrams to the subscriber (moq-shaper)
 #   ./run.sh --passthrough         # carry the multiplex whole (`import/export ts --passthrough`)
 #   ./run.sh --passthrough --mpts  # the same with two programs whose recovery points rarely line up
+#   ./run.sh --mpts --program 2 --join 5 # import each program as its own broadcast, export one 5 s in
+#   ./run.sh --passthrough --splice [forward] # an unflagged encoder switch, its clock 16,844.5 s back (or on)
+#   ./run.sh --passthrough --restart 10 # SIGKILL the import 10 s in, restart it 0.5 s later
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it
@@ -100,7 +103,16 @@ RATE=""         # bits/s moq-shaper carries from the relay to the subscriber, be
 QUEUE=""        # how long a datagram may wait for RATE before the path tail-drops it
 PASSTHROUGH=""  # carry the multiplex whole and grade the capture packet by packet against the source
 MPTS=""         # publish two programs, which only --passthrough carries whole
+PROGRAM=""      # with --mpts: import each program as its own broadcast, and export this one late
+SPLICE=""       # back or forward: splice two encodes on unrelated clocks, as an encoder switch does
+RESTART=""      # seconds into the source to SIGKILL the import, restarted 0.5 s after it exits
 EXPORT=()       # extra `export ts` flags (--delay)
+# How far into the run that export starts (5 s under --program): it joins mid-broadcast, on its
+# program's own groups.
+PROGRAM_JOIN=""
+# How soon the late export must write its first byte, in seconds: connecting, its catalog, and
+# the group it joins on.
+FIRST_BYTE_MAX=3
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
 # exactly the thing under test.
@@ -223,6 +235,26 @@ while [[ $# -gt 0 ]]; do
         --mpts)
             MPTS=1
             shift
+            ;;
+        --program)
+            PROGRAM="$2"
+            shift 2
+            ;;
+        --join)
+            PROGRAM_JOIN="$2"
+            shift 2
+            ;;
+        --splice)
+            SPLICE=back
+            if [[ "${2:-}" == back || "${2:-}" == forward ]]; then
+                SPLICE="$2"
+                shift
+            fi
+            shift
+            ;;
+        --restart)
+            RESTART="$2"
+            shift 2
             ;;
         *)
             PASSTHRU+=("$1")
@@ -362,14 +394,57 @@ if [[ -n "$PASSTHROUGH" && -n "$ANALYZE_ONLY$PAIR$LIVE" ]]; then
     echo "error: --passthrough cannot be combined with --analyze-only, --pair, or --live" >&2
     exit 1
 fi
-if [[ -n "$MPTS" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES") ]]; then
-    echo "error: --mpts generates its own clip and needs --passthrough, the mode that carries a multiplex whole" >&2
+if [[ -n "$MPTS" && (-z "$PASSTHROUGH$PROGRAM" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES") ]]; then
+    echo "error: --mpts generates its own clip and needs --passthrough, which carries the multiplex whole, or --program" >&2
     exit 1
 fi
+# Its grader allows no loss from the join on, so nothing may shed: an unimpaired path only.
+if [[ -n "$PROGRAM" && (-z "$MPTS" || -n "$PASSTHROUGH$ANALYZE_ONLY$PAIR$LIVE$SHAPED") ]]; then
+    echo "error: --program exports one program of --mpts, and cannot be combined with --passthrough, --analyze-only, --pair, --live, --loss, or --rate" >&2
+    exit 1
+fi
+if [[ -n "$PROGRAM_JOIN" && -z "$PROGRAM" ]]; then
+    echo "error: --join sets when the --program export starts, and needs --program" >&2
+    exit 1
+fi
+[[ -n "$PROGRAM" ]] && PROGRAM_JOIN="${PROGRAM_JOIN:-5}"
+if [[ -n "$PROGRAM" && ! ("$PROGRAM" =~ ^[12]$ && "$PROGRAM_JOIN" =~ ^[0-9]+$ && PROGRAM_JOIN -lt DURATION) ]]; then
+    echo "error: --program is 1 or 2, and --join whole seconds within the ${DURATION}s run" >&2
+    exit 1
+fi
+if [[ -n "$SPLICE" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$MPTS$WITH_EIT$RESTART") ]]; then
+    echo "error: --splice generates its own clip and needs --passthrough, the mode that carries a clock step" >&2
+    exit 1
+fi
+# The killed import's gap is the measurement, so nothing else may cost packets: one program,
+# whose groups passthrough.py can place, on an unimpaired path.
+if [[ -n "$RESTART" ]]; then
+    if [[ -z "$PASSTHROUGH" || -n "$MPTS$SHAPED" ]]; then
+        echo "error: --restart grades one program's passthrough gap and needs --passthrough, without --mpts, --loss or --rate" >&2
+        exit 1
+    fi
+    # The restarted import needs two groups of the source left to set its bound.
+    if ! [[ "$RESTART" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v r="$RESTART" -v d="$DURATION" 'BEGIN { exit !(r > 0 && r + 5 <= d) }'; then
+        echo "error: --restart takes seconds above 0 and at least 5 s before the end of the ${DURATION}s clip (got '$RESTART')" >&2
+        exit 1
+    fi
+fi
 IMPORT=(import ts)
+[[ -n "$PROGRAM" ]] && IMPORT+=(--program all)
 if [[ -n "$PASSTHROUGH" ]]; then
     IMPORT+=(--passthrough)
     EXPORT+=(--passthrough)
+fi
+# Each run of `moq import` is a new publisher instance, so the export follows the restart as
+# a replacement. A UDP input ends only on a receive timeout, which TSDuck counts in whole
+# seconds, and the importer holds its last object until its input ends: a 2 s delay keeps
+# that object on time. The delay is buffer, not loss, so the bound does not move with it.
+# Should the old route go before the replacement is announced, the follow window, not the
+# delay's buffer, keeps the export waiting for it.
+if [[ -n "$RESTART" ]]; then
+    [[ " ${EXPORT[*]} " == *" --delay "* ]] || EXPORT+=(--delay 2s)
+    [[ " ${EXPORT[*]} " == *" --follow "* ]] || EXPORT+=(--follow 10s)
+    EXPORT+=(--stitch)
 fi
 
 URL="" # set once a port is reserved, below
@@ -487,6 +562,12 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$SPLICE" ]]; then
+    echo "### generating ~${DURATION}s clip whose clock steps 16,844.5 s $SPLICE halfway, unflagged"
+    # Nothing in the stream marks the switch: every PID's continuity counter breaks once, the
+    # second encode joins mid-GOP, and no packet sets discontinuity_indicator. Passthrough must
+    # carry it as it is, so the source's own continuity breaks are its only verdict.
+    python3 "$DIR/splice.py" "$SRC_TS" "$SPLICE" --duration "$DURATION" --bitrate "$BITRATE"
 elif [[ -n "$MPTS" ]]; then
     echo "### generating ~${DURATION}s two-program clip with ffmpeg"
     # Two services in one multiplex, each with its own PCR PID, their keyframes every 25 and
@@ -736,14 +817,23 @@ capture_b() {
         "$MOQ" "${SUB_CONNECT[@]}" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+capture_program() {
+    sleep "$PROGRAM_JOIN"
+    python3 "$DIR/first-byte.py" "$SUB_TS" "$HARNESS_RUN/first-byte.txt" -- timeout -k 3 $((DURATION + 20)) \
+        "$MOQ" "${SUB_CONNECT[@]}" --connect-version "$VERSION" --broadcast "${BROADCAST%.hang}/$PROGRAM.hang" \
+        export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log"
+}
+
 if [[ -n "$LIVE" ]]; then
     echo "### grading subscriber output live (export ts | pcr-timing.py)"
     harness_spawn sub - grade_live
-else
+    SUB_PID="$HARNESS_PID"
+elif [[ -z "$PROGRAM" ]]; then
     echo "### capturing subscriber output (export ts)"
     harness_spawn sub - capture
+    SUB_PID="$HARNESS_PID"
 fi
-SUB_PID="$HARNESS_PID"
 if [[ -n "$PAIR" ]]; then
     echo "### capturing a second subscriber, joining ${PAIR_JOIN}s late"
     harness_spawn sub-b - capture_b
@@ -771,8 +861,57 @@ publish() {
             "$2" --connect "$3" --connect-version "$5" --broadcast "$4" "${@:6}"
     ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" "$VERSION" "${IMPORT[@]}"
 }
-harness_spawn pub "$HARNESS_RUN/pub.log" publish
+# The source plays live into a UDP port whether or not an import reads it, so a killed
+# import loses what it held and what arrives while it is down, as a contribution feed would.
+# The export runs on throughout. Each import's input is kept, so passthrough.py can place
+# the downtime in the source.
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+publish_restart() {
+    set +e
+    local feed status
+    # A second without a datagram ends an import's input once the source has finished.
+    # The subshell that runs moq records its PID before becoming it, so the kill hits moq alone.
+    import_run() {
+        # shellcheck disable=SC2016  # $1.. are the child bash -c positionals, not ours.
+        timeout -k 3 $((DURATION + 20 + 30)) bash -o pipefail -c '
+            tsp -I ip --receive-timeout 1000 "$1" | tee "$2" | {
+                echo "$BASHPID" >"$3"
+                exec "${@:4}"
+            }
+        ' _ "$SOURCE_PORT" "$HARNESS_RUN/import-$1.ts" "$HARNESS_RUN/import-$1.pid" \
+            "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" "${IMPORT[@]}"
+    }
+    import_run 1 &
+    local first=$!
+    tsp -I file "$SRC_TS" -P regulate --pcr-synchronous --wait-min 5 -O ip "127.0.0.1:$SOURCE_PORT" &
+    feed=$!
+    sleep "$RESTART"
+    echo "### killing the import ${RESTART}s in"
+    kill -KILL "$(cat "$HARNESS_RUN/import-1.pid")"
+    wait "$first"
+    printf 'killed import: %s\n' "$?" >>"$HARNESS_RUN/process-status.log"
+    sleep 0.5
+    echo "### restarting the import"
+    import_run 2
+    status=$?
+    printf 'restarted import: %s\n' "$status" >>"$HARNESS_RUN/process-status.log"
+    wait "$feed" || return $?
+    return "$status"
+}
+if [[ -n "$RESTART" ]]; then
+    harness_port source
+    SOURCE_PORT="$HARNESS_PORT"
+    harness_spawn pub "$HARNESS_RUN/pub.log" publish_restart
+else
+    harness_spawn pub "$HARNESS_RUN/pub.log" publish
+fi
 PUB_PID="$HARNESS_PID"
+# The late joiner starts once the publisher has, so its join is that far into the broadcast.
+if [[ -n "$PROGRAM" ]]; then
+    echo "### capturing program $PROGRAM's broadcast (export ts), joining ${PROGRAM_JOIN}s in"
+    harness_spawn sub - capture_program
+    SUB_PID="$HARNESS_PID"
+fi
 
 # shellcheck disable=SC2329  # invoked from multiple failure paths below
 dump_logs() {
@@ -904,6 +1043,29 @@ if [[ -n "$CAPTURE_OUT" ]]; then
     cp "$SUB_TS" "$CAPTURE_OUT"
 fi
 
+# ── program: one program of the multiplex, joined late ──────────────────────
+# Its own export of the program's own broadcast: it must start promptly, carry that program alone,
+# and lose nothing from the group it joined on to the end.
+if [[ -n "$PROGRAM" ]]; then
+    FIRST_BYTE=$(<"$HARNESS_RUN/first-byte.txt")
+    echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes of program $PROGRAM, the first ${FIRST_BYTE}s after the export started"
+    if awk -v t="$FIRST_BYTE" -v max="$FIRST_BYTE_MAX" 'BEGIN { exit !(t > max) }'; then
+        echo "error: the export's first byte took ${FIRST_BYTE}s, past ${FIRST_BYTE_MAX}s" >&2
+        dump_logs
+        exit 1
+    fi
+    echo
+    if ! python3 "$DIR/holes.py" "$SUB_TS" "$SRC_TS" --program "$PROGRAM" --join "$PROGRAM_JOIN"; then
+        echo >&2
+        echo "error: the capture is not program $PROGRAM alone and whole; the exporter reported:" >&2
+        sed 's/\x1b\[[0-9;]*m//g' "$HARNESS_RUN/sub.log" |
+            grep -E 'TS export release clock|media skipped upstream|missed its deadline|group evicted' |
+            tail -n 20 | sed 's/^/  sub: /' >&2 || true
+        exit 1
+    fi
+    exit 0
+fi
+
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 
 # ── passthrough: the source is the oracle ───────────────────────────────────
@@ -915,7 +1077,9 @@ echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 # the capture must still end on the source's last packet.
 if [[ -n "$PASSTHROUGH" ]]; then
     echo
-    if ! python3 "$DIR/passthrough.py" "$SRC_TS" "$SUB_TS" ${RATE:+--loss-ok} --report-json "$HARNESS_RUN/passthrough.json"; then
+    GRADE=(${RATE:+--loss-ok})
+    [[ -n "$RESTART" ]] && GRADE=(--restart "$HARNESS_RUN/import-1.ts" "$HARNESS_RUN/import-2.ts")
+    if ! python3 "$DIR/passthrough.py" "$SRC_TS" "$SUB_TS" ${GRADE[@]+"${GRADE[@]}"} --report-json "$HARNESS_RUN/passthrough.json"; then
         echo >&2
         echo "error: the capture is not the source's packets in place; the exporter reported:" >&2
         sed 's/\x1b\[[0-9;]*m//g' "$HARNESS_RUN/sub.log" |
@@ -924,7 +1088,7 @@ if [[ -n "$PASSTHROUGH" ]]; then
         exit 1
     fi
     echo
-    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS$RATE" ]]; then
+    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS$RATE$SPLICE$RESTART" ]]; then
         python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode" || exit 1
     else
         echo "decoded-content comparison: not covered for this profile"

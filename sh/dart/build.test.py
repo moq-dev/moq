@@ -67,15 +67,26 @@ class BuildTest(unittest.TestCase):
                 self.assertEqual(compiler_env.read_text(), "fixture-compiler")
                 self.assertEqual(library_out.read_text().strip(), str(library))
                 args = calls.read_text().split()
-                self.assertEqual(args[0], "build-ffi")
-                self.assertEqual("--release" in args, release)
                 self.assertNotIn("--target", args)
+                # The debug build matches maturin's for py, so it reuses py's moq-ffi.
                 self.assertEqual(
-                    args[1:],
+                    args,
                     (
-                        ["--release"]
+                        ["build-ffi", "--release"]
                         if release
-                        else ["--features", "testing", "--target-dir", str(ROOT / "target/ffi-testing")]
+                        else [
+                            "rustc",
+                            "--locked",
+                            "--package",
+                            "moq-ffi",
+                            "--features",
+                            "testing,openh264",
+                            "--lib",
+                            "--crate-type",
+                            "cdylib",
+                            "--target-dir",
+                            str(ROOT / "target/ffi-testing"),
+                        ]
                     )
                     + ["--message-format=json-render-diagnostics"],
                 )

@@ -11,7 +11,9 @@ import {
 	inclusiveGroupEnd,
 	LiveRanges,
 	positionFrames,
+	positionStops,
 	rangeSize,
+	requestedRange,
 	requestedRanges,
 	Subscribe,
 	SubscribeDrop,
@@ -253,9 +255,12 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 	// Type 3 is a live join's lag, which only a start may carry.
 	expect((await update([1, 3, 7, 0])).ranges).toEqual([{ start: { live: 7 } }]);
 	await expect(update([1, 0, 3, 7])).rejects.toThrow(ProtocolViolation);
-	// Any other type is a violation, and so is a Position at frame 0 or as an end.
+	// Any other type is a violation, and so is a Position at frame 0, as a start or an end.
 	await expect(update([1, 2, 0, 0, 0])).rejects.toThrow(ProtocolViolation);
-	await expect(update([1, 1, 0, 2, 7, 4])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, 1, 0, 2, 7, 0])).rejects.toThrow(ProtocolViolation);
+	expect((await update([1, 1, 0, 2, 7, 4])).ranges).toEqual([
+		{ start: { time: 0n }, end: { absolute: 7n, frame: 4 } },
+	]);
 	await expect(update([1, 4, 0, 0])).rejects.toThrow(ProtocolViolation);
 });
 
@@ -328,14 +333,38 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 		}
 		expect(positionFrames(ranges)).toEqual(scanned);
 	}
+});
 
-	// An end there can't go out.
-	await expect(
-		encodeMessage(
-			Version.DRAFT_07,
-			new SubscribeUpdate({ priority: 0, ranges: [{ end: { absolute: 9n, frame: 2 } }] }),
-		),
-	).rejects.toThrow("a range ends only at a group");
+test("a lite-07 range may end partway through a group, stopping it there", async () => {
+	const position = { start: { time: 3n }, end: { absolute: 9n, frame: 2 } };
+	const update = new SubscribeUpdate({ priority: 0, ranges: [position] });
+	const bytes = await encodeMessage(Version.DRAFT_07, update);
+	// Type 1, time 3, then type 2, start 9, frame 2, which it stops before.
+	expect(Array.from(bytes.slice(-6))).toEqual([1, 3, 2, 9, 2, 0]);
+	const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.ranges).toEqual([position]);
+	// The model range includes group 9, and only the frames before frame 2 of it go out.
+	expect(requestedRange(position)).toEqual({ start: 3n, end: 9n });
+	expect(positionStops([position])).toEqual(new Map([[9n, 2]]));
+	// Another range covering group 9 asks for it whole, and one starting past it stops nothing.
+	expect(positionStops([position, { start: { time: 9n } }])).toEqual(new Map());
+	expect(positionStops([{ start: { time: 10n }, end: { absolute: 9n, frame: 2 } }])).toEqual(new Map());
+	// One stopping where it starts holds nothing.
+	expect(requestedRange({ start: { absolute: 9n, frame: 2 }, end: { absolute: 9n, frame: 2 } })).toEqual({
+		start: 1n,
+		end: 0n,
+	});
+	expect(requestedRange({ start: { absolute: 9n, frame: 1 }, end: { absolute: 9n, frame: 2 } })).toEqual({
+		start: 9n,
+		end: 9n,
+	});
+	// It covers no group either, so it neither stops nor starts one, nor keeps another range's
+	// stop or start from applying.
+	const empty = { start: { absolute: 9n, frame: 2 }, end: { absolute: 9n, frame: 2 } };
+	expect(positionStops([empty])).toEqual(new Map());
+	expect(positionFrames([empty])).toEqual(new Map());
+	expect(positionStops([empty, position])).toEqual(new Map([[9n, 2]]));
+	expect(positionFrames([empty, { start: { absolute: 9n, frame: 3 } }])).toEqual(new Map([[9n, 3]]));
 });
 
 test("lite-07 sends an absolute anchor as a time, an end as the time before it", async () => {
@@ -631,7 +660,8 @@ test("a live start round-trips only on lite-07", async () => {
 });
 
 // Lite-07 sends milliseconds plus one, 0 for no limit. Earlier wires send bare milliseconds, so
-// no limit goes out as the largest value every peer reads, and lite-01/02 carry none at all.
+// no limit goes out as the largest value every peer reads and comes back as no limit, and
+// lite-01/02 carry none at all.
 test("max delay says no limit on lite-07, and the largest safe value before it", async () => {
 	// After the size, the priority, and the order.
 	const field = async (maxDelay: number | null) =>
@@ -639,13 +669,8 @@ test("max delay says no limit on lite-07, and the largest safe value before it",
 	expect([await field(null), await field(0), await field(5)]).toEqual([0, 1, 6]);
 
 	for (const version of [Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06, Version.DRAFT_07]) {
-		for (const maxDelay of [null, 0, 250]) {
-			const expected = {
-				[Version.DRAFT_01]: null,
-				[Version.DRAFT_03]: maxDelay ?? Number.MAX_SAFE_INTEGER,
-				[Version.DRAFT_06]: maxDelay ?? Number.MAX_SAFE_INTEGER,
-				[Version.DRAFT_07]: maxDelay,
-			}[version];
+		for (const maxDelay of [null, 0, 250, Number.MAX_SAFE_INTEGER - 1]) {
+			const expected = version === Version.DRAFT_01 ? null : maxDelay;
 			const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, maxDelay };
 			const subscribe = await encodeMessage(version, new Subscribe(props));
 			expect((await Subscribe.decode(new Reader(undefined, subscribe, version), version)).maxDelay).toBe(
@@ -655,6 +680,30 @@ test("max delay says no limit on lite-07, and the largest safe value before it",
 			expect((await SubscribeUpdate.decode(new Reader(undefined, update, version), version)).maxDelay).toBe(
 				expected,
 			);
+		}
+	}
+});
+
+// Rust reads any bare-milliseconds max delay at or past the sentinel as no limit, so one too wide
+// for a JS number does too rather than failing the decode.
+test("a max delay past the largest safe value before lite-07 is no limit", async () => {
+	for (const version of [Version.DRAFT_03, Version.DRAFT_06]) {
+		// A max delay of 0 is a one-byte varint, found where an update with 1 differs.
+		const encode = (maxDelay: number) =>
+			encodeMessage(version, new SubscribeUpdate({ priority: 0, maxDelay, ranges: [] }));
+		const update = await encode(0);
+		const other = await encode(1);
+		const at = update.findIndex((byte, index) => byte !== other[index]);
+		for (const millis of [2n ** 53n, 2n ** 62n - 1n]) {
+			const wide = new Uint8Array(8);
+			new DataView(wide.buffer).setBigUint64(0, millis | (0b11n << 62n));
+			const bytes = Uint8Array.from([
+				update[0] + 7,
+				...update.subarray(1, at),
+				...wide,
+				...update.subarray(at + 1),
+			]);
+			expect((await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version)).maxDelay).toBeNull();
 		}
 	}
 });

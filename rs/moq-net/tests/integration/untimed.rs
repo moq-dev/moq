@@ -54,9 +54,11 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn millis(ms: u64) -> Timestamp {
@@ -171,7 +173,7 @@ async fn frames_arrive_as_published() {
 #[kio::test]
 async fn a_relay_forwards_an_untimed_track_untimed() {
 	for hops in [
-		&["moq-transport-18", "moq-transport-22"][..],
+		&["moq-transport-18", "moq-transport-22", "moq-transport-23"][..],
 		&["moq-lite-07-wip", "moq-lite-07-wip"][..],
 	] {
 		let (frame, info) = frame_through(hops, untimed()).await;
@@ -193,7 +195,13 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 /// which our publisher refuses for groups before the live one, so draft 22 stands in for it.
 #[kio::test]
 async fn an_explicit_start_holds_on_an_untimed_track() {
-	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in [
+		"moq-lite-03",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0]
 			.route("room", moq_net::origin::RouteOptions::hidden())

@@ -76,6 +76,18 @@ describe("QMux01 record framing", () => {
 		expect(() => Frame.decode(record, "qmux-00")).toThrow();
 	});
 
+	test("qmux-00 decode rejects a message carrying more than one frame", () => {
+		const ping = Frame.encode({ type: "ping_request", sequence: 1n }, "qmux-00");
+		const stream = Frame.encode(
+			{ type: "stream", id: new Stream.Id(VarInt.from(0n)), data: new Uint8Array([1]), fin: false },
+			"qmux-00",
+		);
+		expect(() => Frame.decode(new Uint8Array([...ping, ...stream]), "qmux-00")).toThrow();
+		// A PADDING byte is a frame of its own, so a STREAM frame behind it is a second frame.
+		expect(() => Frame.decode(new Uint8Array([0x00, ...stream]), "qmux-00")).toThrow();
+		expect(Frame.decode(new Uint8Array([0x00]), "qmux-00")).toBeNull();
+	});
+
 	test("ping_request and ping_response round-trip preserves the sequence number", () => {
 		const req: Frame.Any = { type: "ping_request", sequence: 0xdeadbeefn };
 		const reqBytes = Frame.encode(req, "qmux-01");

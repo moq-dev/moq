@@ -184,9 +184,11 @@ fn note(log: &Shared, line: String) {
 }
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A broadcast with one frame on [`TRACK`], announced.
@@ -307,6 +309,7 @@ fn follow(index: usize, reader: &origin::Producer, log: Shared) {
 				RouteKind::End | RouteKind::Offline => {
 					log.borrow_mut().shown.remove(&(index, path));
 				}
+				kind => panic!("unexpected route kind {kind:?}"),
 			}
 		}
 	}));

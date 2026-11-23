@@ -326,9 +326,11 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn prefixes(prefixes: &[&str]) -> Prefixes {
@@ -375,15 +377,18 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: update,
+			..
 		} => {
 			live.insert(update.prefix.to_string());
 		}
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: update,
+			..
 		} => {
 			live.remove(update.prefix.as_str());
 		}
+		other => panic!("unexpected route event {other:?}"),
 	};
 	// Take in the replay first, so a retraction is judged against what is announced now
 	// rather than against an empty start.

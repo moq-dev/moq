@@ -26,7 +26,7 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 
 const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
-const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 /// From `start`, or with an unstated Min Age the oldest group still around when there is none.
 fn floored(start: Option<u64>) -> Range {
@@ -38,10 +38,11 @@ fn floored(start: Option<u64>) -> Range {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Four frames starting at `key` seconds, so a group created late still starts

@@ -41,9 +41,20 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAMES: u64 = 4;
 
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	produce(hop, true)
+}
+
+/// An origin that never forwards what it learned, as an application's.
+pub(super) fn produce_app(hop: u64) -> origin::Producer {
+	produce(hop, false)
+}
+
+fn produce(hop: u64, proxy: bool) -> origin::Producer {
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = proxy;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -419,6 +430,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the initial start, got {other:?}"),
 	}
@@ -462,6 +474,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce,
+				..
 			} => {
 				assert_eq!(announce.prefix.as_str(), "live");
 				assert_eq!(
@@ -477,6 +490,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::End,
 				announce,
+				..
 			} => assert_eq!(announce.prefix.as_str(), "live"),
 			other => panic!("{version} {trigger:?}: expected an end, got {other:?}"),
 		}
@@ -484,6 +498,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start,
 				announce,
+				..
 			} => assert_eq!(announce.prefix.as_str(), "live"),
 			other => panic!("{version} {trigger:?}: expected a fresh start, got {other:?}"),
 		}
@@ -526,6 +541,7 @@ async fn better_route_restarts(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
@@ -540,6 +556,7 @@ async fn better_route_restarts(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected a restart, got {other:?}"),
 	}
@@ -1039,7 +1056,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 
 #[kio::test]
 async fn redundant_pair_follows_the_next_instance_when_unreachable() {
-	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(
 			TEST_TIMEOUT,
 			redundant_pair_follows_the_next_instance(version, Loss::Unreachable),
@@ -1051,7 +1068,7 @@ async fn redundant_pair_follows_the_next_instance_when_unreachable() {
 
 #[kio::test]
 async fn redundant_pair_follows_the_next_instance_when_the_incumbent_ends() {
-	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(
 			TEST_TIMEOUT,
 			redundant_pair_follows_the_next_instance(version, Loss::Ends),

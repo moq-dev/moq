@@ -12,14 +12,16 @@ use crate::support::AtStart;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]
 async fn one_stream_credit_serves_every_backlogged_group() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
@@ -90,7 +92,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 /// for it to finish, on each protocol.
 #[kio::test]
 async fn a_newer_group_resets_an_unfinished_older_one() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);

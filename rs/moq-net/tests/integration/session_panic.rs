@@ -84,11 +84,14 @@ async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 				origin::RouteEvent {
 					kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
 					announce,
+					..
 				} => (announce, true),
 				origin::RouteEvent {
 					kind: origin::RouteKind::End | origin::RouteKind::Offline,
 					announce,
+					..
 				} => (announce, false),
+				other => panic!("unexpected route event {other:?}"),
 			};
 			if announce.prefix.as_str() == path && now_active == active {
 				return;
@@ -102,7 +105,7 @@ async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 
 #[kio::test]
 async fn a_panicking_session_leaves_the_others_serving() {
-	for version in ["moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: Version = version.parse().unwrap();
 		let relay = produce_origin(100);
 		let mut announced = relay.consume().routes();

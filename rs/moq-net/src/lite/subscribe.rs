@@ -55,10 +55,10 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it. Lite-06 bounds
-	/// either end partway through a group. A group's start is its time, so lite-07 sends one
-	/// at a group's first frame as an [`Anchor::Time`], an end as the time just before it, and
-	/// a start partway through a group as its Position type, which only a start may be.
+	/// A position: a start delivers from it, and an end stops just before it. Either end may
+	/// fall partway through a group. A group's start is its time, so lite-07 sends one at a
+	/// group's first frame as an [`Anchor::Time`], an end as the time just before it, and one
+	/// partway through a group as its Position type.
 	Absolute(crate::track::Position),
 	/// The group containing this time in the track's timescale (the highest start at or
 	/// below it), included as an end. Lite07+ only.
@@ -175,11 +175,14 @@ impl<'a> Message<'a> for Subscribe<'a> {
 const MAX_SAFE_DELAY_MS: u64 = (1 << 53) - 1;
 
 /// Decode the `Subscriber Max Age`: on lite-07 milliseconds plus one, zero meaning no limit;
-/// before it bare milliseconds.
+/// before it bare milliseconds, [`MAX_SAFE_DELAY_MS`] and up meaning no limit, as a lite-05/06
+/// track's max age does.
 fn decode_max_delay(r: &mut Decoder<'_>, version: Version) -> Result<Option<std::time::Duration>, DecodeError> {
 	Ok(match version.has_unlimited_max_delay() {
 		true => r.varint_opt()?.map(std::time::Duration::from_millis),
-		false => Some(std::time::Duration::from_millis(r.varint()?)),
+		false => Some(r.varint()?)
+			.filter(|millis| *millis < MAX_SAFE_DELAY_MS)
+			.map(std::time::Duration::from_millis),
 	})
 }
 
@@ -317,14 +320,14 @@ pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
-/// anchor, a start the max age places and the live edge as an end. Type 2, a position partway
-/// through a group, is a start only, so `end` refuses it, and so is one at frame 0, which type 1
-/// says. Type 3, a live join's lag in milliseconds, is a start only.
+/// anchor, a start the max age places and the live edge as an end. Type 2 is a position
+/// partway through a group, never at frame 0, which type 1 says. Type 3, a live join's lag in
+/// milliseconds, is a start only, so `end` refuses it.
 fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
 		1 => Some(Anchor::Time(r.varint()?)),
-		2 if !end => {
+		2 => {
 			let group = r.varint()?;
 			let frame = r.varint()?;
 			if frame == 0 {
@@ -341,16 +344,15 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 ///
 /// An absolute position at a group's first frame goes out as its group's time: a start as
 /// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
-/// nothing a time can say. A start partway through a group goes out as a position, its
-/// group's start then the frame; an end there is refused, since FETCH reads a slice of a group.
-/// A live join goes out as its lag in milliseconds, rounded up, and only as a start.
+/// nothing a time can say. One partway through a group goes out as a position, its group's
+/// start then the frame: a start from that frame, an end before it. A live join goes out as its
+/// lag in milliseconds, rounded up, and only as a start.
 fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 2]), EncodeError> {
 	Ok(match anchor {
 		None => (0, [None, None]),
 		Some(Anchor::Time(time)) => (1, [Some(time), None]),
 		Some(Anchor::Live(_)) if end => return Err(EncodeError::InvalidState),
 		Some(Anchor::Live(min)) => (3, [Some(crate::track::live_millis(min)), None]),
-		Some(Anchor::Absolute(position)) if position.frame != 0 && end => return Err(EncodeError::Version),
 		Some(Anchor::Absolute(position)) if position.frame != 0 => (2, [Some(position.group), Some(position.frame)]),
 		Some(Anchor::Absolute(position)) if end => (
 			1,
@@ -1799,12 +1801,16 @@ mod test {
 	}
 
 	/// A lite-07 start may fall partway through a group, as its Position type: the group's
-	/// start, then the frame. An end there is refused, since FETCH reads a slice of a group,
-	/// and so is a Position at frame 0, which a Time says.
+	/// start, then the frame, and so may an end, which stops before that frame. A Position at
+	/// frame 0, which a Time says, is refused.
 	#[test]
-	fn lite07_starts_partway_through_a_group() {
+	fn lite07_starts_and_ends_partway_through_a_group() {
 		let mut msg = framed_sample();
-		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		let framed = encode(&msg, Version::Lite07).unwrap();
+		// Type 2, start 7, frame 4, then type 2, start 9, frame 3, which it stops before.
+		assert!(framed.ends_with(&[1, 2, 7, 4, 2, 9, 3]), "{framed:?}");
+		assert_eq!(range_size(&msg.ranges[0], Version::Lite07.into()), Some(6));
 		msg.ranges = vec![Range {
 			start: absolute(7, 4),
 			end: None,
@@ -1827,7 +1833,8 @@ mod test {
 		};
 		assert!(decode(&[1, 2, 7, 4, 0]).is_ok());
 		assert!(matches!(decode(&[1, 2, 7, 0, 0]), Err(DecodeError::InvalidValue)));
-		assert!(matches!(decode(&[1, 1, 7, 2, 9, 4]), Err(DecodeError::InvalidValue)));
+		assert!(decode(&[1, 1, 7, 2, 9, 4]).is_ok());
+		assert!(matches!(decode(&[1, 1, 7, 2, 9, 0]), Err(DecodeError::InvalidValue)));
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,
@@ -2032,11 +2039,11 @@ mod test {
 			Err(DecodeError::InvalidSubscribeLocation)
 		));
 
-		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a
-		// start only; type 3 is Live, a start only; type 4 is assigned to nothing, as a start
-		// or an end. Each closes the session with a PROTOCOL_VIOLATION.
+		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a start
+		// or an end; type 3 is Live, a start only; type 4 is assigned to nothing, as a start or
+		// an end. Each closes the session with a PROTOCOL_VIOLATION.
 		let starts = [4].map(|kind| (2, kind));
-		let ends = [2, 3, 4].map(|kind| (1, kind));
+		let ends = [3, 4].map(|kind| (1, kind));
 		for (back, kind) in starts.into_iter().chain(ends) {
 			let mut buf = encode(&msg, version).unwrap();
 			let at = buf.len() - back;
@@ -2127,9 +2134,10 @@ mod test {
 		assert_eq!(encoded(Version::Lite07, Some(ms(0))), (1, Some(ms(0))));
 		assert_eq!(encoded(Version::Lite07, Some(ms(250))), (251, Some(ms(250))));
 		assert_eq!(encoded(Version::Lite06, Some(ms(250))), (250, Some(ms(250))));
+		assert_eq!(encoded(Version::Lite06, None), (MAX_SAFE_DELAY_MS, None));
 		assert_eq!(
-			encoded(Version::Lite06, None),
-			(MAX_SAFE_DELAY_MS, Some(ms(MAX_SAFE_DELAY_MS)))
+			encoded(Version::Lite06, Some(ms(MAX_SAFE_DELAY_MS - 1))),
+			(MAX_SAFE_DELAY_MS - 1, Some(ms(MAX_SAFE_DELAY_MS - 1)))
 		);
 
 		let mut msg = subscribe_sample();

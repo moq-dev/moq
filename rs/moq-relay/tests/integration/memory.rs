@@ -96,6 +96,7 @@ pub fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::syn
 				moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					announce: route,
+					..
 				} => (route, false),
 				moq_net::origin::RouteEvent {
 					kind:
@@ -103,7 +104,9 @@ pub fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::syn
 						| moq_net::origin::RouteKind::Update
 						| moq_net::origin::RouteKind::Restart,
 					announce: route,
+					..
 				} => (route, true),
+				other => panic!("unexpected route event {other:?}"),
 			};
 			recorded
 				.lock()

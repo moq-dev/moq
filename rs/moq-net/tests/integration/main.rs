@@ -51,6 +51,7 @@ mod instance;
 mod late_lower_group;
 mod late_tail_reader;
 mod lazy_discovery;
+mod lite06_fill_walk;
 mod mesh_sweep;
 mod mesh_withdraw;
 mod min_age_join;
@@ -97,6 +98,7 @@ mod subscriber_max_age;
 mod subscription_end_integrity;
 #[cfg(feature = "async")]
 mod support;
+mod switch_frame_cap;
 mod synced;
 mod time_start_fill;
 mod track_abort_over_session;

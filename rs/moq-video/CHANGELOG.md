@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The openh264 decoder outputs a Main or High H.264 picture as soon as it decodes when the SPS rules reordering out (picture order count type 2, or a VUI `max_num_reorder_frames` of 0). openh264 used to hold each such picture until the next access unit arrived, a frame interval of decode latency (50 ms at 20 fps) for streams from hardware encoders such as VA-API.
 - The VA-API backend no longer holds every H.264 picture until the next access unit arrives: a stream without B-frames comes out as it decodes, which took a frame interval off decode latency (100 ms at 10 fps).
 - NVIDIA transcodes no longer serialize the whole GPU: NVDEC skips the multi-millisecond decoder-caps query when a flush's new parser keeps the decoder, decoded frames reuse pooled device memory instead of a `cuMemAlloc` and `cuMemFree` each, and each NVENC session scales CUDA frames into one input it registers once and reuses one output bitstream, where it used to allocate, register, and free all of them per frame.
 - A V4L2 camera that opens and never delivers a frame no longer blocks its capture thread forever: reads time out after a second, so dropping the `capture::Stream` stops the thread and closes the device promptly.
@@ -21,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `capture::portal::Selection::restore_token` watches the portal restore token (`RestoreTokenConsumer::changed` reports the latest token, or `None` once cleared, coalescing changes in between), and `with_restore_token` seeds one, so a caller can persist a screen-cast grant across processes and skip the picker on a compositor that keeps grants. `RestoreToken` redacts itself in `Debug` output.
 - `encode::Config::resize` scales a frame at another size inside the encoder, so a `Sink` does it on its own thread rather than the caller's.
+- `encode::Config::qp_floor` sets the finest quantizer openh264's and VideoToolbox's rate control may pick. Unset keeps today's floors; a lower one lets the rate control code finer when the cap allows.
 - `decode::Consumer::arrival` reports when the access unit behind the latest picture read landed in the cache, the video counterpart of `moq_audio::decode::Consumer::arrival`. Pictures a decoder reorders or holds back keep their own access unit's arrival, so a player can tell network delay from decode delay.
 
 ### Changed

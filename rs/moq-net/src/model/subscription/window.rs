@@ -85,8 +85,8 @@ pub(in crate::model) trait Holdings {
 	fn complete(&self) -> bool;
 
 	/// Where a live join holding a nonzero `min` behind the live edge, ending at `end`, starts
-	/// for a reader within `budget`; see [`Join`]. On a hop that [`Self::answers_joins`], only
-	/// an answer recorded after join tick `since`, when the join's range was added, counts.
+	/// for a reader within `budget`; see [`Join`]. Only an upstream's answer recorded after join
+	/// tick `since`, when the join's range was added, counts.
 	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
 		let _ = (min, end, budget, since);
 		Join::Unknown
@@ -96,6 +96,16 @@ pub(in crate::model) trait Holdings {
 	/// does, never from the groups it holds: a copy holding only part of the track.
 	fn answers_joins(&self) -> bool {
 		false
+	}
+
+	/// The upstream's answer to the live join `min` through `end`, for a reader within `budget`
+	/// whose range was added at join tick `since`: the group it starts at, or `None` for nothing
+	/// to deliver. It stands once the end is declared too, when [`Self::answers_joins`] no
+	/// longer holds: a copy holds only the groups from where its feed started, so they can't
+	/// measure a join behind them.
+	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+		let _ = (min, end, budget, since);
+		None
 	}
 
 	/// Whether the producer declared every key in `keys` skipped, so no group starts there
@@ -123,8 +133,10 @@ pub(in crate::model) enum Join {
 /// Where a time falls among the groups a hop holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::model) enum Containing {
-	/// The newest group starting at or before it.
-	Group(u64),
+	/// A range from it starts at this key: the newest group starting at or before it, or, once
+	/// that group ended whole at or before the time, its End, so the range starts at the next
+	/// group: a time past a whole group's span lies in a span no group contains.
+	At(u64),
 	/// Every group held starts after it.
 	Before,
 	/// No group is held.
@@ -134,7 +146,8 @@ pub(in crate::model) enum Containing {
 /// What the track's history answered a time start's lookup with; see [`Window::found`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Found {
-	/// The group containing the time.
+	/// Where the range starts: the group containing the time, or that group's End once it ended
+	/// whole at or before the time.
 	Group(u64),
 	/// No group starts from `floor`, the oldest key the lookup asked from, through the time.
 	Dropped { floor: u64 },
@@ -495,7 +508,7 @@ impl Window {
 		let mut started = false;
 		for (time, key) in tried {
 			let (start, floored) = match holdings.containing(time, self.budget) {
-				Containing::Group(group) => (group, true),
+				Containing::At(start) => (start, true),
 				// The group holding it is older than any held, or nothing can arrive.
 				Containing::Before => (0, false),
 				Containing::Unknown if complete => (0, false),
@@ -735,11 +748,11 @@ impl Window {
 			let asked = span.looking.take().map(|looking| looking.floor);
 			(span.start, span.floored) = match found {
 				Found::Group(group) => (group, true),
-				// A floor is one past the group held below the time, which then holds it; from 0,
+				// A floor is one past where the groups held placed it, which then holds it; from 0,
 				// no group starts at or before it, so the span reads from the time on.
 				Found::Dropped { floor } => (floor.checked_sub(1).unwrap_or(time), true),
 				Found::Unanswered => match holdings.containing(time, self.budget) {
-					Containing::Group(group) => (group, true),
+					Containing::At(start) => (start, true),
 					_ => (0, false),
 				},
 			};
@@ -815,27 +828,39 @@ impl Window {
 					}
 				}
 			}
-			Start::Live(min) => match latest {
-				// Nothing to measure the live edge by yet: wait for the first group, reading
-				// everything meanwhile.
-				None => {
-					self.pending.insert(key);
-					return;
-				}
-				// The latest group holds the live edge. One made before any group then starts at
-				// the first, which was the latest when it was placed.
-				Some(latest) if min.is_zero() => (Some(latest), false),
-				Some(_) => match holdings.join(min, range.end, self.budget, 0) {
-					Join::Time(time) => (Some(time), true),
-					Join::Group(group) => (Some(group), false),
-					// Nothing to measure the live edge by yet: read none of the groups held until it
-					// resolves.
-					Join::Empty | Join::Unknown => {
-						self.reaching.insert(key);
+			Start::Live(min) => {
+				let since = self.since.get(&key).copied().unwrap_or(0);
+				let until = join_end(range.end);
+				// Its upstream's answer places it, whatever the groups held measure: nothing to
+				// deliver starts it past its end, while an unbounded one measures.
+				let answered = match holdings.answered_join(min, until, self.budget, since) {
+					Some(Some(group)) => Some(group),
+					Some(None) => range.end.and_then(|last| last.checked_add(1)),
+					None => None,
+				};
+				match (answered, latest) {
+					(Some(group), _) => (Some(group), false),
+					// Nothing to measure the live edge by yet: wait for the first group, reading
+					// everything meanwhile.
+					(None, None) => {
+						self.pending.insert(key);
 						return;
 					}
-				},
-			},
+					// The latest group holds the live edge. One made before any group then starts at
+					// the first, which was the latest when it was placed.
+					(None, Some(latest)) if min.is_zero() => (Some(latest), false),
+					(None, Some(_)) => match holdings.join(min, until, self.budget, since) {
+						Join::Time(time) => (Some(time), true),
+						Join::Group(group) => (Some(group), false),
+						// Nothing to measure the live edge by yet: read none of the groups held until
+						// it resolves.
+						Join::Empty | Join::Unknown => {
+							self.reaching.insert(key);
+							return;
+						}
+					},
+				}
+			}
 		};
 		// A group a join measured starts there; a time is placed among the groups held.
 		let placed = match (anchor, asks) {
@@ -1018,7 +1043,7 @@ fn start(anchor: Option<u64>, latest: Option<u64>, budget: Duration, holdings: &
 		// No group starts before 0, so time 0 names group 0 whatever is held.
 		Some(0) => Placed::At(0, true),
 		Some(time) => match holdings.containing(time, budget) {
-			Containing::Group(group) => Placed::At(group, true),
+			Containing::At(start) => Placed::At(start, true),
 			// The group holding it is older than any held, so reach back to the oldest.
 			Containing::Before => Placed::At(0, false),
 			// Before any group, which a hop that holds none (such as a reader following route
@@ -1036,9 +1061,9 @@ fn start(anchor: Option<u64>, latest: Option<u64>, budget: Duration, holdings: &
 
 /// The oldest key a fill of the group containing time start `time`, resolved to `start`,
 /// asks from, when the groups held can't tell which group contains it and a handler may: it
-/// is before every group held, or a group the cache evicted may start after `start`, the
-/// newest held at or before it, and still at or before `time`. Keys the producer skipped
-/// hold none.
+/// is before every group held, or a group the cache evicted may start after `start`, where the
+/// groups held placed it, or at `start` itself when that is a whole group's End, and still at
+/// or before `time`. Keys the producer skipped hold none.
 fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) -> Option<u64> {
 	if !holdings.looks_up() {
 		return None;
@@ -1046,7 +1071,13 @@ fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) ->
 	if !floored {
 		return holdings.next_start(0).map(|_| 0);
 	}
-	let next = start.checked_add(1)?;
+	// Past a group held at the start, or one starting at the time, which contains it whatever
+	// its End. A start below the time no group holds is a whole group's End, where a group the
+	// cache let go may start and end before the time, so the search takes it in.
+	let next = match holdings.next_start(start) == Some(start) || start >= time {
+		true => start.checked_add(1)?,
+		false => start,
+	};
 	let after = holdings.next_start(next)?;
 	let gap = next..after.min(time.saturating_add(1));
 	(!holdings.never_produced(gap)).then_some(next)
@@ -1103,7 +1134,7 @@ mod tests {
 
 		fn containing(&self, time: u64, _: Duration) -> Containing {
 			match self.held.range(..=time).next_back() {
-				Some(key) => Containing::Group(*key),
+				Some(key) => Containing::At(*key),
 				None if self.held.is_empty() && time >= self.dropped => Containing::Unknown,
 				None => Containing::Before,
 			}
@@ -1171,6 +1202,10 @@ mod tests {
 
 		fn answers_joins(&self) -> bool {
 			self.0.answers_joins()
+		}
+
+		fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+			self.0.answered_join(min, end, budget, since)
 		}
 
 		fn complete(&self) -> bool {

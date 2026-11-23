@@ -48,11 +48,9 @@ const PEER_RETRY: Duration = Duration::from_secs(10);
 /// by an `api.url` endpoint.
 ///
 /// Accepts a URL string or an object with `url` plus
-/// policy: `cost` prices the link, `egress` declares this relay's own price to
-/// the peer, `token` carries the peer's credential, and `upstream` marks the
-/// link upstream, so it is never offered a route learned on another upstream
-/// link. `egress` defaults to `cost`; a different effective value is rejected
-/// until asymmetric routing lands. An object `token` behaves exactly like an inline `?jwt=` and is
+/// policy: `cost` prices the link, `token` carries the peer's credential, and
+/// `upstream` marks the link upstream, so it is never offered a route learned
+/// on another upstream link. An object `token` behaves exactly like an inline `?jwt=` and is
 /// redacted the same way. Unknown object fields are rejected, as is an object
 /// that sets policy while its `url` still carries `?cost=` or `?jwt=`.
 #[derive(Clone, PartialEq, Eq)]
@@ -60,7 +58,6 @@ const PEER_RETRY: Duration = Duration::from_secs(10);
 pub struct Peer {
 	url: String,
 	cost: Option<u64>,
-	egress: Option<u64>,
 	token: Option<String>,
 	upstream: bool,
 }
@@ -73,7 +70,6 @@ impl std::fmt::Debug for Peer {
 		f.debug_struct("Peer")
 			.field("url", &url.as_ref().map(moq_tokio::RedactedUrl::new))
 			.field("cost", &self.cost)
-			.field("egress", &self.egress)
 			.field("token", &self.token.as_ref().map(|_| "..."))
 			.field("upstream", &self.upstream)
 			.finish()
@@ -86,7 +82,6 @@ impl Peer {
 		Self {
 			url: url.into(),
 			cost: None,
-			egress: None,
 			token: None,
 			upstream: false,
 		}
@@ -103,12 +98,6 @@ impl Peer {
 		self.cost
 	}
 
-	/// What this relay declares in SETUP as its own price toward the peer.
-	/// Defaults to [`Self::cost`]; anything else is rejected for now.
-	pub fn egress(&self) -> Option<u64> {
-		self.egress
-	}
-
 	/// The peer's credential, replacing an inline `?jwt=`.
 	pub fn token(&self) -> Option<&str> {
 		self.token.as_deref()
@@ -123,12 +112,6 @@ impl Peer {
 	/// Price the link this peer is dialed on.
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.cost = Some(cost);
-		self
-	}
-
-	/// Declare this relay's own price toward the peer. Must match the cost.
-	pub fn with_egress(mut self, egress: u64) -> Self {
-		self.egress = Some(egress);
 		self
 	}
 
@@ -163,8 +146,6 @@ struct PeerObject {
 	#[serde(default)]
 	cost: Option<u64>,
 	#[serde(default)]
-	egress: Option<u64>,
-	#[serde(default)]
 	token: Option<String>,
 	#[serde(default)]
 	upstream: bool,
@@ -184,7 +165,7 @@ impl<'de> serde::Deserialize<'de> for Peer {
 			type Value = Peer;
 
 			fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-				f.write_str("a peer URL string or an object with url, cost, egress, token, upstream")
+				f.write_str("a peer URL string or an object with url, cost, token, upstream")
 			}
 
 			fn visit_str<E: serde::de::Error>(self, url: &str) -> Result<Peer, E> {
@@ -197,7 +178,6 @@ impl<'de> serde::Deserialize<'de> for Peer {
 				Ok(Peer {
 					url: object.url,
 					cost: object.cost,
-					egress: object.egress,
 					token: object.token,
 					upstream: object.upstream,
 				})
@@ -213,15 +193,12 @@ impl serde::Serialize for Peer {
 	where
 		S: serde::Serializer,
 	{
-		if self.cost.is_none() && self.egress.is_none() && self.token.is_none() && !self.upstream {
+		if self.cost.is_none() && self.token.is_none() && !self.upstream {
 			return serializer.serialize_str(&self.url);
 		}
 		use serde::ser::SerializeStruct as _;
 		let mut len = 1;
 		if self.cost.is_some() {
-			len += 1;
-		}
-		if self.egress.is_some() {
 			len += 1;
 		}
 		if self.token.is_some() {
@@ -234,9 +211,6 @@ impl serde::Serialize for Peer {
 		state.serialize_field("url", &self.url)?;
 		if let Some(cost) = &self.cost {
 			state.serialize_field("cost", cost)?;
-		}
-		if let Some(egress) = &self.egress {
-			state.serialize_field("egress", egress)?;
 		}
 		if let Some(token) = &self.token {
 			state.serialize_field("token", token)?;
@@ -304,8 +278,7 @@ impl DialTarget {
 	/// Normalize a configured [`Peer`] into dial state. A bare URL keeps its
 	/// inline `?cost=` / `?jwt=`; an object carries policy in its fields instead.
 	/// Mixing the two (object policy plus URL params) is rejected rather than
-	/// given a precedence a migration could silently get wrong. `egress`
-	/// defaults to `cost`; anything else is rejected, never ignored.
+	/// given a precedence a migration could silently get wrong.
 	fn from_peer(peer: &Peer) -> anyhow::Result<Self> {
 		let mut url = peer_url(&peer.url)?;
 		// Spellings that share a key dial alike, so they never conflict.
@@ -320,10 +293,10 @@ impl DialTarget {
 		if url.query_pairs().any(|(key, _)| key == "jwt") {
 			strip_jwt(&mut url);
 		}
-		if peer.cost.is_some() || peer.egress.is_some() {
+		if peer.cost.is_some() {
 			anyhow::ensure!(
 				!has_cost,
-				"cluster peer sets cost/egress alongside a URL ?cost=; use one or the other"
+				"cluster peer sets cost alongside a URL ?cost=; use one or the other"
 			);
 		}
 		let token = peer.token.clone().filter(|token| !token.is_empty());
@@ -334,17 +307,10 @@ impl DialTarget {
 			);
 		}
 		anyhow::ensure!(
-			peer.cost != Some(0) && peer.egress != Some(0),
-			"cluster peer sets a cost or egress of 0; a link costs at least 1, the price of an unpriced link"
+			peer.cost != Some(0),
+			"cluster peer sets a cost of 0; a link costs at least 1, the price of an unpriced link"
 		);
 		let cost = peer.cost.or(take_cost(&mut url)?);
-		// An unpriced link costs 1 (see `moq_net::Client::with_cost`), so `egress`
-		// alone is symmetric only at that price.
-		let charged = cost.unwrap_or(1);
-		anyhow::ensure!(
-			peer.egress.unwrap_or(charged) == charged,
-			"cluster peer sets egress different from cost; asymmetric costs are not supported yet"
-		);
 		Ok(Self {
 			key: PeerKey::canonicalize(&peer.url),
 			url,
@@ -813,7 +779,7 @@ pub struct Config {
 	pub max_hops: Option<usize>,
 
 	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
-	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
+	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`,
 	/// `token`, and `upstream`. A bare host or `host:port` is refused; pass the
 	/// full URL instead. Accepts a comma-separated list on the CLI or repeat the
 	/// flag; in config files use a TOML array of URLs and/or objects.
@@ -824,8 +790,7 @@ pub struct Config {
 	/// unpriced link is 1, which reproduces plain hop counting: use it for a
 	/// same-datacenter sibling and something large for a metered backbone. A
 	/// cost of 0 is refused. The param is consumed by this relay, not sent to the
-	/// peer. Object `egress` defaults to `cost`; anything else is rejected until
-	/// asymmetric routing lands.
+	/// peer.
 	#[usage(
 		name = "cluster-connect",
 		long = "cluster-connect",
@@ -1624,10 +1589,18 @@ pub struct Cluster {
 	/// serving and publishing end together.
 	pub(crate) stats_producer: moq_stats::Producer,
 
-	/// The prefix the relay's own stats publisher writes under, when enabled.
-	/// Only cluster peers may publish there; client sessions cannot, whatever
-	/// their grant, since the registry leaves that subtree unmetered.
-	stats_prefix: Option<Path>,
+	/// Where the relay's own stats publisher writes, when enabled.
+	stats_paths: Option<StatsPaths>,
+}
+
+/// Where a relay's stats live on its origin.
+#[derive(Clone, Debug)]
+pub(crate) struct StatsPaths {
+	/// The top-level prefix. Only cluster peers may publish there; client sessions
+	/// cannot, whatever their grant, since the registry leaves that subtree unmetered.
+	pub prefix: Path,
+	/// Whether each root's view is mounted read-only at `<root>/<prefix>`.
+	pub roots: bool,
 }
 
 /// A gateway or network session admitted with its lease, scoped origins, and stats.
@@ -1734,14 +1707,14 @@ impl Cluster {
 				work.push(Child::new("cache governor", governor));
 			}
 		}
-		let (origin, driver) = origin::Producer::new(origin_config);
 		// A relay carries every peer's traffic to every other (moq-lite-07).
-		let origin = origin.with_proxy(true);
+		origin_config.proxy = true;
+		let (origin, driver) = origin::Producer::new(origin_config);
 		work.push(Child::new("origin driver", async move {
 			moq_net::time::run(driver).await;
 		}));
 		// Publish through the same origin cluster peers read from.
-		let stats_prefix = stats.reserved()?;
+		let stats_paths = stats.reserved()?;
 		let (stats_producer, publisher) = stats.build(origin.clone())?;
 		work.push(Child::new("stats publisher", async move {
 			if let Some(hold) = stats_hold {
@@ -1775,7 +1748,7 @@ impl Cluster {
 			critical: Default::default(),
 			origin,
 			stats,
-			stats_prefix,
+			stats_paths,
 			stats_producer,
 		};
 		Ok((cluster, Driver { work }))
@@ -1866,7 +1839,7 @@ impl Cluster {
 		let stats = self
 			.stats
 			.tier(token.tier.clone())
-			.session(moq_net::stats::SessionInfo::new(&token.label));
+			.session(moq_net::stats::SessionInfo::new(&token.label).with_root(token.root.clone()));
 		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = ?token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
@@ -1956,8 +1929,8 @@ impl Cluster {
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
 		let mut origin = self.mounted(token)?;
-		if let Some(prefix) = self.stats_prefix.as_ref().filter(|_| token.link.is_none()) {
-			origin = origin.exclude(prefix).ok()?;
+		if let Some(stats) = self.stats_paths.as_ref().filter(|_| token.link.is_none()) {
+			origin = origin.exclude(&stats.prefix).ok()?;
 		}
 		origin.scope(&token.root, &token.publish.path).ok()
 	}
@@ -1981,7 +1954,30 @@ impl Cluster {
 				}
 			};
 		}
+		if let Some(stats) = self.stats_paths.as_ref().filter(|stats| stats.roots)
+			&& !token.root.is_empty()
+		{
+			origin = Self::mount_stats(origin, &token.root, &stats.prefix)?;
+		}
 		Some(origin)
+	}
+
+	/// Present `root`'s own stats at `<root>/<prefix>`, read-only, so nothing a session
+	/// under the root publishes there is mistaken for them or read unmetered. When the
+	/// mount is refused, such as when a grant's mount overlaps it or the root is too
+	/// long to nest, the subtree is excluded instead. `None` if that fails too.
+	fn mount_stats(origin: origin::Producer, root: &Path, prefix: &Path) -> Option<origin::Producer> {
+		let at = root.join(prefix).ok()?;
+		let mounted = moq_stats::root_prefix(prefix, root)
+			.map_err(moq_net::Error::from)
+			.and_then(|target| origin.mount(&at, target));
+		match mounted {
+			Ok(origin) => Some(origin),
+			Err(err) => {
+				tracing::debug!(?root, ?err, "root stats mount refused, excluding it");
+				origin.exclude(at).ok()
+			}
+		}
 	}
 
 	/// Whether `--cluster-lan` asked this relay to discover peers over mDNS.
@@ -3053,11 +3049,14 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 
@@ -3067,6 +3066,7 @@ mod tests {
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::Start,
 				announce: route,
+				..
 			} => Some(route),
 			other => panic!("expected an announcement: got {other:?}"),
 		}
@@ -3228,6 +3228,70 @@ mod tests {
 		else {
 			panic!("the driver stopped before publishing stats");
 		};
+	}
+
+	/// With root stats on, a client scoped to a root reads that root's view at
+	/// `.stats/node` under it, cannot publish there, and reading it counts nowhere.
+	#[tokio::test(start_paused = true)]
+	async fn a_root_reads_its_own_stats() {
+		let cluster = Cluster::spawn(Options::default().with_stats(crate::stats::Config {
+			enabled: true,
+			roots: true,
+			..Default::default()
+		}))
+		.expect("cluster");
+		let grant = || moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
+		let lease = |root| auth::Lease::new(root, moq_auth::lease::Consumer::fixed(grant())).unwrap();
+		let (a, b) = (lease("/a"), lease("/b"));
+		let session = |lease: &auth::Lease| {
+			cluster
+				.stats
+				.tier(lease.token().tier.clone())
+				.session(moq_net::stats::SessionInfo::new(&lease.token().label).with_root(lease.token().root.clone()))
+		};
+		let (session_a, _session_b) = (session(&a), session(&b));
+
+		let options = moq_net::origin::RouteOptions::default;
+		let publisher = cluster.publisher(a.token()).expect("publish grant");
+		let _live = publisher
+			.route("live", options())
+			.expect("a client publishes in its root");
+		for path in [".stats", ".stats/node", ".stats/node/evil"] {
+			assert!(publisher.route(path, options()).is_err(), "route {path}");
+		}
+
+		let consumer = cluster
+			.subscriber(a.token())
+			.expect("subscribe grant")
+			.consume()
+			.with_stats(session_a);
+		let path = Path::from_static(".stats/node");
+		let broadcast = kio::clock::timeout(
+			std::time::Duration::from_secs(5),
+			consumer.follow(&path, None).unwrap().available(),
+		)
+		.await
+		.expect("root a's view is published")
+		.unwrap()
+		.unwrap();
+		let stats = moq_stats::Consumer::new(broadcast, Default::default());
+		let mut totals = stats.totals().expect("totals");
+		let frame = kio::wait(|waiter| totals.poll_next(waiter))
+			.await
+			.expect("read")
+			.expect("frame");
+		assert_eq!(
+			frame[""].sessions.sessions_started, 1,
+			"root a's own session, not root b's"
+		);
+
+		let mut report = moq_net::stats::Report::default();
+		cluster.stats.report(&mut report, moq_net::time::Instant::now());
+		assert!(
+			report.traffic.iter().all(|row| !row.path.as_str().contains(".stats")),
+			"reading root stats is uncounted: {:?}",
+			report.traffic
+		);
 	}
 
 	/// The publish task holds only a `Weak` to its producer, so it stops when the
@@ -3706,42 +3770,6 @@ mod tests {
 		);
 	}
 
-	/// `egress` defaults to `cost`, so a matching value is accepted and prices
-	/// the link exactly like the bare URL form. An unpriced link costs 1, so
-	/// `egress = 1` alone is symmetric too.
-	#[test]
-	fn peer_symmetric_egress_is_supported() {
-		let cost_only = DialTarget::from_peer(&Peer::new("https://peer.example/?cost=2")).unwrap();
-		let symmetric: Peer = serde_json::from_str(r#"{"url": "https://peer.example/", "cost": 2, "egress": 2}"#)
-			.expect("parse symmetric peer");
-		assert_eq!(DialTarget::from_peer(&symmetric).unwrap(), cost_only);
-
-		let unpriced = DialTarget::from_peer(&Peer::new("https://peer.example/")).unwrap();
-		let default_egress = DialTarget::from_peer(&Peer::new("https://peer.example/").with_egress(1)).unwrap();
-		assert_eq!(default_egress, unpriced);
-	}
-
-	/// An `egress` that differs from the effective cost is refused, never
-	/// silently ignored. That includes an egress with no cost at all.
-	#[test]
-	fn peer_asymmetric_egress_is_rejected() {
-		for peer in [
-			Peer::new("https://peer.example/").with_cost(1).with_egress(2),
-			Peer::new("https://peer.example/").with_egress(2),
-		] {
-			let err = DialTarget::from_peer(&peer).expect_err("asymmetric egress must fail");
-			assert!(
-				format!("{err:#}").contains("not supported"),
-				"egress refusal must say so: {err:#}"
-			);
-		}
-
-		let Err(err) = parse_peer_list(vec![Peer::new("https://peer.example/").with_cost(1).with_egress(2)]) else {
-			panic!("asymmetric egress must reject the list");
-		};
-		assert!(format!("{err:#}").contains("not supported"));
-	}
-
 	/// Object policy and URL params each get one home. Setting both is rejected
 	/// rather than given a precedence a migration could silently get wrong.
 	#[test]
@@ -3994,8 +4022,8 @@ mod tests {
 	#[test]
 	fn malformed_object_peer_list_preserves_current_dial() {
 		let commands = DialCommands::default();
-		let asymmetric = Peer::new("https://peer.example/").with_cost(1).with_egress(2);
-		Cluster::apply_peer_list(vec![asymmetric], &commands);
+		let mixed = Peer::new("https://peer.example/?cost=1").with_cost(1);
+		Cluster::apply_peer_list(vec![mixed], &commands);
 		assert!(commands.is_empty(), "an invalid list must not reach the dial map");
 	}
 
@@ -4055,7 +4083,6 @@ mod tests {
 		for peer in [
 			Peer::new("https://peer.example/?cost=0"),
 			Peer::new("https://peer.example/").with_cost(0),
-			Peer::new("https://peer.example/").with_egress(0),
 		] {
 			let config = Config {
 				connect: vec![peer.clone()],
@@ -4094,7 +4121,7 @@ mod tests {
 	/// type the connect API parses.
 	#[test]
 	fn cluster_connect_object_form_round_trip() {
-		let toml = "[cluster]\nconnect = [\"https://a.example/?cost=1\", { url = \"https://b.example/\", cost = 2, egress = 2, token = \"secret\", upstream = true }]\n";
+		let toml = "[cluster]\nconnect = [\"https://a.example/?cost=1\", { url = \"https://b.example/\", cost = 2, token = \"secret\", upstream = true }]\n";
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("cluster-connect-object-toml.toml");
 		std::fs::write(&path, toml).unwrap();
@@ -4107,7 +4134,6 @@ mod tests {
 				Peer::new("https://a.example/?cost=1"),
 				Peer::new("https://b.example/")
 					.with_cost(2)
-					.with_egress(2)
 					.with_token("secret")
 					.with_upstream(true),
 			]
@@ -4115,6 +4141,15 @@ mod tests {
 		// The object normalizes exactly like its URL spellings.
 		let desired = parse_peer_list(config.cluster.connect).expect("static peers parse");
 		assert_eq!(desired.len(), 2);
+	}
+
+	/// A peer object still setting the removed `egress` field is refused, not
+	/// silently ignored.
+	#[test]
+	fn peer_egress_field_is_refused() {
+		let err = serde_json::from_str::<Peer>(r#"{"url": "https://peer.example/", "cost": 2, "egress": 2}"#)
+			.expect_err("egress is no longer a field");
+		assert!(err.to_string().contains("egress"), "error must name the field: {err}");
 	}
 
 	/// `--cluster-connect` accepts a full URL verbatim (preserving its `?jwt=`)

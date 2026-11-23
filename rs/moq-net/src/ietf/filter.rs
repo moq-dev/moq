@@ -498,7 +498,7 @@ mod tests {
 			start: Location { group: 9, object: 0 },
 			end: Some(EndLocation { group: 4, object: None }),
 		};
-		for version in [OLD, FIELDS, TYPED] {
+		for version in [OLD, FIELDS, TYPED, Version::Draft23] {
 			let mut buf = Vec::new();
 			assert!(
 				backwards
@@ -672,12 +672,40 @@ impl Param for Fill {
 			order.param_encode(&mut inner, version)?;
 		}
 
-		w.bytes(&buf)
+		// Draft-23 (section 9.19.15) drops the length: the value is the count and the
+		// Parameters themselves, read to the last one counted.
+		match Self::counted(version) {
+			true => {
+				w.slice(&buf);
+				Ok(())
+			}
+			false => w.bytes(&buf),
+		}
 	}
 
 	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		if Self::counted(version) {
+			return Self::decode_counted(r, version);
+		}
 		let mut buf = Decoder::new(r.bytes()?, r.form());
+		let fill = Self::decode_counted(&mut buf, version)?;
+		if !buf.is_empty() {
+			return Err(DecodeError::TrailingBytes);
+		}
+		Ok(fill)
+	}
+}
 
+impl Fill {
+	/// Whether FILL_PARAMETERS is a bare Number of Parameters and the Parameters (draft-23
+	/// section 9.19.15) rather than a length-prefixed block.
+	fn counted(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
+	}
+
+	/// Decode a Number of Parameters and that many fill Parameters off `buf`, leaving
+	/// whatever follows them.
+	fn decode_counted(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let count = buf.varint()?;
 		if count > 64 {
 			return Err(DecodeError::TooMany);
@@ -701,7 +729,7 @@ impl Param for Fill {
 				if filter.is_some() {
 					return Err(DecodeError::Duplicate);
 				}
-				filter = Some(Filter::param_decode(&mut buf, version)?);
+				filter = Some(Filter::param_decode(buf, version)?);
 				continue;
 			}
 
@@ -724,7 +752,7 @@ impl Param for Fill {
 				Framing::Byte => {
 					if key == 0x22 {
 						if group_order
-							.replace(super::GroupOrder::param_decode(&mut buf, version)?)
+							.replace(super::GroupOrder::param_decode(buf, version)?)
 							.is_some()
 						{
 							return Err(DecodeError::Duplicate);
@@ -734,10 +762,6 @@ impl Param for Fill {
 					}
 				}
 			}
-		}
-
-		if !buf.is_empty() {
-			return Err(DecodeError::TrailingBytes);
 		}
 
 		Ok(Self {
@@ -756,7 +780,7 @@ mod fill_tests {
 
 	#[test]
 	fn fill_rejects_invalid_group_order() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let fill = Fill {
 				group_order: Some(super::super::GroupOrder::Any),
 				filter: None,
@@ -816,9 +840,40 @@ mod fill_tests {
 
 	#[test]
 	fn round_trips() {
-		for version in [Version::Draft20, NEW] {
+		for version in [Version::Draft20, NEW, Version::Draft23] {
 			round_trips_on(version);
 		}
+	}
+
+	/// Draft-23 (section 9.19.15) drops the length: the value is the Number of Parameters
+	/// and the Parameters, so whatever follows the last one belongs to the message.
+	#[test]
+	fn draft23_fill_is_counted_not_length_prefixed() {
+		let fill = Fill {
+			filter: Some(Filter::Relative(1)),
+			group_order: None,
+			range_filters: false,
+		};
+		let encode = |version: Version| {
+			let mut buf = Vec::new();
+			fill.param_encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.expect("encode");
+			buf
+		};
+		// count=1, type=0x21, Relative Start, StartGroup=1
+		assert_eq!(encode(NEW), [0x04, 0x01, 0x21, 0x01, 0x01]);
+		assert_eq!(encode(Version::Draft23), [0x01, 0x21, 0x01, 0x01]);
+
+		let version = Version::Draft23;
+		let wire = [0x01, 0x21, 0x01, 0x01, 0xEE];
+		let mut r = Decoder::new(&wire, version.into());
+		assert_eq!(Fill::param_decode(&mut r, version).unwrap(), fill);
+		assert_eq!(r.rest(), [0xEE]);
+
+		// The draft-22 spelling is not accepted in its place: 0x04 reads as four Parameters.
+		let wire = [0x04, 0x01, 0x21, 0x01, 0x01];
+		let mut r = Decoder::new(&wire, version.into());
+		assert!(Fill::param_decode(&mut r, version).is_err());
 	}
 
 	fn round_trips_on(version: Version) {

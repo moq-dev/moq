@@ -17,9 +17,9 @@
 		"moq-doc-api": "workspace:*",
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
-		"vitepress-plugin-llms": "^1.14.0",
-		"vue": "^3.5.44",
-		"wrangler": "^4.158.0",
+		"vitepress-plugin-llms": "^1.15.0",
+		"vue": "^3.5.45",
+		"wrangler": "^4.162.0",
 		"yaml": "^2.9.1"
 	}
 }

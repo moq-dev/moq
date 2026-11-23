@@ -14,14 +14,22 @@ use moq_net::{
 };
 
 fn origin() -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(Default::default());
+	let mut config = origin::Config::default();
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]
 async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload() {
-	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in [
+		"moq-lite-03",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let publisher = origin();
 		let subscriber = origin();
 		let registry = Registry::new(Default::default());
@@ -81,7 +89,7 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 /// admitted with, even for a session with neither origin.
 #[kio::test]
 async fn setup_counts_under_the_admitted_stats() {
-	for version in ["moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: moq_net::Version = version.parse().unwrap();
 		let registry = Registry::new(Default::default());
 		let tier = Tier::new(moq_net::Path::from_static("internal"));
