@@ -2235,9 +2235,17 @@ mod tests {
 		lost.evicted(3, start.saturating_add(Duration::from_millis(200)));
 		lost.cached(3);
 		let at = start.saturating_add(Duration::from_millis(550));
-		assert_eq!(lost.within(0..10, at, grace).collect::<Vec<_>>(), vec![2], "1 aged out, 3 cached again");
+		assert_eq!(
+			lost.within(0..10, at, grace).collect::<Vec<_>>(),
+			vec![2],
+			"1 aged out, 3 cached again"
+		);
 		lost.expire(at, grace);
-		assert_eq!(lost.len(), 2, "the eviction still within the grace and the re-cached one wait");
+		assert_eq!(
+			lost.len(),
+			2,
+			"the eviction still within the grace and the re-cached one wait"
+		);
 		lost.expire(start.saturating_add(Duration::from_millis(700)), grace);
 		assert_eq!(lost.len(), 0);
 		assert!(lost.keys.is_empty());

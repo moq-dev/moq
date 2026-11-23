@@ -256,7 +256,8 @@ export class RangeFills {
 		for (const run of asked) {
 			for (const gone of tail.accounted(run.start, run.end)) {
 				for (const gap of runGaps(this.#recovering, gone.start, gone.end))
-					for (const owed of this.#unrefused(gap.start, gap.end)) insertRun(this.#toRecover, owed.start, owed.end);
+					for (const owed of this.#unrefused(gap.start, gap.end))
+						insertRun(this.#toRecover, owed.start, owed.end);
 			}
 		}
 		// Each stale run goes out on its own subscription with no max delay, once, with the priority

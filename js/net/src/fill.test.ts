@@ -1728,7 +1728,6 @@ test("fill: an answer evicted again before its reader takes it is asked again", 
 	}
 });
 
-
 // A time in the pause past a whole group starts where it would with that group cached: the handler
 // answers with the group, the reader waits for it to end, and its End places the time past it, so
 // the group is never read. Mirrors the Rust `a_looked_up_group_ending_before_the_time_starts_past_it`.
