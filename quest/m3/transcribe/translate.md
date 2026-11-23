@@ -4,8 +4,8 @@
 
 `moq-transcribe` can be configured with target languages. Each becomes
 another transcript rendition in the derivative catalog, translated from the
-source-language segments, on demand like the source transcript. The first
-runtime is OpenAI's live translation.
+source's speech, on demand like the source transcript. The first runtime is
+OpenAI's live translation.
 
 ## Plan
 
@@ -24,9 +24,32 @@ A translation takes `role: "subtitle"`: the source-language transcript is the
 `caption` ([crate](/quest/m3/transcribe/crate.md)), and a translation of
 speech is a subtitle for viewers who hear the audio but not the language.
 
-Each translation mirrors the source transcript's groups, one per utterance,
-and its segments translate the source's final segments, so a translation
-never shows interim text the source later revises.
+`GPT-Realtime-Translate` takes audio, not text, and streams translated text
+and audio while the source speaks, so the translator feeds it the decoded
+source audio the transcriber hears, one session per target language, and
+discards the translated audio. Each translation mirrors the source
+transcript's groups, one per utterance, opening and finishing a group at the
+utterance's bounds; the model's deltas become interim revisions and each
+completed turn a final segment. A segment is timed on the source clock by the
+audio it was fed, so it lags the speech by the model's delay, which watch
+absorbs as it does any late text ([the format](/quest/m3/transcribe/format.md)).
+Its text is the model's own translation of the speech, not of the source
+transcript, so the two can word things differently.
+
+## Waiting
+
+- Maintainer: keep `GPT-Realtime-Translate`, found in review to take audio
+  input only, or translate the source transcript's text instead? Options:
+  (a) keep it, fed the source audio as above (recommended): translated text
+  streams with the speech, about as late as the source transcript, and its
+  translated audio could later become a dubbed audio rendition; it costs a
+  hosted audio session per language ($0.034/min each), times segments only
+  as closely as the model's delay, and can word things differently from the
+  source transcript. (b) Translate each final source segment with a hosted
+  text model: one translated segment per source segment, never interim
+  text, but each lands a pause plus a model round trip after the speech. An
+  agent cannot take this: it chooses the decided runtime. Done when the
+  answer is in this Plan and this item is removed.
 
 ## Required
 

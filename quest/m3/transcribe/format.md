@@ -49,6 +49,14 @@ long utterance stays deliverable however long it runs. The track declares the
 media max age (30 s), so a segmented exporter still finds the groups behind
 the live edge.
 
+Text reaches a player after the speech it transcribes, by the backend's lag
+(a translation's more). Watch shows a segment's newest revision as soon as
+it arrives, even after its `start`, and keeps one that arrives after its
+`end` up for its own duration from arrival, so a player at the live edge
+misses no text; a player whose latency target exceeds the lag shows it
+aligned with the audio. A group that had already finished when the reader
+joined is history rather than late text, so it shows nothing, as above.
+
 Watch highlights words when `words` is present. Its renderer escapes all
 markup today (`sanitizeCue` in `js/watch/src/text/renderer.ts`) and lists
 `vtt` and `utf8` as renderable (`js/watch/src/text/source.ts`), so add the

@@ -31,11 +31,14 @@ time before decoding, holding back at most the stream's reorder depth.
 Decode 608 into `vtt` cues: pop-on gives a cue per displayed caption, and
 roll-up and paint-on give a cue per row as it is displayed, ending when it
 scrolls off or is cleared, with the row and column as WebVTT `line` and
-`position` settings. Decode 708 services the same way. Recommendation: publish
-each 708 service that carries data, and a 608 channel only when no 708
-service does, since broadcasters send the same captions in both; take the
-language from a 708 caption service descriptor when the container carries
-one (MPEG-TS's PMT). Add a track when its channel first carries data, as the
+`position` settings. Decode 708 services the same way. Publish every 608 channel
+and 708 service that carries data: broadcasters usually send the same
+captions in both, but a 608 channel may carry a language no 708 service
+does, and nothing in the stream proves two match, so dropping either can lose
+captions the importer has already stripped from the video. Label each track
+with its channel or service (`CC1`, `Service 1`) so a menu tells the copies
+apart, and take the language from a caption service descriptor when the
+container carries one (MPEG-TS's PMT). Add a track when its channel first carries data, as the
 catalog already grows mid-stream.
 
 Rewriting an SEI NAL re-serializes the remaining messages with their sizes

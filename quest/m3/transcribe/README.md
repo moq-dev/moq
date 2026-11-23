@@ -7,7 +7,7 @@ and programs read as structure. `moq-transcribe` consumes a broadcast's audio
 and publishes a derivative broadcast beside it, as `moq-transcode` does for
 video. Its catalog references a text rendition in a new structured transcript
 format, produced just in time while subscribed. The language is detected
-automatically. A translator later adds one rendition per target language.
+automatically, from the text when the backend reports none. A translator later adds one rendition per target language.
 
 Captions a source carries in band reach players the same way: the importer
 takes CEA-608/708 out of the video and publishes them as text tracks, and the

@@ -6,8 +6,9 @@ The exporters write every text rendition, whatever its format, as the text
 the container carries: an HLS subtitles rendition and a DASH text adaptation
 set of WebVTT segments beside the media, a `wvtt` track in fMP4, and
 `S_TEXT/WEBVTT` or `S_TEXT/UTF8` (SRT) in Matroska. `moq export vtt` and
-`moq export srt` write one text rendition as a sidecar file, as `moq export
-h264` does for a video one. A transcript exports only its final segments;
+`moq export subrip` write one text rendition as a sidecar file, as `moq export
+h264` does for a video one; SubRip takes its full name because `moq export
+srt` is already the SRT transport. A transcript exports only its final segments;
 interim revisions never reach an export.
 
 ## Plan

@@ -34,7 +34,15 @@ frame rate's budget (A/53's `cc_count`), and queue text that exceeds it
 rather than drop it, which roll-up absorbs by delaying its words.
 
 Insert an SEI NAL into the access unit at the captions' presentation time,
-in the exporter's codec layer (`rs/moq-mux/src/codec/h264/export.rs`,
+or, when a cue arrives after that frame went out, into the next frame
+written, as live broadcast captions lag the speech; no cue is dropped for
+arriving late. A transcript's final lands a pause after its speech
+([crate](/quest/m3/transcribe/crate.md)), so a container sink's existing
+release delay (`--delay`) is the caption budget: a cue inside it lands on
+time, and an export that wants every caption aligned raises it past the
+transcript's lag. A cue that missed its frame starts from the next one,
+ahead of later cues, so lateness shifts captions but never reorders them.
+Do this in the exporter's codec layer (`rs/moq-mux/src/codec/h264/export.rs`,
 `rs/moq-mux/src/codec/h265/export.rs`), reusing the SEI writer
 [caption import](/quest/m3/transcribe/caption-import.md) adds to rewrite
 NALs. Matroska is left out, since its own text tracks carry the captions
