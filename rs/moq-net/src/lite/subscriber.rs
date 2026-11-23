@@ -13707,15 +13707,17 @@ impl ServeLoop {
 										Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
 									};
 									let mut largest = first.largest;
-									// Drain any further ready SUBSCRIBE_START messages in one pass
-									// before publishing the starts table, avoiding O(N^2) rebuilds when
-									// a multi-range subscription is answered in a burst.
-									let mut yielded = false;
-									loop {
-										if budget.poll_yield(waiter).is_pending() {
-											yielded = true;
-											break;
-										}
+									// Drain the rest of the burst before applying it: applied in pieces,
+									// each piece re-fits the demand, and an update sent between them
+									// retires ranges whose answers are still unread. Each SUBSCRIBE_START
+									// answers a Range ID this side assigned, at most once, so the drain
+									// stops at that many rather than at the task budget.
+									let mut left = match &self.sub {
+										Sub::Active(active) => active.live.next(),
+										Sub::None => 0,
+									};
+									while left > 0 {
+										left -= 1;
 										let Sub::Active(active) = &mut self.sub else {
 											break;
 										};
@@ -13737,8 +13739,8 @@ impl ServeLoop {
 									if let Err(err) = self.apply_starts(serve, largest, dirty) {
 										return Poll::Ready(ServeEnd::GiveBack(err));
 									}
-									if next.is_none() && yielded {
-										return Poll::Pending;
+									if next.is_none() {
+										ready!(budget.poll_yield(waiter));
 									}
 								}
 								Recv::Message(msg) => {
