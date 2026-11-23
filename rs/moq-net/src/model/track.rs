@@ -11882,20 +11882,6 @@ impl Subscriber {
 		}
 	}
 
-	/// A count that moves whenever this subscriber's ranges may resolve differently, so a caller
-	/// waiting on [`Self::resolved_keys`] can skip asking again while it stands. `None` for a
-	/// front's reader, which keeps none.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn resolution(&mut self) -> Option<u64> {
-		match &mut self.inner {
-			Inner::Plain(cursor) => {
-				cursor.sync();
-				Some(cursor.filter.revision)
-			}
-			Inner::Resume(..) => None,
-		}
-	}
-
 	/// This subscriber's ranges keyed in `keys` while their time starts wait on the groups
 	/// held to place them, or on its route copies for a reader following them: each one's
 	/// time, and the exclusive end it resolved to. `None` for one that resolved.
