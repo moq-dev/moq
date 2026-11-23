@@ -2626,7 +2626,7 @@ export class Subscriber {
 		this.#declare(entry);
 		// The groups the SUBSCRIBE asked for below where every demand range starts are not waited
 		// for, whatever the demand asks later. One that still arrives is delivered.
-		const served = entry.declared?.start;
+		const served = this.#feedStart(entry, "wait");
 		if (entry.requested !== undefined && served !== undefined && served !== null)
 			entry.tail.account(entry.requested, served);
 	}
@@ -2914,10 +2914,45 @@ export class Subscriber {
 		}
 	}
 
-	// Declare where a lite-07 feed starts: the lowest start the live ranges report, or the
-	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_START has yet to
-	// say where one starts. Mirrors the Rust `SubStream::declare`.
+	// Lite-07: where the live feed starts, the lowest start the demand's ranges report, or
+	// undefined, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_START has yet to say where
+	// one starts. With `joins` "skip", a live join still unanswered holds it pending only while no
+	// other range is answered: the join's answer places just the join, whose readers start where it
+	// places them, while every other range's groups come from a range of its own. So a relay
+	// serving this copy answers a range its upstream placed without waiting on a join that upstream
+	// still places. The tail waits for every range. Mirrors the Rust `SubStream::lowest_start`.
+	#feedStart(entry: SubscribeEntry, joins: "wait" | "skip"): bigint | null | undefined {
+		if (entry.start === undefined) return undefined;
+		let start: bigint | null = null;
+		let answered = false;
+		let skipped = false;
+		for (const id of entry.live.ids()) {
+			// Only the demand's ranges say where the live feed starts, not a fill's or a probe.
+			if (entry.fillIds.has(id) || entry.probeIds.has(id)) continue;
+			if (!entry.starts.has(id)) {
+				if (joins === "wait" || entry.live.get(id)?.start?.live === undefined) return undefined;
+				skipped = true;
+				continue;
+			}
+			answered = true;
+			const at = entry.starts.get(id);
+			// A range with no group there serves nothing to start from.
+			if (at !== undefined && (start === null || at < start)) start = at;
+		}
+		return skipped && !answered ? undefined : start;
+	}
+
+	// Declare where a lite-07 feed starts, as `#feedStart` skipping joins says, then where each
+	// live range starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
+		// Before the ranges: a join placed below where the copy said its feed starts would read to
+		// its readers as never coming.
+		const next = { start: this.#feedStart(entry, "skip"), requested: entry.floor };
+		const last = entry.declared;
+		if (!last || last.start !== next.start || last.requested !== next.requested) {
+			entry.declared = next;
+			hooks.startTrack(entry.track, next);
+		}
 		// Where the publisher started each live range asked from a group's start, or from the oldest
 		// group as time 0, with the budget it was answered under, which a reader's time start there
 		// resolves to when the copy can't place it among its groups; and one asked as a live join,
@@ -2948,26 +2983,6 @@ export class Subscriber {
 		hooks.retainJoins(entry.track, (min, end) =>
 			live.some((range) => range.start?.live === min && through(range.end) === end),
 		);
-
-		let start: bigint | null = null;
-		let pending = entry.start === undefined;
-
-		for (const id of entry.live.ids()) {
-			// Only the demand's ranges say where the live feed starts, not a fill's or a probe.
-			if (entry.fillIds.has(id) || entry.probeIds.has(id)) continue;
-			if (!entry.starts.has(id)) {
-				pending = true;
-				break;
-			}
-			const at = entry.starts.get(id);
-			// A range with no group there serves nothing to start from.
-			if (at !== undefined && (start === null || at < start)) start = at;
-		}
-		const next = { start: pending ? undefined : start, requested: entry.floor };
-		const last = entry.declared;
-		if (last && last.start === next.start && last.requested === next.requested) return;
-		entry.declared = next;
-		hooks.startTrack(entry.track, next);
 	}
 
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {

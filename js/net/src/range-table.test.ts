@@ -367,3 +367,60 @@ for (const mode of ["direct", "cold", "warm", "late", "switch"] as const) {
 		});
 	}
 }
+
+// Each range is answered on its own, through every hop: a cold relay behind a warm one serves a
+// time range its upstream placed from cache, over the wire, while a live join in the same
+// subscription still waits on the warm relay's held upstream. The join's groups follow once it is
+// placed. Mirrors the Rust `chain_serves_a_placed_range_before_its_join`.
+test("range table chain: a placed range is served before its join", async () => {
+	const c = defined(table.cases.find((c) => c.name === "a time range and a live join in one subscription"));
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = source();
+	const got = new Got();
+	const cleanup: (() => void)[] = [() => got.close()];
+	// An origin advertising the broadcast for the next hop and serving each request from `copy`, as a
+	// relay does: a session never announces a received broadcast to another.
+	const relay = (copy: () => BroadcastConsumer) => {
+		const published = new OriginProducer();
+		const claim = published.claim(path);
+		void (async () => {
+			for await (const request of claim.requested()) request.serve(copy());
+		})();
+		cleanup.push(
+			() => claim.close(),
+			() => published.close(),
+		);
+		return published;
+	};
+	try {
+		origin.write(c);
+		const warmCopy = await copyOf(origin.origin);
+		cleanup.push(() => warmCopy.close());
+		const warmed = warmCopy.consume();
+		cleanup.push(() => warmed.close());
+		for (const reader of await warm(clock, warmed, c)) cleanup.push(() => reader.close());
+		const coldCopy = await copyOf(relay(warmCopy.consume));
+		cleanup.push(() => coldCopy.close());
+		const front = await copyOf(relay(coldCopy.consume));
+		cleanup.push(() => front.close());
+		const remote = front.consume();
+		cleanup.push(() => remote.close());
+
+		// The origin's answers on the warm relay's open subscription wait, so the join it asks for
+		// there stays unplaced, while the relay's new requests, such as its TRACK, still flow.
+		warmCopy.server.holdOpen();
+		const reader = remote.track("data").subscribe(subscription(c.read));
+		cleanup.push(() => reader.close());
+		await got.read(clock, reader, 0);
+		expect(got.starts(), "the time range waited on the join").toEqual([1000n, 2000n]);
+
+		warmCopy.server.release();
+		await got.read(clock, reader, c.deliver.length);
+		expect(await got.delivered(clock)).toEqual(c.deliver);
+	} finally {
+		for (const close of cleanup.reverse()) close();
+		origin.close();
+		installed.close();
+	}
+});
