@@ -100,6 +100,19 @@ describe("WebSocketStream ponyfill", () => {
 		expect(b.value).toBe("hello");
 	});
 
+	test("a message arriving after the readable is cancelled is dropped", async () => {
+		const wss = new WebSocketStream("wss://x", { webSocket: ctor });
+		const ws = FakeWebSocket.last as FakeWebSocket;
+		ws.open();
+		const { readable } = await wss.opened;
+		await readable.cancel();
+		expect(ws.closeArgs).toBeDefined();
+
+		// The socket is only closing, so frames already in flight still arrive.
+		expect(() => ws.message(new Uint8Array([1]).buffer)).not.toThrow();
+		expect(() => ws.message("late")).not.toThrow();
+	});
+
 	test("writes are sent and backpressure follows bufferedAmount", async () => {
 		const clock = manual();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });

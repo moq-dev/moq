@@ -27,7 +27,7 @@ const AAC_MAX_SAMPLE_RATE: u32 = 0xFF_FFFF;
 
 /// Output audio codec. `#[non_exhaustive]` so new codecs can be added without
 /// breaking external `match`es.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Codec {
 	/// Opus (RFC 6716), and the default.

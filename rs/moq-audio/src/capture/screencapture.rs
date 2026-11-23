@@ -9,8 +9,8 @@
 //! Like the mic path, buffers arrive on a dispatch queue and are forwarded to a
 //! bounded async channel, so dropping the capture future releases the stream.
 //!
-//! Not covered by tests: this needs the Screen Recording TCC grant and a real
-//! display, so it can't run headless.
+//! The capture itself isn't covered by tests: it needs the Screen Recording
+//! TCC grant and a real display, so it can't run headless.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -20,8 +20,11 @@ use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
-use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
-use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_audio_types::{
+	AudioBuffer, AudioBufferList, AudioStreamBasicDescription, kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat,
+	kAudioFormatLinearPCM,
+};
+use objc2_core_media::{CMAudioFormatDescriptionGetStreamBasicDescription, CMSampleBuffer, CMTime};
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
 	SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput,
@@ -106,8 +109,16 @@ impl SystemAudio {
 		let delegate = Delegate::new(tx);
 		let dispatch = DispatchQueue::new("dev.moq.audio.system", None);
 
+		// Registered as the stream's delegate as well as its output, so a stream
+		// that stops on its own (a revoked grant, a display going away) closes the
+		// channel instead of leaving `read` parked forever.
 		let stream = unsafe {
-			SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &configuration, None)
+			SCStream::initWithFilter_configuration_delegate(
+				SCStream::alloc(),
+				&filter,
+				&configuration,
+				Some(ProtocolObject::from_ref(&*delegate)),
+			)
 		};
 		unsafe {
 			let proto = ProtocolObject::from_ref(&*delegate);
@@ -194,6 +205,14 @@ impl Drop for StreamGuard {
 /// channel. Opus wants them interleaved, so weave them here. Returns `None` if
 /// the buffer isn't the float layout we asked for.
 fn samples(sample_buffer: &CMSampleBuffer) -> Option<Buffer> {
+	// The bytes are read as `f32` below, so refuse anything the format
+	// description doesn't say is native-endian 32-bit float.
+	let format = unsafe { sample_buffer.format_description() }?;
+	let asbd = unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(&format).as_ref() }?;
+	if !is_f32(asbd) {
+		return None;
+	}
+
 	// An AudioBufferList is variable-length (a flexible array of AudioBuffer), so
 	// ask how big it needs to be, then hand back a buffer of exactly that size.
 	let mut needed = 0usize;
@@ -237,7 +256,10 @@ fn samples(sample_buffer: &CMSampleBuffer) -> Option<Buffer> {
 	let _block = unsafe { Retained::from_raw(block) };
 
 	let count = unsafe { (*list).mNumberBuffers } as usize;
-	if count == 0 {
+	// The list CoreMedia filled has to fit the storage it was sized for.
+	let end =
+		std::mem::offset_of!(AudioBufferList, mBuffers).checked_add(count.checked_mul(size_of::<AudioBuffer>())?)?;
+	if count == 0 || end > needed {
 		return None;
 	}
 	// `mBuffers` is declared as a 1-element array standing in for a C flexible
@@ -245,21 +267,7 @@ fn samples(sample_buffer: &CMSampleBuffer) -> Option<Buffer> {
 	let buffers =
 		unsafe { std::slice::from_raw_parts(std::ptr::addr_of!((*list).mBuffers).cast::<AudioBuffer>(), count) };
 
-	let planes: Vec<&[f32]> = buffers
-		.iter()
-		.map(|buffer| {
-			if buffer.mData.is_null() {
-				&[][..]
-			} else {
-				unsafe {
-					std::slice::from_raw_parts(
-						buffer.mData.cast::<f32>(),
-						buffer.mDataByteSize as usize / size_of::<f32>(),
-					)
-				}
-			}
-		})
-		.collect();
+	let planes: Vec<&[f32]> = buffers.iter().map(plane).collect::<Option<_>>()?;
 
 	// One buffer means it's already interleaved, and that buffer's own
 	// mNumberChannels says how many are woven in; otherwise it's one plane per
@@ -282,6 +290,30 @@ fn samples(sample_buffer: &CMSampleBuffer) -> Option<Buffer> {
 		samples: out,
 		channels: planes.len() as u32,
 	})
+}
+
+/// Whether `asbd` describes the samples [`samples`] reads: linear PCM of
+/// native-endian 32-bit floats.
+fn is_f32(asbd: &AudioStreamBasicDescription) -> bool {
+	let big_endian = asbd.mFormatFlags & kAudioFormatFlagIsBigEndian != 0;
+	asbd.mFormatID == kAudioFormatLinearPCM
+		&& asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
+		&& asbd.mBitsPerChannel == 32
+		&& big_endian == cfg!(target_endian = "big")
+}
+
+/// One buffer's samples, or `None` if its data isn't aligned for `f32`.
+fn plane(buffer: &AudioBuffer) -> Option<&[f32]> {
+	let data = buffer.mData.cast::<f32>();
+	if data.is_null() {
+		return Some(&[]);
+	}
+	if !data.is_aligned() {
+		return None;
+	}
+	// SAFETY: the block buffer the caller holds owns `mDataByteSize` bytes at
+	// `mData`, now known to be `f32`-aligned and of the float format.
+	Some(unsafe { std::slice::from_raw_parts(data, buffer.mDataByteSize as usize / size_of::<f32>()) })
 }
 
 struct DelegateIvars {
@@ -393,3 +425,67 @@ fn error_message(error: *mut NSError) -> String {
 /// task. The objc object is reference-counted and safe to move between threads.
 struct SendObj<T>(Retained<T>);
 unsafe impl<T> Send for SendObj<T> {}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn asbd(format: u32, flags: u32, bits: u32) -> AudioStreamBasicDescription {
+		AudioStreamBasicDescription {
+			mSampleRate: 48_000.0,
+			mFormatID: format,
+			mFormatFlags: flags,
+			mBytesPerPacket: bits / 8,
+			mFramesPerPacket: 1,
+			mBytesPerFrame: bits / 8,
+			mChannelsPerFrame: 2,
+			mBitsPerChannel: bits,
+			mReserved: 0,
+		}
+	}
+
+	/// Only native-endian 32-bit float PCM is read as `f32`; integer, 64-bit,
+	/// byte-swapped, or compressed audio is refused rather than misread.
+	#[test]
+	fn reads_only_native_f32() {
+		use objc2_core_audio_types::{
+			kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked, kAudioFormatMPEG4AAC,
+		};
+
+		let float = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+		assert!(is_f32(&asbd(kAudioFormatLinearPCM, float, 32)));
+		assert!(is_f32(&asbd(
+			kAudioFormatLinearPCM,
+			float | kAudioFormatFlagIsNonInterleaved,
+			32
+		)));
+		assert!(!is_f32(&asbd(kAudioFormatLinearPCM, kAudioFormatFlagIsPacked, 32)));
+		assert!(!is_f32(&asbd(kAudioFormatLinearPCM, float, 64)));
+		assert!(!is_f32(&asbd(kAudioFormatLinearPCM, float, 16)));
+		assert!(!is_f32(&asbd(
+			kAudioFormatLinearPCM,
+			float | kAudioFormatFlagIsBigEndian,
+			32
+		)));
+		assert!(!is_f32(&asbd(kAudioFormatMPEG4AAC, float, 32)));
+	}
+
+	/// A buffer whose data is not `f32`-aligned is refused rather than cast.
+	#[test]
+	fn refuses_misaligned_data() {
+		let samples = [0.25f32, -0.5, 1.0];
+		let buffer = |data: *const u8, bytes: usize| AudioBuffer {
+			mNumberChannels: 1,
+			mDataByteSize: bytes as u32,
+			mData: data.cast_mut().cast(),
+		};
+
+		let aligned = buffer(samples.as_ptr().cast(), size_of_val(&samples));
+		assert_eq!(plane(&aligned), Some(&samples[..]));
+
+		let misaligned = buffer(samples.as_ptr().cast::<u8>().wrapping_add(1), 8);
+		assert_eq!(plane(&misaligned), None);
+
+		assert_eq!(plane(&buffer(std::ptr::null(), 0)), Some(&[][..]));
+	}
+}

@@ -526,7 +526,7 @@ impl Flate {
 			return;
 		}
 		if self.encoder.take().is_some() {
-			self.plain.bill.sub(flate::ENCODER_HEAP);
+			self.plain.bill.sub_state(flate::ENCODER_HEAP);
 		}
 	}
 }
@@ -583,7 +583,7 @@ impl Plain {
 	/// Drop `state`'s decoder, which no frame needs any more.
 	fn drop_decoder(&self, state: &mut PlainState) {
 		if state.decoder.take().is_some() {
-			self.bill.sub(flate::DECODER_HEAP);
+			self.bill.sub_state(flate::DECODER_HEAP);
 		}
 	}
 
@@ -680,6 +680,10 @@ impl Plain {
 		{
 			freed += self.pop(&mut state);
 		}
+		// Each frame billed its slot, not the deque's spare room: free that too once empty.
+		if state.frames.is_empty() {
+			state.frames = VecDeque::new();
+		}
 		freed
 	}
 
@@ -748,7 +752,7 @@ impl Inflate {
 				.and_then(|size| {
 					let bill = &self.plain.bill;
 					let decoder = state.decoder.get_or_insert_with(|| {
-						bill.add(flate::DECODER_HEAP);
+						bill.add_state(flate::DECODER_HEAP);
 						flate::Decoder::new()
 					});
 					decoder.frame(&slice.frame.payload.contiguous(0), size)
@@ -964,11 +968,18 @@ impl GroupState {
 	/// A compressed group whose plain copy started inflates the slices first, so its plain
 	/// readers carry on past them; one that never started never will.
 	fn shed_to(&mut self, end: usize) -> u64 {
+		self.shed_frames(end, true)
+	}
+
+	/// [`Self::shed_to`], inflating the slices for the plain copy first only when `inflate`:
+	/// not when that copy is about to be shed too.
+	fn shed_frames(&mut self, end: usize, inflate: bool) -> u64 {
 		let end = end.min(self.committed());
 		if end <= self.held() {
 			return 0;
 		}
-		if let Some(flate) = &self.flate
+		if inflate
+			&& let Some(flate) = &self.flate
 			&& flate.plain.len.load(Ordering::Acquire) > 0
 			&& let Ok(job) = self.inflate(flate, end - 1, end - 1)
 		{
@@ -981,6 +992,11 @@ impl GroupState {
 			&& let Some(entry) = self.front.pop_front()
 		{
 			freed += self.unhold(&entry);
+		}
+		// An adopted head's slots were billed by capacity, so the emptied deque frees them.
+		if self.front.is_empty() && self.front.capacity() > 0 {
+			freed += (self.front.capacity() * size_of::<Entry>()) as u64;
+			self.front = VecDeque::new();
 		}
 		let base = self.log.base() as usize;
 		if base < end {
@@ -1076,6 +1092,32 @@ impl GroupState {
 				.shed(debt - freed, cap - freed, self.outcome.frames().is_none());
 		}
 		freed
+	}
+
+	/// Shed every committed frame, an open group's newest too, keeping the timeline the
+	/// frames presented. A reader of a shed frame reads it as [`Error::Evicted`].
+	///
+	/// A received compressed group inflates nothing to do it. When that sheds slices its plain
+	/// copy has not inflated yet, the copy can never inflate past them, so it is released too,
+	/// decoder included, and its readers read the rest as evicted. Otherwise, and in a group a
+	/// local producer is still compressing into, the plain copy keeps going, as any shed does:
+	/// nothing it would decode next is gone.
+	fn shed_all(&mut self) {
+		if self.outcome.error().is_some() {
+			return;
+		}
+		let compressing = self.flate.as_ref().is_some_and(|flate| flate.encoder.is_some());
+		let (held, end) = (self.held(), self.committed());
+		self.shed_frames(end, compressing);
+		if let Some(flate) = &self.flate {
+			let stranded = !compressing && held < end && flate.plain.len.load(Ordering::Acquire) < end;
+			match stranded {
+				true => flate.plain.release(Error::Evicted),
+				false => {
+					flate.plain.shed(u64::MAX, u64::MAX, false);
+				}
+			}
+		}
 	}
 
 	/// Whether this copy holds no committed frame.
@@ -1474,11 +1516,16 @@ impl GroupState {
 		self.front = VecDeque::new();
 		self.evict_log(self.log.end());
 		self.partial = None;
-		if let Some(content) = self.content.take() {
+		let content = self.content.take();
+		if let Some(content) = &content {
 			content.detach(self.outcome.error().cloned().unwrap_or(Error::Dropped));
 		}
 		self.cache = 0;
 		self.charge.clear();
+		// Frames this copy wrote first may be what a live sibling still holds.
+		if let Some(content) = content {
+			content.siblings.update(&self.charge);
+		}
 		// The header state and terminal object outlive the frames.
 		if let Some(relay) = &mut self.relay {
 			relay.bytes = size_of::<Relay>() as u64 + relay.end_object.as_ref().map_or(0, |fields| fields.heap());
@@ -1504,6 +1551,8 @@ impl Drop for GroupState {
 	fn drop(&mut self) {
 		if let Some(content) = self.content.take() {
 			content.detach(Error::Dropped);
+			self.charge.clear();
+			content.siblings.update(&self.charge);
 		}
 	}
 }
@@ -2744,6 +2793,24 @@ impl Handle {
 		}
 	}
 
+	/// Shed every frame this copy holds, as [`GroupState::shed_all`] does. A frame still
+	/// arriving cannot be shed, so a copy holding one is aborted with [`Error::Evicted`]
+	/// instead: only a publisher leaving frames unfinished loses the group itself.
+	pub(super) fn shed_all(&self) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		state.shed_all();
+		// Its payload and its header's fields both bill the session.
+		if state
+			.partial
+			.as_ref()
+			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
+		{
+			self.commit_abort(state, Error::Evicted);
+		}
+	}
+
 	pub(super) fn delivery_size(&self) -> u64 {
 		let state = self.state.read();
 		state.charge.size()
@@ -3217,6 +3284,31 @@ impl Handle {
 	pub(super) fn cache_demote(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.charge.demote();
+			if let Some(content) = &state.content {
+				content.siblings.demote();
+			}
+		}
+	}
+
+	/// Stop billing the session for this copy as it leaves the cache, though it lives on for
+	/// its holders, unless a sibling copy sharing its frames is still the live edge.
+	pub(super) fn cache_leave_edge(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.charge.leave_edge();
+			if let Some(content) = &state.content {
+				content.siblings.update(&state.charge);
+			}
+		}
+	}
+
+	/// Bill the group to its session's live edges: its track's newest, which eviction never
+	/// takes. Idempotent; a no-op once demoted or closed.
+	pub(super) fn cache_promote(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.charge.promote();
+			if let Some(content) = &state.content {
+				content.siblings.update(&state.charge);
+			}
 		}
 	}
 
@@ -3754,6 +3846,12 @@ struct Carry {
 	// The copy an end check waits on past the frames this reader prefetched, with the frame
 	// it reads that copy from: held between polls so the copy keeps this reader's demand.
 	finishing: Option<(usize, Consumer)>,
+	// What ended the read once a copy closed the group below the frames already read: no
+	// route change after undoes it.
+	failed: Option<Error>,
+	// The frames up to the cursor this reader skipped rather than read: where it started, or
+	// where a skip moved it, until it reads on. A copy closing inside them took no frame back.
+	unread: std::ops::Range<usize>,
 }
 
 impl Clone for Carry {
@@ -3766,6 +3864,8 @@ impl Clone for Carry {
 				..*ride
 			}),
 			finishing: None,
+			failed: self.failed.clone(),
+			unread: self.unread.clone(),
 		}
 	}
 }
@@ -4044,8 +4144,36 @@ impl Consumer {
 	/// Carry this group across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover) -> Self {
 		Idle::disarm(&mut self.idle);
-		self.carry.get_or_insert_default().recover = Some(recover);
+		let index = self.position();
+		let carry = self.carry.get_or_insert_default();
+		carry.recover = Some(recover);
+		carry.unread = 0..index;
 		self
+	}
+
+	/// The frame this reader reads next: the cursor, plus the frames a compressed flight it
+	/// boarded still inflates and drops to get back there.
+	fn position(&self) -> usize {
+		let skip = self
+			.carry
+			.as_ref()
+			.and_then(|carry| carry.ride.as_ref())
+			.map_or(0, |ride| ride.skip);
+		self.cursor.index.saturating_add(skip)
+	}
+
+	/// Note that the read moved from position `from` to where it is without reading the frames
+	/// between.
+	fn skipped(&mut self, from: usize) {
+		let to = self.position();
+		if let Some(carry) = self.carry.as_mut().filter(|carry| carry.recover.is_some())
+			&& to > from
+		{
+			match carry.unread.end == from {
+				true => carry.unread.end = to,
+				false => carry.unread = from..to,
+			}
+		}
 	}
 
 	/// Run `read`, and once this copy fails with its route, stalls while a newer route serves,
@@ -4059,6 +4187,9 @@ impl Consumer {
 		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<Option<T>>>,
 	) -> Poll<Result<Option<T>>> {
 		loop {
+			if let Some(err) = self.carry.as_ref().and_then(|carry| carry.failed.clone()) {
+				return Poll::Ready(Err(err));
+			}
 			let res = read(self, waiter);
 			// The reader's own budget gave up on it: that is no route's doing.
 			if self.expired {
@@ -4066,6 +4197,10 @@ impl Consumer {
 			}
 			let index = self.cursor.index;
 			let short = matches!(res, Poll::Ready(Ok(None))) && self.closed_short();
+			// A copy taken over mid-group may close it below the frames already read from the
+			// copy before it, so its close cannot be where this read ends. One below only frames
+			// the read skipped still ends it cleanly, as an empty range does.
+			let past = short && self.closed_past();
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
@@ -4102,6 +4237,12 @@ impl Consumer {
 			if !recover.wants(cause.error(), waiter) {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
+					// The copy being read still serves and holds no more than was read, so
+					// nothing continues the group.
+					Cause::Closed if past => {
+						recover.failed(index, &Error::NotFound);
+						return Poll::Ready(Err(self.fail(Error::NotFound)));
+					}
 					// The copy being read still serves, so its close is the group's end.
 					Cause::Closed => self.let_go(),
 					Cause::Stalled => {}
@@ -4109,7 +4250,8 @@ impl Consumer {
 				return res;
 			}
 			recover.recovering(index, &cause);
-			let closed = matches!(cause, Cause::Closed);
+			// A close stands only where the read is.
+			let closed = short && !past;
 			let replacement = match self.replacement(cause, waiter) {
 				Poll::Ready(Ok(replacement)) => replacement,
 				Poll::Ready(Err(err)) => {
@@ -4121,17 +4263,23 @@ impl Consumer {
 						self.let_go();
 						return res;
 					}
+					if past {
+						return Poll::Ready(Err(self.fail(err)));
+					}
 					return Poll::Ready(Err(err));
 				}
 				// The reader's budget bounds the wait for the rest, as it does a stall, and
-				// ends the group where it closed.
+				// ends the group where it closed, if that close stands.
 				Poll::Pending
-					if closed
+					if short
 						&& self
 							.expiry
 							.as_ref()
 							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
 				{
+					if !closed {
+						return Poll::Ready(Err(self.fail(Error::Old)));
+					}
 					self.let_go();
 					return res;
 				}
@@ -4308,7 +4456,9 @@ impl Consumer {
 	pub fn with_range(mut self, frames: impl RangeBounds<u64>) -> Self {
 		Idle::disarm(&mut self.idle);
 		let (start, end) = super::subscription::key_bounds(frames);
+		let from = self.position();
 		self.cursor.start_at(start);
+		self.skipped(from);
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 		self
 	}
@@ -4334,7 +4484,9 @@ impl Consumer {
 	/// handlers, and surfaces as [`Error::Lagged`] when neither can serve them.
 	pub fn skip_to(&mut self, index: u64) {
 		Idle::disarm(&mut self.idle);
+		let from = self.position();
 		self.cursor.skip_to(index);
+		self.skipped(from);
 	}
 
 	/// The number of frames written so far (completed plus any in-flight), independent of
@@ -4342,6 +4494,13 @@ impl Consumer {
 	pub fn frame_count(&self) -> usize {
 		let state = self.cursor.state.read();
 		state.outcome.frames().unwrap_or(state.next_index)
+	}
+
+	/// How many frames the group holds for good once its producer closed it, `None` while it
+	/// may still grow or after it failed.
+	#[cfg(feature = "async")]
+	pub(crate) fn settled_frames(&self) -> Option<usize> {
+		self.cursor.state.read().outcome.frames()
 	}
 
 	/// Where the group ends in its track's timescale, once its producer finished it whole
@@ -4360,7 +4519,7 @@ impl Consumer {
 	/// passed the [`Self::with_range`] cap.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		let res = match self.recover().is_none() {
+		let res = match !self.resumes() {
 			true => {
 				let res = self.poll_next_frame_once(waiter);
 				self.ended_on(res)
@@ -4460,7 +4619,7 @@ impl Consumer {
 		let read = gate.as_mut().map_or(waiter, |gate| gate.waiter());
 		// Read once, carried across route changes when the group came from a front. One call
 		// site keeps the read inline: a second costs every frame drained a call frame.
-		let res = match self.recover().is_none() {
+		let res = match !self.resumes() {
 			true => self.poll_read_frame_once(read, take),
 			false => self.poll_resumed(read, |this, waiter| this.poll_read_frame_once(waiter, take)),
 		};
@@ -4665,6 +4824,36 @@ impl Consumer {
 			)
 	}
 
+	/// End every later read with `err`, which a route change no longer undoes, and return it.
+	/// The recovery goes, so no replaced copy stays subscribed for a read that ended.
+	fn fail(&mut self, err: Error) -> Error {
+		let carry = self.carry.get_or_insert_default();
+		carry.recover = None;
+		carry.failed = Some(err.clone());
+		err
+	}
+
+	/// Whether reads go through [`Self::poll_resumed`]: the group carries on across route
+	/// changes, or a failure that ended it stands.
+	fn resumes(&self) -> bool {
+		self.carry
+			.as_ref()
+			.is_some_and(|carry| carry.recover.is_some() || carry.failed.is_some())
+	}
+
+	/// Whether the copy read closed the group short below a frame this reader read, from the
+	/// copy before it: not only below frames it skipped.
+	fn closed_past(&self) -> bool {
+		let index = self.position();
+		let unread = self.carry.as_ref().map_or(0..0, |carry| carry.unread.clone());
+		self.cursor
+			.state
+			.read()
+			.outcome
+			.frames()
+			.is_some_and(|frames| index > frames && !(unread.start <= frames && unread.end >= index))
+	}
+
 	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {
 		self.carry.as_mut()?.recover.as_mut()
 	}
@@ -4681,6 +4870,8 @@ impl Consumer {
 					recover: None,
 					ride: Some(ride),
 					finishing: None,
+					failed: None,
+					unread: 0..0,
 				}))
 			}
 			(None, None) => {}
@@ -4846,7 +5037,7 @@ impl Consumer {
 	/// failed upstream) and no route will continue them.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		let res = match self.recover().is_none() {
+		let res = match !self.resumes() {
 			true => self.poll_finished_once(waiter),
 			// A reader at the end of a copy that closed the group short reads on from the route
 			// that replaced it, as a frame read does, so its end is that copy's.
@@ -5360,7 +5551,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn object_fields_follow_their_frames_through_every_read() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from_static(b"p"))
@@ -5433,7 +5624,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn terminal_metadata_stays_charged_after_frames_are_released() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from_static(b"payload"))
@@ -5514,7 +5705,7 @@ mod test {
 	fn frame_slots_are_charged_and_released() {
 		for mode in 0..3 {
 			let pool = cache::Pool::unbounded();
-			let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+			let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 			let mut group = Producer::new(Info::from(0u64), track::Info::timed(), cache);
 			let mut grew = Vec::new();
 			// Segments double from one slot: the first is in the fixed overhead, and the
@@ -5819,7 +6010,7 @@ mod test {
 			(Error::GroupTooLarge, false),
 		] {
 			let pool = cache::Pool::unbounded();
-			let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+			let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 			let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
 			producer
 				.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a"))
@@ -5850,7 +6041,7 @@ mod test {
 	#[test]
 	fn a_held_head_expires_with_the_pool_window() {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		producer
 			.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a"))
@@ -5871,7 +6062,12 @@ mod test {
 	/// dropped once idle past the window.
 	#[test]
 	fn a_lent_head_is_billed_and_expires_with_the_pool_window() {
-		let source = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+		let source = cache::Track::new(
+			cache::Pool::unbounded(),
+			Default::default(),
+			Default::default(),
+			kio::Weak::new(),
+		);
 		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), source);
 		producer
 			.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a"))
@@ -5879,7 +6075,7 @@ mod test {
 		let head = producer.consume().handoff().head().unwrap();
 
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let loan = Handoff::lent(head.clone(), &cache).expect("room for it");
 		assert!(pool.used() > 0, "billed while lent");
 		pool.step(std::time::Duration::from_secs(2));
@@ -5888,7 +6084,7 @@ mod test {
 		assert_eq!(pool.used(), 0);
 
 		let full = cache::Pool::new(cache::Config::default().with_capacity(1));
-		let cache = cache::Track::new(full, Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(full, Default::default(), Default::default(), kio::Weak::new());
 		assert!(Handoff::lent(head, &cache).is_none(), "a full pool lends nothing");
 	}
 
@@ -5898,7 +6094,7 @@ mod test {
 	fn the_held_registry_follows_the_heads_held() {
 		const BURST: usize = 64;
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let fail = |key: u64| {
 			let mut producer = Producer::new(Info::from(key), track::Info::default(), cache.clone());
 			producer
@@ -5928,7 +6124,7 @@ mod test {
 	#[test]
 	fn a_full_pool_holds_no_head() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(1));
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		producer
 			.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a"))
@@ -5944,7 +6140,7 @@ mod test {
 	#[test]
 	fn an_open_frame_reserves_its_remainder_from_adoption() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool, Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
 		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		tail.start_at(1).unwrap();
 		let adopter = tail.handle();
@@ -5978,7 +6174,7 @@ mod test {
 	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	fn an_adopted_head_counts_its_slots() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool, Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
 		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		let count = MAX_CACHE_BYTES as usize / size_of::<Entry>() + 1;
 		tail.start_at(count as u64).unwrap();
@@ -6033,7 +6229,7 @@ mod test {
 		};
 		for wired_first in [true, false] {
 			let pool = cache::Pool::unbounded();
-			let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+			let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 			let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
 			tail.start_at(2).unwrap();
 			if wired_first {
@@ -6197,7 +6393,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_long_group_sheds_its_front() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		let mut live = producer.consume();
 		let mut late = producer.consume();
@@ -6334,7 +6530,7 @@ mod test {
 
 	#[cfg(feature = "async")]
 	fn prefetched_consumer(pool: &cache::Pool, max_age: std::time::Duration) -> (Finished, Consumer) {
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let track = track::Info::timed().with_max_age(max_age);
 		let mut producer = Producer::new(Info { start: 0 }, track, cache);
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
@@ -6877,7 +7073,7 @@ mod test {
 	#[test]
 	fn frame_is_charged_as_written() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let producer = Producer::new(Info { start: 0 }, track::Info::timed(), cache);
 		let before = pool.used();
 
@@ -6985,7 +7181,7 @@ mod test {
 	#[test]
 	fn frame_commit_charges_the_tail() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let producer = Producer::new(Info { start: 0 }, track::Info::timed(), cache);
 		let before = pool.used();
 
@@ -7006,7 +7202,7 @@ mod test {
 		let budget = frame::Budget::new(1024);
 		let pool = cache::Pool::unbounded();
 		let group = |key| {
-			let cache = cache::Track::new(pool.clone(), budget.clone(), kio::Weak::new());
+			let cache = cache::Track::new(pool.clone(), budget.clone(), Default::default(), kio::Weak::new());
 			Producer::new(Info { start: key }, track::Info::timed(), cache)
 		};
 		let a = group(0);
@@ -7042,7 +7238,7 @@ mod test {
 		let budget = frame::Budget::new(2 * frame::SEGMENT);
 		let pool = cache::Pool::unbounded();
 		let group = |key| {
-			let cache = cache::Track::new(pool.clone(), budget.clone(), kio::Weak::new());
+			let cache = cache::Track::new(pool.clone(), budget.clone(), Default::default(), kio::Weak::new());
 			Producer::new(Info { start: key }, track::Info::timed(), cache)
 		};
 
@@ -7132,7 +7328,7 @@ mod test {
 	}
 
 	fn compressed_group(pool: &cache::Pool) -> Producer {
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		Producer::new(
 			Info::from(0u64),
 			track::Info::default().with_compression(crate::track::Compression::Deflate),
@@ -7265,7 +7461,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn reused_encoders_start_independent_group_streams() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let info = track::Info::default().with_compression(crate::track::Compression::Deflate);
 		let mut concurrent = Producer::new(0u64.into(), info.clone(), account.clone());
 		concurrent
@@ -7333,7 +7529,12 @@ mod test {
 		let mut reference = Producer::new(
 			Info::from(0u64),
 			track::Info::default(),
-			cache::Track::new(uncompressed.clone(), Default::default(), kio::Weak::new()),
+			cache::Track::new(
+				uncompressed.clone(),
+				Default::default(),
+				Default::default(),
+				kio::Weak::new(),
+			),
 		);
 		for index in 0..3 {
 			reference
@@ -7414,7 +7615,7 @@ mod test {
 		let plain = fail(&mut Producer::new(
 			Info::from(0u64),
 			track::Info::default(),
-			cache::Track::new(pool.clone(), Default::default(), kio::Weak::new()),
+			cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new()),
 		));
 		let refused = successor();
 		refused.handle.adopt_head(&plain);
@@ -7501,7 +7702,7 @@ mod test {
 		assert_eq!(inflated(), plain);
 		// A job belongs to its delivery even when another copy keeps the canonical
 		// inflated cache alive. Releasing one must not make its pending read succeed.
-		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let info = track::Info::default().with_compression(crate::track::Compression::Deflate);
 		let mut released = Producer::new(Info::from(0u64), info.clone(), cache.clone());
 		released.bound(Bounds { start: 0, end: Some(2) }).unwrap();
@@ -7578,6 +7779,55 @@ mod test {
 		let plain: u64 = (0..4).map(|index| verbose(index).len() as u64).sum();
 		assert!(stored < plain, "the frames compressed");
 		assert_eq!(metered(), stored);
+	}
+
+	/// Shedding every inflated frame frees the deque that held them, keeping the decoder
+	/// for the frames still to come.
+	#[test]
+	#[cfg(feature = "async")]
+	fn shedding_every_inflated_frame_frees_its_slots() {
+		let pool = cache::Pool::unbounded();
+		let mut group = compressed_group(&pool);
+		for index in 0..2 {
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), verbose(index))
+				.unwrap();
+		}
+		let mut reader = group.consume();
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
+		let plain = group.handle.state.read().flate.as_ref().unwrap().plain.clone();
+		assert!(plain.lock().frames.capacity() > 0);
+
+		group.handle.shed_all();
+		assert_eq!(plain.lock().frames.capacity(), 0);
+		assert!(plain.lock().decoder.is_some(), "the open group still decodes");
+	}
+
+	/// Shedding an adopted head frees the slots it was billed by capacity, empty frames too.
+	#[test]
+	fn shedding_an_adopted_head_frees_its_slots() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
+		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		tail.start_at(64).unwrap();
+		let adopter = tail.handle();
+		let entry = Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::new()).into(), 0);
+		let head = Head {
+			content: None,
+			start: 0,
+			first_object: true,
+			entries: vec![entry; 64],
+			compressed: false,
+		};
+		let before = adopter.state.read().charge.size();
+		adopter.adopt_head(&head);
+		assert_eq!(adopter.state.read().offset, 0, "the head was adopted");
+		assert!(adopter.state.read().charge.size() > before);
+
+		adopter.shed_all();
+		assert_eq!(adopter.state.read().front.capacity(), 0);
+		assert_eq!(adopter.state.read().charge.size(), before);
+		drop(tail);
 	}
 
 	/// The codec state counts toward the pool while it lives: the encoder moves to its
@@ -7665,7 +7915,12 @@ mod test {
 	#[test]
 	fn a_refused_shared_write_fails_the_group() {
 		for compression in [crate::track::Compression::None, crate::track::Compression::Deflate] {
-			let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+			let cache = cache::Track::new(
+				cache::Pool::unbounded(),
+				Default::default(),
+				Default::default(),
+				kio::Weak::new(),
+			);
 			let info = track::Info::default().with_compression(compression);
 			let mut first = Producer::new(Info::from(0u64), info.clone(), cache.clone());
 			first

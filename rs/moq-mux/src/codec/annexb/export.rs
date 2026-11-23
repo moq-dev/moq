@@ -13,7 +13,7 @@ pub(crate) struct Export<S: Stream, C: Codec> {
 	codec: std::marker::PhantomData<C>,
 	source: crate::Source,
 	catalog: Option<S>,
-	delay: moq_net::track::Delay,
+	delay: crate::container::Delay,
 	track: Option<Track>,
 	/// The latest presentation time written. A switch to another rendition resumes at its first
 	/// keyframe past it: a new subscription starts at the rendition's latest group, which for
@@ -49,18 +49,18 @@ impl<S: Stream, C: Codec> Export<S, C> {
 			codec: std::marker::PhantomData,
 			source,
 			catalog: Some(catalog),
-			delay: moq_net::track::Delay::default(),
+			delay: crate::container::Delay::default(),
 			track: None,
 			playhead: None,
 		}
 	}
 
-	/// Set how far behind the live edge the per-track source plays: [`Delay::min`](moq_net::track::Delay::min) is where it
-	/// starts, and [`Delay::max`](moq_net::track::Delay::max) how late a group may fall before it is skipped.
+	/// Set how far behind the live edge the per-track source plays: [`Delay::min`](crate::container::Delay::min) is where it
+	/// starts, and [`Delay::max`](crate::container::Delay::max) how late a group may fall before it is skipped.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track start and skip behavior.
 	/// Defaults to zero for both (start at the live edge, skip aggressively).
-	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+	pub fn with_delay(mut self, delay: crate::container::Delay) -> Self {
 		self.delay = delay;
 		self
 	}
@@ -124,10 +124,10 @@ impl<S: Stream, C: Codec> Export<S, C> {
 		let mut catalog = catalog.clone();
 		self.source.retain_selectable(&mut catalog);
 
+		// The catalog's ranking, so a publisher's main orientation wins over its secondary one.
 		let picked = catalog
 			.video
-			.renditions
-			.iter()
+			.ranked()
 			.filter(|(_, c)| c.codec.kind() == C::KIND)
 			.collect::<Vec<_>>();
 
@@ -135,7 +135,7 @@ impl<S: Stream, C: Codec> Export<S, C> {
 			tracing::warn!(
 				count = picked.len(),
 				codec = ?C::KIND,
-				"multiple matching renditions in catalog snapshot; using the first by name. \
+				"multiple matching renditions in catalog snapshot; using the best ranked. \
 				 Narrow with catalog::Select to pick one explicitly."
 			);
 		}
@@ -214,7 +214,7 @@ mod tests {
 		for finished in [false, true] {
 			let mut moving = Moving::new();
 			let mut export = Export::new(moving.source().await, moving.catalog_stream().await)
-				.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(10)));
+				.with_delay(crate::container::Delay::default().with_max(std::time::Duration::from_secs(10)));
 			moving.a.write(marked_frame(0, 0xa1)).unwrap();
 			assert_eq!(marks(&next(&mut export).await), [0xa1]);
 			if finished {

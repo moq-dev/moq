@@ -1,5 +1,5 @@
 import { RETRY_INITIAL } from "../auth_session.ts";
-import { error, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { closeReason, error, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { Reader, type Stream, type Writer } from "../stream.ts";
 import type { Deadline } from "../util/deadline.ts";
@@ -265,7 +265,7 @@ export class RequestStream {
 			this.#violated = true;
 			// Before the session's own close, which would send a clean code.
 			try {
-				this.#quic?.close({ closeCode: e.code, reason: e.message });
+				this.#quic?.close({ closeCode: e.code, reason: closeReason(e.message) });
 			} catch {
 				// Already closed.
 			}

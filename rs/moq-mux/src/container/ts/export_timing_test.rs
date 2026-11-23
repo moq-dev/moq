@@ -140,7 +140,7 @@ impl Live {
 		cfg.description =
 			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -157,7 +157,7 @@ impl Live {
 		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.audio
 			.renditions
@@ -207,7 +207,7 @@ impl Live {
 	/// Declare that video decodes up to `jitter` before it is presented, as a deep B-pyramid's
 	/// catalog would, so a receiver holds that much of it for its DTS.
 	fn declare_video_jitter(&mut self, jitter: Duration) {
-		let mut catalog = self.catalog.modify().unwrap();
+		let mut catalog = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		for config in catalog.video.renditions.values_mut() {
 			config.jitter = Some(jitter);
 		}
@@ -222,7 +222,7 @@ impl Live {
 		let description =
 			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_PYRAMID)], &[Bytes::from_static(PYRAMID_PPS)])
 				.unwrap();
-		let mut catalog = self.catalog.modify().unwrap();
+		let mut catalog = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		for config in catalog.video.renditions.values_mut() {
 			config.description = Some(description.clone());
 			config.reorder = Some(2);
@@ -1440,11 +1440,15 @@ async fn two_legs_pad_the_same_slots_at_a_fractional_rate() {
 /// Whatever follows the source's clock has to follow it identically on both legs, though they
 /// joined at different points on it.
 #[tokio::test(start_paused = true)]
-async fn two_legs_render_a_drifting_source_the_same_way() {
-	for scale in [0.9996, 1.0004] {
-		let (a, b, from) = pair(scale, 0, 180_000_000 / VIDEO_US, |_| false).await;
-		assert_same_packets(&a, &b, from);
-	}
+async fn two_legs_render_a_slow_drifting_source_the_same_way() {
+	let (a, b, from) = pair(0.9996, 0, 180_000_000 / VIDEO_US, |_| false).await;
+	assert_same_packets(&a, &b, from);
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_legs_render_a_fast_drifting_source_the_same_way() {
+	let (a, b, from) = pair(1.0004, 0, 180_000_000 / VIDEO_US, |_| false).await;
+	assert_same_packets(&a, &b, from);
 }
 
 // A receiver locks its decoder's clock to the PCR, so the output's system clock is held to

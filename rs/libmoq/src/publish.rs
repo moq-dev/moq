@@ -442,7 +442,7 @@ impl Publish {
 		let result = (|| {
 			// Retire caller-authored entries while the catalog track is still open.
 			{
-				let mut guard = broadcast.catalog.modify()?;
+				let mut guard = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 				for name in broadcast.video.keys() {
 					guard.video.renditions.remove(name);
 				}
@@ -752,7 +752,7 @@ impl Publish {
 			return Err(moq_mux::Error::IdentityChanged(name.to_string()).into());
 		}
 		broadcast.video.insert(name.to_string(), config.clone());
-		let mut catalog = broadcast.catalog.modify()?;
+		let mut catalog = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 		catalog.video.renditions.insert(name.to_string(), config);
 		catalog.commit()?;
 		Ok(())
@@ -772,7 +772,7 @@ impl Publish {
 			return Err(moq_mux::Error::IdentityChanged(name.to_string()).into());
 		}
 		broadcast.audio.insert(name.to_string(), config.clone());
-		let mut catalog = broadcast.catalog.modify()?;
+		let mut catalog = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 		catalog.audio.renditions.insert(name.to_string(), config);
 		catalog.commit()?;
 		Ok(())
@@ -786,7 +786,7 @@ impl Publish {
 	pub fn video_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if broadcast.video.remove(name).is_some() {
-			let mut catalog = broadcast.catalog.modify()?;
+			let mut catalog = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 			catalog.video.renditions.remove(name);
 			catalog.commit()?;
 		}
@@ -799,7 +799,7 @@ impl Publish {
 	pub fn audio_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if broadcast.audio.remove(name).is_some() {
-			let mut catalog = broadcast.catalog.modify()?;
+			let mut catalog = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 			catalog.audio.renditions.remove(name);
 			catalog.commit()?;
 		}
@@ -809,7 +809,7 @@ impl Publish {
 	/// Replace the properties shared by every video rendition as one catalog update.
 	pub fn video_properties(&mut self, broadcast: Id, properties: hang::catalog::VideoProperties) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		let mut catalog = catalog.modify()?;
+		let mut catalog = catalog.modify(catalog.next_timestamp())?;
 		catalog.video.set_properties(properties)?;
 		catalog.commit()?;
 		Ok(())
@@ -824,7 +824,7 @@ impl Publish {
 	/// automatically.
 	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		let mut guard = catalog.modify()?;
+		let mut guard = catalog.modify(catalog.next_timestamp())?;
 		guard.set_section(name.to_string(), value)?;
 		guard.commit()?;
 		Ok(())
@@ -835,7 +835,7 @@ impl Publish {
 	/// A no-op if no section with that name exists. Republishes the catalog if it did.
 	pub fn catalog_section_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		let mut guard = catalog.modify()?;
+		let mut guard = catalog.modify(catalog.next_timestamp())?;
 		guard.remove_section(name);
 		guard.commit()?;
 		Ok(())

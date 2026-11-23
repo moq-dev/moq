@@ -30,14 +30,19 @@ const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 /// From `start`, or with an unstated Min Age the oldest group still around when there is none.
 fn floored(start: Option<u64>) -> Range {
+	let start = match start {
+		Some(start) => moq_net::track::Start::Time(start),
+		None => moq_net::track::Start::Oldest,
+	};
 	Range { start, end: None }
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Four frames starting at `key` seconds, so a group created late still starts
@@ -248,8 +253,15 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let subscribe = |range: Range, min: Option<Duration>| {
 		let track = remote.track("late").unwrap();
 		async move {
+			let range = match (range.start, min) {
+				(moq_net::track::Start::Oldest, Some(min)) => Range {
+					start: moq_net::track::Start::Live(min),
+					..range
+				},
+				_ => range,
+			};
 			let subscription = Subscription::default()
-				.with_delay(Delay::default().with_min(min).with_max(BUDGET))
+				.with_delay(Delay::default().with_max(BUDGET))
 				.with_ranges([range]);
 			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await

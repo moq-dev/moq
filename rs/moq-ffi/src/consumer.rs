@@ -16,8 +16,8 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 	}
 }
 
-/// How far behind the live edge a subscriber plays, mirroring [`moq_net::track::Delay`]: where
-/// it starts, and how late it may fall.
+/// How far behind the live edge a subscriber plays, mirroring [`moq_mux::container::Delay`]:
+/// where it starts, and how late it may fall.
 ///
 /// [`moq_subscription_defaults`] carries moq-net's default: no `min` and a zero `max`. Uniffi
 /// can't default a duration, so Kotlin and Swift name both fields, the Python, Go, and Dart
@@ -27,10 +27,11 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, or null
 	/// to leave it unstated. A range with no start is a live join once this is stated, zero
-	/// included: it starts at the group containing the live edge minus `min`. Unstated, such a
-	/// range reaches back as far as `max` allows. A range with a start ignores it, and a missing
-	/// group is given up by `max` alone. A media consumer starts an unstated minimum as zero.
-	/// moq-lite-07 sends it upstream. A `min` past `max` starts a live join no further back than
+	/// included: it starts at the group containing the live edge minus `min`
+	/// ([`Start::Live`](moq_net::track::Start::Live)). Unstated, such a range reaches back as far
+	/// as `max` allows. A range with a start ignores it, and a missing group is given up by `max`
+	/// alone. A media consumer starts an unstated minimum as zero. moq-lite-07 sends each live join
+	/// upstream. A `min` past `max` starts a live join no further back than
 	/// the group covering the point `max` behind the live edge, since the publisher serves no
 	/// older group. An audio decoder refuses a `min` beyond the track's max age instead.
 	pub min: Option<Duration>,
@@ -44,14 +45,14 @@ pub struct MoqDelay {
 	pub max: Option<Duration>,
 }
 
-impl From<MoqDelay> for moq_net::track::Delay {
+impl From<MoqDelay> for moq_mux::container::Delay {
 	fn from(delay: MoqDelay) -> Self {
 		Self::default().with_min(delay.min).with_max(delay.max)
 	}
 }
 
-impl From<moq_net::track::Delay> for MoqDelay {
-	fn from(delay: moq_net::track::Delay) -> Self {
+impl From<moq_mux::container::Delay> for MoqDelay {
+	fn from(delay: moq_mux::container::Delay) -> Self {
 		Self {
 			min: delay.min,
 			max: delay.max,
@@ -59,7 +60,8 @@ impl From<moq_net::track::Delay> for MoqDelay {
 	}
 }
 
-/// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
+/// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`] with its
+/// live joins stated as `delay.min`.
 ///
 /// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, no `delay.min`
 /// and a zero `delay.max`, everything still fresh, newest first) and change the fields you care
@@ -92,10 +94,9 @@ pub struct MoqSubscription {
 /// A null subscription argument means the same; build from this one to change a field.
 #[uniffi::export]
 pub fn moq_subscription_defaults() -> MoqSubscription {
-	let defaults = moq_net::track::Subscription::default();
 	MoqSubscription {
-		priority: defaults.priority,
-		delay: defaults.delay.into(),
+		priority: moq_net::track::Subscription::default().priority,
+		delay: moq_mux::container::Delay::default().into(),
 		ranges: None,
 		order: None,
 	}
@@ -147,7 +148,10 @@ impl MoqRange {
 	/// This range as moq-net reads it.
 	pub(crate) fn resolve(self) -> Result<moq_net::track::Range, MoqError> {
 		Ok(moq_net::track::Range {
-			start: self.start.map(range_time).transpose()?,
+			start: match self.start {
+				Some(start) => moq_net::track::Start::Time(range_time(start)?),
+				None => moq_net::track::Start::Oldest,
+			},
 			end: self.end.map(range_time).transpose()?,
 		})
 	}
@@ -193,24 +197,32 @@ impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 	}
 }
 
-impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
-	type Error = MoqError;
-
-	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
-		let mut subscription = moq_net::track::Subscription::default()
-			.with_priority(s.priority)
-			.with_delay(s.delay.into());
-		if let Some(ranges) = s.ranges {
+impl MoqSubscription {
+	/// The subscription without its delay, each range with no start still from the oldest group,
+	/// and that delay, for a caller widening it before it subscribes.
+	pub(crate) fn resolve(self) -> Result<(moq_net::track::Subscription, moq_mux::container::Delay), MoqError> {
+		let mut subscription = moq_net::track::Subscription::default().with_priority(self.priority);
+		if let Some(ranges) = self.ranges {
 			let ranges = ranges
 				.into_iter()
 				.map(MoqRange::resolve)
 				.collect::<Result<Vec<_>, _>>()?;
 			subscription = subscription.with_ranges(ranges);
 		}
-		if let Some(order) = s.order {
+		if let Some(order) = self.order {
 			subscription = subscription.with_order(order.into());
 		}
-		Ok(subscription)
+		Ok((subscription, self.delay.into()))
+	}
+}
+
+/// A stated `delay.min` joins each range with no start live that far behind the live edge.
+impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
+	type Error = MoqError;
+
+	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
+		let (subscription, delay) = s.resolve()?;
+		Ok(delay.subscription(subscription))
 	}
 }
 
@@ -523,7 +535,7 @@ impl TrackInner {
 pub struct MoqTrackConsumer {
 	/// Reads poll in place without holding a lock across a wait.
 	reads: Polled<TrackInner>,
-	control: moq_net::track::Control,
+	pub(crate) control: moq_net::track::Control,
 	info: moq_net::track::Info,
 	/// The owner whose panic ends this track's reads, handed to every group and reader taken from it.
 	driver: Background,
@@ -622,11 +634,15 @@ impl MoqTrackConsumer {
 
 	/// Change this subscriber's delivery preferences.
 	///
+	/// A range with no start that the subscription already asks, with the same end, keeps the
+	/// live join it was subscribed with: a changed `delay.min` joins only the ranges it adds.
+	///
 	/// Silently ignored if the track already ended; the update is meaningless at
 	/// that point. Errors on a range time the track can't serve, leaving the
 	/// preferences as they were.
 	pub fn update(&self, subscription: MoqSubscription) -> Result<(), MoqError> {
-		let subscription: moq_net::track::Subscription = subscription.try_into()?;
+		let (subscription, delay) = subscription.resolve()?;
+		let subscription = delay.update(&self.control.subscription(), subscription);
 		match self.control.update(subscription) {
 			Ok(()) | Err(moq_net::Error::Closed) => {}
 			Err(err) => return Err(err.into()),

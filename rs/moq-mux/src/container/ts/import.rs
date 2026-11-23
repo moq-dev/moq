@@ -822,7 +822,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// Record the program-level descriptors as the PMT revises them; export re-emits them
 		// verbatim, including the original CUEI.
 		if self.supports_mpegts && self.program_info != pmt.program_info {
-			if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
+			if let Some(mpegts) = self.catalog.edit()?.ext.mpegts_mut() {
 				mpegts.program_descriptors = pmt.program_info.clone();
 			}
 			self.program_info = pmt.program_info.clone();
@@ -1261,7 +1261,7 @@ impl<E: catalog::Catalog> Import<E> {
 			// A verbatim entry leaves with its stream; a decoded track's is recorded here.
 			if let Some(name) = self.recorded_media.remove(&pid)
 				&& stream.media_track_name().is_some()
-				&& let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut()
+				&& let Some(mpegts) = self.catalog.edit()?.ext.mpegts_mut()
 			{
 				mpegts.tracks.remove(&name);
 			}
@@ -1701,7 +1701,7 @@ impl<E: catalog::Catalog> Import<E> {
 	/// only when a window sets a new high, ever more rarely.
 	fn record_mux_rate(&mut self) -> Result<()> {
 		let rate = self.mux_rate.published();
-		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
+		if let Some(mpegts) = self.catalog.edit()?.ext.mpegts_mut() {
 			mpegts.mux_rate = rate;
 		}
 		Ok(())
@@ -1721,7 +1721,7 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		}
 		let descriptors = self.es_descriptors.get(&pid.as_u16()).cloned().unwrap_or_default();
-		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
+		if let Some(mpegts) = self.catalog.edit()?.ext.mpegts_mut() {
 			// A format change moved the PID to a new track, whose entry replaces the ended one's.
 			if let Some(previous) = self.recorded_media.get(&pid) {
 				mpegts.tracks.remove(previous);
@@ -1789,7 +1789,7 @@ impl<E: catalog::Catalog> Import<E> {
 		if !self.supports_mpegts {
 			return Ok(());
 		}
-		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
+		if let Some(mpegts) = self.catalog.edit()?.ext.mpegts_mut() {
 			let program = mpegts.program.get_or_insert_with(Default::default);
 			program.transport_stream_id = transport_stream_id;
 			program.program_number = entry.program_number;
@@ -2219,7 +2219,7 @@ fn register_verbatim<E: catalog::Catalog>(
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	)?;
 
-	let mut guard = catalog.modify()?;
+	let mut guard = catalog.edit()?;
 	let Some(mpegts) = guard.ext.mpegts_mut() else {
 		// supports_mpegts was true when sampled at construction; None here means the
 		// catalog dropped the section since.
@@ -2234,7 +2234,7 @@ fn register_verbatim<E: catalog::Catalog>(
 /// Remove a verbatim track's entry from the `mpegts` catalog section on drop.
 fn unregister_verbatim<E: catalog::Catalog>(catalog: &mut crate::catalog::Producer<E>, name: &str) {
 	// A closed catalog has nothing left to unregister from.
-	let Ok(mut catalog) = catalog.modify() else {
+	let Ok(mut catalog) = catalog.edit() else {
 		return;
 	};
 	if let Some(mpegts) = catalog.ext.mpegts_mut() {
@@ -11831,7 +11831,12 @@ pub(super) mod test {
 			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
 		)
 		.unwrap();
-		catalog.modify().unwrap().ext.mpegts.program_descriptors = vec![super::catalog::Descriptor {
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.ext
+			.mpegts
+			.program_descriptors = vec![super::catalog::Descriptor {
 			tag: 0x80,
 			data: bytes::Bytes::from_static(&[0xaa]),
 		}];

@@ -546,17 +546,19 @@ export type FetchedObject =
 			/** The payload length; past one segment, the payload follows on the stream. */
 			size: number;
 	  }
-	| { kind: "endOfRange"; reason: EndOfRange; group: bigint; object: number };
+	| { kind: "endOfRange"; reason: EndOfRange; group: bigint; object: bigint };
 
 /** Decode the next object on a fetch stream. Its properties are skipped. */
 export function decodeFetchObject(c: Cursor): FetchedObject {
-	const flags = c.u53();
-	if (flags >= FETCH_NAMED) {
-		if (!END_OF_RANGE.includes(flags)) {
-			throw new ProtocolViolation(`unknown fetch serialization flags: 0x${flags.toString(16)}`);
+	// Any 62-bit value is a legal field, so an unknown one is a violation, not a decode failure.
+	const wide = c.varint();
+	if (wide.hi !== 0 || wide.lo >= FETCH_NAMED) {
+		if (wide.hi !== 0 || !END_OF_RANGE.includes(wide.lo)) {
+			throw new ProtocolViolation(`unknown fetch serialization flags: 0x${wide.toBigInt().toString(16)}`);
 		}
-		return { kind: "endOfRange", reason: flags as EndOfRange, group: c.u62(), object: c.u53() };
+		return { kind: "endOfRange", reason: wide.lo as EndOfRange, group: c.u62(), object: c.u62() };
 	}
+	const flags = wide.lo;
 
 	// Wire order: Group ID, Subgroup ID, Object ID, Priority, Properties.
 	const group = flags & FETCH_GROUP_ID ? c.u62() : undefined;

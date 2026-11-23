@@ -54,6 +54,23 @@ impl Budget {
 		Some(lite::range_size(range, self.form)? + self.id)
 	}
 
+	/// As many of `ranges`, in order, as fit beside the `spent` ones, at least the first: one
+	/// range past them still fits the message, since the budget is half of it.
+	pub fn fit_after<'a>(&self, spent: impl IntoIterator<Item = &'a Range>, ranges: Vec<Range>) -> Vec<Range> {
+		let mut used = (spent.into_iter())
+			.map(|range| self.cost(range).unwrap_or(usize::MAX))
+			.fold(0, usize::saturating_add);
+		let mut taken = Vec::with_capacity(ranges.len());
+		for range in ranges {
+			used = used.saturating_add(self.cost(&range).unwrap_or(usize::MAX));
+			if used > self.bytes && !taken.is_empty() {
+				break;
+			}
+			taken.push(range);
+		}
+		taken
+	}
+
 	fn span(&self, start: Position, end: Option<Position>) -> usize {
 		self.cost(&span(start, end)).unwrap_or(usize::MAX)
 	}
@@ -113,7 +130,7 @@ pub(super) fn fit(
 	let spans = Spans::new(spans, budget, |_| false);
 	let fills = Spans::new(fills.iter().map(fill).collect(), budget, |gap| avoid.overlaps(&gap));
 
-	// The other ranges start at a time or where the Min Age or max age places them, so no gap
+	// The other ranges start at a time or where a live join's lag or the max age places them, so no gap
 	// between them is measured: when even one span per list leaves them no room, each kind
 	// collapses to the one range covering it.
 	let cost = |ranges: &[Range]| -> usize {
@@ -255,6 +272,7 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		None => 0,
 		Some(Anchor::Time(_)) => 1,
 		Some(Anchor::Absolute(_)) => 2,
+		Some(Anchor::Live(_)) => 3,
 	};
 	let mut kinds: Vec<Range> = Vec::new();
 	for range in ranges {
@@ -265,6 +283,8 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		cover.start = match (cover.start, range.start) {
 			(Some(Anchor::Time(a)), Some(Anchor::Time(b))) => Some(Anchor::Time(a.min(b))),
 			(Some(Anchor::Absolute(a)), Some(Anchor::Absolute(b))) => Some(Anchor::Absolute(a.min(b))),
+			// The join reaching furthest back delivers what each of the others does.
+			(Some(Anchor::Live(a)), Some(Anchor::Live(b))) => Some(Anchor::Live(a.max(b))),
 			(start, _) => start,
 		};
 		cover.end = match (cover.end, range.end) {
@@ -388,7 +408,6 @@ mod tests {
 			wanted_group: Some(u64::MAX - 1),
 			priority: i8::MIN,
 			max_delay: Some(std::time::Duration::from_millis(u64::MAX - 1)),
-			min_delay: Some(std::time::Duration::from_millis(u64::MAX - 1)),
 			ranges,
 			order: crate::track::Order::Descending,
 		};

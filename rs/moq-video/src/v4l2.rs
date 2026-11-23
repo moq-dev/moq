@@ -785,9 +785,10 @@ impl Queue {
 	///
 	/// An M2M driver copies the OUTPUT timestamp onto the CAPTURE buffer its work
 	/// comes out on, so this is how a frame's presentation time survives a codec
-	/// that pipelines.
+	/// that pipelines. A buffer the driver refuses goes back on the free list,
+	/// since it is still ours, rather than leaving the pool one smaller.
 	pub(crate) fn queue(
-		&self,
+		&mut self,
 		device: &Device,
 		index: u32,
 		bytesused: &[u32],
@@ -811,8 +812,10 @@ impl Queue {
 
 		// SAFETY: `VIDIOC_QBUF` takes a `v4l2_buffer`, whose plane array is the one
 		// above, valid for the call and long enough for `buffer.length`.
-		unsafe { device.ioctl(vidioc::VIDIOC_QBUF, &mut buffer) }
-			.map_err(|err| device.err(format_args!("QBUF {index}"), err))
+		unsafe { device.ioctl(vidioc::VIDIOC_QBUF, &mut buffer) }.map_err(|err| {
+			self.free.push_back(index);
+			device.err(format_args!("QBUF {index}"), err)
+		})
 	}
 
 	/// Take back a buffer the driver has finished with.

@@ -55,8 +55,9 @@ struct WireClaim {
 	claim: Claim,
 	/// The node whose claim it is, once a floor closed the batch that started it.
 	origin: Option<NodeId>,
-	/// Whether the node holds it: a claim the session's limit does not admit is left out.
-	filed: bool,
+	/// The absolute paths the node holds it at (see [`Routed::filing`]): none when the
+	/// session may carry nothing beneath it.
+	filed: Vec<Path>,
 }
 
 /// A change to the claim with an Announce ID, waiting for the floor that closes its batch.
@@ -161,8 +162,8 @@ pub(in crate::lite) struct Routed {
 	me: NodeId,
 	/// The peer forwards and is trusted with the whole tree: it sends routes.
 	routing: bool,
-	/// The permit the session filed under. The node holds only the peer's claims its
-	/// limit admits.
+	/// The permit the session filed under. The node holds the peer's claims only where
+	/// its limit admits them (see [`filing`]).
 	permit: crate::auth::Permit,
 	root: Path,
 	/// The session's origin handle, whose exclusions and mounts also gate the claims.
@@ -691,7 +692,7 @@ impl Routed {
 					instance,
 					claim,
 					origin: None,
-					filed: false,
+					filed: Vec::new(),
 				};
 				self.claims.insert(id, wire);
 				self.changed(id, true)?;
@@ -710,7 +711,7 @@ impl Routed {
 					true => Change::Lost,
 					false => Change::Ended,
 				};
-				let broadcast = wire.path.map(|path| (path, wire.instance));
+				let broadcast = wire.path.map(|path| (path, wire.instance.clone()));
 				if self.routing {
 					if let Some((_, claims)) = wire
 						.origin
@@ -721,8 +722,10 @@ impl Routed {
 					// Every forwarding node holds every path another does.
 					let broadcast = broadcast.ok_or(Error::ProtocolViolation)?;
 					self.pending.end(id, broadcast, change, wire.origin.is_some());
-				} else if let (true, Some(broadcast)) = (wire.filed, broadcast) {
-					let changes = vec![(broadcast, change)];
+				} else if !wire.filed.is_empty() {
+					let changes = (wire.filed.into_iter())
+						.map(|path| ((path, wire.instance.clone()), change.clone()))
+						.collect();
 					self.stream
 						.recv(Msg::Announce { changes })
 						.map_err(|err| refused(err, &mut self.cause))?;
@@ -764,24 +767,22 @@ impl Routed {
 			return Ok(());
 		}
 		// A claim at no path this node can hold reaches no reader here.
-		let Some(broadcast) = broadcast else {
+		let Some((path, instance)) = broadcast else {
 			return Ok(());
 		};
-		let admitted = admits(&self.origin, &self.root, &self.permit, &broadcast.0);
+		let filing = filing(&self.origin, &self.root, &self.permit, &path);
 		// Counted once per claim: as it starts, or as a change takes it out of scope.
-		if !admitted && (fresh || wire.filed) {
+		if filing.is_empty() && (fresh || !wire.filed.is_empty()) {
 			self.origin.stats().refuse_route(RouteRefusal::Scope);
 		}
-		let change = match (wire.filed, admitted) {
-			(_, true) => change,
-			(true, false) => Change::Lost,
-			(false, false) => return Ok(()),
-		};
-		wire.filed = admitted;
-		let changes = vec![(broadcast, change)];
-		self.stream
-			.recv(Msg::Announce { changes })
-			.map_err(|err| refused(err, &mut self.cause))
+		let changes = refile(wire, &instance, filing, true);
+		match changes.is_empty() {
+			true => Ok(()),
+			false => self
+				.stream
+				.recv(Msg::Announce { changes })
+				.map_err(|err| refused(err, &mut self.cause)),
+		}
 	}
 
 	/// ANNOUNCE_FLOOR: the claim changes since the last one are those of the node the
@@ -883,17 +884,12 @@ impl Routed {
 		}
 		let mut changes = Vec::new();
 		for wire in self.claims.values_mut() {
-			let Some(path) = &wire.path else {
+			let Some(path) = wire.path.clone() else {
 				continue;
 			};
-			let admitted = admits(&self.origin, &self.root, &self.permit, path);
-			let change = match (wire.filed, admitted) {
-				(false, true) => Change::Live(wire.claim.clone()),
-				(true, false) => Change::Lost,
-				_ => continue,
-			};
-			wire.filed = admitted;
-			changes.push(((path.clone(), wire.instance.clone()), change));
+			let filing = filing(&self.origin, &self.root, &self.permit, &path);
+			let instance = wire.instance.clone();
+			changes.extend(refile(wire, &instance, filing, false));
 		}
 		for change in changes {
 			let changes = vec![change];
@@ -1051,13 +1047,52 @@ fn refused(err: route::Error, cause: &mut Option<RouteClose>) -> Error {
 	Error::ProtocolViolation
 }
 
-/// Whether the node may hold the peer's claim at `path`: the permit's limit admits
-/// it, and the origin would serve it rather than refuse it (an excluded subtree or mount).
-fn admits(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::Permit, path: &Path) -> bool {
-	origin.publishable(path)
-		&& path
-			.strip_prefix(root)
-			.is_some_and(|relative| permit.within_limit(relative.as_str()))
+/// Where the node files the peer's claim at the absolute `path`, as the origin files a
+/// producer's claim: there when the permit's limit and the origin's scope cover it, and
+/// otherwise at each of their prefixes beneath it, so a route through the session serves
+/// the whole subtree it is filed at. None when the origin would refuse it (an excluded
+/// subtree or a mount) or the session may carry nothing beneath it.
+fn filing(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::Permit, path: &Path) -> Vec<Path> {
+	let Some(relative) = path.strip_prefix(root) else {
+		return Vec::new();
+	};
+	if !origin.publishable(path) {
+		return Vec::new();
+	}
+	let scope = permit.limiting(origin.allowed());
+	let publishable = |prefix: &Path| root.join(prefix).is_ok_and(|prefix| origin.publishable(&prefix));
+	(crate::origin::filed(&scope, &relative, publishable).into_iter())
+		.filter_map(|(prefix, _)| root.join(&prefix).ok())
+		.collect()
+}
+
+/// File `wire`, a claim of `instance`, at `filing` instead of where it is: what the node
+/// should hear, each place it holds live, as many segments above it as it lies beneath the
+/// claim's path, then each it leaves lost. With `changed`, the claim itself changed, so
+/// every place it stays is told again.
+fn refile(
+	wire: &mut WireClaim,
+	instance: &Instance,
+	filing: Vec<Path>,
+	changed: bool,
+) -> Vec<(node::Broadcast, Change)> {
+	let depth = wire.path.as_ref().map_or(0, |path| path.depth());
+	let mut changes = Vec::new();
+	for path in &filing {
+		if !changed && wire.filed.contains(path) {
+			continue;
+		}
+		let mut claim = wire.claim.clone();
+		claim.item.above = claim.item.above.saturating_add((path.depth() - depth) as u64);
+		changes.push(((path.clone(), instance.clone()), Change::Live(claim)));
+	}
+	for path in &wire.filed {
+		if !filing.contains(path) {
+			changes.push(((path.clone(), instance.clone()), Change::Lost));
+		}
+	}
+	wire.filed = filing;
+	changes
 }
 
 /// Whether `permit` trusts the peer with the whole tree: neither grant confines it,

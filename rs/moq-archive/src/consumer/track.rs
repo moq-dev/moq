@@ -127,7 +127,7 @@ impl Live {
 				self.producer.finish_at(Position::new(at.group, at.frame))?;
 				// An empty group stores no object, so the replay declares it never produces what
 				// the archive holds nothing for up to the end, and the end settles over it.
-				let fin = at.group + u64::from(at.frame != 0);
+				let fin = at.group.checked_add(u64::from(at.frame != 0)).ok_or(Error::Overflow)?;
 				let from = self.next.unwrap_or(0);
 				self.producer.skip_groups(from..fin);
 			}

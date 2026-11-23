@@ -776,8 +776,6 @@ async function servedSubscription(
 		pending?: boolean;
 		// The `Subscriber Max Age` as decoded, in place of the scheduling tests' wide one.
 		maxDelay?: number | null;
-		// The `Subscriber Min Age` as decoded, which places a range with no start.
-		minDelay?: number;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -845,7 +843,6 @@ async function servedSubscription(
 	// rejecting.
 	msg.ranges = options.ranges;
 	if (options.maxDelay !== undefined) msg.maxDelay = options.maxDelay;
-	msg.minDelay = options.minDelay;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -991,16 +988,15 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		version,
 		prefill: [0n, 1n, 2n, 3n, 4n],
 		maxAge: Duration.millis(3_600_000),
-		// A live join 1 ms behind the newest frame, at 4 ms.
-		minDelay: 1,
 		ranges: [
-			{},
+			// A live join 1 ms behind the newest frame, at 4 ms.
+			{ start: { live: 1 } },
 			// Group 1 starts at 1 ms.
 			{ start: { time: 1n }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
-			// Empty only once its start resolves to group 3.
-			{ end: { absolute: 2n } },
+			// Empty only once its join resolves to group 3.
+			{ start: { live: 1 }, end: { absolute: 2n } },
 		],
 	});
 	try {
@@ -1048,8 +1044,7 @@ test.each([
 });
 
 // A range an update adds learns where it starts from SUBSCRIBE_STARTED, and keeps that start however
-// many later updates leave it live, rather than joining again from a newer live edge under a newer
-// Min Age.
+// many later updates leave it live, rather than joining again from a newer live edge.
 test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later updates keep", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
@@ -1070,24 +1065,21 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 		expect(start.start.starts).toEqual([0n]);
 
 		// A live join 2 ms behind the newest frame, at group 2, which takes Range ID 1.
-		await replayUpdate({ priority: 0, minDelay: 2, ranges: [{}] }).encode(sub.client.writer, version);
+		await replayUpdate({ priority: 0, ranges: [{ start: { live: 2 } }] }).encode(sub.client.writer, version);
 		const started = await next();
 		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([started.started.id, started.started.start]).toEqual([1n, 2n]);
 
-		// Newer groups arrive, and another update under a larger Min Age leaves the range live: it
-		// still starts at 2. The added range starts at time 9, which the live group 7 contains.
+		// Newer groups arrive, and another update leaves the range live: it still starts at 2. The
+		// added range starts at time 9, which the live group 7 contains.
 		for (const key of [5n, 6n, 7n]) sub.serve(key);
-		await replayUpdate({ priority: 0, minDelay: 4, ranges: [{ start: { absolute: 9n } }] }).encode(
-			sub.client.writer,
-			version,
-		);
+		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
 		const pinned = await next();
 		if (!("started" in pinned)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([pinned.started.id, pinned.started.start]).toEqual([2n, 7n]);
 		const ranges = sub.track.subscription.peek()?.ranges ?? [];
 		expect(ranges.some((range) => range.start === 2n)).toBe(true);
-		expect(ranges.some((range) => range.start === undefined)).toBe(false);
+		expect(ranges.some((range) => typeof range.start === "object")).toBe(false);
 	} finally {
 		await sub.close();
 	}
@@ -1118,8 +1110,7 @@ test("lite-07 answers a bounded window that resolves empty and FINs in reply", a
 			prefill: [0n, 1n, 2n, 3n, 4n, 5n],
 			maxAge: Duration.millis(3_600_000),
 			// A live join at the latest group, past its end.
-			minDelay: 0,
-			ranges: [{ end: { absolute: 3n } }],
+			ranges: [{ start: { live: 0 }, end: { absolute: 3n } }],
 		});
 		try {
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
@@ -1860,7 +1851,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			try {
 				hooks.receiveTrack(sub.track);
 				// A lite-07 source reports where it started the time asked for.
-				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]], NO_MAX_DELAY);
+				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source, NO_MAX_DELAY]]);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
@@ -1878,18 +1869,29 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
-// A relay's copy already asks from the oldest group, so a downstream asking from time 2 adds no
-// range upstream and gets no start of its own. The oldest range starting at 6 still places it:
-// the source holds nothing at or before 2.
-test("lite draft-07: a time start a copy's oldest range covers starts where that range did", async () => {
+// A relay's copy already asks from the oldest group, yet a downstream asking from time 2 asks its
+// upstream for a start of its own: the oldest range starting at 6 may have expired a group at or
+// before 2 that a wider reader still gets. Answered past 2, it starts at 6.
+test("lite draft-07: a time start a copy's oldest range covers waits for an answer of its own", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2n });
 	// The relay's own reader, asking from the oldest group, which the copy's demand then starts at.
 	const local = sub.track.subscribe({ delay: { max: Duration.millis(60_000) } });
 	try {
 		hooks.receiveTrack(sub.track);
 		await flush();
-		hooks.timeStarts(sub.track, [[0n, 6n]], NO_MAX_DELAY);
+		hooks.timeStarts(sub.track, [[0n, 6n, NO_MAX_DELAY]]);
 		hooks.startTrack(sub.track, { start: 6n });
+		await flush();
+		expect(
+			hooks
+				.requested(sub.track)
+				.asks()
+				.map(([time]) => time),
+		).toEqual([2n]);
+		hooks.timeStarts(sub.track, [
+			[0n, 6n, NO_MAX_DELAY],
+			[2n, 6n, NO_MAX_DELAY],
+		]);
 		sub.serve(6n);
 		expect(await sub.servedSequence()).toBe(6n);
 		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
@@ -1911,7 +1913,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
-			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]], NO_MAX_DELAY);
+			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n, NO_MAX_DELAY]]);
 			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
@@ -2273,6 +2275,92 @@ test("lite-07 an update moves frame starts with the live ranges", async () => {
 	}
 });
 
+test("lite-07 a Position end parks the group, the stream open, until an update moves it", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		sub.serve(0n);
+		let served: Served | undefined;
+		const serving = sub.servedGroup().then((group) => {
+			served = group;
+		});
+		await flush();
+		expect(served).toBeUndefined();
+
+		// Moved past the group, the rest goes out on the same stream, which then ends.
+		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
+			sub.client.writer,
+			version,
+		);
+		await serving;
+		expect(served).toMatchObject({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+	} finally {
+		await sub.close();
+	}
+
+	// A group ending at the end ends its stream as usual.
+	const ending = await servedSubscription({
+		version,
+		frames: ["a", "b"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		ending.serve(0n);
+		expect(await ending.servedGroup()).toMatchObject({ key: 0n, payloads: ["a", "b"] });
+	} finally {
+		await ending.close();
+	}
+
+	// A track that ends while a group is parked still applies the update that moves its stop.
+	const ended = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		ended.serve(0n);
+		let served: Served | undefined;
+		const serving = ended.servedGroup().then((group) => {
+			served = group;
+		});
+		ended.track.finish();
+		await flush();
+		expect(served).toBeUndefined();
+		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
+			ended.client.writer,
+			version,
+		);
+		await serving;
+		expect(served).toMatchObject({ key: 0n, payloads: ["a", "b", "c"] });
+	} finally {
+		await ended.close();
+	}
+
+	// The subscriber leaving resets a parked stream: no update will move its stop.
+	const leaving = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		const reset = leaving.stall();
+		leaving.serve(0n);
+		expect(await leaving.servedHeader()).toBe(0n);
+		leaving.client.close();
+		expect(await reset).toBeDefined();
+	} finally {
+		await leaving.close();
+	}
+});
+
 // The update and group are both ready when the write unblocks. Control is drained first, then
 // the group is popped and positioned synchronously under the new frame cap.
 test("lite draft-06: a queued frame update applies before the next group pop", async () => {
@@ -2433,7 +2521,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
 			// Lite-06 cannot state a minimum.
-			delay: { min: null, max: Duration.millis(TEST_MAX_DELAY_MS) },
+			delay: { max: Duration.millis(TEST_MAX_DELAY_MS) },
 			order: "descending",
 			ranges: [{ end: 5n }],
 		});
@@ -4487,10 +4575,11 @@ test("a lite-07 claim above the grant is shown at the granted prefix", async () 
 // A scoped claim is shown only where its scope and the grant share a path: one at `a` scoped to
 // `a/q/x` serves something `a` or `a/q` grants, and nothing `a/r` does.
 test("a lite-07 scoped claim sharing no path with the grant is hidden", async () => {
+	// Filed at its scope, the claim is shown there, however much wider the grant is.
 	const cases: [string, string[]][] = [
 		["a/r", []],
-		["a/q", ["a/q"]],
-		["a", ["a"]],
+		["a/q", ["a/q/x"]],
+		["a", ["a/q/x"]],
 	];
 	for (const [granted, told] of cases) {
 		const origin = new OriginProducer();
@@ -4517,6 +4606,121 @@ test("a lite-07 scoped claim sharing no path with the grant is hidden", async ()
 			close();
 			origin.close();
 		}
+	}
+});
+
+// A claim filed at a handle's root, above it, covers all of what the handle shows: through an
+// origin rooted there it is no more above the path than the path is deep.
+test("a lite-07 claim filed above the handle's root is no more above than the path", async () => {
+	const origin = new OriginProducer();
+	const claim = origin.scope(Path.empty(), Path.Prefixes.parse(["room"])).claim(Path.empty());
+	const { next, ok, close } = routedAnswer(origin.scope(Path.from("room"), Path.Prefixes.parse([""])));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const told = msgs.flatMap((msg) => (msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : []));
+		expect(told).toEqual([" above 0"]);
+	} finally {
+		claim.close();
+		close();
+		origin.close();
+	}
+});
+
+// Of claims filed at one grant, the most specific one is shown wherever they meet, however cheap
+// or deep the broader one is filed, as a request there resolves.
+test("a lite-07 answer shows the most specific of the claims filed at a grant", async () => {
+	// The narrow claim at `a` is granted `a/b`; the cheaper root claim is filed at `broadGrant`.
+	const cases: [string, string][] = [
+		["a/b", "a/b above 1"],
+		["a/b/c", "a/b/c above 2"],
+	];
+	for (const [broadGrant, told] of cases) {
+		const origin = new OriginProducer();
+		const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));
+		const narrow = scoped("a/b").claim(Path.from("a"), { cost: 1n });
+		const broad = scoped(broadGrant).claim(Path.empty(), { cost: 0n });
+		const asked = Path.from(broadGrant);
+		const { next, ok, close } = routedAnswer(origin, undefined, asked);
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
+			expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual([told]);
+			expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+
+			// A request there resolves through the same claim.
+			const request = origin.consume().request(Path.join(asked, Path.from("x")));
+			const which = await Promise.race([
+				narrow
+					.requested()
+					.next()
+					.then(() => "narrow"),
+				broad
+					.requested()
+					.next()
+					.then(() => "broad"),
+			]);
+			expect(which).toBe("narrow");
+			request.close();
+		} finally {
+			narrow.close();
+			broad.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// Through a handle rooted beneath both filings, a broader claim filed above the root still gives
+// way to a more specific one filed beneath it, as a request there resolves.
+test("a lite-07 rooted answer shows the most specific claim filed on either side of its root", async () => {
+	const origin = new OriginProducer();
+	const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));
+	const broad = scoped("a").claim(Path.empty(), { cost: 0n });
+	const narrow = scoped("a/b/c/d").claim(Path.from("a"), { cost: 1n });
+	const rooted = origin.scope(Path.from("a/b/c"), Path.Prefixes.parse([""]));
+	const { next, ok, close } = routedAnswer(rooted, undefined, Path.from("d"));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
+		expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual(["d above 1"]);
+		expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+
+		const request = origin.consume().request(Path.from("a/b/c/d/x"));
+		const which = await Promise.race([
+			narrow
+				.requested()
+				.next()
+				.then(() => "narrow"),
+			broad
+				.requested()
+				.next()
+				.then(() => "broad"),
+		]);
+		expect(which).toBe("narrow");
+		request.close();
+	} finally {
+		narrow.close();
+		broad.close();
+		close();
+		origin.close();
 	}
 });
 

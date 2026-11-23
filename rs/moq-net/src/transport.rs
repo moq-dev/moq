@@ -24,7 +24,9 @@ pub enum Address {
 	Setup,
 }
 
-/// One connection's cumulative wire counters, which its transport updates as it sends and receives.
+/// One connection's cumulative wire counters, which its transport updates as it sends and receives:
+/// its bytes, its sender's waits on the peer's connection-level credit, and its receiver's holds
+/// on a spent receive window.
 ///
 /// Clones share the counters, so stats read them without polling the session or keeping the
 /// connection alive, and the final totals stay readable after it closes. Each counter is
@@ -36,6 +38,14 @@ pub struct Wire(std::sync::Arc<WireCounters>);
 struct WireCounters {
 	sent_bytes: std::sync::atomic::AtomicU64,
 	received_bytes: std::sync::atomic::AtomicU64,
+	credit_stalls: std::sync::atomic::AtomicU64,
+	credit_stalled_us: std::sync::atomic::AtomicU64,
+	credit_held_readers_us: std::sync::atomic::AtomicU64,
+	credit_held_evicted_us: std::sync::atomic::AtomicU64,
+}
+
+fn micros(time: Duration) -> u64 {
+	u64::try_from(time.as_micros()).unwrap_or(u64::MAX)
 }
 
 impl Wire {
@@ -62,6 +72,49 @@ impl Wire {
 	/// Record the cumulative bytes received so far.
 	pub fn set_received_bytes(&self, total: u64) {
 		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// How many times the sender blocked with all the peer's connection credit (`MAX_DATA`) spent.
+	pub fn credit_stalls(&self) -> u64 {
+		self.0.credit_stalls.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// How long the sender spent blocked on the peer's connection credit.
+	pub fn credit_stalled(&self) -> Duration {
+		Duration::from_micros(self.0.credit_stalled_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// Record the cumulative episodes and time the sender spent blocked on the peer's connection
+	/// credit. An episode starts when a write blocks with every credited byte sent, and ends when
+	/// the peer grants more; a write held by the local send window is not one.
+	pub fn set_credit_stalls(&self, stalls: u64, stalled: Duration) {
+		self.0.credit_stalls.store(stalls, std::sync::atomic::Ordering::Relaxed);
+		self.0
+			.credit_stalled_us
+			.store(micros(stalled), std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// How long the peer had this side's whole receive window spent while a reader had data it
+	/// had not looked at yet: a reader behind holding the window.
+	pub fn credit_held_readers(&self) -> Duration {
+		Duration::from_micros(self.0.credit_held_readers_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// How long the peer had this side's whole receive window spent while an evicted reader had
+	/// not stopped its stream.
+	pub fn credit_held_evicted(&self) -> Duration {
+		Duration::from_micros(self.0.credit_held_evicted_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// Record the cumulative time the peer had the whole receive window spent while eviction
+	/// waited on `readers` behind or on `evicted` readers yet to stop their streams.
+	pub fn set_credit_held(&self, readers: Duration, evicted: Duration) {
+		self.0
+			.credit_held_readers_us
+			.store(micros(readers), std::sync::atomic::Ordering::Relaxed);
+		self.0
+			.credit_held_evicted_us
+			.store(micros(evicted), std::sync::atomic::Ordering::Relaxed);
 	}
 }
 

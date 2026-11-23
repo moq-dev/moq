@@ -87,10 +87,13 @@ class Timestamp:
         """This timestamp as a ``timedelta``, rounded down to a whole microsecond.
 
         The timestamp itself is exact; keep it, not the ``timedelta``, to republish a tick such as 90 kHz.
-        Raises ``ValueError`` on an :meth:`unscaled` timestamp, which has no time.
+        Raises ``ValueError`` on an :meth:`unscaled` timestamp, which has no time, or on a
+        scale that is not positive.
         """
         if self.scale is None:
             raise ValueError(f"an unscaled timestamp (key {self.value}) has no time")
+        if self.scale <= 0:
+            raise ValueError(f"timestamp scale must be positive: {self.scale}")
         return timedelta(microseconds=self.value * 1_000_000 // self.scale)
 
     def _ffi(self) -> MoqTimestamp:

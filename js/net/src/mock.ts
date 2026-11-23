@@ -66,6 +66,9 @@ const READABLE_STRATEGY: QueuingStrategy<Uint8Array> = { highWaterMark: 256 };
 /** Every stream of a transport pair, so a session close can fail the ones still open. */
 type StreamSet = Set<(err: Error) => void>;
 
+/** The data one side writes, queued in order while {@link MockTransport.hold} stalls its delivery. */
+type Held = { queue?: (() => void)[] };
+
 /**
  * What the peer sees of a local reset or stop reason: only its code, as on a real wire.
  * WebTransport sends a `WebTransportError`'s `streamErrorCode` and 0 for anything else.
@@ -80,7 +83,10 @@ function onWire(reason: unknown, message: string): Error {
  * One direction of a stream. A reset (`abort`) reaches the reader, and a stop (`cancel`) the
  * writer, carrying only the code. A TransformStream would hand the peer the local reason.
  */
-function newStream(streams: StreamSet): { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> } {
+function newStream(
+	streams: StreamSet,
+	held: Held,
+): { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> } {
 	let reader!: ReadableStreamDefaultController<Uint8Array>;
 	let writer!: WritableStreamDefaultController;
 	// Set once either side ends early, so a write waiting on a full reader gives up.
@@ -118,7 +124,13 @@ function newStream(streams: StreamSet): { readable: ReadableStream<Uint8Array>; 
 			async write(chunk) {
 				// Copy each chunk to simulate real WebTransport's kernel-boundary copy.
 				// Without this, Writer's scratch buffer reuse corrupts queued data.
-				reader.enqueue(new Uint8Array(chunk));
+				const copy = new Uint8Array(chunk);
+				if (held.queue) {
+					// Sent, as into a kernel buffer, but not yet delivered.
+					held.queue.push(() => reader.enqueue(copy));
+					return;
+				}
+				reader.enqueue(copy);
 				// Backpressure: wait for the reader to drain, as a TransformStream would.
 				while (!ended && (reader.desiredSize ?? 0) <= 0) {
 					await new Promise<void>((resolve) => {
@@ -127,7 +139,8 @@ function newStream(streams: StreamSet): { readable: ReadableStream<Uint8Array>; 
 				}
 			},
 			close() {
-				reader.close();
+				if (held.queue) held.queue.push(() => reader.close());
+				else reader.close();
 			},
 			abort(reason) {
 				reader.error(onWire(reason, "reset stream"));
@@ -143,6 +156,19 @@ function newStream(streams: StreamSet): { readable: ReadableStream<Uint8Array>; 
 	});
 
 	return { readable, writable };
+}
+
+/** Deliver what `held` stalled, in the order it was written, and stop holding. */
+function deliver(held: Held): void {
+	const queue = held.queue ?? [];
+	held.queue = undefined;
+	for (const write of queue) {
+		try {
+			write();
+		} catch {
+			// The stream ended meanwhile.
+		}
+	}
 }
 
 /** A fake {@link WebTransport} backed by in-memory streams, paired with a peer. */
@@ -183,6 +209,12 @@ export class MockTransport implements WebTransport {
 	// Shared with the peer: a session close fails every stream either side opened, the way
 	// a real WebTransport session does.
 	#streams: StreamSet = new Set();
+
+	// The stream data this side wrote while held.
+	#held: Held = {};
+
+	// While set, each uni stream this side opens holds its own data, oldest first.
+	#heldUnis?: Held[];
 
 	constructor(
 		protocol: string,
@@ -275,6 +307,46 @@ export class MockTransport implements WebTransport {
 		}
 	}
 
+	/**
+	 * Stall delivery of the stream data this side writes until {@link release}, as a link that
+	 * stops delivering: writes still complete, and streams still open, but the peer reads nothing
+	 * new from them.
+	 */
+	hold(): void {
+		this.#held.queue ??= [];
+	}
+
+	/** Deliver what {@link hold} stalled, in the order it was written, and stop holding. */
+	release(): void {
+		deliver(this.#held);
+	}
+
+	/**
+	 * Stall each uni stream this side opens from now on, as Rust's `MockSession::hold_unis`:
+	 * the peer reads nothing from one until {@link releaseOldestUni} or {@link releaseNewestUni}
+	 * picks it.
+	 */
+	holdUnis(): void {
+		this.#heldUnis ??= [];
+	}
+
+	/** How many uni streams {@link holdUnis} still stalls. */
+	heldUnis(): number {
+		return this.#heldUnis?.length ?? 0;
+	}
+
+	/** Deliver the oldest stalled uni stream, and let it flow from now on. */
+	releaseOldestUni(): void {
+		const held = this.#heldUnis?.shift();
+		if (held) deliver(held);
+	}
+
+	/** Deliver the newest stalled uni stream, and let it flow from now on. */
+	releaseNewestUni(): void {
+		const held = this.#heldUnis?.pop();
+		if (held) deliver(held);
+	}
+
 	setPeer(peer: MockTransport) {
 		this.#peer = peer;
 		this.#streams = peer.#streams;
@@ -285,8 +357,8 @@ export class MockTransport implements WebTransport {
 		if (!peer) throw new Error("no peer");
 
 		// One stream for each direction
-		const c2s = newStream(this.#streams);
-		const s2c = newStream(this.#streams);
+		const c2s = newStream(this.#streams, this.#held);
+		const s2c = newStream(this.#streams, peer.#held);
 
 		// Local side: writes to c2s, reads from s2c
 		const local = {
@@ -313,7 +385,12 @@ export class MockTransport implements WebTransport {
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
-		const c2s = newStream(this.#streams);
+		let held = this.#held;
+		if (this.#heldUnis) {
+			held = { queue: [] };
+			this.#heldUnis.push(held);
+		}
+		const c2s = newStream(this.#streams, held);
 
 		// Record before handing the peer its end, so a peer that waits for the stream to arrive
 		// always finds it here.
@@ -342,6 +419,10 @@ export class MockTransport implements WebTransport {
 	}
 
 	close(_closeInfo?: WebTransportCloseInfo): void {
+		// As a browser's does, so an unbounded reason fails here as it would there.
+		if (new TextEncoder().encode(_closeInfo?.reason ?? "").byteLength > 1024) {
+			throw new DOMException("close reason exceeds 1024 bytes", "SyntaxError");
+		}
 		const info = _closeInfo ?? { closeCode: 0, reason: "" };
 		this.#closeResolve(info);
 

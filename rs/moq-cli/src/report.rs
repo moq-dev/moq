@@ -175,7 +175,7 @@ impl Stats {
 	) -> anyhow::Result<Self> {
 		let tracks = ReportTrack::create(broadcast, STATS_TRACK)?;
 		let mut catalog = catalog.clone();
-		let mut guard = catalog.modify()?;
+		let mut guard = catalog.modify(catalog.next_timestamp())?;
 		guard.stats = Some(hang::catalog::Stats::new(STATS_TRACK));
 		guard.commit()?;
 		Ok(Self {

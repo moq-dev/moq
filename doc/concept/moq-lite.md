@@ -199,7 +199,11 @@ The empty prefix covers everything. A grant holds no wildcard: `room/**`, `**`,
 `room/**` and the empty prefix for `**`. Tokens and auth server grants spell a
 prefix as `room/**` or `**` until releases before 0.22 retire, since those read
 a bare member as one path. Since every grant covers
-whole subtrees, a route a grant admits always serves whole subtrees too.
+whole subtrees, a route a grant admits always serves whole subtrees too: a claim
+broader than its publisher's grant is announced at each granted prefix beneath
+it instead, so a claim at `room` through a grant of `room/alice` is announced at
+`room/alice`, and no reader is shown it where it cannot serve. Each relay it
+crosses does the same with the grant it takes the claim under.
 
 Patterns are discovery filters: they pick which announcements a consumer lists,
 and never widen or narrow what it may request. They never travel as
@@ -294,8 +298,20 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's max age alone to bound it. |
-| **Min delay** | The playout buffer the subscriber holds behind the live edge, and where a live join starts. A range with no start and a stated min delay starts at the group containing the live edge minus it, so the buffer arrives full instead of filling in real time, and no fuller; zero starts at the latest group. The hop answering measures by media time on a timed track and by arrival on an untimed one, and fills from history to reach that group like any time start. A relay copy that can't prove which group its upstream would start at asks upstream and waits, so a join reads the same groups through a relay as from the publisher. Not stated (the default), a range with no start reaches back as far as max delay allows, and a range with a start ignores it. Carried by moq-lite 07, where a relay asks upstream for the largest its joining subscribers state, counting not stated as the largest. |
-| **Ranges** | Which groups to ask for: from the group containing a time, or from where min delay places a range with no start, through the group containing an end time or onward with the live edge. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
+| **Ranges** | Which groups to ask for, through the group containing an end time or onward with the live edge. A range starts at the group containing a time, at the oldest group max delay allows (the default), or as a live join. Each group arrives whole, from its first frame. Max delay still caps every range. |
+
+A live join is a range starting a lag behind the live edge: the playout buffer
+the subscriber holds. It starts at the group containing the live edge minus the
+lag, so the buffer arrives full instead of filling in real time, and no fuller;
+a zero lag starts at the latest group. Each range joins on its own, so one
+subscription can join at several lags. The hop answering measures by media time
+on a timed track and by arrival on an untimed one, and fills from history to
+reach that group like any time start. A moq-lite 07 relay copy asks its upstream
+for each join, with the same lag and end, and places a reader's join only from
+an answer that arrived after the reader asked, so a join reads the same groups
+through a relay as from the publisher. Readers joining alike share one answer.
+Over older moq-lite and moq-transport, a relay places the join from the groups
+it holds instead.
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.

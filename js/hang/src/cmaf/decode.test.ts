@@ -125,3 +125,37 @@ describe("CMAF untrusted counts and sizes", () => {
 		expect(() => decodeInitSegment(stalled)).toThrow("Invalid free box size 0");
 	});
 });
+
+describe("esds AudioSpecificConfig", () => {
+	const ASC = [0x11, 0x90];
+
+	/** A descriptor of `tag` around `payload`, with a one-byte size. */
+	const desc = (tag: number, ...payload: number[]) => [tag, payload.length, ...payload];
+
+	/** An audio init segment whose mp4a entry carries an ES_Descriptor with `flags` and `optional` fields. */
+	function init(flags: number, optional: number[]): Uint8Array {
+		const config = desc(0x04, 0x40, 0x15, 0, 0, 0, ...new Array(8).fill(0), ...desc(0x05, ...ASC));
+		const es = desc(0x03, 0, 1, flags, ...optional, ...config, ...desc(0x06, 2));
+		const esds = box("esds", new Uint8Array([0, 0, 0, 0, ...es]));
+		const stsd = box("stsd", words(0, 1), box("mp4a", new Uint8Array(28), esds));
+		const mdhd = box("mdhd", words(0, 0, 0, 48_000, 0, 0));
+		const hdlr = box("hdlr", words(0, 0), new TextEncoder().encode("soun"), words(0, 0, 0));
+		const mdia = box("mdia", mdhd, hdlr, box("minf", box("stbl", stsd)));
+		return box("moov", box("trak", mdia));
+	}
+
+	test.each([
+		["no optional fields", 0x00, []],
+		["streamDependenceFlag", 0x80, [0, 2]],
+		["URL_Flag", 0x40, [3, 0x61, 0x62, 0x63]],
+		["OCRstreamFlag", 0x20, [0, 3]],
+		["every flag", 0xe0, [0, 2, 1, 0x61, 0, 3]],
+	])("%s", (_, flags, optional) => {
+		expect(Array.from(decodeInitSegment(init(flags, optional)).description ?? [])).toEqual(ASC);
+	});
+
+	test("a truncated ES_Descriptor refuses the init segment", () => {
+		// The URL claims more bytes than the descriptor holds.
+		expect(() => decodeInitSegment(init(0x40, [200]))).toThrow();
+	});
+});

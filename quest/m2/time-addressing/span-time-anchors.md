@@ -40,7 +40,3 @@ Where it lives: Rust `model/track.rs` (time starts, `find_landable`,
 anchor), JS `js/net/src/track.ts`, and the draft's Time Anchor text.
 
 Public API: none expected. Wire: none; the draft's Time Anchor rule changes.
-
-## Related
-
-- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - the non-overlap rule this resolution relies on

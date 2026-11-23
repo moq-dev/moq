@@ -270,6 +270,12 @@ export type Mode = infer<typeof ModeSchema>;
 
 export const ModeSchema: ZodMiniString<string>;
 
+export const Orientation: {
+	of: (width: number, height: number) => "landscape" | "portrait" | undefined;
+};
+
+export type Orientation = NonNullable<ReturnType<typeof Orientation.__type.of.__type>>;
+
 export const PRIORITY: {
 	readonly audio: 80;
 	readonly catalog: 100;
@@ -629,6 +635,92 @@ export class UnsupportedVersion extends Error {
 export const VERSION: 4;
 
 export const Video: {
+	orientation: (section: {
+		display?: {
+			height: number & $brand<"u53">;
+			width: number & $brand<"u53">;
+		};
+		flip?: boolean;
+		renditions: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
+			bitrate?: number & $brand<"u53"> | undefined;
+			broadcast?: RelativeBroadcast | undefined;
+			codec: string;
+			codedHeight?: number & $brand<"u53"> | undefined;
+			codedWidth?: number & $brand<"u53"> | undefined;
+			color?: {
+				contentLight?: {
+					maxCll: number;
+					maxFall: number;
+				} | undefined;
+				mastering?: {
+					blue: {
+						x: number;
+						y: number;
+					};
+					green: {
+						x: number;
+						y: number;
+					};
+					maxLuminance: number;
+					minLuminance: number;
+					red: {
+						x: number;
+						y: number;
+					};
+					white: {
+						x: number;
+						y: number;
+					};
+				} | undefined;
+				matrix?: number & $brand<"u8"> | undefined;
+				primaries?: number & $brand<"u8"> | undefined;
+				range?: "full" | "limited" | undefined;
+				transfer?: number & $brand<"u8"> | undefined;
+			} | undefined;
+			container: {
+				kind: "legacy";
+			} | {
+				init: string;
+				kind: "cmaf";
+			} | {
+				kind: "loc";
+			} | {
+				kind: "unknown";
+				raw: {
+					[x: string]: unknown;
+					kind: string;
+				};
+			};
+			delay?: number & $brand<"u53"> | undefined;
+			description?: string | undefined;
+			displayAspectHeight?: number & $brand<"u53"> | undefined;
+			displayAspectWidth?: number & $brand<"u53"> | undefined;
+			enabled?: boolean | undefined;
+			framerate?: number | undefined;
+			instance?: ReferenceInstance | undefined;
+			interlaced?: boolean | undefined;
+			jitter?: number & $brand<"u53"> | undefined;
+			label?: string | undefined;
+			optimizeForLatency?: boolean | undefined;
+			preference?: number | undefined;
+			projection?: {
+				kind: "rectilinear";
+			} | {
+				fov?: number | undefined;
+				kind: "equirectangular";
+			} | {
+				kind: "unknown";
+				raw: {
+					[x: string]: unknown;
+					kind: string;
+				};
+			} | undefined;
+			reorder?: number & $brand<"u8"> | undefined;
+			stereo?: string | undefined;
+			track?: string | undefined;
+		}>, Record<string, unknown>>>;
+		rotation?: number;
+	}, config: VideoConfig) => "landscape" | "portrait" | undefined;
 	ranked: (renditions: Record<string, VideoConfig>) => [string, VideoConfig][];
 };
 

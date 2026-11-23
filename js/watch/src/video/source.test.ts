@@ -465,6 +465,105 @@ describe("Source rendition preference", () => {
 	});
 });
 
+describe("Source rendition orientation", () => {
+	// A landscape program ranked first, beside a lower-ranked portrait one, each with a ladder.
+	const renditions = () => ({
+		wide: config("avc1.640028", { codedWidth: 1920, codedHeight: 1080, bitrate: 5_000_000 }),
+		"wide/360p": config("avc1.64001e", { codedWidth: 640, codedHeight: 360, bitrate: 600_000 }),
+		tall: config("vp09.00.10.08", { codedWidth: 1080, codedHeight: 1920, bitrate: 5_000_000, preference: -1 }),
+		"tall/360p": config("vp09.00.10.08", { codedWidth: 360, codedHeight: 640, bitrate: 600_000, preference: -1 }),
+	});
+
+	it("follows the viewport across rotations, and takes the ranking without one", async () => {
+		const target = new Signal<Target | undefined>(undefined);
+		const source = new Source({ broadcast: mockBroadcast(renditions()), target });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("wide");
+
+		target.set({ width: 1080, height: 1920 });
+		await settle();
+		expect(source.out.track.peek()).toBe("tall");
+
+		target.set({ width: 1920, height: 1080 });
+		await settle();
+		expect(source.out.track.peek()).toBe("wide");
+
+		// A square box has no orientation, so the ranking decides.
+		target.set({ width: 1920, height: 1920 });
+		await settle();
+		expect(source.out.track.peek()).toBe("wide");
+		source.close();
+	});
+
+	it("steps down within the orientation for the rate", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast(renditions()),
+			target: { width: 1080, height: 1920 },
+			rate: 1_000_000,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("tall/360p");
+		source.close();
+	});
+
+	it("treats a square rendition as either orientation", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				...renditions(),
+				square: config("avc1.640028", {
+					codedWidth: 1440,
+					codedHeight: 1440,
+					bitrate: 5_000_000,
+					preference: 1,
+				}),
+			}),
+			target: { width: 1080, height: 1920 },
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("square");
+		source.close();
+	});
+
+	it("falls back to the other orientation when its own can't be decoded", async () => {
+		answer = (config) => !config.codec.startsWith("vp09");
+		const source = new Source({ broadcast: mockBroadcast(renditions()), target: { width: 1080, height: 1920 } });
+
+		await settle();
+		// Only the 360p landscape rendition fits a 1080-wide box.
+		expect(source.out.track.peek()).toBe("wide/360p");
+		source.close();
+	});
+});
+
+describe("rotated renditions", () => {
+	it("fits the box by the size as shown, the coded size turned by the rotation", async () => {
+		const renditions = {
+			"1080p": config("avc1.640028", { codedWidth: 1920, codedHeight: 1080 }),
+			"720p": config("avc1.64001f", { codedWidth: 1280, codedHeight: 720 }),
+			"360p": config("avc1.64001e", { codedWidth: 640, codedHeight: 360 }),
+		};
+		for (const [rotation, track] of [
+			[90, "720p"],
+			[270, "720p"],
+			// Unturned, a landscape 720p is too wide for the portrait box.
+			[0, "360p"],
+			[180, "360p"],
+		] as const) {
+			const broadcast = {
+				in: { connection: new Signal(undefined) },
+				out: { catalog: new Signal({ video: { renditions, rotation } }) },
+			} as unknown as Broadcast;
+			const source = new Source({ broadcast, target: { width: 720, height: 1280 } });
+			await settle();
+			expect([rotation, source.out.track.peek()]).toEqual([rotation, track]);
+			source.close();
+		}
+	});
+});
+
 describe("conflicting rendition metadata", () => {
 	it("keeps the first ranking's best picture when bitrate metadata has no common name", async () => {
 		const source = new Source({

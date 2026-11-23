@@ -117,7 +117,7 @@ idle_timeout = "10s"                 # Drop a connection after this long with no
 gso = true                           # UDP segmentation offload. Default.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 4194304             # Whole-connection window, in bytes. Default (4 MiB).
-stream_receive_window = 1048576      # Per-stream window, in bytes. Default (1 MiB).
+stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
 send_window = 4194304                # Unacknowledged outgoing data, in bytes. Default (4 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
@@ -158,7 +158,10 @@ gets through. WebSocket and TCP sessions cancel the same way; the relay accepts
 them at these windows too and widens peers to `[limits.peer.quic]`, and links
 it dials take these settings. `stream_receive_window` only paces one stream:
 its credit returns as bytes are read, whether or not their message is complete,
-so the 1 MiB default caps one group stream at about 67 Mbps at a 100 ms RTT.
+so the 4 MiB default caps one group stream at about 270 Mbps at a 100 ms RTT.
+Clients and peers share it, so a peer link carries one group stream as fast as
+a client connection does. It bounds no memory: the connection's `receive_window`
+caps what all of a peer's streams hold together.
 
 ## \[limits.client] and \[limits.peer]
 
@@ -170,14 +173,16 @@ certificate, route hop, or cluster-looking URL alone does not select peer limits
 ```toml
 [limits.client]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
+live_edges = 268435456               # Bytes of live edges its tracks hold (256 MiB).
 
 [limits.peer]
 announces = 100000
+live_edges = 0                       # No bound.
 
 [limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
-receive_window = 16777216            # Connection-wide receive window (16 MiB).
-send_window = 16777216               # Unacknowledged outgoing data (16 MiB).
+receive_window = 67108864            # Connection-wide receive window (64 MiB).
+send_window = 67108864               # Unacknowledged outgoing data (64 MiB).
 ```
 
 `[limits.peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
@@ -185,8 +190,14 @@ any other `[quic]` key is refused. They replace the `[quic]` values for a
 peer's connection once its grant is known, before the SETUP reply, over QUIC,
 WebSocket, or TCP alike. Links the relay dials get them from the handshake on.
 A link carrying a whole cluster is then not throttled by `[quic]` limits sized
-for one viewer, for example `--limits-peer-quic-max-streams=200000`. The 16 MiB windows carry about 450 Mbps at a 250 ms
-RTT and about 1 Gbps at 100 ms; raise both for a busier link.
+for one viewer, for example `--limits-peer-quic-max-streams=200000`. The 64 MiB windows carry about 2 Gbps at a 250 ms
+RTT and about 5 Gbps at 100 ms; raise both for a busier link. Each peer can
+make the relay buffer up to its `receive_window` of unread or incomplete
+incoming data, so the peer count times that window bounds that data. A peer's
+retained groups are bounded separately by its `live_edges` (no bound by
+default), and data sent to it but not yet acknowledged by `send_window`. Peers take the `[quic]` `stream_receive_window`
+like every other connection, so one group stream carries at most about 4 MiB per
+round trip.
 
 These are the defaults. Each subscription and FETCH holds a stream, as does each
 PUBLISH a peer's track listing gets, so `[quic]` or `[limits.peer.quic]`
@@ -196,6 +207,17 @@ for the combined traffic they carry, and use session peak counters to check
 announcement and subscription headroom. Exceeding `announces` closes the session
 with `TOO_MANY_REQUESTS`; reconnecting with the same load will exceed it again.
 Zero admits no entries of that kind, not unlimited entries.
+
+`live_edges` bounds the newest group of every track a session publishes to the
+relay. The cache keeps that group whatever its `capacity` or `headroom`, so a
+publisher holding many quiet tracks would otherwise hold one group each past
+any budget. Past the bound, the frames of the session's own live edges are
+shed, the one that moved longest ago first. A viewer reaching a shed frame
+meets it as it would any frame the cache dropped; the group's place on the
+timeline stays, so live joins land where they did. Another session's edges
+are never touched. Here zero means no bound.
+Peers default to none: a peer link carries every publisher behind it, and each
+is bounded where it connects.
 
 ## \[runtime]
 
@@ -277,6 +299,12 @@ max_hops = 32                                         # Legacy: longest hop path
 url = "https://api.example.com/peers"                  # Live JSON peer list; a local file also works.
 # root = ["api-ca.pem"]                               # API server trust, independent from connect.tls.
 
+[cluster.listen]                                      # A QUIC port for peers alone, apart from [listen].
+bind = "[::]:4443"
+cert = ["cluster.pem"]                                # Served to peers, selected by SNI.
+key = ["cluster.key"]
+root = ["cluster-ca.pem"]                             # Required: a client without a certificate chaining here is refused.
+
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
 # secret = "/etc/moq/cluster.key"                     # Optional: a file holding 64 hex chars.
@@ -321,9 +349,8 @@ duration = "30s"                     # Reclaim groups idle this long, and cap ev
 With no settings, the relay targets 10% of system memory free (the cgroup limit
 when set), checked every five seconds, and shrinks the cache toward it as
 publishers write. It is a target, not a hard bound: a burst of writes between
-checks can overshoot it, and the newest frame of every live track is kept
-whatever the target, so a publisher that opens many tracks still holds that much
-until it stops. `headroom` takes bytes or a percentage, and `capacity` also caps
+checks can overshoot it, and the newest group of every live track is kept
+whatever the target, which each session's `live_edges` limit bounds instead. `headroom` takes bytes or a percentage, and `capacity` also caps
 the cache at an absolute size. `headroom = "0"` removes the governor, so the
 cache grows without bound unless `capacity` is set: only run that where every
 publisher is trusted.
@@ -367,6 +394,7 @@ interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Required with stats enabled on a clustered relay, so nodes do not overwrite each other.
 depth = 1                            # One bucket track per first N path segments (per tenant).
 linger = "5m"                        # Keep an empty bucket's track listed this long. Default.
+roots = true                         # Also give each root its own stats under <root>/<prefix>. Default false.
 ```
 
 Each node publishes its traffic and session counters as MoQ tracks, split by a
@@ -380,7 +408,10 @@ node's totals count everything since its run began, so billing reads those;
 a bucket's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
-[Stats](/concept/stats) describes the paths, tracks, and encodings; read them
+With `roots`, a session also reads its own root's stats at `<prefix>/node/<node>`
+under that root with a grant on the root alone, and sees nothing of other roots;
+leave it off when a root's members should not see its traffic.
+[Stats](/concept/stats#root-broadcasts) describes the paths, tracks, and encodings; read them
 with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## Shutdown

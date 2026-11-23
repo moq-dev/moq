@@ -183,7 +183,7 @@ impl Transcoder {
 		// can pick a rung immediately. Commit so a catalog that cannot be published fails
 		// here rather than serving rungs nobody can discover.
 		{
-			let mut guard = derived.modify()?;
+			let mut guard = derived.modify(derived.next_timestamp())?;
 			catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 			guard.commit()?;
 		}
@@ -210,7 +210,7 @@ impl Transcoder {
 							let scale = Box::pin(pipeline::timescale(source, next.track()));
 							moving = Some(Moving { next, scale, snapshot: snapshot.clone() });
 						}
-						let mut guard = derived.modify()?;
+						let mut guard = derived.modify(derived.next_timestamp())?;
 						catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 						guard.commit()?;
 					}
@@ -226,7 +226,7 @@ impl Transcoder {
 					match scale {
 						Ok(scale) => {
 							ladder.adopt(next, scale).await;
-							let mut guard = derived.modify()?;
+							let mut guard = derived.modify(derived.next_timestamp())?;
 							catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 							guard.commit()?;
 						}
@@ -234,6 +234,8 @@ impl Transcoder {
 						Err(err) => tracing::warn!(%err, "could not resolve the new source's timescale"),
 					}
 				},
+				// A closed source may keep its catalog track open, so the catalog alone may never end.
+				() = source.closed() => break,
 				Some(result) = tasks.join_next() => match result {
 					Ok(Ok(())) => {}
 					Ok(Err(err)) => tracing::warn!(%err, "rung failed"),
@@ -351,7 +353,7 @@ mod tests {
 			video.description = description;
 			self.size = (width, height);
 
-			let mut guard = self.catalog.modify().unwrap();
+			let mut guard = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 			guard.video = hang::catalog::Video::default();
 			guard.video.insert("video", video).unwrap();
 		}
@@ -475,7 +477,12 @@ mod tests {
 		video.coded_height = Some(240);
 		video.bitrate = Some(1_000_000);
 		video.framerate = Some(30.0);
-		catalog.modify().unwrap().video.insert("video", video).unwrap();
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.insert("video", video)
+			.unwrap();
 
 		let track = broadcast.create_track("video", info).unwrap();
 
@@ -992,7 +999,7 @@ mod tests {
 
 		let past = moq_net::track::Subscription::default()
 			.with_ranges([moq_net::track::Range {
-				start: Some(3),
+				start: moq_net::track::Start::Time(3),
 				end: Some(4),
 			}])
 			.with_delay(moq_net::track::Delay::default().with_max(None));
@@ -1138,11 +1145,14 @@ mod tests {
 		let mut source = source_broadcast(2, 5);
 		source
 			.catalog
-			.mutate(|catalog| {
-				let mut video = catalog.video.renditions.remove("video").unwrap();
-				video.track = Some("video".to_string());
-				catalog.video.renditions.insert("main".to_string(), video);
-			})
+			.mutate(
+				|catalog| {
+					let mut video = catalog.video.renditions.remove("video").unwrap();
+					video.track = Some("video".to_string());
+					catalog.video.renditions.insert("main".to_string(), video);
+				},
+				source.catalog.next_timestamp(),
+			)
 			.unwrap();
 
 		let config = Config {
@@ -2166,8 +2176,9 @@ mod tests {
 		let (rung, live) = instance().await;
 		let mut subscriber = rung
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::ZERO)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live(std::time::Duration::ZERO),
+				)]),
 			)
 			.await
 			.unwrap()
@@ -2221,7 +2232,7 @@ mod tests {
 		moved.track = Some("withheld".into());
 		source
 			.catalog
-			.modify()
+			.modify(source.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -2259,7 +2270,7 @@ mod tests {
 		moved.track = Some("withheld".into());
 		source
 			.catalog
-			.modify()
+			.modify(source.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -2392,7 +2403,7 @@ mod tests {
 		avc.coded_height = Some(360);
 		avc.bitrate = Some(1_000_000);
 
-		let mut guard = catalog.modify().unwrap();
+		let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 		guard.video.insert("hevc", hevc).unwrap();
 		guard.video.insert("avc", avc).unwrap();
 		guard.commit().unwrap();
@@ -2518,6 +2529,39 @@ mod tests {
 
 		let result = kio::clock::timeout(std::time::Duration::from_secs(5), transcoder).await;
 		result.expect("run did not shut down within 5s").unwrap().unwrap();
+	}
+
+	/// A source that closes while its catalog track stays open still ends a serving transcoder.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_source_ends_the_serve_loop() {
+		let source = source_broadcast(1, 3);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| !snapshot.video.renditions.is_empty()).await;
+
+		source.broadcast.close();
+		let result = kio::clock::timeout(std::time::Duration::from_secs(5), transcoder).await;
+		result
+			.expect("closing the source ends the transcoder")
+			.unwrap()
+			.unwrap();
+		drop(source);
 	}
 
 	/// A rung finishes only when its source track finishes. Any other end, here

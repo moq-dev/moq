@@ -137,6 +137,26 @@ function versioned<T extends object>(
 	) as Record<string, T>;
 }
 
+/**
+ * Write each unknown `container` and `projection` back as the object it was parsed from, not the
+ * `{ kind: "unknown", raw }` wrapper, so a republisher passes a future kind through unchanged.
+ */
+function unwrapped<T extends { container?: Unwrappable; projection?: Unwrappable }>(
+	entries: Record<string, T>,
+): Record<string, T> {
+	const raw = (field: Unwrappable) => (field.kind === "unknown" ? field.raw : field);
+	return Object.fromEntries(
+		Object.entries(entries).map(([id, entry]) => {
+			const out: Record<string, unknown> = { ...entry };
+			if (entry.container) out.container = raw(entry.container);
+			if (entry.projection) out.projection = raw(entry.projection);
+			return [id, out];
+		}),
+	) as Record<string, T>;
+}
+
+type Unwrappable = { kind: string; raw?: unknown };
+
 /** A catalog update used one rendition ID for both a video and an audio rendition. */
 export class DuplicateRendition extends Error {
 	/** The rendition ID used for both video and audio. */
@@ -164,6 +184,9 @@ export function checkRenditions(root: Root): Root {
  * empty `sync` left off the wire. No moq-hang-04 field reshapes the root, so the root `version` is
  * never written.
  *
+ * Takes the parsed catalog, never this function's own output: an unknown container or projection
+ * is written as its original object, which no longer reads as the parsed wrapper.
+ *
  * Throws {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
  */
 export function encode(root: Root): Root {
@@ -171,9 +194,12 @@ export function encode(root: Root): Root {
 	const value = { ...root };
 	delete value.version;
 	if (value.sync && value.sync.clock === undefined && value.sync.interval === undefined) delete value.sync;
-	if (value.video) value.video = { ...value.video, renditions: versioned(value.video.renditions, entryVersion) };
-	if (value.audio) value.audio = { ...value.audio, renditions: versioned(value.audio.renditions, entryVersion) };
-	if (value.text) value.text = { ...value.text, renditions: versioned(value.text.renditions, entryVersion) };
+	if (value.video)
+		value.video = { ...value.video, renditions: versioned(unwrapped(value.video.renditions), entryVersion) };
+	if (value.audio)
+		value.audio = { ...value.audio, renditions: versioned(unwrapped(value.audio.renditions), entryVersion) };
+	if (value.text)
+		value.text = { ...value.text, renditions: versioned(unwrapped(value.text.renditions), entryVersion) };
 	if (value.json) value.json = { ...value.json, tracks: versioned(value.json.tracks, entryVersion) };
 	if (value.binary) value.binary = { ...value.binary, tracks: versioned(value.binary.tracks, entryVersion) };
 	if (value.include) value.include = versioned(value.include, () => undefined);

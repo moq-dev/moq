@@ -45,6 +45,12 @@ Sites, with recommendations (re-grep each on the head):
   to mean a clean end or a stale group. Where a moq-net poll reports a clean
   end as an error, it returns `Ok(None)` instead; that part is breaking in
   moq-net, so split it to m2 if it is more than a mechanical change.
+- Additional `moq_net::Error::{Closed, Unroutable}` matches (added 2026-11-21
+  from the pre-cut full-codebase audit): `rs/moq-srt/src/ts.rs:248,668`,
+  `rs/moq-boy/src/input.rs:151` (if `moq-boy` is still in tree),
+  `rs/moq-gst/src/source/imp.rs:896,2604-2606`, `rs/moq-hls/src/server/mod.rs:247`,
+  `rs/moq-cli/src/archive.rs:162`, `rs/moq-cli/src/report.rs:585`, and
+  `rs/moq-cli/src/play/media.rs:105`.
 - Smaller: moq-archive `Error::NotFound` (`consumer/track.rs`), moq-audio
   `InvalidCapture` (`encode/capture.rs`), moq-video `UnsupportedCodec`
   (`decode/backend/mod.rs`), moq-webrtc `ice::Error::Closed`

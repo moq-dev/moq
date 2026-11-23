@@ -9,6 +9,10 @@ import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { decodeFetchObject, EndOfRange, objectTime } from "./object.ts";
 
+// The first Object ID past the safe range: no fetched object can carry it, so an End of Range
+// reaching it leaves nothing to follow in its group.
+const OBJECT_LIMIT = 1n << 53n;
+
 /** The groups one standalone FETCH writes, sharing the joining FETCH's object and payload decoder. @internal */
 export class RangeFetch {
 	readonly fill: FillGroups;
@@ -119,7 +123,7 @@ export class RangeFetch {
 					if (
 						object.group < (prior ?? this.first) ||
 						object.group > this.last ||
-						(this.bound !== undefined && object.group === this.last && object.object >= this.bound)
+						(this.bound !== undefined && object.group === this.last && object.object >= BigInt(this.bound))
 					)
 						throw new ProtocolViolation("End of Range is outside FETCH_OK's range");
 					if (this.#current?.key === object.group) {
@@ -139,7 +143,7 @@ export class RangeFetch {
 						this.#next = object.group + 1n;
 					}
 					prior = object.group;
-					next = object.object + 1;
+					next = Number(object.object < OBJECT_LIMIT ? object.object + 1n : OBJECT_LIMIT);
 					first = true;
 					continue;
 				}

@@ -33,12 +33,11 @@ Recommended:
 - Extend `rs/moq-net/verify/failover/FailoverChain.tla` with a claim that disappears and comes
   back while its route stays up, and a route that leaves and returns live. Check that an attached
   reader resumes in both (`/verify-failover`).
-- Keep [route wakes](/quest/m4/route-wakes.md)'s write-once and targeted-wake goals in view: the
+- Keep [route wakes](/quest/m3/route-wakes.md)'s write-once and targeted-wake goals in view: the
   waiting reason is what lets a change wake only the requests it affects.
 
 Public API: none expected. Wire: none.
 
 ## Related
 
-- [Route wakes](/quest/m4/route-wakes.md) - which fronts a route change wakes
-- [A lite-07 claim is shown no broader than its grants](/quest/m2/lite07-claim-reach-routes.md) - an advertised claim a request is then refused on
+- [Route wakes](/quest/m3/route-wakes.md) - which fronts a route change wakes

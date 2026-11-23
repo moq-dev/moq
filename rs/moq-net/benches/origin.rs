@@ -29,6 +29,9 @@
 //! Readers draining a swapped track are swept over their count, the groups every
 //! route delivered, and the routes each reader still holds a copy of.
 //!
+//! A claim broader than its grant is filed at each of the grant's prefixes beneath it: one
+//! is filed and dropped, swept over those prefixes and the claims already filed at each.
+//!
 //! A claim's answer, and its retraction moving the claim to a fresh instance, is swept
 //! over the paths the claim already answered and the cursors watching it.
 //!
@@ -130,6 +133,38 @@ fn bench_announce(c: &mut Criterion) {
 				}
 			});
 		});
+	}
+	group.finish();
+}
+
+/// A claim at `a` through a grant of `prefixes` prefixes beneath it, filed at each, then
+/// dropped, with one root cursor watching, beside `claims` claims already filed at each prefix.
+/// A cost that grows with the claims at a prefix, rather than with the places one is filed at,
+/// shows up as a slope over `claims`.
+fn bench_filing(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/filing");
+	for prefixes in [1, 16, 256] {
+		group.throughput(Throughput::Elements(prefixes));
+		for claims in [1, 16, 256] {
+			let id = BenchmarkId::new(format!("{prefixes}prefixes"), format!("{claims}claims"));
+			group.bench_function(id, |b| {
+				let (producer, _driver) = origin::Producer::new(origin::Config::default());
+				let grant: Prefixes = (0..prefixes)
+					.map(|i| Prefix::try_from(format!("a/p{i}").as_str()).unwrap())
+					.collect();
+				let scoped = producer.scope("", &grant).unwrap();
+				let options = moq_net::origin::RouteOptions::default;
+				let _held: Vec<_> = (0..claims).map(|_| scoped.claim("a", options()).unwrap()).collect();
+				let mut cursor = producer.consume().routes();
+				while cursor.next().now_or_never().flatten().is_some() {}
+				b.iter(|| {
+					let claim = scoped.claim("a", options()).unwrap();
+					while cursor.next().now_or_never().flatten().is_some() {}
+					drop(claim);
+					while cursor.next().now_or_never().flatten().is_some() {}
+				});
+			});
+		}
 	}
 	group.finish();
 }
@@ -530,8 +565,9 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 }
 
 /// Re-price a live mesh route with cursors watching different scopes.
-/// The challenger alternates between winning and losing, so selection must
-/// honor each cursor's scope rather than reuse one global winner.
+/// Each claim is broader than its grant, so it is filed at each granted prefix and
+/// contends there. The challenger alternates between winning and losing, so selection
+/// must honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
 	for incumbent_cost in [INCUMBENT_COST, MAX_COST - 1] {
@@ -557,9 +593,18 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						.unwrap()
 					})
 					.collect();
+				// Through both grants, so the challenger is filed beside the incumbents at each.
+				let both = producer
+					.scope(
+						"",
+						&(0..2)
+							.map(|i| Prefix::try_from(format!("{PATH}/p{i}")).unwrap())
+							.collect::<Prefixes>(),
+					)
+					.unwrap();
 				let challenger = duplicates as u64 + 1;
 				let route = moq_net::fuzz::requests_route(
-					&producer,
+					&both,
 					moq_net::Path::new(PATH).unwrap(),
 					peer_route(challenger, incumbent_cost + 1),
 				)
@@ -1847,6 +1892,7 @@ criterion_group!(
 	benches,
 	bench_announce,
 	bench_announce_covering,
+	bench_filing,
 	bench_pending_churn,
 	bench_withdraw,
 	bench_withdraw_wave,

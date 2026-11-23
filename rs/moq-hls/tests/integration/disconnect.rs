@@ -42,11 +42,14 @@ async fn disconnect(at: At) {
 	if let At::Catalog = at {
 		publisher
 			.catalog
-			.mutate(|catalog| {
-				let config = catalog.video.renditions.get_mut(TRACK).expect("listed");
-				config.coded_width = Some(640);
-				config.coded_height = Some(480);
-			})
+			.mutate(
+				|catalog| {
+					let config = catalog.video.renditions.get_mut(TRACK).expect("listed");
+					config.coded_width = Some(640);
+					config.coded_height = Some(480);
+				},
+				publisher.catalog.next_timestamp(),
+			)
 			.expect("catalog update");
 	}
 	pair.disconnect();
