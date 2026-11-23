@@ -11,7 +11,7 @@
 
 import { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
-import { NO_MAX_DELAY, runsFrom, wireMillis } from "./internal.ts";
+import { NO_MAX_DELAY, PAST_EVERY_GROUP, runsFrom, wireMillis } from "./internal.ts";
 import type { Range, Start } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import { Sorted } from "./util/sorted.ts";
@@ -329,6 +329,30 @@ export function clamped(
 		if (start !== undefined) out.start = start;
 		if (requested !== undefined) out.end = requested;
 		return out;
+	});
+}
+
+/**
+ * `ranges` as a copy asked from `floor` through the exclusive `end` asks for them: as {@link clamped}
+ * places them, except a live join with a max. Placed at the group it resolved to, that join would
+ * read as history, whose groups never go stale, so it is asked again as a live join taking every
+ * group still within its max ({@link PAST_EVERY_GROUP} behind). The copy's local floor keeps out the
+ * groups below where it resolved; those its upstream sends are within the max, so the cost is
+ * bounded by it. Mirrors the Rust `Range::asked`.
+ */
+export function asked(
+	ranges: readonly Range[],
+	floor: bigint | undefined,
+	end: bigint | undefined,
+	resolved: readonly (Resolved | undefined)[],
+): Range[] {
+	return clamped(ranges, floor, end, resolved).map((out, index) => {
+		const start = ranges[index].start;
+		if (typeof start !== "object" || start.live.max === null || typeof out.start !== "bigint" || isEmpty(out))
+			return out;
+		const within: Range = { start: { live: { min: PAST_EVERY_GROUP, max: start.live.max ?? Duration.ZERO } } };
+		if (out.end !== undefined) within.end = out.end;
+		return within;
 	});
 }
 

@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import type { Live, Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
+import { PAST_EVERY_GROUP } from "./internal.ts";
 import {
 	AT_KEYS,
+	asked,
 	type Containing,
 	clamped,
 	EMPTY,
@@ -600,6 +602,33 @@ describe("ranges", () => {
 		]);
 		// Nothing to clamp to returns the ranges as given.
 		expect(clamped(ranges, undefined, undefined, [])).toEqual(ranges);
+	});
+
+	// A copy asked from a floor gets a resolved live join with a max as a live join taking every
+	// group within it, so its groups still go stale there; one with no max, and history, are asked
+	// from where they resolved. Mirrors the Rust `a_resolved_live_join_is_asked_with_its_max`.
+	test("a resolved live join is asked with its max", () => {
+		const max = Duration.secs(2);
+		const join = (max: Duration | null, end?: bigint): Range => {
+			const out: Range = { start: { live: { min: Duration.millis(2), max } } };
+			if (end !== undefined) out.end = end;
+			return out;
+		};
+		const within = (end?: bigint): Range => {
+			const out: Range = { start: { live: { min: PAST_EVERY_GROUP, max } } };
+			if (end !== undefined) out.end = end;
+			return out;
+		};
+		const at = (start: bigint, end?: bigint) => [{ start, end, floored: true }];
+		expect(asked([join(max)], 10n, undefined, at(8n))).toEqual([within()]);
+		// Its end where it resolved, as a placed one's.
+		expect(asked([join(max, 500n)], 10n, undefined, at(8n, 12n))).toEqual([within(11n)]);
+		expect(asked([join(null)], 10n, undefined, at(8n))).toEqual([groups(10n)]);
+		expect(asked([groups(8n)], 10n, undefined, at(8n))).toEqual([groups(10n)]);
+		// Not yet resolved: asked as it is, for the copy to place.
+		expect(asked([join(max)], 10n, undefined, [])).toEqual([join(max)]);
+		// Capped at where it resolved: nothing, whatever its max.
+		expect(isEmpty(asked([join(max)], undefined, 8n, at(8n))[0])).toBe(true);
 	});
 
 	test("ranges are checked rather than served widened", () => {

@@ -76,8 +76,8 @@ import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import {
 	AT_KEYS,
+	asked,
 	type Budget,
-	clamped,
 	EMPTY,
 	isEmpty,
 	liveMillis,
@@ -767,7 +767,7 @@ class Reader implements ResumeSource {
 			copy.from = ranges;
 			copy.resolved = this.#window().resolved();
 		}
-		return { ...preferences, ranges: clamped(ranges, copy.floor, copyEnd(copy), copy.resolved ?? []) };
+		return { ...preferences, ranges: asked(ranges, copy.floor, copyEnd(copy), copy.resolved ?? []) };
 	}
 
 	/**
