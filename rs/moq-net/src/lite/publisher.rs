@@ -6042,6 +6042,7 @@ impl TrackRun {
 					}
 				}
 				Recv::Finished => {
+					tracing::warn!(unresolved = self.start.is_unresolved(), version = ?self.ctx.version, "SCRATCH pub recv finished");
 					// A group waiting for credit is still in flight too.
 					if !self.children.is_empty() || self.opening.is_some() {
 						return Poll::Pending;
@@ -6296,6 +6297,7 @@ impl TrackRun {
 					(None, Some((time, end))) if time <= self.floor => (start, end),
 					(None, _) => return None,
 				};
+				tracing::warn!(id, start, from, ?end, "SCRATCH pub starts");
 				end.is_none_or(|end| end > from).then_some(from)
 			})
 			.collect()

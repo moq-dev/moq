@@ -1248,6 +1248,7 @@ impl Holdings for TrackState {
 	/// An idle copy waits as [`Self::latest_live`] does: what an ended feed left measures no
 	/// live edge, and the groups it missed since leave a hole the next feed may not fill.
 	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
+		let out = (|| -> Join {
 		// Once the end is declared, nothing more is answered: it places as the groups held
 		// measure it, as its upstream's would, holding the same final groups.
 		if self.joins_answered() {
@@ -1346,6 +1347,9 @@ impl Holdings for TrackState {
 			_ if self.outcome.is_final() || self.is_settled() => Join::Time(target),
 			_ => Join::Unknown,
 		}
+		})();
+		tracing::warn!(?min, ?end, ?budget, since, answered = self.joins_answered(), end_decl = ?self.outcome.end(), is_final = self.outcome.is_final(), settled = self.is_settled(), held = ?self.walked(..).map(|(k, _)| *k).collect::<Vec<_>>(), ts = ?self.info.as_ref().map(|i| i.timescale), anchors = ?self.anchors, ?out, "SCRATCH join");
+		out
 	}
 
 	fn answers_joins(&self) -> bool {
