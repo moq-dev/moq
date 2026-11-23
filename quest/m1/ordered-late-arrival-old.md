@@ -8,6 +8,8 @@ a newer group was handed out is no `Old` gap unless the budget gave up on it.
 
 ## Plan
 
+Decided 2026-11-23 (maintainer, /quest-run): keep.
+
 Found on [moq-dev/moq#9422](https://github.com/moq-dev/moq/pull/9422).
 In 2 of 40 instrumented runs of that PR's relay repro (`moq import ts` through a relay
 with `cache.headroom = "100%"` to `moq export fmp4`, `--max-delay` 500 ms), the export

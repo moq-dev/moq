@@ -8,6 +8,8 @@ frames the pool evicted come back on a flight, or the group ends `Old` when it i
 
 ## Plan
 
+Decided 2026-11-23 (maintainer, /quest-run): keep.
+
 Found on [moq-dev/moq#9422](https://github.com/moq-dev/moq/pull/9422). In its 66-run relay
 repro at 8fca407bd8 (`moq import ts` through `moq-relay` to `moq export fmp4`, 500 ms
 `--max-delay`), one run's export saw its current group, mid-stream, fail
