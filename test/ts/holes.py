@@ -245,15 +245,17 @@ def starts(source: dict[str, Stream], capture: dict[str, Stream], join: Fraction
         (keyframes(capture[pid])[0] for pid in videos if pid in capture and any(capture[pid].sync)),
         default=None,
     )
+    # The join is time into the program, which starts with its first stream, not each stream's own.
+    origin = min(src.span[0] for src in source.values())
     found: dict[str, list[str]] = {}
-    for pid, src in source.items():
+    for pid in source:
         if pid not in capture:
             continue
         first = capture[pid].span[0]
         reasons = found.setdefault(pid, [])
-        if join and first - src.span[0] < join - 2 * group:
+        if join and first - origin < join - 2 * group:
             reasons.append(
-                f"starts {float(first - src.span[0]):.3f}s into its source, over two {float(group)}s groups "
+                f"starts {float(first - origin):.3f}s into its program, over two {float(group)}s groups "
                 f"before the {float(join)}s join"
             )
         if opened is not None and first - opened > group:
