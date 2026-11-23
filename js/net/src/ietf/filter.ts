@@ -8,7 +8,7 @@ import { ProtocolViolation } from "../error.ts";
 import { concat, type Reader } from "../stream.ts";
 import type { Order } from "../track.ts";
 import * as Varint from "../varint.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import { type IetfVersion, isDraft23, Version } from "./version.ts";
 
 /** Which Objects a subscription delivers. */
 export type Filter =
@@ -391,8 +391,30 @@ export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
 	return concat(parts);
 }
 
+/**
+ * Whether FILL_PARAMETERS is a bare Number of Parameters and the Parameters (draft-23 section
+ * 9.19.15) rather than a length-prefixed block.
+ */
+export function isCountedFill(version: IetfVersion): boolean {
+	return isDraft23(version);
+}
+
 /** Decode FILL_PARAMETERS, including its inherited or explicit group order. */
 export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
+	const [fill, rest] = readFill(data, version);
+	if (rest.length !== 0) {
+		throw new Error("trailing bytes in FILL_PARAMETERS");
+	}
+	return fill;
+}
+
+/** How many bytes at the front of `data` the fill's count and Parameters span. */
+export function fillSize(data: Uint8Array, version: IetfVersion): number {
+	return data.length - readFill(data, version)[1].length;
+}
+
+/** Read a fill's count and Parameters off the front of `data`, returning what follows them. */
+function readFill(data: Uint8Array, version: IetfVersion): [Fill, Uint8Array] {
 	const [count, afterCount] = unvarint(data);
 	if (count > 64n) {
 		throw new Error("too many parameters in FILL_PARAMETERS");
@@ -454,11 +476,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		[, rest] = readLengthPrefixed(rest);
 	}
 
-	if (rest.length !== 0) {
-		throw new Error("trailing bytes in FILL_PARAMETERS");
-	}
-
-	return { filter, groupOrder, rangeFilters };
+	return [{ filter, groupOrder, rangeFilters }, rest];
 }
 
 /** Split a length-prefixed value off the front of `data`, returning it and what follows. */

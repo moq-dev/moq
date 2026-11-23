@@ -106,6 +106,7 @@ pub async fn handle_viewers(
 				tracing::info!(%viewer, "viewer went offline");
 				let _ = cmd_tx.send(Command::Left { viewer }).await;
 			}
+			_ => {}
 		}
 	}
 	anyhow::bail!("viewer origin closed")

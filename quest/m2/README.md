@@ -26,14 +26,10 @@ native crates, and public APIs:
 - **Wire and drafts.** Delete the temporary `raw_parts` / `base.split("/")`
   `Path Keep` migration before lite-07 finalizes
   ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)).
-- **Public API freezes.** Fence `moq-net` event/item types with
-  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)).
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),
-[m1/precut-audit](/quest/m1/precut-audit/README.md) (high- and medium-impact
-fixes, TLA+ sync drift, and CI hardening), [m3](/quest/m3/README.md) (softer
-edge cases and low-severity cleanups), and
+[m3](/quest/m3/README.md) (softer edge cases and low-severity cleanups), and
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
 
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
@@ -97,7 +93,7 @@ with Min Age placing a live join;
 scale-less tracks aging by arrival ([moq-dev/moq#9266](https://github.com/moq-dev/moq/pull/9266));
 Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),
 with GROUP_END's end back as a delta;
-[time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md);
+time anchors landing by group spans ([moq-dev/moq#9406](https://github.com/moq-dev/moq/pull/9406));
 and first-party producers keeping those spans apart ([moq-dev/moq#9317](https://github.com/moq-dev/moq/pull/9317)).
 [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
 [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since

@@ -1067,6 +1067,7 @@ async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Inst
 				moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
 					announce,
+					..
 				} => {
 					return announce.route.instance().clone();
 				}

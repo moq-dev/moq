@@ -869,6 +869,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 					announce: update,
+					..
 				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true)
@@ -876,6 +877,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					announce: update,
+					..
 				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, false)
@@ -885,6 +887,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::Restart,
 					announce: update,
+					..
 				})) => {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
@@ -894,6 +897,8 @@ impl<S: Shape> Merged<S> {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true);
 				}
+				// A route change this version does not know changes no membership.
+				Poll::Ready(Some(_)) => {}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
 			}
@@ -1060,6 +1065,7 @@ fn advance<S: Shape>(
 				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added {
 					name: listed,
 					info: broadcast::Listed::Track(_),
+					..
 				}))) => {
 					if parse_bucket_track(&listed).is_some_and(|(bucket, _)| bucket.as_str() == name) {
 						node.offered = Some(listed);
@@ -1069,10 +1075,12 @@ fn advance<S: Shape>(
 					broadcast::TracksEvent::Removed {
 						kind: broadcast::Kind::Track,
 						name: listed,
+						..
 					}
 					| broadcast::TracksEvent::Finished {
 						kind: broadcast::Kind::Track,
 						name: listed,
+						..
 					},
 				))) => {
 					if node.offered.as_ref() == Some(&listed) {
@@ -1245,11 +1253,14 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 
@@ -2278,15 +2289,7 @@ mod tests {
 		let path = Path::from_static(".stats/node/a");
 		let instance: Instance = "a".parse().unwrap();
 		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into());
-		merged.apply_announce(
-			&moq_net::announce::Announce {
-				prefix: path.clone(),
-				captures: None,
-				route: moq_net::fuzz::route_info([], 0, None),
-			},
-			instance.clone(),
-			true,
-		);
+		merged.apply_announce(&moq_net::fuzz::announce(path.as_str(), 0), instance.clone(), true);
 		(merged, (path, instance))
 	}
 
@@ -2300,15 +2303,7 @@ mod tests {
 			value
 		};
 		let path = Path::from_static(".stats/node/b");
-		merged.apply_announce(
-			&moq_net::announce::Announce {
-				prefix: path.clone(),
-				captures: None,
-				route: moq_net::fuzz::route_info([], 0, None),
-			},
-			"b".parse().unwrap(),
-			true,
-		);
+		merged.apply_announce(&moq_net::fuzz::announce(path.as_str(), 0), "b".parse().unwrap(), true);
 		let second = (path, "b".parse().unwrap());
 		merged
 			.nodes
