@@ -127,7 +127,6 @@ test("fit leaves any edit between fitted ranges one message", async () => {
 			wantedGroup: (1n << 64n) - 2n,
 			priority: -128,
 			maxDelay: Number.MAX_SAFE_INTEGER,
-			minDelay: Number.MAX_SAFE_INTEGER,
 			order: "ascending",
 			remove: edit.remove,
 			ranges: edit.add,

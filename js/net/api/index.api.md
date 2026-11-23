@@ -516,6 +516,7 @@ export namespace Origin {
 		reject(err: Error): void;
 		route(options?: Origin.RouteOptions): Origin.Route;
 		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
+		unwanted(): Promise<void>;
 	}
 	export interface RequestOptions {
 		instance?: Instance.Valid;
@@ -680,7 +681,6 @@ export namespace Track {
 	}
 	export interface Delay {
 		max?: Clock.Duration | null;
-		min?: Clock.Duration | null;
 	}
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
@@ -802,7 +802,7 @@ export namespace Track {
 	}
 	export interface Range {
 		end?: bigint;
-		start?: bigint;
+		start?: Track.Start;
 	}
 	export interface Refresh {
 		interval: Clock.Duration | null;
@@ -817,6 +817,9 @@ export namespace Track {
 		get name(): string;
 		requestedFill(): Promise<Track.FillGroups | undefined>;
 	}
+	export type Start = bigint | {
+		live: Clock.Duration;
+	};
 	export class Subscriber {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;

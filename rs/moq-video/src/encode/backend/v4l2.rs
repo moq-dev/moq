@@ -570,7 +570,10 @@ impl Backend for V4l2 {
 		// Also reclaims finished input buffers, so the codec is drained even when
 		// the caller never asks for output.
 		let index = self.free_buffer()?;
-		self.planes.write(&mut self.raw, index, &i420)?;
+		if let Err(err) = self.planes.write(&mut self.raw, index, &i420) {
+			self.raw.reclaim(index);
+			return Err(err);
+		}
 
 		let bytesused: Vec<u32> = self.raw.format().planes.iter().map(|plane| plane.sizeimage).collect();
 		self.raw.queue(&self.device, index, &bytesused, key)?;

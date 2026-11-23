@@ -55,9 +55,11 @@ async fn viewer(
 }
 
 fn origin() -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]

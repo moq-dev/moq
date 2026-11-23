@@ -1,0 +1,66 @@
+[package]
+name = "moq-interop"
+description = "The Rust clients `just test interop` runs beside moq-relay and moq-cli."
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+version = "0.0.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "interop-tail"
+path = "../../test/interop/clients/rust/tail.rs"
+
+[[bin]]
+name = "interop-catalog"
+path = "../../test/interop/clients/rust/catalog.rs"
+
+[[bin]]
+name = "interop-goaway"
+path = "../../test/interop/clients/rust/goaway.rs"
+
+[[bin]]
+name = "interop-control"
+path = "../../test/interop/clients/rust/control.rs"
+
+[[bin]]
+name = "interop-goaway-client"
+path = "../../test/interop/clients/rust/goaway-client.rs"
+
+[[bin]]
+name = "interop-finish"
+path = "../../test/interop/clients/rust/finish.rs"
+
+[[bin]]
+name = "interop-hls"
+path = "../../test/interop/clients/rust/hls.rs"
+
+[[bin]]
+name = "interop-audio"
+path = "../../test/interop/clients/rust/audio.rs"
+
+# A package of its own rather than moq-cli examples: examples build with moq-cli's
+# dev-dependencies, whose test-only features (moq-relay's `test-support` among
+# them) recompiled the whole graph a second time. Built in the same cargo call as
+# the relay and CLI, these share every compilation with them.
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+hang = { workspace = true, features = ["async"] }
+kio = { workspace = true, features = ["runtime"] }
+moq-audio = { workspace = true }
+moq-json = { workspace = true, features = ["async"] }
+moq-mux = { workspace = true, features = ["async"] }
+moq-net = { workspace = true }
+moq-tokio = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+url = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
+[lints]
+workspace = true

@@ -220,6 +220,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-interop" = rec {
+      packageId = "moq-interop";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-interop";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-json" = rec {
       packageId = "moq-json";
       build = internal.buildRustCrateWithFeatures {
@@ -9764,9 +9774,9 @@ rec {
       };
       "form_urlencoded" = rec {
         crateName = "form_urlencoded";
-        version = "1.2.2";
+        version = "1.2.3";
         edition = "2018";
-        sha256 = "1kqzb2qn608rxl3dws04zahcklpplkd5r1vpabwga5l50d2v4k6b";
+        sha256 = "0vph40jb1qvkvl52aigslr0hvbg1dhiwdwaxg48i5yxgkqcqk95g";
         authors = [
           "The rust-url developers"
         ];
@@ -12742,11 +12752,6 @@ rec {
           {
             name = "thiserror";
             packageId = "thiserror 2.0.21";
-          }
-          {
-            name = "url";
-            packageId = "url";
-            features = [ "serde" ];
           }
         ];
         devDependencies = [
@@ -17977,10 +17982,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "bitstream-io";
-            packageId = "bitstream-io 4.10.0";
-          }
-          {
             name = "block2";
             packageId = "block2 0.6.2";
             optional = true;
@@ -18048,6 +18049,7 @@ rec {
             features = [
               "CMSampleBuffer"
               "CMBlockBuffer"
+              "CMFormatDescription"
               "CMSync"
               "objc2-core-audio-types"
             ];
@@ -18926,10 +18928,6 @@ rec {
             target = { target, features }: (target."unix" or false);
           }
           {
-            name = "moq-audio";
-            packageId = "moq-audio";
-          }
-          {
             name = "moq-relay";
             packageId = "moq-relay";
             usesDefaultFeatures = false;
@@ -19746,6 +19744,83 @@ rec {
           "server"
         ];
       };
+      "moq-interop" = rec {
+        crateName = "moq-interop";
+        version = "0.0.0";
+        edition = "2024";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-interop;
+        };
+        dependencies = [
+          {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "futures";
+            packageId = "futures";
+          }
+          {
+            name = "hang";
+            packageId = "hang";
+            features = [ "async" ];
+          }
+          {
+            name = "kio";
+            packageId = "kio";
+            features = [ "runtime" ];
+          }
+          {
+            name = "moq-audio";
+            packageId = "moq-audio";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "moq-json";
+            packageId = "moq-json";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-mux";
+            packageId = "moq-mux";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-net";
+            packageId = "moq-net";
+          }
+          {
+            name = "moq-tokio";
+            packageId = "moq-tokio";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "full" ];
+          }
+          {
+            name = "url";
+            packageId = "url";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
+          }
+        ];
+
+      };
       "moq-json" = rec {
         crateName = "moq-json";
         version = "0.5.8";
@@ -20046,10 +20121,6 @@ rec {
             packageId = "tracing";
           }
           {
-            name = "url";
-            packageId = "url";
-          }
-          {
             name = "webm-iterable";
             packageId = "webm-iterable";
           }
@@ -20302,6 +20373,7 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
+            usesDefaultFeatures = false;
             features = [
               "relay"
               "test-support"
@@ -51992,9 +52064,9 @@ rec {
       };
       "url" = rec {
         crateName = "url";
-        version = "2.5.8";
+        version = "2.5.9";
         edition = "2018";
-        sha256 = "1v8f7nx3hpr1qh76if0a04sj08k86amsq4h8cvpw6wvk76jahrzz";
+        sha256 = "06ivkcv3ljdrp34vlr8n2byyzk7m43q4r3g8ggqhwb5lgd0d437h";
         authors = [
           "The rust-url developers"
         ];

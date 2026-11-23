@@ -22,14 +22,8 @@ Found 2026-11-21 by the main → release routing audit:
   that setting `listen.version` replaces the defaults, so enabling
   `moq-lite-07-wip` means listing every default too, since one list serves
   clients and peers alike.
-- Check the shared `cluster.connect` list advice (about line 308) against
-  what [route floors](/quest/m1/lite07-routing/route-floors.md) lands.
 
 [Federation](/quest/m3/cluster-routing/federation.md) adds its own recipes
 later; this covers what ships at the cut.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Route floors](/quest/m1/lite07-routing/route-floors.md) - the shared connect list the guide recommends black-holes routes until it lands

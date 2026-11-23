@@ -352,7 +352,7 @@ impl<S: Stream> Client<S> {
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
 		let mut export = FlvExport::new(source, catalog)
-			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
+			.with_delay(moq_mux::container::Delay::default().with_min(delay).with_max(delay));
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 

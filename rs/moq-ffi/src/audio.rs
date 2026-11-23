@@ -58,7 +58,8 @@ impl From<MoqAudioSampleFormat> for moq_audio::Format {
 ///
 /// An immutable object so adding a codec later does not break callers
 /// switching over a closed enum.
-#[derive(uniffi::Object)]
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
 pub struct MoqAudioCodec {
 	inner: moq_audio::encode::Codec,
 }
@@ -81,6 +82,11 @@ impl MoqAudioCodec {
 		Arc::new(Self {
 			inner: moq_audio::encode::Codec::Aac,
 		})
+	}
+
+	/// The codec's lowercase name, such as `opus`.
+	pub fn name(&self) -> String {
+		self.inner.as_str().to_string()
 	}
 }
 
@@ -313,8 +319,8 @@ impl MoqAudioEncoder {
 		let guard = self.inner.lock().unwrap();
 		let encoder = guard.as_ref().ok_or(MoqError::Closed)?;
 		let format = match encoder.codec() {
-			moq_audio::encode::Codec::Opus => crate::media::MoqAudioFormat::Opus,
-			moq_audio::encode::Codec::Aac => crate::media::MoqAudioFormat::Aac,
+			moq_audio::encode::Codec::Opus => crate::media::MoqAudioFormat::opus(),
+			moq_audio::encode::Codec::Aac => crate::media::MoqAudioFormat::aac(),
 			codec => return Err(moq_audio::Error::Unsupported(format!("no audio init for {codec}")).into()),
 		};
 		let data = encoder.catalog().description.ok_or(MoqError::Unsupported)?;
@@ -667,7 +673,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.track = catalog_audio.track;
 	config.bitrate = catalog_audio.bitrate;
 	config.description = catalog_audio.description.map(Into::into);
-	config.container = catalog_audio.container.into();
+	config.container = catalog_audio.container.try_into()?;
 	config.jitter = catalog_audio.jitter;
 	config.warmup = catalog_audio.warmup;
 	Ok(config)
@@ -741,6 +747,18 @@ impl MoqAudioConsumer {
 mod tests {
 	use super::*;
 	use crate::media::{MoqAudio, MoqContainer};
+
+	/// Codecs compare and hash by value, and their names are distinct.
+	#[test]
+	fn codecs_name_compare_and_hash_by_value() {
+		assert_eq!(MoqAudioCodec::opus().name(), "opus");
+		assert_eq!(MoqAudioCodec::aac().name(), "aac");
+		assert_eq!(
+			std::collections::HashSet::from([MoqAudioCodec::opus(), MoqAudioCodec::opus()]).len(),
+			1
+		);
+		assert_ne!(MoqAudioCodec::opus(), MoqAudioCodec::aac());
+	}
 
 	fn catalog_audio(codec: &str) -> MoqAudio {
 		MoqAudio {
@@ -925,7 +943,7 @@ mod tests {
 	fn codec_only_encoder_reports_its_opus_head() {
 		let encoder = MoqAudioEncoder::new(opus_output(None)).unwrap();
 		let init = encoder.track_init().unwrap();
-		assert!(matches!(init.format, crate::media::MoqAudioFormat::Opus));
+		assert_eq!(init.format, crate::media::MoqAudioFormat::opus());
 		assert_eq!(&init.data[..8], b"OpusHead");
 		// Channel count, then a nonzero pre-skip for the codec lookahead.
 		assert_eq!(init.data[9], 2);

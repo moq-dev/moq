@@ -127,7 +127,7 @@ Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several
 use one source timeline; omitting it keeps an independent offset. A timebase belongs to
 its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
 anywhere, so a raw byte stream needs no other importer.
-`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample.
+`moq::ContainerFormat::fmp4()` splits each fragment into one frame per sample.
 Media times are exact `moq::Timestamp{value, scale}` records, `value` units at `scale` units
 per second, and read back at the track's timescale, so a 90 kHz tick republishes unchanged.
 An untimed track has no time: its frames carry `moq::Timestamp{key, std::nullopt}`, the
@@ -141,12 +141,12 @@ moq::RouteOptions options;
 options.hidden = true; // fill tracks before anyone finds it; hold the route to stay announced
 auto route = ok(session->publish()->route("my-stream.hang", options));
 auto broadcast = route->broadcast();
-auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
+auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::opus(), opus_init}));
 ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 
 moq::VideoEncoderOutput output{moq::VideoCodec::h264(), std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
-auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
+auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::rgba(), 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
 ok(route->announce()); // each route mints a fresh instance, route->instance_id()
 ok(broadcast->close()); // keep the producer alive while publishing, then close explicitly
