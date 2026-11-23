@@ -437,7 +437,10 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let info = raw_track_info(info)?;
-			let track = state.broadcast.create_track(name, Some(info))?;
+			let track = state
+				.broadcast
+				.create_track(name, Some(info))
+				.ok_or(moq_net::Error::Duplicate)?;
 			MoqTrackProducer::child(track, &state.children)
 		})
 	}
@@ -539,21 +542,12 @@ impl MoqTrackRequests {
 	/// Wait for the next run of groups readers miss: a fetch of an uncached group, or
 	/// history a subscription reads that the cache no longer holds.
 	///
-	/// Cached groups are served without reaching this method.
-	///
-	/// A reader's time start that no cached group places is looked up rather than filled; a
-	/// fill names groups, so the lookup is dropped unanswered here, and the reader falls back
-	/// to the groups held.
+	/// Cached groups are served without reaching this method. A reader's time start that no
+	/// cached group places asks for the group starting at that time, as any other.
 	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
 		let fill = self
 			.reads
-			.wait(|requests, waiter| {
-				loop {
-					if let moq_net::track::Fill::Groups(fill) = ready!(requests.poll_requested_fill(waiter))? {
-						return Poll::Ready(Ok(fill));
-					}
-				}
-			})
+			.wait(|requests, waiter| requests.poll_requested_fill(waiter).map_err(Into::into))
 			.await?;
 		Ok(Arc::new(MoqFill::new(fill)))
 	}
@@ -640,7 +634,7 @@ impl MoqFill {
 	/// at [`start`](Self::start)'s frame, so its frames keep their indices.
 	pub fn accept(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let group = self.inner.accept(start, None)?;
+		let group = self.inner.accept(start, None)?.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -829,16 +823,22 @@ impl MoqTrackProducer {
 
 	/// Hand the track to a typed writer that `f` builds (a JSON producer, say), closing this
 	/// handle once `f` succeeds so the writer is the track's only producer. The writer takes this
-	/// handle's place among its broadcast's children. On failure the handle stays open.
+	/// handle's place among its broadcast's children, which `f` also receives so a writer that
+	/// finishes can [`keep`](Children::keep) its track; a finished track has none. On failure the
+	/// handle stays open.
 	pub(crate) fn adopt<T: Child + 'static>(
 		&self,
-		f: impl FnOnce(moq_net::track::Producer) -> Result<T, MoqError>,
+		f: impl FnOnce(moq_net::track::Producer, Option<&Children>) -> Result<T, MoqError>,
 	) -> Result<Arc<T>, MoqError> {
 		// Taken for the whole construction, so a racing adopt finds the handle closed. `f` runs
 		// outside the lock: it may take the broadcast's, which a close holds while it takes this one.
 		let mut phase = std::mem::take(&mut *self.phase.lock().unwrap());
 		let raw = phase.raw()?.clone();
-		match (f(raw), phase) {
+		let family = match &phase {
+			TrackPhase::Open { family, .. } => Some(family),
+			TrackPhase::Finished(_) | TrackPhase::Closed => None,
+		};
+		match (f(raw, family), phase) {
 			(Ok(writer), TrackPhase::Open { family, .. }) => family.adopt(Arc::new(writer)),
 			// A finished track has no family left to join, and ends at its declared end.
 			(Ok(writer), _) => Ok(Arc::new(writer)),

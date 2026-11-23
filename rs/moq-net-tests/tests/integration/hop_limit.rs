@@ -16,9 +16,10 @@ use std::num::NonZeroUsize;
 fn produce_origin(hop: u64) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
+	config.proxy = true;
 	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Land a peer's route at `path` on `origin`, as its session does.
@@ -44,9 +45,9 @@ async fn hop_limit_bounds_receive_and_send() {
 		let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
 		config.max_hops = NonZeroUsize::new(2).unwrap();
 		config.pool = cache::Pool::unbounded();
+		config.proxy = true;
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
-		let relay = relay.with_proxy(true);
 		let sink = produce_origin(3);
 		let _upstream = peer(version, &source, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
@@ -105,9 +106,9 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
 		config.max_hops = NonZeroUsize::new(3).unwrap();
 		config.pool = cache::Pool::unbounded();
+		config.proxy = true;
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
-		let relay = relay.with_proxy(true);
 		let sink = produce_origin(3);
 		let _near = peer(version, &near, &relay).await;
 		let _far = peer(version, &far, &relay).await;

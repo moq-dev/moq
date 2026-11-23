@@ -544,21 +544,24 @@ impl Background {
 		}
 	}
 
+	/// Run a binding call through [`run`], ending it with the owner's failure once it fails.
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
+		run(self.supervise(future)).await
+	}
+
+	/// [`Self::watch`] without [`run`], for a caller already inside one.
+	pub async fn supervise<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
 		self.check()?;
-		let result = host(async {
-			if self.result.is_some() {
-				tokio::pin!(future);
-				tokio::select! {
-					biased;
-					result = self.finished() => { result?; future.await }
-					result = &mut future => result,
-				}
-			} else {
-				future.await
+		let result = if self.result.is_some() {
+			tokio::pin!(future);
+			tokio::select! {
+				biased;
+				result = self.finished() => { result?; future.await }
+				result = &mut future => result,
 			}
-		})
-		.await;
+		} else {
+			future.await
+		};
 		self.check()?;
 		result
 	}
@@ -954,10 +957,10 @@ impl<T: Send + 'static> Task<T> {
 		Fut: Future<Output = Result<R, MoqError>>,
 	{
 		self.check()?;
-		let result = run(self
+		let result = self
 			.driver
-			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f)))
-		.await;
+			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f))
+			.await;
 		// A foreign future may stop polling while holding the state, so cancellation cannot
 		// wait for cleanup. Its next call still reports a completed cleanup panic.
 		self.check()?;
@@ -1316,6 +1319,25 @@ mod tests {
 	/// Fail the test instead of hanging when a wakeup goes missing.
 	async fn soon<F: Future>(f: F) -> F::Output {
 		kio::clock::timeout(Duration::from_secs(5), f).await.expect("timed out")
+	}
+
+	/// A binding call through `watch` reports a panic as an error instead of unwinding into the
+	/// host, whether or not its handle has an owner, and polls inside the runtime.
+	#[tokio::test]
+	async fn watch_isolates_a_panic_and_enters_the_runtime() {
+		let (_origin, owned, _failed) = panicking_origin();
+		for driver in [Background::default(), owned] {
+			let err = driver
+				.watch(async { panic!("injected watch panic") as Result<(), MoqError> })
+				.await
+				.expect_err("the panic should be reported");
+			assert!(matches!(err, MoqError::Task { .. }), "{err:?}");
+			let entered = driver
+				.watch(async { Ok(tokio::runtime::Handle::current().id() == runtime().handle.id()) })
+				.await
+				.unwrap();
+			assert!(entered, "the call should poll inside the FFI runtime");
+		}
 	}
 
 	#[tokio::test]

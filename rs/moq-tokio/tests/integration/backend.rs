@@ -466,8 +466,9 @@ struct MtlsPaths {
 }
 
 /// Connect with a client certificate signed by a CA the server trusts, and
-/// assert the server observes the validated peer certificate via mTLS.
-async fn mtls_test(scheme: &str, reject: bool) {
+/// assert the server observes the validated peer certificate via mTLS. With
+/// `require`, a client presenting no certificate is then refused at the handshake.
+async fn mtls_test(scheme: &str, require: bool) {
 	let (_dir, paths) = generate_mtls_certs();
 
 	let pub_origin = moq_tokio::origin::spawn();
@@ -477,6 +478,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	server_config.tls.cert = vec![paths.server_cert.clone()];
 	server_config.tls.key = vec![paths.server_key.clone()];
 	server_config.tls.root = vec![paths.ca.clone()];
+	server_config.tls.require = require;
 	// One shared tuning, handed to both roles the way a binary would.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
@@ -486,13 +488,14 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.root = vec![paths.ca.clone()];
-	client_config.tls.system_roots = Some(false);
+	let mut anonymous_config = moq_tokio::connect::Config::default();
+	anonymous_config.tls.root = vec![paths.ca.clone()];
+	anonymous_config.tls.system_roots = Some(false);
+	anonymous_config.tls.host_name = Some("localhost".to_string());
+	anonymous_config.bind = Some("0.0.0.0:0".parse().unwrap());
+	let mut client_config = anonymous_config.clone();
 	client_config.tls.cert = Some(paths.client_cert.clone());
 	client_config.tls.key = Some(paths.client_key.clone());
-	client_config.tls.host_name = Some("localhost".to_string());
-	client_config.bind = Some("0.0.0.0:0".parse().unwrap());
 	let client = client_config.init(quic.clone()).expect("failed to init client");
 	// Dial the IP while verifying the certificate's localhost SAN. This covers
 	// the independent TLS hostname override alongside client authentication.
@@ -504,17 +507,15 @@ async fn mtls_test(scheme: &str, reject: bool) {
 		// The peer cert must be visible before we accept the session.
 		let has_cert = request.peer_identity().is_some();
 		let _ = identity_tx.send(has_cert);
-		if reject {
-			request.reject(moq_net::SessionError::Unauthorized).await?;
-			return Ok::<_, anyhow::Error>(has_cert);
-		}
 		let session = request.with_publisher(pub_origin.consume()).ok().await?;
 		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(has_cert)
+		// Nothing else reaches the application: a certless client never finished
+		// its handshake.
+		Ok::<_, anyhow::Error>(server)
 	});
 
 	// The mTLS cases assert on the connect result itself, so keep it a `Result`.
-	let connection = kio::clock::timeout(TIMEOUT, connect_once(client, url))
+	let connection = kio::clock::timeout(TIMEOUT, connect_once(client, url.clone()))
 		.await
 		.expect("client connect timed out");
 
@@ -523,19 +524,46 @@ async fn mtls_test(scheme: &str, reject: bool) {
 		.expect("identity inspection timed out")
 		.expect("server dropped identity result");
 	assert!(has_cert, "server did not observe the client certificate");
-	if !reject {
-		connection.as_ref().expect("client connect failed");
-	}
+	connection.as_ref().expect("client connect failed");
 	drop(connection);
 
-	if reject {
-		server_handle.abort();
-	} else {
-		kio::clock::timeout(TIMEOUT, server_handle)
-			.await
-			.expect("server task timed out")
-			.expect("server task panicked")
-			.expect("server task failed");
+	let mut server = kio::clock::timeout(TIMEOUT, server_handle)
+		.await
+		.expect("server task timed out")
+		.expect("server task panicked")
+		.expect("server task failed");
+
+	let anonymous = anonymous_config.init(quic).expect("failed to init client");
+	match require {
+		true => {
+			// The accept loop drives handshakes, so it runs beside the dial and must
+			// never hand the application this client.
+			let connected = tokio::select! {
+				connected = kio::clock::timeout(TIMEOUT, connect_once(anonymous, url)) => connected,
+				_ = server.accept() => panic!("a client without a certificate reached the application"),
+			};
+			let connected = connected.expect("anonymous connect timed out");
+			assert!(connected.is_err(), "a client without a certificate was admitted");
+		}
+		false => {
+			let serve = async {
+				let request = server.accept().await.expect("no incoming connection");
+				let identified = request.peer_identity().is_some();
+				let origin = moq_tokio::origin::spawn();
+				let session = request.with_publisher(origin.consume()).ok().await;
+				(identified, session)
+			};
+			let (connected, served) = tokio::join!(
+				kio::clock::timeout(TIMEOUT, connect_once(anonymous, url)),
+				kio::clock::timeout(TIMEOUT, serve),
+			);
+			let _connection = connected
+				.expect("anonymous connect timed out")
+				.expect("an optional certificate refused a client without one");
+			let (identified, session) = served.expect("anonymous accept timed out");
+			session.expect("anonymous session failed");
+			assert!(!identified, "an anonymous client carried an identity");
+		}
 	}
 }
 
@@ -786,7 +814,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 				.init(quic)
 				.expect("failed to init client")
 				.with_publisher(origin.consume());
-			let mut connection = client.connect(url).established().await.expect("client connect failed");
+			let connection = client.connect(url).established().await.expect("client connect failed");
 
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
@@ -794,8 +822,10 @@ async fn quic_client_close_drains_migrated_predecessor() {
 			subscribed_tx.send(()).unwrap();
 
 			// Once the replacement is live, only the predecessor serves the subscription.
-			while connection.connects() < 2 || !connection.connected() {
-				connection.status().await.expect("connection stopped");
+			let monitor = connection.monitor();
+			let mut seen = monitor.state();
+			while seen.connects < 2 || !matches!(seen.phase, moq_tokio::connection::Phase::Connected { .. }) {
+				seen = monitor.state_changed(seen.revision).await.expect("connection stopped");
 			}
 			migrated_tx.send(()).unwrap();
 
@@ -932,7 +962,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 				.init(quic)
 				.expect("failed to init client")
 				.with_publisher(origin.consume());
-			let mut connection = client.connect(url).established().await.expect("client connect failed");
+			let connection = client.connect(url).established().await.expect("client connect failed");
 
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
@@ -940,7 +970,11 @@ async fn quic_client_close_keeps_predecessor_handover() {
 			subscribed_tx.send(()).unwrap();
 
 			// Close while the old session is still inside its handover window.
-			while connection.status().await.expect("connection stopped") != moq_tokio::Status::Migrating {}
+			let monitor = connection.monitor();
+			let mut seen = monitor.state();
+			while !matches!(seen.phase, moq_tokio::connection::Phase::Migrating { .. }) {
+				seen = monitor.state_changed(seen.revision).await.expect("connection stopped");
+			}
 			let start = kio::clock::now();
 			let err = connection.close().await.expect_err("the predecessor cannot drain");
 			let elapsed = start.elapsed();
@@ -1033,6 +1067,11 @@ async fn quic_webtransport() {
 #[tokio::test]
 async fn quic_mtls() {
 	mtls_test("https", false).await;
+}
+
+#[tokio::test]
+async fn quic_mtls_required() {
+	mtls_test("https", true).await;
 }
 
 #[tokio::test]
@@ -1172,5 +1211,6 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Present(route) => Some((route, true)),
 		moq_net::announce::Event::Absent(route) => Some((route, false)),
+		event => panic!("unexpected announce event {event:?}"),
 	}
 }

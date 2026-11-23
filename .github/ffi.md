@@ -1,14 +1,16 @@
 # Shared FFI releases
 
 `release-shared-ffi.yml` (Release FFI) owns the `moq-ffi-v*` tag trigger for
-Go, Kotlin and Swift. Nightly calls the same coordinator without publisher
+Go, Kotlin, Swift and Dart. Nightly calls the same coordinator without publisher
 secrets. It builds each default-feature target once and uploads
 `default-lib-<target>`; binding jobs read the built Linux library with
 `just rs package-ffi --bindings-only --library PATH` instead of compiling
 moq-ffi again. Package workflows select only their own targets and keep their
 own binding names, outputs, publisher steps and credentials. Manual calls and
-Go's PR dry-run stay standalone. Dart keeps its own superset of targets; Python
-keeps its own wheel builds. Sharing produces the same native code as per-language
+Go's and Dart's PR dry-runs stay standalone. Dart reuses the shared libraries
+and builds only the two Apple targets (`x86_64-apple-darwin`, `x86_64-apple-ios`)
+the shared build lacks, failing if any of its eleven libraries is missing.
+Python keeps its own wheel builds. Sharing produces the same native code as per-language
 builds ([#5549](https://github.com/moq-dev/moq/pull/5549)).
 
 ## Failure isolation

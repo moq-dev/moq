@@ -477,8 +477,8 @@ pub(crate) async fn connect(
 				let url = &url;
 				async move {
 					let stream = tokio::net::TcpStream::connect(addr).await?;
-					stream.set_nodelay(true)?;
-					connect_tls_override(tls, name, url, stream, alpns, session).await
+					let stats = qmux::tcp::adopt(&stream)?;
+					connect_tls_override(tls, name, url, stream, stats, alpns, session).await
 				}
 			})
 			.await?
@@ -514,6 +514,7 @@ async fn connect_tls_override(
 	tls_host_name: &str,
 	url: &Url,
 	stream: tokio::net::TcpStream,
+	stats: Option<qmux::SharedSocketStats>,
 	alpns: &[&str],
 	session: &qmux::Config,
 ) -> Result<qmux::Session> {
@@ -537,13 +538,13 @@ async fn connect_tls_override(
 		.map_err(|err| Error::WebSocketConnect(crate::error::message(err)))?;
 	let negotiated = upgrade(&mut stream, &request).await?;
 
-	qmux::ws::Upgraded::new(stream, &negotiated)
+	let mut upgraded = qmux::ws::Upgraded::new(stream, &negotiated)
 		.with_keep_alive(qmux::ws::KeepAlive::default())
-		.with_session_config(session.clone())
-		.connect()
-		.await
-		.map(crate::spawn_qmux)
-		.map_err(Error::connect)
+		.with_session_config(session.clone());
+	if let Some(stats) = stats {
+		upgraded = upgraded.with_socket_stats(stats);
+	}
+	upgraded.connect().await.map(crate::spawn_qmux).map_err(Error::connect)
 }
 
 /// The most response header bytes [`upgrade`] reads before giving up on the server.
@@ -641,7 +642,7 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, request: &ht
 /// moq-transport-18 and newer require qmux-01, so we never pair them with qmux-00.
 /// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns
 /// `&[]`, which qmux expands to every draft it knows about.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-20", "moqt-22"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-20", "moqt-22", "moqt-23"];
 
 fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
 	if QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -693,21 +694,23 @@ impl Error {
 /// alongside QUIC connections on a separate port.
 pub struct Listener {
 	listener: tokio::net::TcpListener,
-	protocols: Vec<String>,
+	/// The subprotocols [`with_protocols`](Self::with_protocols) named, or `None` to accept
+	/// the versions of the [`crate::Server`] it joins (every default ALPN on its own).
+	protocols: Option<Vec<String>>,
 	health: crate::accept::Health,
 	/// The settings each accepted qmux session starts with.
 	session: qmux::Config,
 }
 
 impl Listener {
-	/// Bind a listener to the given address, accepting every moq ALPN we know about.
+	/// Bind a listener to the given address, accepting the versions of the [`crate::Server`]
+	/// it joins, or every default moq ALPN on its own.
 	pub async fn bind(addr: net::SocketAddr) -> Result<Self> {
 		crate::runtime::scope(async move {
 			let listener = tokio::net::TcpListener::bind(addr).await?;
-			let protocols = supported_subprotocols(moq_net::ALPNS);
 			Ok(Self {
 				listener,
-				protocols,
+				protocols: None,
 				health: crate::accept::Health::new("websocket"),
 				session: crate::qmux_default(),
 			})
@@ -730,8 +733,17 @@ impl Listener {
 		for protocol in &protocols {
 			http::HeaderValue::from_str(protocol).map_err(|err| Error::ProtocolHeader(crate::error::message(err)))?;
 		}
-		self.protocols = protocols;
+		self.protocols = Some(protocols);
 		Ok(self)
+	}
+
+	/// Accept `versions`, a [`crate::Server`]'s `listen.version`, unless
+	/// [`with_protocols`](Self::with_protocols) already named the subprotocols.
+	pub(crate) fn with_versions(mut self, versions: &moq_net::Versions) -> Self {
+		if self.protocols.is_none() {
+			self.protocols = Some(supported_subprotocols(&versions.alpns()));
+		}
+		self
 	}
 
 	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
@@ -773,12 +785,15 @@ impl Listener {
 	pub(crate) async fn accept_pending(
 		&self,
 	) -> impl Future<Output = Result<(qmux::Session, Url, Accepted)>> + Send + use<> {
-		let (stream, addr) = self.accept_socket().await;
+		let (stream, stats, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted WebSocket TCP connection");
 
 		let accepted = Arc::new(Mutex::new(None::<(String, Url)>));
 		let accepted_callback = accepted.clone();
-		let protocols = self.protocols.clone();
+		let protocols = self
+			.protocols
+			.clone()
+			.unwrap_or_else(|| supported_subprotocols(moq_net::ALPNS));
 		let session = self.session.clone();
 		#[expect(
 			clippy::result_large_err,
@@ -829,30 +844,33 @@ impl Listener {
 				.unwrap()
 				.take()
 				.expect("successful upgrade selected a protocol");
-			let session = qmux::ws::Upgraded::new(stream, &protocol)
+			let mut upgraded = qmux::ws::Upgraded::new(stream, &protocol)
 				.with_keep_alive(qmux::ws::KeepAlive::default())
-				.with_session_config(session)
-				.accept()
-				.await
-				.map(crate::spawn_qmux)
-				.map_err(Error::accept)?;
+				.with_session_config(session);
+			if let Some(stats) = stats {
+				upgraded = upgraded.with_socket_stats(stats);
+			}
+			let session = upgraded.accept().await.map(crate::spawn_qmux).map_err(Error::accept)?;
 			Ok((session, url, Accepted { remote: addr, protocol }))
 		}
 	}
 
-	/// The `accept(2)` half: keep asking until a connection comes back.
-	async fn accept_socket(&self) -> (tokio::net::TcpStream, net::SocketAddr) {
+	/// The `accept(2)` half: keep asking until a connection comes back, prepared to carry
+	/// a session.
+	async fn accept_socket(&self) -> (tokio::net::TcpStream, Option<qmux::SharedSocketStats>, net::SocketAddr) {
 		loop {
 			match self.listener.accept().await {
 				Ok((stream, addr)) => {
-					// qmux already batches records, so Nagle would only hold a batch's
-					// tail for the peer's delayed ACK. Only a reset socket refuses it.
-					if let Err(err) = stream.set_nodelay(true) {
-						tracing::debug!(%addr, %err, "dropped a connection that refused TCP_NODELAY");
-						continue;
-					}
+					// Only a reset socket refuses it.
+					let stats = match qmux::tcp::adopt(&stream) {
+						Ok(stats) => stats,
+						Err(err) => {
+							tracing::debug!(%addr, %err, "dropped a connection that refused TCP_NODELAY");
+							continue;
+						}
+					};
 					self.health.accepted();
-					return (stream, addr);
+					return (stream, stats, addr);
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
@@ -949,12 +967,14 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn listener_disables_nagle() {
+	async fn listener_prepares_sockets() {
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
-		let (stream, _) = listener.accept_socket().await;
+		let (stream, stats, _) = listener.accept_socket().await;
 		assert!(stream.nodelay().unwrap());
+		// The handle the session bounds the kernel's unsent queue through.
+		assert_eq!(stats.is_some(), cfg!(any(target_os = "linux", target_os = "macos")));
 	}
 
 	#[tokio::test]
@@ -1326,10 +1346,15 @@ mod tests {
 	fn moqt_18_and_newer_pin_to_qmux01() {
 		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
 		// otherwise the pin silently stops matching.
-		let drafts: Vec<_> = ["moq-transport-18", "moq-transport-20", "moq-transport-22"]
-			.into_iter()
-			.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
-			.collect();
+		let drafts: Vec<_> = [
+			"moq-transport-18",
+			"moq-transport-20",
+			"moq-transport-22",
+			"moq-transport-23",
+		]
+		.into_iter()
+		.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
+		.collect();
 		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 		for &alpn in QMUX01_ONLY_ALPNS {
 			assert_eq!(qmux_versions_for(alpn), &[qmux::Version::QMux01]);

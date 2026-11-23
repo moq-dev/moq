@@ -91,7 +91,7 @@ function merge<T>(stored: T[], incoming: T[], key: (value: T) => number): T[] {
 /**
  * Add one payload's cues to the store, keeping it sorted by start time.
  *
- * Groups arrive in delivery order rather than sequence order, so a cue can legitimately land
+ * Groups arrive in delivery order rather than start order, so a cue can legitimately land
  * before one that is already stored. Each end is clamped to `MAX_CUE` past its start, so a
  * declared end cannot hold a cue past the prune horizon. Exported for tests.
  *

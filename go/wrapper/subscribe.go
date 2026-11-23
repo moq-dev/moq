@@ -153,7 +153,7 @@ func (t *TrackConsumer) Info() TrackInfo {
 }
 
 // Update changes this subscriber's delivery preferences. It fails on a
-// negative MaxDelay, or a time anchor the track can't serve.
+// negative MaxDelay, or a range time the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {
@@ -213,7 +213,7 @@ func (f *VideoDecodedFrame) Height() uint32 {
 }
 
 // Pixels converts the frame to tightly packed pixels in format.
-func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
+func (f *VideoDecodedFrame) Pixels(format *VideoPixelFormat) ([]byte, error) {
 	return f.inner.Pixels(format)
 }
 

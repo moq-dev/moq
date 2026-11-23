@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { StreamCode, Stream as StreamError } from "../error.ts";
+import { FrameTooLarge, ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { Cursor, concat, encodeVarint, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
+import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import { FetchHeader } from "./fetch.ts";
-import { decodeGroupGap, encodeGroupGap, Frame, Group, objectTime } from "./object.ts";
+import { decodeFetchObject, decodeGroupGap, EndOfRange, encodeGroupGap, Frame, Group, objectTime } from "./object.ts";
 import { Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_18;
@@ -85,8 +86,30 @@ test("an object's header goes out in one write, ahead of its payload", async () 
 	expect(Frame.decode(c, flags).endOfTrack).toBe(true);
 });
 
+test("an object or fetched object declaring more than 32 MiB is refused at its header", () => {
+	const flags = {
+		hasExtensions: false,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: false,
+		hasPriority: false,
+		firstObject: true,
+	};
+	// Only the header: the cap must not wait for any payload bytes.
+	const object = (size: number) =>
+		new Cursor(concat([encodeVarint(0, VERSION), encodeVarint(size, VERSION)]), VERSION);
+	expect(Frame.decode(object(MAX_FRAME_BYTES), flags).streamed).toBe(MAX_FRAME_BYTES);
+	expect(() => Frame.decode(object(MAX_FRAME_BYTES + 1), flags)).toThrow(FrameTooLarge);
+
+	// Flags 0: subgroup zero and no optional fields, so the length follows them directly.
+	const fetched = (size: number) =>
+		new Cursor(concat([encodeVarint(0, VERSION), encodeVarint(size, VERSION)]), VERSION);
+	expect(decodeFetchObject(fetched(MAX_FRAME_BYTES))).toMatchObject({ kind: "object", size: MAX_FRAME_BYTES });
+	expect(() => decodeFetchObject(fetched(MAX_FRAME_BYTES + 1))).toThrow(FrameTooLarge);
+});
+
 test("a data stream's header goes out in one write, stream type included", async () => {
-	for (const version of [Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_22, Version.DRAFT_23]) {
 		const chunks: Uint8Array[] = [];
 		const writer = new Writer(
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
@@ -119,5 +142,19 @@ test("a data stream's header goes out in one write, stream type included", async
 		expect(await fetch.u53()).toBe(FetchHeader.type);
 		expect((await FetchHeader.decode(fetch, version)).requestId).toBe(1_000_000n);
 		expect(await fetch.done()).toBe(true);
+	}
+});
+
+test("an End of Range decodes a 62-bit Object ID and refuses unknown flags", () => {
+	const cursor = (...values: (number | bigint)[]) => new Cursor(block(...values), VERSION);
+	const max = (1n << 62n) - 1n;
+	expect(decodeFetchObject(cursor(EndOfRange.NonExistent, max, max))).toEqual({
+		kind: "endOfRange",
+		reason: EndOfRange.NonExistent,
+		group: max,
+		object: max,
+	});
+	for (const flags of [0x80, 0x10d, 1n << 53n, max]) {
+		expect(() => decodeFetchObject(cursor(flags, 0, 0))).toThrow(ProtocolViolation);
 	}
 });

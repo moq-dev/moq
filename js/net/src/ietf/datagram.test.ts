@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin } from "../mock.ts";
@@ -14,7 +15,7 @@ import { Connection } from "./connection.ts";
 import { encodeDatagram, ObjectDatagram } from "./datagram.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
+const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23];
 
 function single(publisherPriority?: number): ObjectDatagram {
 	return new ObjectDatagram({
@@ -142,10 +143,12 @@ test("a datagram track round-trips over moq-transport", async () => {
 	const source = new Origin();
 	const path = Path.from("live");
 	const publication = source.route(path, { hidden: true });
-	const datagrams = publication.broadcast.createDatagrams("audio", {
-		timescale: Timescale.MILLI,
-		priority: 3,
-	});
+	const datagrams = defined(
+		publication.broadcast.createDatagrams("audio", {
+			timescale: Timescale.MILLI,
+			priority: 3,
+		}),
+	);
 	publication.announce();
 	const pair = createMockTransportPair(ALPN.DRAFT_22);
 	const url = new URL("https://localhost/datagrams");
@@ -197,8 +200,8 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 		const relay = new Origin();
 		const path = Path.from("shared");
 		const publication = source.route(path, { hidden: true });
-		const track = publication.broadcast.createTrack("audio", { timescale: Timescale.MILLI });
-		const datagrams = publication.broadcast.createDatagrams("audio", { timescale: Timescale.MICRO });
+		const track = defined(publication.broadcast.createTrack("audio", { timescale: Timescale.MILLI }));
+		const datagrams = defined(publication.broadcast.createDatagrams("audio", { timescale: Timescale.MICRO }));
 		publication.announce();
 		const upstream = createMockTransportPair(ALPN.DRAFT_18);
 		const url = new URL("https://localhost/shared");
@@ -298,7 +301,7 @@ function lagAnswers(transport: MockTransport, lag: number): void {
 	Object.defineProperty(transport, "incomingBidirectionalStreams", { value: incoming });
 }
 
-for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
+for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22, ALPN.DRAFT_23]) {
 	for (const [lag, finish] of [
 		[0, false],
 		[100, false],
@@ -309,7 +312,7 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 			using clock = manual();
 			const source = new Origin();
 			const publication = source.route(Path.from("live"), { hidden: true });
-			const datagrams = publication.broadcast.createDatagrams("audio");
+			const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 			publication.announce();
 			const pair = createMockTransportPair(alpn);
 			lagAnswers(pair.server, lag);
@@ -346,12 +349,12 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 	}
 }
 
-for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
+for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22, ALPN.DRAFT_23]) {
 	test(`${alpn}: a datagram burst reaches its reader before the end across a receive yield`, async () => {
 		using clock = manual();
 		const source = new Origin();
 		const publication = source.route(Path.from("live"), { hidden: true });
-		const datagrams = publication.broadcast.createDatagrams("audio");
+		const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
 		const url = new URL("https://localhost/datagrams");

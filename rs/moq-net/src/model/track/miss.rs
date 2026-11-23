@@ -36,7 +36,7 @@ use crate::{Error, ledger};
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
 /// and readers start, and the drops revision.
-type JudgedAt = (u64, u64, Option<u64>, Option<u64>, Option<u64>, super::Start, u64);
+type JudgedAt = (u64, u64, Option<u64>, Option<u64>, Option<u64>, super::FeedStart, u64);
 
 /// The misses of one cursor, judged as what it reads or the feed moves.
 #[derive(Default)]
@@ -79,6 +79,12 @@ pub(super) struct Misses {
 	picked: BTreeMap<u64, RangeSet<u64>>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
+	/// The part of `given_up` judged stale, with the budget each run was judged under: a
+	/// wider budget asks it again (see [`Self::widen`]).
+	stale: RangeMap<u64, Duration>,
+	/// No wider than the narrowest budget in `stale`, so [`Self::widen`] looks only when a
+	/// budget wider than it could take a run back.
+	narrowest: Option<Duration>,
 	/// The window revision and cap what this holds was last clipped to, with the window's
 	/// missable groups then, `None` while every group was.
 	clipped: Option<(u64, Option<u64>, Option<Cover>)>,
@@ -278,6 +284,21 @@ impl Deferred {
 		self.runs.clear();
 		self.ages.clear();
 	}
+}
+
+/// The part of `hole` the track's drops leave open for a reader under `drift`: a received
+/// stale run that does not settle it is no verdict for it (see `Drift::settles`), so it asks
+/// the group again.
+pub(super) fn unsettled(state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> RangeSet<u64> {
+	let mut left = RangeSet::new();
+	left.insert(hole.clone());
+	// Only what overlaps the hole, so judging every run costs each one the same.
+	for (run, gone) in state.drops.overlapping(&hole) {
+		if drift.settles(run.start.max(hole.start), gone) {
+			left.remove(run.clone());
+		}
+	}
+	left
 }
 
 impl Misses {
@@ -619,9 +640,14 @@ impl Misses {
 		// A refusal held while the feed may still deliver its groups is judged again once
 		// the feed gives up on them, which nothing else wakes this reader for. Registered
 		// whether or not the deadline moved here: `ask` settles what no handler can take
-		// before this runs, and the judge registered only the deadline it saw.
+		// before this runs, and the judge registered only the deadline it saw. One already
+		// passed is the judge's to take up, which runs once the feed's start resolves: armed
+		// again, it would wake this reader at once, every poll, while nothing can change.
 		if let Some(at) = self.deferred.deadline() {
-			state.read().cache.watch_wall(at, waiter);
+			let state = state.read();
+			if at > state.cache.pool().now_wall() {
+				state.cache.watch_wall(at, waiter);
+			}
 		}
 		retry
 	}
@@ -709,7 +735,7 @@ impl Misses {
 		let bound = bound.filter(|_| state.unfed).and_then(|end| end.checked_sub(1));
 		// The feed's start is unknown until the serving session resolves it, and readers
 		// take nothing from a cache that does not reflect the feed.
-		if matches!(state.start, super::Start::Pending(_)) || !state.readable() && bound.is_none() {
+		if matches!(state.start, super::FeedStart::Pending(_)) || !state.readable() && bound.is_none() {
 			return asks;
 		}
 		// A received stale run this reader cannot trust is still asked for, though nothing above
@@ -799,6 +825,15 @@ impl Misses {
 			self.refused = clip(&self.refused);
 			self.given_up = clip(&self.given_up);
 			self.refilled = clip(&self.refilled);
+			if !self.stale.is_empty() {
+				let mut stale = RangeMap::new();
+				for (run, budget) in self.stale.iter() {
+					for kept in self.given_up.overlapping(run) {
+						stale.insert(kept.start.max(run.start)..kept.end.min(run.end), *budget);
+					}
+				}
+				self.stale = stale;
+			}
 			for (&start, &(end, _)) in &self.deferred.runs {
 				for run in span.overlapping(&(start..end)) {
 					candidates.insert(start.max(run.start)..end.min(run.end));
@@ -832,6 +867,7 @@ impl Misses {
 				] {
 					set.remove(0..low);
 				}
+				self.stale.remove(0..low);
 				self.deferred.remove(0..low);
 			}
 			// What the window no longer covers is forgotten, and what it newly covers
@@ -852,6 +888,7 @@ impl Misses {
 					] {
 						set.remove(run.clone());
 					}
+					self.stale.remove(run.clone());
 					self.deferred.remove(run);
 				}
 				for run in view.gained(old, low, last).into_iter().map(half) {
@@ -1002,7 +1039,7 @@ impl Misses {
 		// the live edge or the floor the copy asked for leaves older groups as history only a
 		// reader naming them asked for.
 		let unasked = state.fills_from_start
-			|| !matches!(state.start, super::Start::Resolved(_))
+			|| !matches!(state.start, super::FeedStart::Resolved(_))
 				&& state.anchors.received()
 				&& named.is_none_or(|named| named >= start);
 		if unasked && start > 0 {
@@ -1167,6 +1204,7 @@ impl Misses {
 			] {
 				set.remove(0..low);
 			}
+			self.stale.remove(0..low);
 		}
 		let evicted = inbox.judge(state.cached, inbox_floor(low, taken), top);
 		debug_assert!(evicted.is_empty(), "an eviction landed without counting");
@@ -1319,7 +1357,6 @@ impl Misses {
 				end: run.end,
 				frame_end: None,
 				asking: *asking,
-				time: None,
 				fetch: false,
 			};
 			let (joins, unfillable) = fills.lock().join(fills, &ask);
@@ -1335,23 +1372,32 @@ impl Misses {
 	/// The part of `hole` nobody has a verdict on yet: a received stale run that does not
 	/// settle this reader is no verdict for it (see `Drift::settles`).
 	fn unclaimed(&self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> Vec<ops::Range<u64>> {
-		let mut left = RangeSet::new();
-		left.insert(hole.clone());
-		// Only what overlaps the hole, so judging every run costs each one the same.
-		for (run, gone) in state.drops.overlapping(&hole) {
-			if drift.settles(run.start.max(hole.start), gone) {
-				left.remove(run.clone());
+		let mut left = self.unanswered(state, hole.clone(), drift);
+		for run in self.wanted.overlapping(&hole) {
+			left.remove(run.clone());
+		}
+		left.iter().cloned().collect()
+	}
+
+	/// The part of `hole` with no verdict for this reader and no answer from its fills: still
+	/// to ask, or asked and not answered.
+	pub(super) fn unanswered(&self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> RangeSet<u64> {
+		let mut left = unsettled(state, hole.clone(), drift);
+		let mut given: RangeSet<u64> = self.given_up.overlapping(&hole).cloned().collect();
+		// A run given up stale under a narrower budget is no verdict for this reader, even
+		// before its next probe takes it back (see `Self::widen`).
+		for (run, judged) in self.stale.overlapping(&hole) {
+			if *judged < drift.budget {
+				given.remove(run.clone());
 			}
 		}
-		for claimed in [&self.given_up, &self.wanted] {
-			for run in claimed.overlapping(&hole) {
-				left.remove(run.clone());
-			}
+		for run in given.iter() {
+			left.remove(run.clone());
 		}
 		for key in self.filled.range(hole) {
 			left.remove(*key..*key + 1);
 		}
-		left.iter().cloned().collect()
+		left
 	}
 
 	/// Take in a fill's refusal of `groups`: final where the feed gave up on them too,
@@ -1388,7 +1434,43 @@ impl Misses {
 			return;
 		}
 		self.given_up.insert(groups.clone());
+		match stale {
+			Some(budget) => {
+				self.stale.insert(groups.clone(), budget);
+				self.narrowest = Some(self.narrowest.map_or(budget, |narrowest| narrowest.min(budget)));
+			}
+			None => self.stale.remove(groups.clone()),
+		}
 		given_up.push((groups, stale));
+	}
+
+	/// Take back the runs given up as stale under a budget narrower than `budget`, returning
+	/// them for the caller to reopen with [`Self::reopen`]: only a widening reverses a stale
+	/// verdict. Looks only when `budget` is wider than the narrowest it holds, whichever
+	/// budget a verdict was judged under and whenever it arrived.
+	pub fn widen(&mut self, budget: Duration) -> RangeSet<u64> {
+		if self.narrowest.is_none_or(|narrowest| budget <= narrowest) {
+			return RangeSet::new();
+		}
+		let widened: RangeSet<u64> = self
+			.stale
+			.iter()
+			.filter(|(_, judged)| **judged < budget)
+			.map(|(run, _)| run.clone())
+			.collect();
+		for run in widened.iter() {
+			self.stale.remove(run.clone());
+		}
+		self.narrowest = self.stale.iter().map(|(_, judged)| *judged).min();
+		widened
+	}
+
+	/// Judge `run` afresh: no longer given up, and judged again by the next probe.
+	pub fn reopen(&mut self, run: ops::Range<u64>) {
+		self.given_up.remove(run.clone());
+		self.judged.remove(run);
+		// The next probe judges under new terms, which looks at every key it has not judged.
+		self.at = None;
 	}
 }
 
@@ -1616,12 +1698,13 @@ fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
 /// folds: it hands out nothing there, so never asks a fill for it again.
 impl super::super::record::Beside for Misses {
 	fn runs(&self) -> u64 {
-		self.given_up.len() as u64
+		(self.given_up.len() + self.stale.len()) as u64
 	}
 
 	fn forget_below(&mut self, floor: u64) {
 		if floor > 0 {
 			self.given_up.remove(0..floor);
+			self.stale.remove(0..floor);
 		}
 	}
 }
@@ -2211,7 +2294,7 @@ mod tests {
 				_ => Servable::covering(
 					Cover::new(runs(6).into_iter().chain(runs(2))),
 					(next(3) == 0).then(|| next(KEYS + 2)),
-					&Servable::NONE,
+					&Default::default(),
 				),
 			};
 			let mut misses = Misses::default();
@@ -2454,7 +2537,7 @@ mod tests {
 		);
 
 		// One fill answers: only its join is looked at again, and the later task wakes.
-		let fill = std::future::poll_fn(|cx| requests.poll_requested_groups(&kio::Waiter::new(cx.waker().clone())))
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
 			.await
 			.unwrap();
 		let woken = second.0.load(Ordering::Relaxed);
@@ -2531,7 +2614,7 @@ mod tests {
 			"a no-op poll leaves the real registrations in place"
 		);
 
-		let fill = std::future::poll_fn(|cx| requests.poll_requested_groups(&kio::Waiter::new(cx.waker().clone())))
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
 			.await
 			.unwrap();
 		let (read_woken, drops_woken) = (read.0.load(Ordering::Relaxed), drops.0.load(Ordering::Relaxed));

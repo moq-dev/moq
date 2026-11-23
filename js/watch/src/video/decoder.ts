@@ -52,6 +52,11 @@ type Finish = "read" | "played";
 export type DecoderInput = {
 	/** Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output. */
 	enabled: Getter<boolean>;
+	/**
+	 * Delivery priority of the video track against the connection's other subscriptions, in
+	 * `-128..=127` with higher sent first. Defaults to `Catalog.PRIORITY.video`.
+	 */
+	priority: Getter<number>;
 };
 
 /** Constructor properties for {@link Decoder}. */
@@ -186,6 +191,7 @@ export class Decoder {
 	constructor(props: DecoderProps) {
 		this.in = {
 			enabled: getter(props?.enabled ?? true),
+			priority: getter(props?.priority ?? Catalog.PRIORITY.video),
 		};
 
 		this.source = props.source;
@@ -353,6 +359,7 @@ export class Decoder {
 			tally: this.#tally,
 			key: { path: broadcast.in.name.peek(), id: track },
 			catalog: broadcast.out.catalog,
+			priority: this.in.priority,
 			predecessor,
 		});
 		this.#selection.set({ kind: "selected", rendition });
@@ -578,6 +585,8 @@ interface RenditionProps {
 	// The rendition's feedback counters, under `key`: its ID in the catalog it was selected from.
 	tally: Tally;
 	key: Key;
+	// The subscription's priority.
+	priority: Getter<number>;
 }
 
 /** One rendition's playback through one WebCodecs decoder. */
@@ -599,7 +608,8 @@ class Rendition {
 
 	// The playout delay is where a cold join starts, and the shared max delay how late it may fall.
 	// Its subscription and its consumer take the same delay.
-	#delay: Getter<Moq.Track.Delay>;
+	#delay: Getter<Container.Delay>;
+	#priority: Getter<number>;
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<Container.BufferedRanges>([]);
@@ -657,6 +667,7 @@ class Rendition {
 		this.tally = props.tally;
 		this.key = props.key;
 		this.#delay = new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max }));
+		this.#priority = props.priority;
 		this.#predecessor = props.predecessor;
 
 		this.#signals.run(this.#run.bind(this));
@@ -692,8 +703,6 @@ class Rendition {
 			format,
 			delay: this.#delay,
 			predecessor: this.consumer ?? this.#predecessor,
-			// The one decoder drives the clock, so it skips a hole once the clock passed it.
-			playhead: this.sync,
 		});
 		effect.cleanup(() => consumer.close());
 		this.consumer = consumer;
@@ -709,7 +718,7 @@ class Rendition {
 		const sub = subscribeMedia(effect, {
 			broadcast: this.broadcast,
 			track: this.name,
-			priority: Catalog.PRIORITY.video,
+			priority: this.#priority,
 			delay: this.#delay,
 		});
 		if (!sub) return;
@@ -838,7 +847,7 @@ class Rendition {
 				const { frame } = next;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so neither a hole nor an endpoint
+				// starts only grow within a subscription, so neither a hole nor an endpoint
 				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);
@@ -916,7 +925,7 @@ class Rendition {
 				const { frame } = next;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so neither a hole nor an endpoint
+				// starts only grow within a subscription, so neither a hole nor an endpoint
 				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);

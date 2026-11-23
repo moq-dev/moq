@@ -36,7 +36,7 @@ function fields(version: Lite | Version, ...values: (number | bigint)[]): Uint8A
 	return concat(values.map((value) => encodeVarint(value, version)));
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	for (const [name, decode] of [
 		["request error code", RequestError.decode],
 		["publish status code", PublishDone.decode],
@@ -57,8 +57,8 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 // Build the peer's fields independently of each message encoder, so a numeric writer
 // cannot reject the fixture before its decoder sees the full-width value.
 
-test("relative anchors round-trip beyond 2^53 and resolve adjacent counts exactly", async () => {
-	const ranges = [{ start: { relative: UNSAFE }, end: { relative: UNSAFE - 1n } }];
+test("time anchors round-trip beyond 2^53 and resolve adjacent times exactly", async () => {
+	const ranges = [{ start: { time: UNSAFE - 1n }, end: { time: UNSAFE } }];
 	const message = new Subscribe({ id: UNSAFE, broadcast: Path.from("room"), track: "video", priority: 0, ranges });
 	const bytes = await Writer.collect(Lite.DRAFT_07, (w) => message.encode(w, Lite.DRAFT_07));
 	expect((await Subscribe.decode(new Reader(undefined, bytes, Lite.DRAFT_07), Lite.DRAFT_07)).ranges).toEqual(ranges);
@@ -67,22 +67,20 @@ test("relative anchors round-trip beyond 2^53 and resolve adjacent counts exactl
 	expect((await SubscribeUpdate.decode(new Reader(undefined, updated, Lite.DRAFT_07), Lite.DRAFT_07)).ranges).toEqual(
 		ranges,
 	);
-	// Every group from 0 through the latest held, so a count back names the group that many before it.
+	// Every group from 0 through the latest held, so a time names the group starting there.
 	const contiguous: Holdings = {
 		resolves: () => true,
-		containing: (time) => ({ group: time }),
+		containing: (time) => ({ at: time }),
 		nextStart: (from) => from,
-		back: (latest, back) => (latest >= back ? latest - back : undefined),
 		complete: () => false,
 	};
-	expect(new Window(rangesOf(ranges), UNSAFE + 5n, contiguous).runs()).toEqual([{ start: 5n, end: 7n }]);
-	expect(union([{ start: { relative: UNSAFE - 1n } }, { start: { relative: UNSAFE } }])).toEqual([
-		{ start: { relative: UNSAFE } },
-	]);
-	expect(() => rangesOf([{ start: { relative: 1 as never } }])).toThrow(TypeError);
+	const model = rangesOf([{ start: UNSAFE - 1n, end: UNSAFE }]);
+	expect(new Window(model, UNSAFE + 5n, contiguous).runs()).toEqual([{ start: UNSAFE - 1n, end: UNSAFE + 1n }]);
+	expect(union([{ start: UNSAFE - 1n, end: UNSAFE - 1n }, { start: UNSAFE }])).toEqual([{ start: UNSAFE - 1n }]);
+	expect(() => rangesOf([{ start: 1 as never }])).toThrow(TypeError);
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	test(`${version}: subgroup and datagram object IDs round-trip beyond 2^53`, async () => {
 		await expect(
 			Group.decode(new Reader(undefined, fields(version, 2 ** 32 + 0x14, 0, 0, 0, 0), version), version),
@@ -139,7 +137,8 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(() => Frame.decode(cursor(0, UNSAFE), FLAGS)).toThrow(RangeError);
 		expect(() => Frame.decode(cursor(0, 0, UNSAFE), FLAGS)).toThrow(RangeError);
 		expect(() => decodeFetchObject(cursor(0x0c, 0, UNSAFE))).toThrow(RangeError);
-		expect(() => decodeFetchObject(cursor(0x8c, 0, UNSAFE))).toThrow(RangeError);
+		// An End of Range's Object ID is any varint, since it can close out the rest of a group.
+		expect(decodeFetchObject(cursor(0x8c, 0, UNSAFE))).toMatchObject({ kind: "endOfRange", object: UNSAFE });
 		expect(() => decodeFetchObject(cursor(0, UNSAFE))).toThrow(RangeError);
 		expect(() => decodeGroupGap(cursor(0x0b, UNSAFE))).toThrow(RangeError);
 	});
@@ -197,8 +196,8 @@ test("legacy session bitrate refuses unsafe numbers", async () => {
 });
 
 test("time anchors round-trip beyond 2^53 as group starts", async () => {
-	const ranges = [{ start: { time: UNSAFE }, end: { time: UNSAFE + 1n } }];
-	expect(toWireRanges(ranges)).toEqual(ranges);
+	const ranges = toWireRanges([{ start: UNSAFE, end: UNSAFE + 1n }]);
+	expect(ranges).toEqual([{ start: { time: UNSAFE }, end: { time: UNSAFE + 1n } }]);
 	const message = new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 0, ranges });
 	const bytes = await Writer.collect(Lite.DRAFT_07, (w) => message.encode(w, Lite.DRAFT_07));
 	expect((await Subscribe.decode(new Reader(undefined, bytes, Lite.DRAFT_07), Lite.DRAFT_07)).ranges).toEqual(ranges);

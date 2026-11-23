@@ -36,7 +36,8 @@ const FADE = Duration.millis(50);
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
 
-import { Duration, Instant, now } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import * as MediaClock from "../media-clock";
 import { Backlog } from "./backlog";
 import { Framer } from "./framer";
 
@@ -191,6 +192,7 @@ export class Encoder {
 	 * A snapshot, for reaching the shared capture format knobs (`audio.capture?.sampleRate`). Read
 	 * {@link in}.capture through an effect instead when you need to react to it being swapped.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	get capture(): Capture | undefined {
 		return this.in.capture.peek();
 	}
@@ -219,7 +221,7 @@ export class Encoder {
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
 	#encoding = false;
-	// How far back retained audio is replayed (see replayBudget): a live join's min delay, else the max
+	// How far back retained audio is replayed (see replayBudget): a live join's lag, else the max
 	// delay, and for fetches alone the retention. Replayed groups land as fresh arrivals, so only this
 	// cut keeps a rejoining live viewer from receiving all the retained audio before the live edge.
 	#budget: Duration | undefined;
@@ -804,7 +806,7 @@ export class Encoder {
 
 				const backlog = new Backlog(retention, config.sampleRate);
 				const deadline = new Signal<Duration | undefined>(undefined);
-				const clock = () => now().since(Instant.ZERO);
+				const clock = MediaClock.now;
 				effect.run((timer) => {
 					const at = timer.get(deadline);
 					if (at === undefined) return;
@@ -1029,18 +1031,22 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 	};
 }
 
-// How far back a subscription wants retained audio replayed. A live join starts its min delay behind
-// the live edge, which a player states as its playout delay plus the codec's warmup, so that bounds
-// it within the max delay. Any other range, or a live join stating no min (moq-transport, moq-lite
-// before 07), wants all its max delay keeps. Undefined with no subscription, leaving the retention.
+// How far back a subscription wants retained audio replayed. A live join (an open range starting
+// live) starts its lag behind the live edge, which a player states as its playout delay plus the
+// codec's warmup, so the largest lag bounds it within the max delay. Any other range, such as one
+// from the oldest group (moq-transport, moq-lite before 07), wants all its max delay keeps.
+// Undefined with no subscription, leaving the retention.
 function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
 	const delay = subscription?.delay;
 	if (!delay) return undefined;
 	const max = delay.max ?? undefined;
-	const ranges = subscription.ranges ?? [{}];
-	const live = ranges.length > 0 && ranges.every((range) => range.start?.relative === 0n && range.end === undefined);
-	if (!live || delay.min === null || delay.min === undefined) return max;
-	return max === undefined ? delay.min : delay.min.min(max);
+	let lag: Duration | undefined;
+	for (const range of subscription.ranges ?? [{}]) {
+		if (typeof range.start !== "object" || range.end !== undefined) return max;
+		lag = lag === undefined ? range.start.live : lag.max(range.start.live);
+	}
+	if (lag === undefined) return max;
+	return max === undefined ? lag : lag.min(max);
 }
 
 /**

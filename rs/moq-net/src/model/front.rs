@@ -20,8 +20,9 @@
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
 //! so a returning reader still finds the cache) and no consumer holds its broadcast,
-//! it ends, and the next request mints a fresh one. A front waiting for a route is
-//! not idle.
+//! it ends, and the next request mints a fresh one. That includes a front still asking
+//! a route, so the request it held learns nobody waits on it; a front waiting for a
+//! route to appear is not idle.
 //!
 //! Sources and tracks are named by ids and names, never handles, so a
 //! transition can be checked in a unit test by comparing the actions it emits.
@@ -45,6 +46,9 @@ pub(super) struct Candidate {
 	/// a carried instance says the answer is the same stream. A minted one names the
 	/// announcement, and the route could answer with whatever stream now wins upstream.
 	pub carried: bool,
+	/// Whether the route is a lite-07 claim, which the route layer keeps in the table
+	/// through its debounce once its session closes; see [`Front::waiting`].
+	pub claim: bool,
 }
 
 /// Why an upstream request through a route did not produce a source.
@@ -197,6 +201,10 @@ struct Track {
 	/// re-splice is awaited. A refusal of that re-splice, or the front ending first, reports
 	/// this instead: the source closing is what ended the track.
 	lost: Option<Error>,
+	/// What the copy died of when its source closed under it with nothing serving the
+	/// track. A front ending before another source splices it reports this, but unlike
+	/// [`Self::lost`] a refusal does not: the next source's answer is its own verdict.
+	closed: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	wanted: bool,
 	/// A detached source whose copy still feeds the track until the serving source's
@@ -236,6 +244,8 @@ pub(super) struct Front {
 	upstream: Option<Candidate>,
 	/// Routes excluded from selection: their source ended while still advertised.
 	excluded: HashSet<u64>,
+	/// The excluded routes that are claims, while the table still shows them.
+	orphans: HashSet<u64>,
 	/// Whether the parked requesters were resolved (the first source attached).
 	resolved: bool,
 	tracks: BTreeMap<Arc<str>, Track>,
@@ -264,6 +274,7 @@ impl Front {
 			serving_closing: false,
 			upstream: None,
 			excluded: HashSet::new(),
+			orphans: HashSet::new(),
 			resolved: false,
 			tracks: BTreeMap::new(),
 			parked: BTreeSet::new(),
@@ -284,6 +295,21 @@ impl Front {
 	/// Forget excluded routes that left the table (a reconnect is a fresh entry).
 	pub(super) fn retain_routes(&mut self, standing: impl Fn(u64) -> bool) {
 		self.excluded.retain(|route| standing(*route));
+		self.orphans.retain(|route| self.excluded.contains(route));
+	}
+
+	/// Whether a selection that finds no route leaves the front waiting rather than ending.
+	/// A claim whose source closed with its session stays in the table, unavailable, until
+	/// another session serves it, a detour that may be learned only a round trip later and
+	/// always arrives as another route, or until its debounce runs out. Its own route is
+	/// never asked again: it would re-request the broadcast that just ended.
+	pub(super) fn waiting(&self) -> bool {
+		!self.orphans.is_empty()
+	}
+
+	/// The route an upstream request is in flight through, if any.
+	pub(super) fn asking(&self) -> Option<u64> {
+		self.upstream.map(|upstream| upstream.route)
 	}
 
 	/// The route the attached source came through, if any.
@@ -299,7 +325,8 @@ impl Front {
 	/// Why `track`'s serving copy died, while its re-splice is still awaited. A track the
 	/// front ends meanwhile ends with this rather than the front's end.
 	pub(super) fn lost(&self, track: &str) -> Option<Error> {
-		self.tracks.get(track)?.lost.clone()
+		let track = self.tracks.get(track)?;
+		track.lost.clone().or_else(|| track.closed.clone())
 	}
 
 	/// Whether the front is over.
@@ -342,6 +369,7 @@ impl Front {
 						refused: HashSet::new(),
 						refusal: None,
 						lost: None,
+						closed: None,
 						wanted: false,
 						ended: None,
 						draining: None,
@@ -406,9 +434,10 @@ impl Front {
 	}
 
 	/// Whether nothing needs the front: no track is left, even a lingering one, no
-	/// consumer holds its broadcast, and it serves from a source with no route pending.
+	/// consumer holds its broadcast, and it serves from a source or asks a route for one.
+	/// Ending one that asks drops its request, so the route's claimant learns nobody waits.
 	fn idle(&self) -> bool {
-		!self.held && self.tracks.is_empty() && self.serving.is_some() && self.upstream.is_none()
+		!self.held && self.tracks.is_empty() && (self.serving.is_some() || self.upstream.is_some())
 	}
 
 	fn selected(&mut self, best: Option<Candidate>, serving_closing: bool, actions: &mut Vec<Action>) {
@@ -433,6 +462,8 @@ impl Front {
 				self.upstream = Some(candidate);
 				actions.push(Action::Request { route: candidate.route });
 			}
+			// Nothing serves the path yet, but a claim it lost may still come back on a detour.
+			None if self.waiting() => self.upstream = None,
 			// Nothing serves the path: the front is over, even with a live source. Its
 			// route left the table and nothing replaced it, so it serves nobody new;
 			// a later announcement gets a fresh front.
@@ -466,8 +497,12 @@ impl Front {
 			// The winning route's answer is final, even while another source serves:
 			// asking a sibling or a shorter prefix instead would turn one refusal into
 			// a request per candidate.
+			// A closed source's error gives way to it too: the route's answer is its own verdict.
 			Err(Refusal { err, standing: true }) => {
 				self.upstream = None;
+				for track in self.tracks.values_mut() {
+					track.closed = None;
+				}
 				self.end(err, actions);
 			}
 		}
@@ -520,6 +555,9 @@ impl Front {
 		// would re-request the broadcast that just ended; another route may still
 		// resume it.
 		self.excluded.insert(candidate.route);
+		if candidate.claim {
+			self.orphans.insert(candidate.route);
+		}
 		self.serving = None;
 		self.serving_closing = false;
 		actions.push(Action::Detach { source, drain: true });
@@ -606,6 +644,7 @@ impl Front {
 			Ok(()) => {
 				track.draining = None;
 				track.lost = None;
+				track.closed = None;
 				track.stranded = None;
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
@@ -628,10 +667,14 @@ impl Front {
 	) {
 		let strands = self.strands();
 		let serving = self.serving.map(|(serving, _)| serving);
+		// Nothing serves or is being asked, but a claim the front lost may still resume it.
+		let waiting = serving.is_none() && self.upstream.is_none() && self.waiting();
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
 		let spliced = track.state == (TrackState::Spliced { source });
+		// A copy the closed source answered after its close: neither served nor drained.
+		let late = serving != Some(source) && track.draining != Some(source);
 		// A track finishing on a copy other than the serving source's asks that source for
 		// one anew, since finishing lets go of a query in flight: the group reads still
 		// holding the track continue from it, as after a later source change.
@@ -654,6 +697,14 @@ impl Front {
 				return;
 			}
 			if !spliced {
+				// The source closed under the copy and nothing serves yet: what the copy died
+				// of is what ends the track, unless a route the front waits on resumes it.
+				if let Err(err) = result
+					&& serving.is_none()
+					&& track.ended.is_none()
+				{
+					track.closed.get_or_insert(err);
+				}
 				return;
 			}
 		}
@@ -673,7 +724,8 @@ impl Front {
 			// route a switch already under way moves to, whatever the error, since the
 			// route it leaves may be what failed. A copy still read from a source that
 			// closed during the switch has no serving source to judge the instance by, so
-			// the route the switch asks speaks for it.
+			// the route the switch asks speaks for it. What that copy died of is no
+			// serving copy's loss: the route's answer is its own verdict, as while waiting.
 			Err(err)
 				if delivered
 					&& (err.transient() || self.upstream.is_some())
@@ -682,8 +734,19 @@ impl Front {
 						.is_some_and(|candidate| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
-				track.lost = Some(err);
+				if late {
+					track.closed.get_or_insert(err);
+				} else {
+					track.lost = Some(err);
+				}
 				self.fail_over(name, actions);
+			}
+			// A copy the closed source answered after its close died while the front waits on
+			// the claim it served: as for a draining copy, what it died of ends the track
+			// unless a session that serves the claim next resumes it.
+			Err(err) if delivered && waiting => {
+				track.state = TrackState::Idle;
+				track.closed.get_or_insert(err);
 			}
 			// The route lost the content, which another route of the instance continues:
 			// wait for one rather than ask this route again, which can only refuse. A copy
@@ -901,6 +964,7 @@ impl Front {
 			TrackState::Idle | TrackState::Querying { .. } => {
 				track.state = TrackState::Parked { since: now };
 				track.lost = None;
+				track.closed = None;
 				// An ended track has nothing to drop.
 				if track.ended.is_none() {
 					actions.push(Action::Park { track: name });
@@ -956,6 +1020,7 @@ mod tests {
 			route,
 			local: false,
 			carried: true,
+			claim: false,
 		}
 	}
 
@@ -964,6 +1029,7 @@ mod tests {
 			route,
 			local: true,
 			carried: true,
+			claim: false,
 		}
 	}
 
@@ -1223,6 +1289,288 @@ mod tests {
 				serving_closing: false,
 			}),
 			&[Action::End { err: Error::Unroutable }],
+		);
+	}
+
+	fn claim(route: u64) -> Candidate {
+		Candidate {
+			claim: true,
+			..remote(route)
+		}
+	}
+
+	/// A front whose claim's session closed under `video` before its copy failed, with no
+	/// other route yet: it waits on the claim the table still shows, never asking it again.
+	fn orphaned() -> Front {
+		let mut front = serving(claim(1), 100);
+		assert_actions(
+			front.step(Event::SourceClosed { source: 100 }),
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
+		);
+		assert_eq!(front.excluded_routes(), &HashSet::from([1]));
+		assert!(front.waiting());
+		assert_actions(
+			front.step(Event::Selected {
+				best: None,
+				serving_closing: false,
+			}),
+			&[],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Session(crate::SessionError::Cancel)),
+				delivered: true,
+			}),
+			&[],
+		);
+		front
+	}
+
+	/// The claim comes back on another session, a detour learned after the close: the
+	/// front resumes on it rather than end.
+	#[test]
+	fn a_closed_claim_resumes_on_the_session_that_serves_it_next() {
+		let mut front = orphaned();
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(claim(2)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert!(front.lost("video").is_none());
+	}
+
+	/// The session that serves the claim next frames the track differently: its verdict
+	/// ends the track, not the closed session's error.
+	#[test]
+	fn a_closed_claims_next_session_refusing_ends_with_its_verdict() {
+		let mut front = orphaned();
+		front.step(Event::Selected {
+			best: Some(claim(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(info().with_compression(track::Compression::Deflate)),
+				retry: None,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::Unsupported,
+				retry: None,
+			}],
+		);
+	}
+
+	/// Nothing serves the claim again: the front ends, and its track with what ended the
+	/// copy, the session's error, not the later `Unroutable`.
+	#[test]
+	fn a_closed_claim_nothing_resumes_ends_with_the_sessions_error() {
+		let mut front = orphaned();
+		// The claim's debounce ran out: it left the table.
+		front.retain_routes(|_| false);
+		assert!(!front.waiting());
+		assert_actions(
+			front.step(Event::Selected {
+				best: None,
+				serving_closing: false,
+			}),
+			&[Action::End { err: Error::Unroutable }],
+		);
+		assert_eq!(
+			front.lost("video").map(|err| err.to_string()),
+			Some(Error::Session(crate::SessionError::Cancel).to_string())
+		);
+	}
+
+	/// The route that serves the claim next refuses the broadcast: every track ends with
+	/// that refusal, as its requesters do, not the closed session's error.
+	#[test]
+	fn a_closed_claims_next_route_refusing_ends_with_its_verdict() {
+		let mut front = orphaned();
+		front.step(Event::Selected {
+			best: Some(claim(2)),
+			serving_closing: false,
+		});
+		assert_actions(refuse(&mut front, 2), &[Action::End { err: Error::NotFound }]);
+		assert!(front.lost("video").is_none());
+	}
+
+	/// The closed source answers a query it was asked before its close, and the copy it
+	/// splices then dies while the front waits on its claim: the track waits too, and the
+	/// session that serves the claim next resumes it.
+	#[test]
+	fn a_copy_spliced_after_its_claim_closed_dying_waits_for_the_detour() {
+		let mut front = querying(claim(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		assert_actions(
+			front.step(Event::Selected {
+				best: None,
+				serving_closing: false,
+			}),
+			&[],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Err(Error::Session(crate::SessionError::Cancel)),
+				delivered: true,
+			}),
+			&[],
+		);
+		assert_eq!(
+			front.lost("video").map(|err| err.to_string()),
+			Some(Error::Session(crate::SessionError::Cancel).to_string())
+		);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(claim(2)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+	}
+
+	/// A front whose claim closed, asking the route that serves it next, with a copy the
+	/// closed source answered after its close spliced in and then dead.
+	fn late_copy_died_while_asking() -> Front {
+		let mut front = querying(claim(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(claim(2)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Err(Error::Session(crate::SessionError::Cancel)),
+				delivered: true,
+			}),
+			&[],
+		);
+		front
+	}
+
+	/// The late copy dies while the next route is asked, and that route refuses the
+	/// broadcast: the track ends with the refusal, not the closed session's error.
+	#[test]
+	fn a_late_copy_dying_while_asking_yields_to_a_broadcast_refusal() {
+		let mut front = late_copy_died_while_asking();
+		assert_actions(refuse(&mut front, 2), &[Action::End { err: Error::NotFound }]);
+		assert!(front.lost("video").is_none());
+	}
+
+	/// The late copy dies while the next route is asked, whose source then refuses the
+	/// track: the track aborts with that refusal, not the closed session's error.
+	#[test]
+	fn a_late_copy_dying_while_asking_yields_to_a_track_refusal() {
+		let mut front = late_copy_died_while_asking();
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Err(Error::Unsupported),
+				retry: None,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::Unsupported,
+				retry: None,
+			}],
 		);
 	}
 
@@ -1594,6 +1942,7 @@ mod tests {
 					route: 1,
 					local,
 					carried,
+					claim: false,
 				};
 				let abort = [Action::Abort {
 					track: name("video"),
@@ -1846,6 +2195,7 @@ mod tests {
 					route: 1,
 					local,
 					carried: false,
+					claim: false,
 				},
 				100,
 			);
@@ -2233,24 +2583,10 @@ mod tests {
 		assert_actions(front.step(Event::Unheld), &[Action::Retire]);
 	}
 
-	/// A front waiting for a route is not idle, though nobody holds it: neither one
-	/// still resolving nor one whose source died while it asks another route.
+	/// A front nobody holds stays while it waits to learn a route, and retires once it asks
+	/// one, rather than waiting on an answer nobody will read.
 	#[test]
-	fn a_front_waiting_for_a_route_stays() {
-		let mut front = Front::new(LINGER);
-		front.step(Event::Selected {
-			best: Some(remote(1)),
-			serving_closing: false,
-		});
-		assert_actions(front.step(Event::Unheld), &[]);
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 1,
-				result: Ok(100),
-			}),
-			&[Action::Resolve, Action::Retire],
-		);
-
+	fn an_unheld_front_retires_once_it_asks() {
 		let mut front = serving(local(1), 100);
 		front.step(Event::Unwanted {
 			track: name("video"),
@@ -2273,15 +2609,16 @@ mod tests {
 				best: Some(remote(2)),
 				serving_closing: false,
 			}),
-			&[Action::Request { route: 2 }],
+			&[Action::Request { route: 2 }, Action::Retire],
 		);
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 2,
-				result: Ok(200),
-			}),
-			&[Action::Retire],
-		);
+
+		// Still resolving its first route.
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(remote(1)),
+			serving_closing: false,
+		});
+		assert_actions(front.step(Event::Unheld), &[Action::Retire]);
 	}
 
 	/// A request that joined before the driver could retire the front keeps it: the
@@ -2725,8 +3062,9 @@ mod tests {
 				best: Some(remote(1)),
 				serving_closing: false,
 			},
+			// A claim, which its source closing leaves excluded but waited on.
 			Event::Selected {
-				best: Some(remote(2)),
+				best: Some(claim(2)),
 				serving_closing: false,
 			},
 			Event::Selected {
@@ -2749,6 +3087,7 @@ mod tests {
 				}),
 			},
 			Event::SourceClosed { source: 100 },
+			Event::SourceClosed { source: 200 },
 			Event::TrackAssigned {
 				track: name("v"),
 				now: t0,

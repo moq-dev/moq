@@ -10,7 +10,16 @@ from pathlib import Path
 # Keep the Go static-library history keys when the coordinator supplies them.
 # Android and iOS libraries are already measured inside Kotlin/Swift packages.
 GO_TARGETS = {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"}
-ARTIFACTS = ["go-lib-*", "libmoq-*", "moq-cli-*", "moq-relay-*", "python-*", "kotlin-package", "swift-ffi-package"]
+ARTIFACTS = [
+    "go-lib-*",
+    "libmoq-*",
+    "moq-c-generated-*",
+    "moq-cli-*",
+    "moq-relay-*",
+    "python-*",
+    "kotlin-package",
+    "swift-ffi-package",
+]
 # What a consumer downloads: archives, packages and the Go mirror's staticlibs.
 # Bare binaries, .deb and .rpm repeat the archives; Go's .so and .dll ship inside the packages.
 SHIPPING = (".tar.gz", ".zip", ".whl", ".aar", ".jar", ".a", ".lib")

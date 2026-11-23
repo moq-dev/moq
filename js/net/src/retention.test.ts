@@ -1,6 +1,7 @@
 import { afterAll, afterEach, expect, spyOn, test } from "bun:test";
 import { type Dispose, Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import type * as Group from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
 import { hooks } from "./internal.ts";
@@ -84,7 +85,7 @@ async function session(alpn: string) {
 
 	const broadcastRoute = origin.route(Path.from("test"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();

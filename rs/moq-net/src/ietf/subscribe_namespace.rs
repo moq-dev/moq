@@ -68,9 +68,10 @@ impl<'a> Message<'a> for SubscribeNamespace {
 /// NAMESPACE message (0x08), sent on the SUBSCRIBE_NAMESPACE bidi stream.
 /// Indicates a namespace suffix matching the subscribed prefix is active.
 ///
-/// The base message carries only the suffix. A session that negotiated the MoQ Cluster
-/// extension appends a Parameters field carrying HOP_PATH and ROUTE_COST (see
-/// [`super::cluster`]).
+/// Through draft-22 the base message carries only the suffix, and a session that negotiated
+/// the MoQ Cluster extension appends a Parameters field carrying HOP_PATH and ROUTE_COST
+/// (see [`super::cluster`]). Draft-23 (section 9.15) gives every NAMESPACE that field, and
+/// defines no parameter for it: without an extension it is an empty block.
 #[derive(Clone, Debug)]
 pub struct Namespace {
 	pub suffix: Path,
@@ -81,15 +82,27 @@ pub struct Namespace {
 }
 
 impl Namespace {
+	/// Whether every NAMESPACE carries a Parameters field (draft-23 section 9.15), not only
+	/// one on a session whose extension defines it.
+	fn has_params(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
+	}
+
 	/// Decode the message body, expecting the extended form when the session negotiated
 	/// an extension that defines it. See [`super::PublishNamespace::decode_body`].
 	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: Negotiated) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r)?;
 
-		// The base form has no Parameters field at all, so there is nothing to read
-		// (and nothing to reject) unless an extension is on.
 		let params = match negotiated.extended() {
 			true => Some(super::publish_namespace::decode_advert_params(r, version, negotiated)?),
+			// The draft defines no parameter for NAMESPACE and an unknown one cannot be
+			// skipped (section 9.19), so without an extension the block must be empty.
+			false if Self::has_params(version) => {
+				decode_params!(r, version,);
+				None
+			}
+			// Through draft-22 the base form has no Parameters field at all, so there is
+			// nothing to read (and nothing to reject).
 			false => None,
 		};
 
@@ -104,6 +117,10 @@ impl<'a> Message<'a> for Namespace {
 		encode_namespace(w, &self.suffix)?;
 		match &self.params {
 			Some(params) => super::publish_namespace::encode_advert_params(w, version, params),
+			None if Self::has_params(version) => {
+				encode_params!(w, version,);
+				Ok(())
+			}
 			None => Ok(()),
 		}
 	}
@@ -229,6 +246,66 @@ mod tests {
 			crate::coding::decode_buf(&mut bytes, version, |r, v| Namespace::decode_body(r, v, CLUSTER)),
 			Err(DecodeError::InvalidValue)
 		));
+	}
+
+	/// Draft-23 (section 9.15) gives every NAMESPACE a Number of Parameters, zero without
+	/// an extension. Drafts 18 to 22 keep the bare suffix.
+	#[test]
+	fn namespace_has_an_empty_parameter_block_at_draft23() {
+		let msg = Namespace {
+			suffix: Path::from_static("alice.hang"),
+			params: None,
+		};
+		let old = body(&msg, Version::Draft22);
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(body(&msg, version), old, "{version:?} keeps the bare suffix");
+			let (decoded, consumed) = decode(old.clone(), version, Negotiated::default()).unwrap();
+			assert!(consumed && decoded.params.is_none());
+		}
+
+		let new = body(&msg, Version::Draft23);
+		assert_eq!(new[..old.len()], old[..]);
+		assert_eq!(new[old.len()..], [0], "Number of Parameters = 0");
+		let (decoded, consumed) = decode(new, Version::Draft23, Negotiated::default()).unwrap();
+		assert!(consumed && decoded.params.is_none());
+		assert_eq!(decoded.suffix.as_str(), "alice.hang");
+
+		// The bare suffix is not a draft-23 NAMESPACE: the count is missing.
+		assert!(decode(old, Version::Draft23, Negotiated::default()).is_err());
+	}
+
+	/// The draft defines no parameter for NAMESPACE and an unknown one cannot be skipped
+	/// (section 9.19), so one arriving without an extension is refused.
+	#[test]
+	fn namespace_refuses_a_parameter_at_draft23_without_an_extension() {
+		let version = Version::Draft23;
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, version.into());
+		encode_namespace(&mut w, &Path::from_static("a")).unwrap();
+		// Number of Parameters = 1, then an undefined type and a one-byte value.
+		w.varint(1).unwrap();
+		w.varint(0x3e).unwrap();
+		w.varint(0).unwrap();
+
+		assert!(matches!(
+			decode(buf, version, Negotiated::default()),
+			Err(DecodeError::InvalidValue)
+		));
+	}
+
+	/// With MoQ Cluster negotiated the block is the extension's, at draft-23 as before it.
+	#[test]
+	fn cluster_namespace_round_trips_at_draft23() {
+		let version = Version::Draft23;
+		let msg = Namespace {
+			suffix: Path::from_static("alice.hang"),
+			params: clustered(&[7, 9], 5),
+		};
+		assert_eq!(body(&msg, version), body(&msg, Version::Draft22));
+
+		let (decoded, consumed) = decode(body(&msg, version), version, CLUSTER).unwrap();
+		assert!(consumed);
+		assert_eq!(decoded.params, msg.params);
 	}
 
 	/// An endpoint must not append the parameters on a session that did not negotiate,

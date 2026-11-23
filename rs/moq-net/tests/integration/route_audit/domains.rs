@@ -162,7 +162,9 @@ async fn an_edge_passes_its_clients_and_its_cores_but_never_core_to_core() {
 async fn a_leaf_advertises_only_what_its_host_serves() {
 	for leaf in [true, false] {
 		let mut mesh = Mesh::new(3);
-		mesh.relays[2] = mesh.relays[2].clone().with_proxy(!leaf);
+		if leaf {
+			mesh.relays[2] = crate::route_change::produce_app(102);
+		}
 		for relay in [0, 1] {
 			mesh.join(2, relay, Join::peer(1)).await;
 		}

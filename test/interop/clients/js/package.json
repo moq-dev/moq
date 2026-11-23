@@ -3,7 +3,7 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test --only-failures"
 	},
 	"dependencies": {
@@ -17,6 +17,7 @@
 	"devDependencies": {
 		"@moq/common": "workspace:*",
 		"playwright": "1.64.1",
-		"vite": "^8.3.6"
+		"typescript": "7.0.2",
+		"vite": "^8.3.8"
 	}
 }

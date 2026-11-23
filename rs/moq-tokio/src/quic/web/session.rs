@@ -1301,7 +1301,7 @@ mod tests {
 	/// fail.
 	#[tokio::test]
 	async fn an_offset_stays_acknowledged_through_a_reset() {
-		use moq_net::transport::poll::{Acked, SendStream};
+		use moq_net::transport::poll::SendStream;
 
 		for (framed, finish) in [false, true]
 			.into_iter()
@@ -1322,7 +1322,7 @@ mod tests {
 			};
 			let (acked, (recv, read)) = tokio::join!(kio::wait(|waiter| send.poll_acked(waiter, &payload)), recv);
 			assert_eq!(read, b"payload", "framed: {framed}");
-			assert!(matches!(acked, Ok(Acked::Delivered)), "framed: {framed}: {acked:?}");
+			assert!(matches!(acked, Ok(())), "framed: {framed}: {acked:?}");
 
 			// The driver runs on this thread, so nothing acknowledges this before the reset.
 			let cut = match finish {
@@ -1347,7 +1347,7 @@ mod tests {
 			SendStream::reset(&mut send, 1);
 			let acked = |offset| SendStream::poll_acked(&send, &Waiter::noop(), offset);
 			assert!(
-				matches!(acked(&payload), Poll::Ready(Ok(Acked::Delivered))),
+				matches!(acked(&payload), Poll::Ready(Ok(()))),
 				"framed: {framed}, finished: {finish}: the reset forgot it"
 			);
 			assert_eq!(SendStream::offset(&send), end, "framed: {framed}, finished: {finish}");
@@ -1364,7 +1364,7 @@ mod tests {
 	/// acknowledged: the stop fails only the bytes it had not.
 	#[tokio::test]
 	async fn an_offset_stays_acknowledged_through_a_stop() {
-		use moq_net::transport::poll::{Acked, SendStream};
+		use moq_net::transport::poll::SendStream;
 
 		for framed in [false, true] {
 			let (client, server, _endpoints) = pair().await;
@@ -1381,7 +1381,7 @@ mod tests {
 				recv
 			};
 			let (acked, recv) = tokio::join!(kio::wait(|waiter| send.poll_acked(waiter, &payload)), recv);
-			assert!(matches!(acked, Ok(Acked::Delivered)), "framed: {framed}: {acked:?}");
+			assert!(matches!(acked, Ok(())), "framed: {framed}: {acked:?}");
 
 			recv.stop(3);
 			let stopped = kio::wait(|waiter| SendStream::poll_closed(&send, waiter)).await;
@@ -1391,7 +1391,7 @@ mod tests {
 			);
 			let acked = SendStream::poll_acked(&send, &Waiter::noop(), &payload);
 			assert!(
-				matches!(acked, Poll::Ready(Ok(Acked::Delivered))),
+				matches!(acked, Poll::Ready(Ok(()))),
 				"framed: {framed}: the stop forgot it: {acked:?}"
 			);
 		}

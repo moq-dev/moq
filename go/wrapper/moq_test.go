@@ -155,7 +155,7 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestAudioConsumerDelay(t *testing.T) {
 	estimate := false
 	fixed, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{
 		Format:   moq.AudioSampleFormatF32,
-		Delay:    moq.Delay{Min: fixedDelay, MaxUnlimited: true},
+		Delay:    moq.Delay{Min: &fixedDelay, MaxUnlimited: true},
 		Estimate: &estimate,
 	})
 	if err != nil {
@@ -448,7 +448,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		t.Fatal(err)
 	}
 	video, err := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
-		Input:     moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
+		Input:     moqvideo.EncoderInput{Format: moq.RgbaVideoPixelFormat(), Width: 320, Height: 240, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
 		Output:    moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.SoftwareEncoder()},
 		Track:     &track,
 		Bandwidth: nil,
@@ -526,7 +526,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		t.Fatalf("surface = %#v, want a non-null VideoSurfacePixelBuffer", frame.Surface())
 	}
 
-	i420, err := frame.Pixels(moq.VideoPixelFormatI420)
+	i420, err := frame.Pixels(moq.I420VideoPixelFormat())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +534,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		t.Fatalf("I420 length = %d, want %d", len(i420), want)
 	}
 
-	packed, err := frame.Pixels(moq.VideoPixelFormatRgba)
+	packed, err := frame.Pixels(moq.RgbaVideoPixelFormat())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -917,7 +917,7 @@ func TestUnknownFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A bad format is no longer expressible: it is an enum. Bad init bytes still are.
-	if _, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: nil}); err == nil {
+	if _, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: nil}); err == nil {
 		t.Fatal("expected error for unknown format")
 	}
 }
@@ -928,7 +928,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 
 	origin := newOrigin(t)
 	route, broadcast := newRoute(t, origin, "live", moq.RouteOptions{Hidden: true})
-	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1110,9 +1110,10 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	}
 
 	order := moq.OrderAscending
+	start := moq.Unscaled(0)
 	consumer, err := track.Consume(&moq.Subscription{
 		Delay:  moq.Delay{Max: 10 * time.Second},
-		Ranges: []moq.Range{{Start: moq.AnchorRelative{Groups: 2}}},
+		Ranges: []moq.Range{{Start: &start}},
 		Order:  &order,
 	})
 	if err != nil {
@@ -1330,7 +1331,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatalf("request name = %q, want requested-audio", name)
 	}
 
-	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Requested{Request: request}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Requested{Request: request}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1375,9 +1376,9 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if string(frame.Payload) != string(payload) || durationOf(t, frame.Timestamp) != 20*time.Millisecond {
 		t.Fatalf("frame = %+v, want payload=%q ts=20000", frame, payload)
 	}
-	// The explicit pause marker is an encoder end even while the track stays open. The marker
-	// is a group of its own, and group starts strictly increase, so it ends one microsecond past
-	// the frame's group: the producer doesn't parse how long the packet runs.
+	// The explicit pause marker is an encoder end even while the track stays open. The importer
+	// reads the packet's duration from its TOC byte ('d' is a 10ms hybrid frame), and the marker
+	// sits one microsecond before that frame's end, so what resumes there starts after it.
 	if err := media.Discontinuity(); err != nil {
 		t.Fatal(err)
 	}
@@ -1388,8 +1389,8 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value, ok := end.(moqmedia.ReadEnd); !ok || durationOf(t, value.End) != 20*time.Millisecond+time.Microsecond {
-		t.Fatalf("expected encoder end at 20001us, got %T %+v", end, end)
+	if value, ok := end.(moqmedia.ReadEnd); !ok || durationOf(t, value.End) != 30*time.Millisecond-time.Microsecond {
+		t.Fatalf("expected encoder end at 29999us, got %T %+v", end, end)
 	}
 	if next, err := mediaConsumer.Next(ctx); next != nil || err != nil {
 		t.Fatalf("after finish: %v %v", next, err)

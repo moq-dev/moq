@@ -32,7 +32,7 @@ Share `media.NewTimebase(broadcast)` through `ContainerInit` when several import
 source timeline; omitting it keeps an independent offset. Timebases belong to one broadcast
 and do not keep it open; release the handle with `Close` on the calling goroutine.
 `NewContainerProducer` takes chunks split anywhere, so a raw byte stream needs no other importer.
-`ContainerFormatFmp4` splits each fragment into one frame per sample.
+`Fmp4ContainerFormat()` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
@@ -97,7 +97,7 @@ import (
 // Hidden until the catalog is filled; keep the route reachable while publishing.
 route, _ := client.Route("my-stream.hang", moq.RouteOptions{Hidden: true})
 broadcast := route.Broadcast()
-audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
+audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: opusInit})
 timestamp := moq.TimestampFromScale(960, 48_000) // 20 ms on the Opus sample clock
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: timestamp})
 _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
@@ -105,7 +105,7 @@ _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
 video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
-    Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
+    Input: moqvideo.EncoderInput{Format: moq.RgbaVideoPixelFormat(), Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
     Output: moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.AutoEncoder()},
     Track: &track,
 })
@@ -140,7 +140,7 @@ shows which module holds each.
 - **Errors.** Read diagnostic payloads from `Reason` and structured protocol failures from `Details`.
 - **Catalog timing.** Each catalog from `CatalogConsumer.Next` carries the `Timestamp` it takes effect at on the broadcast's media timeline. `NewCatalogConsumer(ctx, broadcast, 0)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout delay instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `Preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq.ErrUnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
-- **Subscription defaults.** A zero `moq.Subscription{}`, a nil `*Subscription`, and `moq.DefaultSubscription()` all mean moq-net's defaults, whose zero `Delay` starts at the newest group and skips a superseded one at once. Set `Delay.MaxUnlimited` for no subscriber limit, and `Delay.MinUnstated` to leave the target latency unstated. Decoders take the same `moq.Delay`.
+- **Subscription defaults.** A zero `moq.Subscription{}`, a nil `*Subscription`, and `moq.DefaultSubscription()` all mean moq-net's defaults, whose zero `Delay` states no target latency and skips a superseded group at once, so it starts at the newest group. Set `Delay.MaxUnlimited` for no subscriber limit, which reaches back to the oldest group held, and set `Delay.Min` to join that far behind the live edge instead. Decoders take the same `moq.Delay`.
 - **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `Demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call `AbortUnwanted(code)` on its producer (raw, media, audio, video, or JSON) once `WantedChanged` returns false rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next false on a fresh `Demand()`, since one that already returned false misses a subscriber that came and went.
 - **Group refresh.** `demand.Refresh(ctx)` returns once a subscriber asks for a new group: the first group of a track with none, or a join judged by `TrackInfo{Refresh: moq.TrackRefresh{Ratio: ..., Interval: ...}}`. Write a group starting with a keyframe or snapshot, which answers it, then wait again. The ratio asks on a join once the newest group has grown past that many times its first frame; the interval has a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask. A subscriber asks with `consumer.Refresh(ctx)`, which returns once the request is sent (forwarded upstream, or read by a local publisher); cancelling `ctx` first withdraws it.
 

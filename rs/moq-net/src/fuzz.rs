@@ -572,6 +572,31 @@ pub fn route_info(
 	}
 }
 
+/// An [`Update`](crate::origin::RouteKind::Update) of the route at `prefix` with `cost`, as a
+/// consuming cursor yields it, for benches that replay route events.
+pub fn route_update(prefix: &str, cost: u64) -> crate::origin::RouteEvent {
+	crate::origin::RouteEvent {
+		kind: crate::origin::RouteKind::Update,
+		announce: announce(prefix, cost),
+	}
+}
+
+/// The announces a session replays for a burst of route events: each prefix's last active
+/// event, in event order. For benches of the replay.
+pub fn replay(events: Vec<crate::origin::RouteEvent>) -> Vec<crate::announce::Announce> {
+	crate::lite::replay::initial(events)
+}
+
+/// A route over `prefix` with `cost`, as an announcement listing reports it, for tests that
+/// hand one to code that consumes announcements.
+pub fn announce(prefix: &str, cost: u64) -> crate::announce::Announce {
+	crate::announce::Announce {
+		prefix: crate::Path::new(prefix).unwrap(),
+		captures: None,
+		route: route_info([], cost, None),
+	}
+}
+
 /// The hop ids a received route traversed, oldest first: crate-private chain state, for
 /// tests that check which path a route took.
 pub fn route_hops(route: &crate::origin::RouteInfo) -> Vec<u64> {
@@ -1186,7 +1211,6 @@ impl LiteSample {
 			Self::Group => lite::Group {
 				subscribe: 3,
 				key: 1_234,
-				previous: None,
 				frame_start: 0,
 			}
 			.encode(w, version)
@@ -1200,8 +1224,7 @@ impl LiteSample {
 				track: "video".into(),
 				priority: 2,
 				max_delay: Some(std::time::Duration::from_secs(10)),
-				min_delay: None,
-				ranges: vec![lite::Range::OLDEST],
+				ranges: vec![lite::Range::OPEN],
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -1399,7 +1422,6 @@ impl Default for Messages {
 				track: "video".into(),
 				priority: 3,
 				max_delay: Some(Duration::from_millis(500)),
-				min_delay: None,
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
@@ -1410,7 +1432,6 @@ impl Default for Messages {
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Some(Duration::from_millis(500)),
-				min_delay: None,
 				// Lite-06, the bench's version, restates the ranges.
 				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
@@ -1431,7 +1452,6 @@ impl Default for Messages {
 			lite_group: lite::Group {
 				subscribe: 7,
 				key: 123_456,
-				previous: None,
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
@@ -1580,8 +1600,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			track: track.into(),
 			priority: 0,
 			max_delay: Some(std::time::Duration::ZERO),
-			min_delay: None,
-			ranges: vec![lite::Range::OLDEST],
+			ranges: vec![lite::Range::OPEN],
 			order: track::Order::Descending,
 		}
 		.encode(w, BENCH_LITE)

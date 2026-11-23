@@ -70,7 +70,10 @@ async fn main() -> anyhow::Result<()> {
 				.route(&config.broadcast, moq_net::origin::RouteOptions::hidden())
 				.context("failed to create broadcast")?;
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-			let track = route.broadcast().create_track(track, info)?;
+			let track = route
+				.broadcast()
+				.create_track(track, info)
+				.context("the track already exists")?;
 			route.announce().context("failed to announce broadcast")?;
 			let clock = Publisher::new(track);
 
@@ -97,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
 			let path = moq_net::Path::new(&config.broadcast)?;
 			let scope =
-				moq_net::Patterns::from(moq_net::Pattern::subtree(path.as_str()).context("invalid broadcast name")?);
+				moq_net::Prefixes::from(moq_net::Prefix::try_from(path.as_str()).context("invalid broadcast name")?);
 			let consumer = origin
 				.scope("", &scope)
 				.context("not allowed to consume broadcast")?
@@ -120,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
 						announce::Event::Absent(update) => {
 							tracing::warn!(broadcast = %update.prefix, "broadcast ended, waiting...");
 						}
+						_ => {}
 					},
 					res = reconnect.closed() => return Ok(res?),
 					// Drops the previous subscriber on each new announce.

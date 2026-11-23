@@ -67,6 +67,7 @@ export class Producer {
 		return this.#inner.priority;
 	}
 	/** The datagram track's terminal result. */
+	// fallow-ignore-next-line unused-class-member
 	get closed(): NetDatagram.Producer["closed"] {
 		return this.#inner.closed;
 	}
@@ -137,6 +138,7 @@ export class Consumer {
 		return new Consumer(inner, key);
 	}
 	/** This consumer's subscriber priority. */
+	// fallow-ignore-next-line unused-class-member
 	get priority(): number {
 		return this.#inner.priority;
 	}
@@ -145,6 +147,7 @@ export class Consumer {
 		return this.#inner.info();
 	}
 	/** Change this consumer's priority, higher first. */
+	// fallow-ignore-next-line unused-class-member
 	setPriority(priority: number): void {
 		this.#inner.setPriority(priority);
 	}

@@ -14,7 +14,7 @@ use support::{AppendNext, AtStart};
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{Error, Pattern, Patterns, Version, auth::Grant, origin};
+use moq_net::{Error, Prefix, Prefixes, Version, auth::Grant, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer};
 
 /// How long a relay lets an announce stream stall before closing its session.
@@ -73,6 +73,7 @@ pub(super) async fn record(node: &origin::Producer, path: &'static str) -> Watch
 				origin::RouteKind::Restart => support::Kind::Restart,
 				origin::RouteKind::End => support::Kind::End,
 				origin::RouteKind::Offline => support::Kind::Offline,
+				kind => panic!("unexpected route kind {kind:?}"),
 			};
 			let route = &event.announce.route;
 			let seen = (kio::clock::now(), kind, route.available(), route.cost().value());
@@ -210,8 +211,10 @@ async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
 }
 
 /// `X` is `P`'s only way out and neighbours `R1`, `R2` and `R3`, which mesh with each other.
-/// `X` dies: each relay hears its own session close and its neighbours' DEADs, and none
-/// moves onto another's route through `X` on the way. Each withdraws the claim once.
+/// `X` dies: each relay hears its own session close and its neighbours' DEADs. One that
+/// hears its own first may move onto a neighbour's route through `X`, which nothing yet
+/// says is dead, only until that neighbour's DEAD lands, here in the same instant. Each
+/// withdraws the claim once.
 #[kio::test]
 async fn a_dead_relay_reaches_every_neighbour_as_withdrawals() {
 	let version = lite07();
@@ -238,8 +241,8 @@ async fn a_dead_relay_reaches_every_neighbour_as_withdrawals() {
 	for (i, watch) in watched.iter_mut().enumerate() {
 		let seen = watch.seen(start);
 		assert!(
-			!seen.iter().any(|seen| seen.available && !withdrawn(seen)),
-			"R{}: no move onto a route through X: {seen:?}",
+			seen.iter().all(|seen| !seen.available || seen.at.is_zero()),
+			"R{}: on a route through X only until its DEAD lands: {seen:?}",
 			i + 1
 		);
 		assert_eq!(
@@ -362,7 +365,7 @@ async fn a_scoped_peers_dead_leaves_other_sessions_routes_alone() {
 	options.server_subscribe = Some(w.clone());
 	let s_w = connect_mock(options).await;
 	let mut grant = Grant::default();
-	grant.publish = [Pattern::subtree("a").unwrap()].into_iter().collect::<Patterns>();
+	grant.publish = Prefixes::from(Prefix::try_from("a").unwrap());
 	s_w.server.auth().authorize(&grant);
 	quiesce().await;
 

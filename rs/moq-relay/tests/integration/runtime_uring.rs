@@ -106,7 +106,7 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(WORKERS).unwrap());
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config
 }
 
@@ -437,7 +437,7 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");
-	let all = moq_auth::Pattern::all;
+	let all = moq_auth::Prefix::all;
 	let (_first_lease, first_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	first.grant(first_consumer);
 	let established = connecting.await.expect("client task");
@@ -623,7 +623,7 @@ async fn workers_share_a_generated_identity() {
 		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(WORKERS).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = io_uring;
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.auth.public = vec![moq_auth::Prefix::all()];
 		let relay = Relay::load(config)
 			.await
 			.expect("generated worker identity")
@@ -900,7 +900,7 @@ async fn uring_refusals_reach_metrics() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = uring_config(&cert, &key);
-	config.auth.public = vec!["anon/**".parse().unwrap()];
+	config.auth.public = vec!["anon".parse().unwrap()];
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
@@ -950,7 +950,7 @@ async fn uring_refusals_reach_metrics() {
 /// A policy admitting verified certificates and nobody else.
 fn mtls_only() -> moq_auth::serve::Policy {
 	let mut policy = moq_auth::serve::Policy::default();
-	policy.mtls = moq_auth::Permissions::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+	policy.mtls = moq_auth::Permissions::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
 	policy
 }
 
@@ -974,11 +974,14 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }
 
@@ -1015,7 +1018,7 @@ async fn uring_forwards_the_setup_token() {
 				assert_eq!(admission.request.path, "/");
 				assert!(admission.request.query.is_none());
 			}
-			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let all = moq_auth::Prefixes::all();
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
 		}
 	});
@@ -1102,7 +1105,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 					.as_ref()
 					.is_some_and(|alpn| alpn.starts_with("moq-lite-"))
 			);
-			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let all = moq_auth::Prefixes::all();
 			let grant = moq_auth::Grant::new(all.clone(), all);
 			let (producer, consumer) = moq_auth::lease::Producer::new(grant);
 			leases.push(producer);

@@ -1,6 +1,6 @@
 import type { Duration } from "@moq/clock";
 import { race } from "@moq/signals";
-import { ConnectTimeout, error, fromClose, ProtocolViolation } from "../error.ts";
+import { ConnectTimeout, closeReason, error, fromClose, ProtocolViolation } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
@@ -77,7 +77,9 @@ export async function accept({ transport, url, ...props }: AcceptProps): Promise
 	} catch (failure) {
 		try {
 			transport.close(
-				failure instanceof ProtocolViolation ? { closeCode: failure.code, reason: failure.message } : undefined,
+				failure instanceof ProtocolViolation
+					? { closeCode: failure.code, reason: closeReason(failure.message) }
+					: undefined,
 			);
 		} catch {
 			/* Already closed. */
@@ -108,6 +110,9 @@ async function acceptInner(
 		implementation: props.implementation ?? IMPLEMENTATION,
 	};
 
+	if (protocol === Ietf.ALPN.DRAFT_23) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_23, wiring);
+	}
 	if (protocol === Ietf.ALPN.DRAFT_22) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_22, wiring);
 	}

@@ -21,6 +21,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context;
 use bytes::Bytes;
 use kio::clock::Wall;
 use moq_net::{broadcast, track};
@@ -130,12 +131,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 	let mut tracks = Vec::new();
 	for path in &args.publish {
 		let route = publish.route(path.as_str(), moq_net::origin::RouteOptions::hidden())?;
-		let track = route.broadcast().create_track(
-			TRACK,
-			track::Info::default()
-				.with_timescale(moq_net::Timescale::MILLI)
-				.with_max_age(None),
-		)?;
+		let track = route
+			.broadcast()
+			.create_track(
+				TRACK,
+				track::Info::default()
+					.with_timescale(moq_net::Timescale::MILLI)
+					.with_max_age(None),
+			)
+			.context("the replay track is already published")?;
 		route.announce()?;
 		routes.push(route);
 		tracks.push(track.clone());
@@ -181,13 +185,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 		.init(args.quic.clone())?
 		.with_publisher(&publish)
 		.with_subscriber(consume.clone());
-	let mut reconnect = client.connect(url);
+	let reconnect = client.connect(url);
 
 	let result = loop {
 		tokio::select! {
-			status = reconnect.status() => if let Err(err) = status {
-				break Err(anyhow::Error::from(err).context("the connection gave up"));
-			},
+			// We hold the handle, so the loop only stops by giving up.
+			closed = reconnect.closed() => break Err(match closed {
+				Err(err) => anyhow::Error::from(err).context("the connection gave up"),
+				Ok(()) => anyhow::anyhow!("the connection stopped"),
+			}),
 			Some(res) = tasks.join_next() => match res {
 				Ok(Ok(())) => {}
 				Ok(Err(err)) => break Err(err),

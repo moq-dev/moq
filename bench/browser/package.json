@@ -3,7 +3,7 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test --only-failures"
 	},
 	"dependencies": {
@@ -15,6 +15,7 @@
 		"@moq/watch": "workspace:*"
 	},
 	"devDependencies": {
-		"playwright": "1.64.1"
+		"playwright": "1.64.1",
+		"typescript": "7.0.2"
 	}
 }

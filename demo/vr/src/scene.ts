@@ -274,23 +274,4 @@ export class Scene {
 			this.#camera.quaternion.setFromEuler(euler);
 		});
 	}
-
-	close() {
-		this.#renderer.setAnimationLoop(null);
-		window.removeEventListener("resize", this.#resize);
-		window.removeEventListener("keydown", this.#key);
-		for (const index of [0, 1]) {
-			const controller = this.#renderer.xr.getController(index);
-			controller.removeEventListener("select", this.#recentre);
-			controller.removeEventListener("squeeze", this.#toggleMute);
-		}
-		for (const mesh of [...this.#eyes, this.#hud]) {
-			mesh.geometry.dispose();
-			mesh.material.map?.dispose();
-			mesh.material.dispose();
-		}
-		this.#texture.dispose();
-		this.#renderer.dispose();
-		this.#frame?.close();
-	}
 }

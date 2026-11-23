@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_relay::Relay;
 use moq_tokio::quic::driver;
 
@@ -33,7 +33,7 @@ fn timed() -> moq_net::track::Info {
 /// Publish and subscribe everything under `root`, for an hour, without a re-check
 /// of its own: a test pushes one through `/sessions/revalidate` when it wants it.
 fn rooted(root: &str) -> Grant {
-	let all: Patterns = [Pattern::all()].into_iter().collect();
+	let all = Prefixes::all();
 	let mut grant = Grant::new(all.clone(), all);
 	grant.root = Some(root.into());
 	grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
@@ -271,6 +271,7 @@ impl Watcher {
 					if let moq_net::origin::RouteEvent {
 						kind: moq_net::origin::RouteKind::Start,
 						announce: route,
+						..
 					} = event
 					{
 						seen.lock().unwrap().push(route.prefix.to_string());
@@ -360,12 +361,15 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 				Some(RouteEvent {
 					kind: RouteKind::End | RouteKind::Offline,
 					announce: route,
+					..
 				}) => listed.remove(route.prefix.as_str()),
 				Some(RouteEvent {
 					kind: RouteKind::Start | RouteKind::Update | RouteKind::Restart,
 					announce: route,
+					..
 				}) => listed.insert(route.prefix.to_string()),
 				None => return,
+				other => panic!("unexpected route event {other:?}"),
 			};
 		}
 	})

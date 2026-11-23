@@ -79,7 +79,8 @@ fn request(c: &mut Criterion) {
 			for tier in 0..tiers {
 				let handle = registry.tier(stats::Tier::new(moq_net::Path::new(&format!("tier{tier}")).unwrap()));
 				for root in 0..roots {
-					contexts.push(handle.request(moq_net::Path::new(&format!("room/{root}")).unwrap()));
+					let path = moq_net::Path::new(&format!("room/{root}")).unwrap();
+					contexts.push(handle.request(stats::SessionInfo::new(path.clone()).with_root(path)));
 				}
 			}
 			let handle = registry.tier(stats::Tier::new(
@@ -87,7 +88,10 @@ fn request(c: &mut Criterion) {
 			));
 			let root = format!("room/{}", roots - 1);
 			group.bench_function(BenchmarkId::from_parameter(format!("{roots}x{tiers}")), |b| {
-				b.iter(|| std::hint::black_box(handle.request(moq_net::Path::new(&root).unwrap())));
+				b.iter(|| {
+					let path = moq_net::Path::new(&root).unwrap();
+					std::hint::black_box(handle.request(stats::SessionInfo::new(path.clone()).with_root(path)))
+				});
 			});
 			std::hint::black_box(contexts);
 		}

@@ -17,6 +17,10 @@ use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, 
 /// How long [`Session::close`] waits for queued data before closing anyway.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The least time a transport this side closed gets to confirm it, before the session
+/// ends without its confirmation.
+const CLOSE_GRACE: Duration = Duration::from_millis(100);
+
 /// A close requested by a session handle, executed by the driver.
 #[derive(Clone)]
 enum Close {
@@ -138,6 +142,16 @@ pub struct Stats {
 	/// Total receive streams evicted because incomplete messages exhausted the receive window.
 	/// A count above zero means the receive window is too small for what the peer sends.
 	pub streams_evicted: Option<u64>,
+
+	/// Total times the sender blocked with all the peer's connection-level credit (`MAX_DATA`)
+	/// spent: an episode starts when a write blocks with every credited byte sent, and ends when
+	/// the peer grants more. A count rising while [`Self::credit_stalled`] grows means the peer
+	/// is not granting credit, rather than loss or congestion slowing the session.
+	pub credit_stalls: Option<u64>,
+
+	/// Total time the sender spent blocked on the peer's connection-level credit, across
+	/// [`Self::credit_stalls`]. A wait in progress counts up to the transport's latest step.
+	pub credit_stalled: Option<Duration>,
 
 	/// Total datagrams received for a subscription with no datagram track: one this session
 	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version without
@@ -375,6 +389,10 @@ impl Session {
 
 	/// Block until the transport session is closed, returning the reason.
 	///
+	/// A close this side sent counts as closed once the transport confirms it, or after
+	/// three round trips (at least 100ms) without that, since a peer that is gone may never
+	/// let it; the transport keeps delivering the close in the background.
+	///
 	/// The driver keeps draining group streams already delivered to the transport
 	/// after this resolves, so keep driving it until it completes.
 	///
@@ -459,7 +477,9 @@ impl Session {
 	/// Ready at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
-	pub(crate) fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// A session that sent a GOAWAY can then close without cutting any reader off.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
 	}
 
@@ -598,6 +618,7 @@ impl Session {
 			sampled: None,
 			mode: SamplerMode::Idle,
 			drain: Drain::Idle,
+			unconfirmed: None,
 			auth: auth.clone(),
 		};
 
@@ -636,7 +657,8 @@ impl Session {
 /// samples the connection stats (including the send-bandwidth estimate) while
 /// anyone is consuming them, and enforces GOAWAY deadlines independently of writes.
 ///
-/// Finishes once the transport reports closed; everything else is moot then.
+/// Finishes once the transport reports closed, or once a close this side sent goes
+/// unconfirmed past its grace; everything else is moot then.
 pub(crate) struct Supervisor {
 	goaway: Option<goaway::Deadline>,
 	version: Version,
@@ -665,6 +687,9 @@ pub(crate) struct Supervisor {
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
+	/// Set once this side closed the transport: past it, the session ends without the
+	/// transport confirming the close.
+	unconfirmed: Option<crate::time::Deadline>,
 	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
 	wire: Option<crate::stats::Wire>,
 	/// This session's side of its auth handle, closed before the end is published so a
@@ -757,38 +782,78 @@ impl Supervisor {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// The transport's terminal error ends the supervisor.
-		if let Poll::Ready(err) = self.closed_watch.poll_closed(waiter) {
-			// Nothing samples once this returns, but `stats()` keeps serving
-			// this cell, so leave it holding the session's final counters
-			// rather than whichever sample the last demand happened to catch.
-			self.stats.lock().sample = snapshot(&self.session);
-			self.wire.take();
-			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
-				Drain::Done(res) => Some(res),
-				_ => None,
-			};
-			let err = match err.close_kind() {
-				// The transport only knows this side closed it, so the reason is ours.
-				crate::transport::CloseKind::Closed if err.session_error().is_none() => {
-					self.session.closing().cause(self.version).unwrap_or(Error::Cancel)
-				}
-				_ => self.version.transport_error(err),
-			};
-			// Anything the peer is told is "no error" ended the session cleanly, by
-			// either side: one spelling for the handles and the stats.
-			let err = match SessionError::from(&err) {
-				SessionError::Cancel => Error::Cancel,
-				_ => err,
-			};
-			self.auth.close(err.clone());
-			self.context.end(&err);
-			if let Ok(mut closed) = self.closed.write() {
-				*closed = Some(Ended { err, drain });
-			}
+		if let Poll::Ready(err) = self.poll_ended(waiter) {
+			self.end(err);
 			return Poll::Ready(());
 		}
+		self.poll_running(waiter);
+		// A close executed this turn starts its grace, which has to register its wakeup.
+		if let Poll::Ready(err) = self.poll_ended(waiter) {
+			self.end(err);
+			return Poll::Ready(());
+		}
+		Poll::Pending
+	}
 
+	/// Resolve with why the session ended: the transport's terminal error, or this side's
+	/// reason once the transport reports or has had its grace to confirm this side's close.
+	fn poll_ended(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let err = match self.closed_watch.poll_closed(waiter) {
+			Poll::Ready(err) => match err.close_kind() {
+				// The transport only knows this side closed it, so the reason is ours.
+				crate::transport::CloseKind::Closed if err.session_error().is_none() => None,
+				_ => return Poll::Ready(self.version.transport_error(err)),
+			},
+			// A peer that is gone never lets some transports confirm a close, such as a
+			// WebTransport close waiting for its capsule's acknowledgement until the idle
+			// timeout. So a close this side sent, by a handle or the protocol, ends the
+			// session after three round trips and at least [`CLOSE_GRACE`], the time a live
+			// peer takes; the transport goes on delivering it on its own.
+			Poll::Pending => {
+				if self.unconfirmed.is_none() && self.session.closing().is_sent() {
+					let rtt = snapshot(&self.session).rtt.unwrap_or_default();
+					let grace = (rtt * 3).max(CLOSE_GRACE);
+					self.unconfirmed = Some(crate::time::Deadline::after(&self.runtime, grace));
+				}
+				match &mut self.unconfirmed {
+					Some(grace) => {
+						ready!(grace.poll(waiter));
+						None
+					}
+					None => return Poll::Pending,
+				}
+			}
+		};
+		Poll::Ready(err.unwrap_or_else(|| self.session.closing().cause(self.version).unwrap_or(Error::Cancel)))
+	}
+
+	/// Publish the session's end with `err`.
+	fn end(&mut self, err: Error) {
+		// Nothing samples once this returns, but `stats()` keeps serving
+		// this cell, so leave it holding the session's final counters
+		// rather than whichever sample the last demand happened to catch.
+		self.stats.lock().sample = snapshot(&self.session);
+		self.wire.take();
+		let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
+			Drain::Done(res) => Some(res),
+			_ => None,
+		};
+		// Anything the peer is told is "no error" ended the session cleanly, by
+		// either side: one spelling for the handles and the stats.
+		let err = match SessionError::from(&err) {
+			SessionError::Cancel => Error::Cancel,
+			_ => err,
+		};
+		self.auth.close(err.clone());
+		self.context.end(&err);
+		if let Ok(mut closed) = self.closed.write() {
+			*closed = Some(Ended { err, drain });
+		}
+	}
+
+	/// Run everything a live session does: its GOAWAY deadline, the handles' close
+	/// requests, and the samplers.
+	fn poll_running(&mut self, waiter: &kio::Waiter) {
 		if let Some(goaway) = &mut self.goaway
 			&& let Poll::Ready(timeout) = goaway.poll(waiter)
 		{
@@ -847,8 +912,6 @@ impl Supervisor {
 		if let Some(probe) = &mut self.probe {
 			probe.poll(waiter);
 		}
-
-		Poll::Pending
 	}
 
 	pub(crate) fn draining(&self) -> bool {
@@ -1017,6 +1080,8 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 		packets_received: metrics.packets_received(),
 		packets_lost: metrics.packets_lost(),
 		streams_evicted: metrics.streams_evicted(),
+		credit_stalls: wire.as_ref().map(crate::transport::Wire::credit_stalls),
+		credit_stalled: wire.as_ref().map(crate::transport::Wire::credit_stalled),
 		// Counted by the protocol, not the transport: filled in by `Session::stats`.
 		datagrams_unrouted: None,
 	}
@@ -1112,6 +1177,7 @@ impl Drop for Working {
 /// ```
 /// let mut limits = moq_net::session::Limits::default();
 /// limits.announces = 1_000;
+/// limits.live_edges = Some(256 << 20);
 /// let client = moq_net::Client::new().with_limits(limits);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1119,12 +1185,23 @@ impl Drop for Working {
 pub struct Limits {
 	/// Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us.
 	pub announces: usize,
+
+	/// Bytes the newest group of every track we receive from the peer may hold in all.
+	///
+	/// The cache never evicts a live track's newest group, so a peer holding many quiet
+	/// tracks would otherwise hold one group each past any cache capacity. Past this, the
+	/// session sheds the frames of its own live edges, the one that moved longest ago first,
+	/// and then the older frames of the one being written. `None` leaves them unbounded.
+	pub live_edges: Option<u64>,
 }
 
 impl Default for Limits {
 	/// Generous enough for a relay mesh carrying a large origin; lower it for untrusted peers.
 	fn default() -> Self {
-		Self { announces: 100_000 }
+		Self {
+			announces: 100_000,
+			live_edges: None,
+		}
 	}
 }
 

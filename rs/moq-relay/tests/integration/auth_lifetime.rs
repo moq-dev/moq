@@ -21,7 +21,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_net::stats;
 use moq_relay::web;
 use moq_relay::{Config, Connection, Relay, auth, cluster};
@@ -168,8 +168,8 @@ impl Script {
 	}
 }
 
-fn all() -> Patterns {
-	[Pattern::all()].into_iter().collect()
+fn all() -> Prefixes {
+	Prefixes::all()
 }
 
 /// How often [`grant`] asks to be re-checked.
@@ -942,7 +942,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Deafen alice's audio: everything else stays as admitted.
 		let mut narrow = grant(Duration::from_secs(3600));
-		narrow.subscribe.path = ["alice/video/**".parse().unwrap()].into_iter().collect();
+		narrow.subscribe.path = ["alice/video".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
 		clock.advance(CADENCE);
 
@@ -1376,10 +1376,10 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	assert_refused(&format!("ws://127.0.0.1:{port}/room").parse().unwrap()).await;
 	relay.abort();
 
-	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
+	// A narrow grant: the certificate publishes under `mine` and nothing else.
 	let narrow = serve(policy(moq_auth::Permissions::new(
-		"mine/**".parse::<moq_auth::Pattern>().unwrap(),
-		Patterns::new(),
+		"mine".parse::<moq_auth::Prefix>().unwrap(),
+		Prefixes::new(),
 	)))
 	.await;
 	let cluster = crate::spawn_cluster(cluster::Options::default());
@@ -1428,6 +1428,130 @@ async fn an_mtls_peer_is_a_cluster_peer() {
 #[tokio::test]
 async fn an_mtls_client_ingests_here() {
 	assert_eq!(mtls_route_source(false).await, None);
+}
+
+/// `--cluster-listen` admits a certificate peer and refuses a client without one at
+/// the handshake, even where the auth server would admit it. The public listener
+/// asks nobody for a certificate, so the same peer dialing it arrives anonymous.
+#[tokio::test]
+async fn the_cluster_listener_requires_a_certificate() {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (root, client_cert, client_key) = signed_client(dir.path());
+
+	let mut policy = moq_auth::serve::Policy::default();
+	policy.public = moq_auth::Permissions::new(all(), all());
+	policy.mtls = moq_auth::Permissions::new(all(), all());
+	policy.mtls_link = Some(moq_auth::Link::Peer);
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+	let server = moq_auth::serve::Server::new(policy).unwrap();
+	tokio::spawn(async move { server.serve(listener).await });
+
+	// The cluster listener serves its own identity, apart from the public one.
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let served = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params")
+		.self_signed(&key)
+		.expect("self-signed cert");
+	let cert = dir.path().join("cluster.pem");
+	let cert_key = dir.path().join("cluster.key.pem");
+	std::fs::write(&cert, served.pem()).expect("write cert");
+	std::fs::write(
+		&cert_key,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
+
+	let mut config = Config::default();
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.listen.tls.generate = vec!["localhost".into()];
+	config.cluster.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.cluster.listen.cert = vec![cert];
+	config.cluster.listen.key = vec![cert_key];
+	config.cluster.listen.root = vec![root];
+	config.auth.url = Some(auth_url);
+	config.drain_timeout = Some(Duration::ZERO.into());
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let public = relay.quic_addr().expect("public listener");
+	let peers = relay.cluster_addr().expect("cluster listener");
+	assert_ne!(public, peers);
+	let mut announced = relay.cluster().origin.consume().routes();
+	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
+
+	let client = |cert: bool| {
+		let mut config = moq_tokio::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+		if cert {
+			config.tls.cert = Some(client_cert.clone());
+			config.tls.key = Some(client_key.clone());
+		}
+		config
+			.init(Default::default())
+			.expect("client init")
+			.with_reconnect(false)
+	};
+	let url =
+		|addr: std::net::SocketAddr| -> url::Url { format!("moql://127.0.0.1:{}/", addr.port()).parse().unwrap() };
+
+	// No certificate: the cluster listener ends the handshake, so no session exists to refuse.
+	let anonymous = kio::clock::timeout(
+		TIMEOUT,
+		client(false)
+			.with_subscriber(moq_tokio::origin::spawn())
+			.connect(url(peers))
+			.established(),
+	)
+	.await
+	.expect("connect timeout");
+	assert!(
+		anonymous.is_err(),
+		"the cluster listener admitted a client without a certificate"
+	);
+
+	// Each dial publishes one broadcast and reports where the relay saw it enter,
+	// returning what keeps it announced.
+	let mut publish = async |addr: std::net::SocketAddr, name: &str| {
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin
+			.route(name, moq_net::origin::RouteOptions::default())
+			.expect("create");
+		let session = kio::clock::timeout(
+			TIMEOUT,
+			client(true)
+				.with_publisher(origin.consume())
+				.connect(url(addr))
+				.established(),
+		)
+		.await
+		.expect("connect timeout")
+		.expect("a certificate client was refused");
+		let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
+			.await
+			.expect("timed out waiting for the announce")
+			.expect("origin closed");
+		assert_eq!(update.prefix.as_str(), name);
+		(update.route.entered_from(), (session, broadcast))
+	};
+
+	// The public listener never asks for the certificate, so the same client is
+	// admitted there anonymous: ingesting here, not a peer.
+	let (source, _public) = publish(public, "public").await;
+	assert_eq!(source, None, "the public listener read a certificate");
+	// The cluster listener verifies it: a peer, whose announce entered elsewhere.
+	let (source, _peer) = publish(peers, "peer").await;
+	assert!(source.is_some(), "the peer's route counted as entering here");
+
+	trigger.start();
+	running.await.expect("relay task").expect("relay run");
 }
 
 /// The peer the relay records a broadcast announced over a certificate session as
@@ -1876,11 +2000,14 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }
 
@@ -1915,7 +2042,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 #[tokio::test]
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
-		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
+		let mut initial = Grant::new(all(), "a".parse::<moq_auth::Prefix>().unwrap());
 		initial.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
@@ -1965,7 +2092,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap()
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
+		let mut replacement = Grant::new(all(), "b".parse::<moq_auth::Prefix>().unwrap());
 		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = subscriber.auth().add("replacement").unwrap();
@@ -2248,7 +2375,7 @@ async fn websocket_refusal_is_in_band() {
 /// The role seen at SETUP reaches the shared admission gate on the WebSocket path.
 #[tokio::test]
 async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
-	let script = Script::new(Grant::new(Patterns::new(), all()));
+	let script = Script::new(Grant::new(Prefixes::new(), all()));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let url = room_url("ws", port);
 	let origin = moq_tokio::origin::spawn();

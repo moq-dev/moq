@@ -3,6 +3,7 @@ import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as cache from "./cache.ts";
+import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, TooFarBehind, toStreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -108,7 +109,7 @@ test("a replacement producer starts over", async () => {
 	second.close();
 
 	broadcast.removeTrack("media");
-	const third = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const third = defined(broadcast.createTrack("media", { timescale: Timescale.MILLI }));
 	third.finishAt({ group: 0n, frame: 0 });
 	third.close();
 	broadcast.close();
@@ -121,7 +122,7 @@ test("createTrack answers a queued request", async () => {
 	const subscriber = broadcast.track("media").subscribe().ordered();
 
 	// The track is created before any handler takes the queued request.
-	const producer = broadcast.createTrack("media", { timescale: Timescale.MILLI, priority: 3 });
+	const producer = defined(broadcast.createTrack("media", { timescale: Timescale.MILLI, priority: 3 }));
 	producer.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 	expect(await subscriber.readString()).toBe("hello");
 	expect((await info).priority).toBe(3);
@@ -136,7 +137,7 @@ test("createTrack answers a queued request", async () => {
 	const again = broadcast.track("media").subscribe().ordered();
 	producer.writeFrame(textFrame("again", Timestamp.fromMillis(2)));
 	expect(await again.readString()).toBe("again");
-	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
+	expect(broadcast.createTrack("media")).toBeUndefined();
 
 	broadcast.close();
 	expect(await pulled).toBeUndefined();
@@ -151,7 +152,7 @@ test("createTrack with invalid info rejects the queued request it answers", asyn
 	expect(await subscriber.closed).toBeInstanceOf(Error);
 
 	// The refused request no longer holds the name.
-	broadcast.createTrack("media");
+	defined(broadcast.createTrack("media"));
 	broadcast.close();
 	expect(await pulled).toBeUndefined();
 });
@@ -164,7 +165,7 @@ test("createTrack does not take over a request a handler already pulled", async 
 	if (!request) throw new Error("expected request");
 
 	// The handler holds it, so the name stays duplicate until it answers, as in Rust.
-	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
+	expect(broadcast.createTrack("media")).toBeUndefined();
 	request.reject(new Error("request refused"));
 	broadcast.close();
 });
@@ -277,7 +278,7 @@ test("an abandoned info lookup's request goes once answered", async () => {
 
 test("a held info lookup on an inserted track leaves it open when it lets go", async () => {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("media", { timescale: Timescale.MILLI }));
 	const hold = new AbortController();
 	await wireOf(broadcast).resolveTrackInfo("media", hold.signal);
 
@@ -326,20 +327,20 @@ test("a request exposes the aggregate subscription options", async () => {
 	consumer.track("video").subscribe({
 		priority: 3,
 		delay: { max: Duration.millis(100) },
-		ranges: [{ start: { time: 10n }, end: { time: 19n } }],
+		ranges: [{ start: 10n, end: 19n }],
 	});
 	consumer.track("video").subscribe({
 		priority: 7,
 		delay: { max: Duration.millis(250) },
-		ranges: [{ start: { time: 0n }, end: { time: 29n } }],
+		ranges: [{ start: 0n, end: 29n }],
 	});
 
 	const request = await pendingRequest(consumer);
 	expect(request?.subscription).toEqual({
 		priority: 7,
-		delay: { min: Duration.ZERO, max: Duration.millis(250) },
+		delay: { max: Duration.millis(250) },
 		order: "descending",
-		ranges: [{ start: { time: 0n }, end: { time: 29n } }],
+		ranges: [{ start: 0n, end: 29n }],
 	});
 	expect(request?.priority).toBe(7);
 });
@@ -374,7 +375,7 @@ test("a consumer clone shares the broadcast until every handle closes", () => {
 
 test("closing every consumer leaves a produced broadcast to its producer", async () => {
 	const producer = new BroadcastProducer();
-	const track = producer.createTrack("video");
+	const track = defined(producer.createTrack("video"));
 	const consumer = producer.consume();
 	const subscriber = consumer.track("video").subscribe();
 	consumer.close();
@@ -425,7 +426,7 @@ test("consumer track subscriptions fan out and close independently", async () =>
 test("subscribe serves a statically inserted track without a request", async () => {
 	const broadcast = new BroadcastProducer();
 
-	const track1 = broadcast.createTrack("track1", { timescale: Timescale.MILLI });
+	const track1 = defined(broadcast.createTrack("track1", { timescale: Timescale.MILLI }));
 	hooks.appendNext(track1).finish();
 
 	// The track already exists, so subscribe resolves immediately (no requested()).
@@ -436,7 +437,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 	expect(await pendingRequest(broadcast)).toBeUndefined();
 
 	// A second static track behaves the same.
-	const track2 = broadcast.createTrack("track2", { timescale: Timescale.MILLI });
+	const track2 = defined(broadcast.createTrack("track2", { timescale: Timescale.MILLI }));
 
 	const sub2 = broadcast.track("track2").subscribe().ordered();
 	hooks.appendNext(track2).finish();
@@ -445,7 +446,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 
 test("two subscribers to one inserted track each get a full copy", async () => {
 	const broadcast = new BroadcastProducer();
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const a = broadcast
 		.track("video")
@@ -468,7 +469,7 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 
 test("a late subscriber replays the cached window", async () => {
 	const broadcast = new BroadcastProducer();
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	// Written before anyone subscribes; retained in the cache for replay.
 	producer.writeFrame(textFrame("early", Timestamp.fromMillis(1)));
@@ -482,7 +483,7 @@ test("a late subscriber replays the cached window", async () => {
 
 test("a read throws Evicted at a shed front, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const sub = broadcast
 		.track("video")
 		.subscribe({ delay: { max: Duration.millis(5000) } })
@@ -511,7 +512,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		clock.jump(Duration.millis(10_000));
 
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 		// A subscriber that never reads. Its sink must not grow without bound. No max delay,
 		// so only eviction (not a skip of a superseded group) can drop the old group.
@@ -541,11 +542,13 @@ test("a stalled consumer does not pin evicted groups", async () => {
 test("createTrack commits info up front", async () => {
 	const broadcast = new BroadcastProducer();
 
-	const producer = broadcast.createTrack("video", {
-		timescale: Timescale.MILLI,
-		maxAge: Duration.millis(2000),
-		priority: 3,
-	});
+	const producer = defined(
+		broadcast.createTrack("video", {
+			timescale: Timescale.MILLI,
+			maxAge: Duration.millis(2000),
+			priority: 3,
+		}),
+	);
 	expect(producer.name).toBe("video");
 
 	const info = await broadcast.track("video").info();
@@ -553,15 +556,15 @@ test("createTrack commits info up front", async () => {
 	expect(info.priority).toBe(3);
 });
 
-test("createTrack rejects a duplicate live name", () => {
+test("createTrack returns undefined for a duplicate live name", () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("dup", { timescale: Timescale.MILLI });
-	expect(() => broadcast.createTrack("dup", { timescale: Timescale.MILLI })).toThrow("duplicate track");
+	defined(broadcast.createTrack("dup", { timescale: Timescale.MILLI }));
+	expect(broadcast.createTrack("dup", { timescale: Timescale.MILLI })).toBeUndefined();
 });
 
 test("a finished track is still served from its cache", async () => {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("track1", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("track1", { timescale: Timescale.MILLI }));
 	track.writeFrame(textFrame("last"));
 	track.finish();
 	track.close();
@@ -580,7 +583,7 @@ test("a finished track is still served from its cache", async () => {
 
 test("an aborted track is gone, so a subscribe with no handler answers NotFound", async () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("track1").abort(new Error("boom"));
+	defined(broadcast.createTrack("track1")).abort(new Error("boom"));
 
 	// Nothing serves requests on demand, so this must fail rather than wait forever.
 	const subscriber = broadcast.consume().track("track1").subscribe();
@@ -592,7 +595,7 @@ test("an aborted track is gone, so a subscribe with no handler answers NotFound"
 test("an aborted track falls through to a request when a handler is serving", async () => {
 	const broadcast = new BroadcastProducer();
 	const pulled = wireOf(broadcast).requested();
-	broadcast.createTrack("track1").abort(new Error("boom"));
+	defined(broadcast.createTrack("track1")).abort(new Error("boom"));
 
 	broadcast.track("track1").subscribe();
 	expect((await pulled)?.name).toBe("track1");
@@ -601,13 +604,13 @@ test("an aborted track falls through to a request when a handler is serving", as
 test("removeTrack drops the static entry", async () => {
 	// While the static entry exists, subscribing takes the fast path: no on-demand request.
 	const kept = new BroadcastProducer();
-	kept.createTrack("track1", { timescale: Timescale.MILLI });
+	defined(kept.createTrack("track1", { timescale: Timescale.MILLI }));
 	kept.track("track1").subscribe();
 	expect(await pendingRequest(kept)).toBeUndefined();
 
 	// With the entry removed and nothing serving on demand, the track is not found.
 	const removed = new BroadcastProducer();
-	removed.createTrack("track1", { timescale: Timescale.MILLI });
+	defined(removed.createTrack("track1", { timescale: Timescale.MILLI }));
 	removed.removeTrack("track1");
 	await expect(removed.track("track1").subscribe().info()).rejects.toBeInstanceOf(NotFound);
 });
@@ -633,7 +636,7 @@ test("close rejects a still-pending track request so its subscriber unblocks", a
 // wants a group that already exists, and waiting for one that is gone would never return.
 test("a fetch of a group still to come asks the request handler, and the write answers it", async () => {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	// As in Rust, the miss goes to the handler at once; without one it would be NotFound.
 	const requests = track.requests();
 
@@ -657,7 +660,9 @@ test("a fetch of a group still to come asks the request handler, and the write a
 
 test("fetch maxDelay tightens the publisher's maxAge without changing omission", async () => {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(2000) });
+	const track = defined(
+		broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(2000) }),
+	);
 
 	for (const millis of [0, 1000]) {
 		const group = hooks.appendNext(track);
@@ -683,7 +688,7 @@ test("fetch maxDelay tightens the publisher's maxAge without changing omission",
 
 test("aborting a fetch rejects with the signal's reason", async () => {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	// A request handler keeps the miss pending until the abort.
 	const requests = track.requests();
 
@@ -725,7 +730,7 @@ test("a fetch of a failed group leaves its unread frames to the pool's expiry", 
 	const installed = clock.install();
 	try {
 		const broadcast = new BroadcastProducer();
-		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		hooks.poolTrack(track, new cache.Pool({ expiry: Duration.millis(1_000) }));
 
 		const failed = hooks.appendNext(track);
@@ -757,7 +762,7 @@ test("a track name with a lone surrogate is refused where it is named, since UTF
 	}
 	// A pair is one scalar, U+10000, and U+FFFD itself is text like any other.
 	for (const name of ["𐀀", "a�"]) {
-		expect(broadcast.createTrack(name).name).toBe(name);
+		expect(defined(broadcast.createTrack(name)).name).toBe(name);
 		expect(consumer.track(name).name).toBe(name);
 	}
 	broadcast.close();

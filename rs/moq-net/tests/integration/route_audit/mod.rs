@@ -353,7 +353,7 @@ impl Reader {
 				// From the live edge, and never skipping a group however late.
 				let prefs = track::Subscription::default()
 					.with_delay(track::Delay::default().with_max(Duration::from_secs(60)))
-					.with_ranges([track::Range::live()]);
+					.with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
 				let Ok(mut sub) = broadcast.track(TRACK).unwrap().subscribe(prefs).await else {
 					continue;
 				};
@@ -439,18 +439,6 @@ impl Reader {
 	}
 }
 
-/// Pinned, not endorsed, until [the detour fix](/quest/m2/multicast/detour-resume.md): a relay
-/// whose serving session closes before the detour to the same Instance reaches it, one
-/// round trip later, ends its front. Its reader restarts cleanly onto another Instance
-/// when one serves the path (`other`), and otherwise reads nothing more. The fix makes
-/// each such reader seamless, and each case calling this changes with it.
-pub(super) fn detour_lost(report: &Report, other: bool) -> bool {
-	match other {
-		true => report.clean() && report.runs.len() == 2,
-		false => report.after == 0,
-	}
-}
-
 /// What a reader saw across a failure.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Report {
@@ -516,6 +504,7 @@ pub(super) async fn shown_at(node: &origin::Producer, path: &str) -> Option<Show
 				instance: route.instance().clone(),
 			}),
 			origin::RouteKind::End | origin::RouteKind::Offline => None,
+			kind => panic!("unexpected route kind {kind:?}"),
 		};
 	}
 	shown
@@ -550,6 +539,7 @@ impl Watch {
 					origin::RouteKind::Restart => support::Kind::Restart,
 					origin::RouteKind::End => support::Kind::End,
 					origin::RouteKind::Offline => support::Kind::Offline,
+					kind => panic!("unexpected route kind {kind:?}"),
 				};
 				let seen = Seen {
 					kind,

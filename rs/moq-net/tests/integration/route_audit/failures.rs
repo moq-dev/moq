@@ -2,7 +2,7 @@
 //! its neighbours notice seconds apart, failures at one instant on a mesh larger than any
 //! exhaustive check, and no group crossing a link twice for one subscription.
 
-use super::{Feed, Join, Mesh, Source, detour_lost, measured, readers, reports, ring, shown};
+use super::{Feed, Join, Mesh, Source, measured, readers, reports, ring, shown};
 use crate::path_routes::{cut, lite07, quiesce};
 use crate::support::Rng;
 
@@ -10,10 +10,9 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 /// A ring of `count` relays with a publisher on `R0`, the link from `R1` to `R2` priced
-/// `r1_r2`. The link from `R0` to `R1` closes, and `R1` resumes the way round the ring.
-/// Unless `held`, every other route to `R0` ran through `R1`, so `R1` held none at the cut:
-/// its detour arrives a round trip later, once `R2` hears the closed session named.
-async fn detour(count: usize, r1_r2: u64, held: bool) {
+/// `r1_r2`. The link from `R0` to `R1` closes, and every reader, `R1`'s included, reads on
+/// the way round the ring, every group once.
+async fn detour(count: usize, r1_r2: u64) {
 	let mut mesh = Mesh::new(count);
 	for i in 0..count {
 		let cost = if i == 1 { r1_r2 } else { 1 };
@@ -30,10 +29,6 @@ async fn detour(count: usize, r1_r2: u64, held: bool) {
 	quiesce().await;
 	let case = format!("ring of {count}, R1-R2 at {r1_r2}, R0-R1 cut");
 	for (i, report) in reports(&mut readers, since, &case).iter().enumerate() {
-		if i == 1 && !held {
-			assert!(detour_lost(report, false), "{case}: R1: {report:?}");
-			continue;
-		}
 		assert!(report.seamless(), "{case}: R{i}: {report:?}");
 	}
 	assert_eq!(mesh.doubled(), [], "ring of {count}, R1-R2 at {r1_r2}");
@@ -44,15 +39,17 @@ async fn detour(count: usize, r1_r2: u64, held: bool) {
 #[kio::test]
 async fn a_relay_resumes_on_a_detour_it_already_holds() {
 	for (count, r1_r2) in [(3, 1), (4, 3), (5, 4)] {
-		detour(count, r1_r2, true).await;
+		detour(count, r1_r2).await;
 	}
 }
 
-/// `R1` holds no other route to `R0` when its session closes.
+/// `R1` holds no other route to `R0` when its session closes: every other one ran through
+/// `R1`, so its detour arrives a round trip later, once `R2` hears the closed session named.
+/// `R1`'s front rides through the claim's debounce until it does.
 #[kio::test]
 async fn a_relay_resumes_on_a_detour_learned_after_the_cut() {
 	for count in [4, 5, 6] {
-		detour(count, 1, false).await;
+		detour(count, 1).await;
 	}
 }
 
@@ -180,15 +177,7 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 			None => assert_eq!(shown, None, "{case}: let go"),
 		}
 	}
-	// Pinned, not endorsed, until [the resend fix](/quest/m2/multicast/resend.md): a route
-	// moving behind an unchanged next hop sends that hop the newest group again, once.
-	let doubled = mesh.doubled();
-	eprintln!("measured failures at one instant, seed {seed:#x}: groups sent twice {doubled:?}");
-	let links: BTreeSet<_> = doubled.iter().map(|&(from, to, _, _)| (from, to)).collect();
-	assert!(
-		links.len() == doubled.len() && doubled.iter().all(|doubled| doubled.3 == 2),
-		"seed {seed:#x}: {doubled:?}"
-	);
+	assert_eq!(mesh.doubled(), [], "seed {seed:#x}: no group crosses a link twice");
 	worst
 }
 
@@ -221,11 +210,10 @@ mod failures_at_one_instant {
 /// 1 and `Y` at 2, with `B` (`R3`) reading through `A`. The link from `X` to `A` closes:
 /// `A` moves onto `Y`, and `B` keeps `A` as its next hop while its route moves from `X`
 /// to `Y`. A lite-07 request names the relay it routes to, so `B` asks `A` anew, from the
-/// newest group it handed out: a range cannot start past a group whose end it does not
-/// know. That group crosses `A`-`B` twice. Pinned, not endorsed, until
-/// [the resend fix](/quest/m2/multicast/resend.md).
+/// position past the frames it holds of the newest group it handed out, and no group
+/// crosses `A`-`B` twice.
 #[kio::test]
-async fn a_route_moving_behind_one_next_hop_resends_a_group() {
+async fn a_route_moving_behind_one_next_hop_resends_no_group() {
 	let mut mesh = Mesh::new(4);
 	mesh.join(0, 2, Join::peer(1)).await;
 	mesh.join(1, 2, Join::peer(2)).await;
@@ -243,11 +231,7 @@ async fn a_route_moving_behind_one_next_hop_resends_a_group() {
 	for (i, report) in reports(&mut readers, since, "X-A cut").iter().enumerate().skip(2) {
 		assert!(report.seamless(), "R{i}: {report:?}");
 	}
-	let doubled = mesh.doubled();
-	assert!(
-		matches!(doubled.as_slice(), [(2, 3, _, 2)]),
-		"one group crosses A-B twice: {doubled:?}"
-	);
+	assert_eq!(mesh.doubled(), [], "no group crosses A-B twice");
 }
 
 /// A ring of six with a publisher on `R0` and a reader on every relay. A link from `R0` to

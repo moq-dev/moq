@@ -18,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 const MB: usize = 1 << 20;
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// Receive windows whose stream credit, 64 MiB, is past the 16 MiB pacing cap.
 fn uncapped() -> ReceiveWindow {
@@ -26,9 +26,11 @@ fn uncapped() -> ReceiveWindow {
 }
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// A publisher's track and a relay's subscription to it, over one peering.

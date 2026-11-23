@@ -2,6 +2,7 @@ import { beforeEach, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import * as z from "zod/mini";
 import { hooks } from "../../../net/src/internal.ts";
 import { key, resetKeys } from "../key.test-util.ts";
 import { Consumer } from "./consumer.ts";
@@ -374,6 +375,27 @@ test("mutate starts from the configured initial value", async () => {
 		v.a = 1;
 	}, key());
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
+});
+
+// JSON null is a published value: mutate must hand it over rather than the stale `initial`, and
+// must not refuse it as if nothing had been published.
+test("mutate starts from a published null", async () => {
+	for (const initial of [undefined, { a: 1 }]) {
+		const track = new Track.Producer("test");
+		const producer = new Producer<Value | null>({ track, initial });
+		producer.update(null, key());
+
+		let seen: Value | null | undefined;
+		producer.mutate((v) => {
+			seen = v;
+		}, key());
+		expect(seen).toBeNull();
+		producer.finish();
+		const consumer = new Consumer<Value | null>({ track });
+		const states: (Value | null)[] = [];
+		for (let state = await consumer.latest(); state; state = await consumer.latest()) states.push(state.value);
+		expect(states).toEqual([null]);
+	}
 });
 
 // A rejected edit never reached the wire, so the next owner starts from the last value that did.
@@ -768,6 +790,15 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 	expect((await consumer.next())?.value).toEqual({ ok: true });
 	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
+});
+
+test("a value that fails the schema rejects the read", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const consumer = new Consumer({ track, schema: z.object({ n: z.number() }) });
+	track
+		.appendGroup(Time.Timestamp.fromMillis(1))
+		.writeFrame({ payload: new TextEncoder().encode('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
+	await expect(consumer.latest()).rejects.toBeInstanceOf(z.core.$ZodError);
 });
 
 test("a scale-less snapshot opens its group at its key, and a delta carries that key", async () => {

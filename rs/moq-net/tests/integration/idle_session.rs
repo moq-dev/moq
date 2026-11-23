@@ -55,9 +55,11 @@ async fn viewer(
 }
 
 fn origin() -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]
@@ -110,7 +112,7 @@ async fn busy_viewer_sees_the_estimate_move() {
 /// A transport estimate demanded locally still costs one poll per sampling deadline.
 #[kio::test]
 async fn ietf_stats_refresh_costs_one_driver_poll() {
-	for version in ["moq-transport-22"] {
+	for version in ["moq-transport-22", "moq-transport-23"] {
 		let polls = Arc::new(AtomicUsize::new(0));
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 		options.stats = STATS;
@@ -175,7 +177,7 @@ async fn probe_follows_consumer_lifetime() {
 /// A stats tick reads the transport's wire counters and adds no sampler timer or session wake.
 #[kio::test]
 async fn wire_collection_never_arms_the_idle_sampler() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let polls = Arc::new(AtomicUsize::new(0));
 		let mut options = MockConnectOptions::new(version.parse().unwrap());

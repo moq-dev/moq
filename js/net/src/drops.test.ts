@@ -55,7 +55,7 @@ test("drops: what a change replaced or forgot is reported since its revision, un
 	expect(drops.removedSince(drops.revision)).toEqual([]);
 });
 
-test("drops: the keys given up from a key on stop where a walk of the runs stops", () => {
+test("drops: the keys given up, and those gone for good, from a key on stop where a walk of the runs stops", () => {
 	const drops = new DropSet();
 	const errors = [new NotFound("a"), new NotFound("b")];
 	let seed = 7;
@@ -69,7 +69,12 @@ test("drops: the keys given up from a key on stop where a walk of the runs stops
 		const end = start + BigInt(1 + random(6));
 		if (random(5) === 0) drops.clear([{ start, end }]);
 		else if (random(4) === 0) drops.set(start, end);
-		else drops.set(start, end, { error: errors[random(2)], skip: random(3) === 0 || undefined });
+		else
+			drops.set(start, end, {
+				error: errors[random(2)],
+				skip: random(3) === 0 || undefined,
+				stale: random(3) === 0 ? 100 : undefined,
+			});
 		for (let from = 0n; from < 72n; from++) {
 			let at = from;
 			for (const run of drops.overlapping(from, 1000n)) {
@@ -79,6 +84,16 @@ test("drops: the keys given up from a key on stop where a walk of the runs stops
 			expect(drops.coveredFrom(from)).toBe(at);
 			expect(drops.covers(from, at)).toBe(true);
 			expect(drops.covers(from, at + 1n)).toBe(false);
+			// A stale run is given up only within its budget.
+			for (const budget of [50, 500]) {
+				let gone = from;
+				for (const run of drops.overlapping(from, 1000n)) {
+					if (run.start > gone || (run.stale !== undefined && budget > run.stale)) break;
+					gone = run.end;
+				}
+				expect(drops.givenUp(from, gone, budget)).toBe(true);
+				expect(drops.givenUp(from, gone + 1n, budget)).toBe(false);
+			}
 		}
 	}
 });

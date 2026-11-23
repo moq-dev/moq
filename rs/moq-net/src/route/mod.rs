@@ -80,6 +80,9 @@ pub(crate) type Id = u64;
 /// A route metric: the sum of configured link costs.
 pub(crate) type Metric = u64;
 
+/// The highest cost a claim carries: every sum saturates here, as the draft says.
+pub(crate) const MAX_COST: Metric = crate::origin::Cost::MAX.value();
+
 /// A forwarding node's claim revision, advancing on every change to its own claims.
 pub(crate) type Rev = u64;
 

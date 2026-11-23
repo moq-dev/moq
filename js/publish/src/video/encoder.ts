@@ -157,6 +157,7 @@ export class Encoder {
 	 * A snapshot. Read {@link in}.capture through an effect instead when you need to react to it
 	 * being swapped.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	get capture(): Capture | undefined {
 		return this.in.capture.peek();
 	}
@@ -508,11 +509,17 @@ export class Encoder {
 			let configured: VideoEncoderConfig | undefined;
 			// Set when the size changed, so the next frame opens a group whose keyframe carries it.
 			let resized = false;
+			// Set while a zero grant holds a constant bitrate encoder's frames back.
+			let held = false;
 			effect.run((effect) => {
 				const current = effect.get(settings);
 				if (!current) return;
 				const { config, scale } = current;
 
+				// A constant bitrate can't be configured at zero, which the allocator grants once higher
+				// priorities take the estimate, so hold every frame back until the grant rises again.
+				held = !scale && config.bitrate === 0;
+				if (held) return;
 				if (configured && (configured.width !== config.width || configured.height !== config.height)) {
 					resized = true;
 				}
@@ -560,12 +567,14 @@ export class Encoder {
 						// Ours now: every path below has to close it.
 						try {
 							if (effect.abort.aborted) break;
-							if (encoder.state !== "configured") continue;
+							if (!held && encoder.state !== "configured") continue;
 							// A pending input means the codec is saturated. Keep capture live instead of
 							// growing a stale encode queue whose lateness becomes permanent catalog delay.
 							// Drop before answering a keyframe request or advancing the frame-rate cursor.
-							// Likewise while quantizer mode's bucket is full: the scene outgrew the largest QP.
+							// Likewise while quantizer mode's bucket is full: the scene outgrew the largest QP,
+							// and while a zero grant holds a constant bitrate back.
 							if (
+								held ||
 								encoder.encodeQueueSize > 0 ||
 								quantizer?.control.admit(frame.timestamp, budget) === false
 							) {

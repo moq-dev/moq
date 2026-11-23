@@ -55,8 +55,9 @@ struct WireClaim {
 	claim: Claim,
 	/// The node whose claim it is, once a floor closed the batch that started it.
 	origin: Option<NodeId>,
-	/// Whether the node holds it: a claim the session's limit does not admit is left out.
-	filed: bool,
+	/// The absolute paths the node holds it at (see [`Routed::filing`]): none when the
+	/// session may carry nothing beneath it.
+	filed: Vec<Path>,
 }
 
 /// A change to the claim with an Announce ID, waiting for the floor that closes its batch.
@@ -138,11 +139,19 @@ type ServedKey = (NodeId, Path, Instance);
 struct Left(crate::origin::Claim);
 
 impl node::Orphan for Left {
-	fn release(self: Box<Self>, ended: bool) {
-		// Dropped, a claim the node let go of goes offline rather than ending.
-		if ended {
-			self.0.withdrawn();
-		}
+	fn release(self: Box<Self>, gone: node::Gone) {
+		release(self.0, gone);
+	}
+}
+
+/// Let go of a copy of a claim the origin holds, for the reason `gone` gives.
+fn release(claim: crate::origin::Claim, gone: node::Gone) {
+	match gone {
+		// Dropped, it goes offline, while another copy serves.
+		node::Gone::Moved => drop(claim),
+		node::Gone::Lost => claim.retire(false),
+		node::Gone::Ended => claim.retire(true),
+		node::Gone::Withdrawn => claim.withdrawn(),
 	}
 }
 
@@ -153,8 +162,8 @@ pub(in crate::lite) struct Routed {
 	me: NodeId,
 	/// The peer forwards and is trusted with the whole tree: it sends routes.
 	routing: bool,
-	/// The permit the session filed under. The node holds only the peer's claims its
-	/// limit admits.
+	/// The permit the session filed under. The node holds the peer's claims only where
+	/// its limit admits them (see [`filing`]).
 	permit: crate::auth::Permit,
 	root: Path,
 	/// The session's origin handle, whose exclusions and mounts also gate the claims.
@@ -164,6 +173,15 @@ pub(in crate::lite) struct Routed {
 	wants: BTreeMap<Path, Option<crate::model::Snapshot>>,
 	/// The prefixes asked of the peer.
 	asked: BTreeMap<u64, Asked>,
+	/// What of the grant the peer's answers already cover, `None` for everything: what
+	/// a grant change shows beyond it may already be in the peer's answer, unheard here.
+	covered: Option<crate::Prefixes>,
+	/// What the grant shows beyond `covered` within the wants, held until an answer after
+	/// it is in: one per want and prefix of the grant, however often it changes.
+	gained: Vec<Gain>,
+	/// The grant showed more since the last edit: the next is sent even when it changes
+	/// nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix.
+	regranted: bool,
 	next_prefix: u64,
 	/// The edits the peer has yet to answer, oldest first.
 	edits: VecDeque<Editing>,
@@ -188,6 +206,18 @@ pub(in crate::lite) struct Routed {
 	ready: kio::Queue<ServedKey>,
 	/// Why the last error closes the session, when the route layer said.
 	cause: Option<RouteClose>,
+}
+
+/// What a grant change newly shows within a want: the readers at `held` wait for an
+/// answer after it.
+struct Gain {
+	want: Path,
+	/// The prefix of the grant that showed it.
+	prefix: crate::Prefix,
+	/// The deeper of the want and the prefix, relative to the root.
+	held: Path,
+	/// Holds the readers until dropped.
+	_snapshot: crate::model::Snapshot,
 }
 
 /// The absolute prefixes a session asks a peer that grants `permit` for, to serve
@@ -231,8 +261,9 @@ fn widest(set: &BTreeSet<Path>) -> BTreeSet<Path> {
 /// grant's `regions`, or all of them without a confined grant, give way to the longest
 /// prefix they share, the largest such group first, and then a prefix alone in its
 /// region gives way to the region. Either lies inside the region, so the session asks
-/// for more than it wants and never for more than it is granted. Regions that are too
-/// many on their own lose the last of them.
+/// for more than it wants and never for more than it is granted. Regions too many on
+/// their own give way to the longest prefix any of them share, up to the root: the peer
+/// answers a prefix wider than the grant region by region, so none goes unasked.
 fn coarsen(mut set: BTreeSet<Path>, regions: &BTreeSet<Path>) -> BTreeSet<Path> {
 	while !lite::request_fits(set.iter(), lite::Version::Lite07) {
 		// Each prefix files under the widest region holding it.
@@ -257,19 +288,27 @@ fn coarsen(mut set: BTreeSet<Path>, regions: &BTreeSet<Path>) -> BTreeSet<Path> 
 				.max_by_key(|(_, group)| bytes(group))
 				.map(|(region, _)| region.clone())
 		};
-		match shared.or_else(region) {
-			Some(wider) => {
-				set.insert(wider);
-				set = widest(&set);
-			}
-			None => {
-				// Nothing is left to widen: the grant's regions alone pass one request.
-				let dropped = set.pop_last();
-				tracing::warn!(?dropped, "a grant too wide for one ANNOUNCE_REQUEST goes unasked");
-			}
-		}
+		// Nothing is left to widen within a region: the regions alone pass one request.
+		let wider = shared.or_else(region).unwrap_or_else(|| deepest_shared(&set));
+		set.insert(wider);
+		set = widest(&set);
 	}
 	set
+}
+
+/// The longest prefix at least two of `set` lie within, the root at the least.
+fn deepest_shared(set: &BTreeSet<Path>) -> Path {
+	let mut counts: BTreeMap<Path, usize> = BTreeMap::new();
+	for prefix in set {
+		for above in route::ancestors(prefix).filter(|above| above != prefix) {
+			*counts.entry(above).or_default() += 1;
+		}
+	}
+	(counts.into_iter())
+		.filter(|(_, count)| *count > 1)
+		.map(|(above, _)| above)
+		.max_by_key(|above| above.parts().count())
+		.unwrap_or_default()
 }
 
 impl Routed {
@@ -320,6 +359,9 @@ impl Routed {
 			origin: subscriber.origin.clone(),
 			wants: BTreeMap::new(),
 			asked: BTreeMap::new(),
+			covered: permit.grant().cloned(),
+			gained: Vec::new(),
+			regranted: false,
 			next_prefix: 0,
 			edits: VecDeque::new(),
 			finished: false,
@@ -363,6 +405,7 @@ impl Routed {
 	/// The origin no longer wants `prefix` of the peer.
 	pub(in crate::lite) fn unwant(&mut self, prefix: &Path) {
 		self.wants.remove(prefix);
+		self.gained.retain(|gain| gain.want != *prefix);
 		self.reask();
 	}
 
@@ -383,7 +426,8 @@ impl Routed {
 			remove: asking.difference(&wanted).cloned().collect(),
 			add: wanted.difference(&asking).cloned().collect(),
 		};
-		if edit.remove.is_empty() && edit.add.is_empty() {
+		let regranted = std::mem::take(&mut self.regranted);
+		if edit.remove.is_empty() && edit.add.is_empty() && !regranted {
 			return;
 		}
 		// Refused only for a set with one prefix inside another, which `asks` never builds.
@@ -394,25 +438,40 @@ impl Routed {
 	/// answered every request, and sent the initial set of each prefix asked for it.
 	/// The caller serves what the node queued first.
 	pub(in crate::lite) fn release(&mut self) {
-		if self.wants.values().all(|snapshot| snapshot.is_none()) {
-			return;
-		}
 		let done = self.finished || self.silent;
 		if !done && !self.stream.answered() {
 			return;
 		}
-		for (want, snapshot) in &mut self.wants {
-			if snapshot.is_none() {
-				continue;
-			}
-			let Ok(want) = self.root.join(want) else {
-				*snapshot = None;
-				continue;
+		let (root, asked) = (&self.root, &self.asked);
+		// Whether every prefix asked that overlaps `prefix` sent its initial set.
+		let answered = |prefix: &Path| {
+			let Ok(prefix) = root.join(prefix) else {
+				return true;
 			};
-			let mut answers = (self.asked.values())
-				.filter(|asked| route::within(&asked.path, &want) || route::within(&want, &asked.path));
-			if done || answers.all(|asked| asked.synced) {
+			let mut answers = (asked.values())
+				.filter(|asked| route::within(&asked.path, &prefix) || route::within(&prefix, &asked.path));
+			done || answers.all(|asked| asked.synced)
+		};
+		for (want, snapshot) in &mut self.wants {
+			if snapshot.is_some() && answered(want) {
 				*snapshot = None;
+			}
+		}
+		let (released, held): (Vec<Gain>, Vec<Gain>) = std::mem::take(&mut self.gained)
+			.into_iter()
+			.partition(|gain| answered(&gain.held));
+		self.gained = held;
+		// The peer's answers now cover each released prefix, and once nothing is held, the
+		// whole grant.
+		if self.gained.is_empty() {
+			if self.covered.as_ref() != self.permit.grant() {
+				self.covered = self.permit.grant().cloned();
+			}
+		} else if let Some(covered) = self.covered.as_mut() {
+			for gain in released {
+				if !self.gained.iter().any(|held| held.prefix == gain.prefix) {
+					covered.insert(gain.prefix);
+				}
 			}
 		}
 	}
@@ -537,7 +596,7 @@ impl Routed {
 		// Only its floor closes a batch of claim messages.
 		let claim = matches!(
 			announce,
-			Wire::Start { .. } | Wire::Change { .. } | Wire::End { .. } | Wire::Floor { .. } | Wire::Skipped
+			Wire::Start { .. } | Wire::Change { .. } | Wire::End { .. } | Wire::Floor { .. }
 		);
 		if !claim && !self.pending.is_empty() {
 			return Err(Error::ProtocolViolation);
@@ -633,7 +692,7 @@ impl Routed {
 					instance,
 					claim,
 					origin: None,
-					filed: false,
+					filed: Vec::new(),
 				};
 				self.claims.insert(id, wire);
 				self.changed(id, true)?;
@@ -652,7 +711,7 @@ impl Routed {
 					true => Change::Lost,
 					false => Change::Ended,
 				};
-				let broadcast = wire.path.map(|path| (path, wire.instance));
+				let broadcast = wire.path.map(|path| (path, wire.instance.clone()));
 				if self.routing {
 					if let Some((_, claims)) = wire
 						.origin
@@ -663,8 +722,10 @@ impl Routed {
 					// Every forwarding node holds every path another does.
 					let broadcast = broadcast.ok_or(Error::ProtocolViolation)?;
 					self.pending.end(id, broadcast, change, wire.origin.is_some());
-				} else if let (true, Some(broadcast)) = (wire.filed, broadcast) {
-					let changes = vec![(broadcast, change)];
+				} else if !wire.filed.is_empty() {
+					let changes = (wire.filed.into_iter())
+						.map(|path| ((path, wire.instance.clone()), change.clone()))
+						.collect();
 					self.stream
 						.recv(Msg::Announce { changes })
 						.map_err(|err| refused(err, &mut self.cause))?;
@@ -676,10 +737,11 @@ impl Routed {
 			| Wire::Active { .. }
 			| Wire::Ended { .. }
 			| Wire::EndedId { .. }
-			| Wire::Update { .. } => {
+			| Wire::Update { .. }
+			// Decoding refuses an unknown lite-07 type; only lite-06 skips one.
+			| Wire::Skipped => {
 				return Err(Error::ProtocolViolation);
 			}
-			Wire::Skipped => {}
 		}
 		Ok(())
 	}
@@ -706,24 +768,22 @@ impl Routed {
 			return Ok(());
 		}
 		// A claim at no path this node can hold reaches no reader here.
-		let Some(broadcast) = broadcast else {
+		let Some((path, instance)) = broadcast else {
 			return Ok(());
 		};
-		let admitted = admits(&self.origin, &self.root, &self.permit, &broadcast.0);
+		let filing = filing(&self.origin, &self.root, &self.permit, &path);
 		// Counted once per claim: as it starts, or as a change takes it out of scope.
-		if !admitted && (fresh || wire.filed) {
+		if filing.is_empty() && (fresh || !wire.filed.is_empty()) {
 			self.origin.stats().refuse_route(RouteRefusal::Scope);
 		}
-		let change = match (wire.filed, admitted) {
-			(_, true) => change,
-			(true, false) => Change::Lost,
-			(false, false) => return Ok(()),
-		};
-		wire.filed = admitted;
-		let changes = vec![(broadcast, change)];
-		self.stream
-			.recv(Msg::Announce { changes })
-			.map_err(|err| refused(err, &mut self.cause))
+		let changes = refile(wire, &instance, filing, true);
+		match changes.is_empty() {
+			true => Ok(()),
+			false => self
+				.stream
+				.recv(Msg::Announce { changes })
+				.map_err(|err| refused(err, &mut self.cause)),
+		}
 	}
 
 	/// ANNOUNCE_FLOOR: the claim changes since the last one are those of the node the
@@ -772,6 +832,52 @@ impl Routed {
 			};
 		}
 		let same = permit.same_limit(&self.permit);
+		// What a grant change newly shows within a prefix asked may already be in the
+		// peer's answer, unheard here: the next edit goes, since its answer follows the
+		// change, and the readers there and any reader arriving before that answer wait
+		// for it. Elsewhere, and on a narrowing, nothing new can arrive, and a reader stays
+		// synced.
+		if !permit.same_grant(&self.permit) {
+			// The peer's answers cover only what the new grant still shows of what they did.
+			self.covered = match (self.covered.take(), permit.grant()) {
+				(None, granted) => granted.cloned(),
+				(Some(covered), None) => Some(covered),
+				(Some(covered), Some(granted)) => Some(covered.intersect(granted)),
+			};
+			let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
+			let asking = self.stream.asking();
+			let mut before = std::mem::take(&mut self.gained);
+			for (granted, region) in permit.beyond(self.covered.as_ref()) {
+				// Too deep to lie beneath the root, it shows nothing here.
+				let Ok(absolute) = self.root.join(&region) else {
+					continue;
+				};
+				if asking.iter().any(|asked| overlaps(asked, &absolute)) {
+					self.regranted = true;
+				}
+				for want in self.wants.keys().filter(|want| overlaps(want, &region)) {
+					self.regranted = true;
+					// Held already: keep its snapshot, so its readers wait on unbroken.
+					let kept = (before.iter()).position(|gain| gain.want == *want && gain.prefix == granted);
+					if let Some(kept) = kept {
+						self.gained.push(before.swap_remove(kept));
+						continue;
+					}
+					let held = match region.has_prefix(want) {
+						true => region.clone(),
+						false => want.clone(),
+					};
+					self.gained.push(Gain {
+						want: want.clone(),
+						prefix: granted.clone(),
+						_snapshot: self.origin.snapshot(held.clone()),
+						held,
+					});
+				}
+			}
+			// What the grant no longer shows beyond what is covered can bring nothing more.
+			drop(before);
+		}
 		self.permit = permit.clone();
 		self.reask();
 		if same {
@@ -779,17 +885,12 @@ impl Routed {
 		}
 		let mut changes = Vec::new();
 		for wire in self.claims.values_mut() {
-			let Some(path) = &wire.path else {
+			let Some(path) = wire.path.clone() else {
 				continue;
 			};
-			let admitted = admits(&self.origin, &self.root, &self.permit, path);
-			let change = match (wire.filed, admitted) {
-				(false, true) => Change::Live(wire.claim.clone()),
-				(true, false) => Change::Lost,
-				_ => continue,
-			};
-			wire.filed = admitted;
-			changes.push(((path.clone(), wire.instance.clone()), change));
+			let filing = filing(&self.origin, &self.root, &self.permit, &path);
+			let instance = wire.instance.clone();
+			changes.extend(refile(wire, &instance, filing, false));
 		}
 		for change in changes {
 			let changes = vec![change];
@@ -828,13 +929,10 @@ impl Routed {
 				origin,
 				path,
 				instance,
-				ended,
+				gone,
 			} => {
-				// Dropped, a claim the node let go of goes offline rather than ending.
-				if let Some(served) = self.served.remove(&(origin, path, instance))
-					&& ended
-				{
-					served.route.dynamic.withdrawn();
+				if let Some(served) = self.served.remove(&(origin, path, instance)) {
+					release(served.route.dynamic, gone);
 				}
 			}
 		}
@@ -886,6 +984,7 @@ impl Routed {
 			priority: Some(served.priority),
 			// A receiver refuses a claim above its path by more than the path's segments.
 			above: u8::try_from(served.attr.above).unwrap_or(u8::MAX),
+			lifecycle: served.lifecycle,
 		};
 		// A claim no route reaches is unavailable: it stays shown, and serves nothing.
 		let route = crate::origin::RouteInfo::new()
@@ -949,19 +1048,58 @@ fn refused(err: route::Error, cause: &mut Option<RouteClose>) -> Error {
 	Error::ProtocolViolation
 }
 
-/// Whether the node may hold the peer's claim at `path`: the permit's limit admits
-/// it, and the origin would serve it rather than refuse it (an excluded subtree or mount).
-fn admits(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::Permit, path: &Path) -> bool {
-	origin.publishable(path)
-		&& path
-			.strip_prefix(root)
-			.is_some_and(|relative| permit.within_limit(relative.as_str()))
+/// Where the node files the peer's claim at the absolute `path`, as the origin files a
+/// producer's claim: there when the permit's limit and the origin's scope cover it, and
+/// otherwise at each of their prefixes beneath it, so a route through the session serves
+/// the whole subtree it is filed at. None when the origin would refuse it (an excluded
+/// subtree or a mount) or the session may carry nothing beneath it.
+fn filing(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::Permit, path: &Path) -> Vec<Path> {
+	let Some(relative) = path.strip_prefix(root) else {
+		return Vec::new();
+	};
+	if !origin.publishable(path) {
+		return Vec::new();
+	}
+	let scope = permit.limiting(origin.allowed());
+	let publishable = |prefix: &Path| root.join(prefix).is_ok_and(|prefix| origin.publishable(&prefix));
+	(crate::origin::filed(&scope, &relative, publishable).into_iter())
+		.filter_map(|(prefix, _)| root.join(&prefix).ok())
+		.collect()
+}
+
+/// File `wire`, a claim of `instance`, at `filing` instead of where it is: what the node
+/// should hear, each place it holds live, as many segments above it as it lies beneath the
+/// claim's path, then each it leaves lost. With `changed`, the claim itself changed, so
+/// every place it stays is told again.
+fn refile(
+	wire: &mut WireClaim,
+	instance: &Instance,
+	filing: Vec<Path>,
+	changed: bool,
+) -> Vec<(node::Broadcast, Change)> {
+	let depth = wire.path.as_ref().map_or(0, |path| path.depth());
+	let mut changes = Vec::new();
+	for path in &filing {
+		if !changed && wire.filed.contains(path) {
+			continue;
+		}
+		let mut claim = wire.claim.clone();
+		claim.item.above = claim.item.above.saturating_add((path.depth() - depth) as u64);
+		changes.push(((path.clone(), instance.clone()), Change::Live(claim)));
+	}
+	for path in &wire.filed {
+		if !filing.contains(path) {
+			changes.push(((path.clone(), instance.clone()), Change::Lost));
+		}
+	}
+	wire.filed = filing;
+	changes
 }
 
 /// Whether `permit` trusts the peer with the whole tree: neither grant confines it,
-/// whether by setting no patterns or by one that covers everything.
+/// whether by setting no prefixes or by the empty one, which covers everything.
 pub(in crate::lite) fn whole(permit: &crate::auth::Permit) -> bool {
-	permit.covers_subtree("")
+	permit.matches("")
 }
 
 #[cfg(test)]

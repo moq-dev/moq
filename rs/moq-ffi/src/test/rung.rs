@@ -81,7 +81,7 @@ async fn shaped_uplink_disables_and_resumes() {
 					.first()
 					.cloned()
 					.map(|producer| MoqMediaProducer::Track { producer }),
-				..video_init(MoqVideoFormat::H264, h264_init())
+				..video_init(MoqVideoFormat::h264(), h264_init())
 			},
 		)
 		.unwrap();

@@ -254,6 +254,7 @@ moq ... import capture --window 39193 --audio off        # one window (macOS, Wi
 moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
 moq ... import capture --video demand                    # also gate video on demand
+moq ... import capture --rendition sd=0.25              # add a quarter-size simulcast rendition
 moq ... import capture --audio on                        # encode audio continuously
 ```
 
@@ -278,6 +279,12 @@ has a subscriber, leaving nothing to fetch from before the first viewer; video
 still opens its source once at startup to probe the mode it negotiates.
 `--bitrate` is a ceiling that
 backends with live bitrate control lower to fit the connection.
+`--rendition NAME=SCALE`, repeatable, also publishes `video/NAME` from the same
+capture, each frame scaled to SCALE of its pixels (0.25 is half the width and
+height) at a bitrate derived from that size, like the web publisher's simulcast.
+Each one encodes only while watched, and with `--video demand` the source stays
+open while any rendition is. The renditions share the connection smallest
+first: under congestion the smallest keeps playing while larger ones pause.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
@@ -471,13 +478,14 @@ both `--connect` and a WAN cluster peer is refused at startup: use port 0, or dr
 
 ```bash
 moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
-moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' > alice.jwt
+moq auth sign --key private.jwk --root rooms/123 --publish alice --subscribe '' > alice.jwt
 moq auth verify --key public.jwk --in alice.jwt
-moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
+moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe anon
 ```
 
-`--publish` and `--subscribe` take patterns: `alice` is one broadcast,
-`alice/**` is a subtree, `**` is everything under `--root`. `moq auth serve`
+`--publish` and `--subscribe` take prefixes: `alice` covers `alice` and
+everything beneath it, and `''` is everything under `--root`. A wildcard such as
+`alice/**` is refused. `moq auth serve`
 answers a relay's auth requests with the same keys (see [Auth
 server](/bin/relay/auth#auth-server)). It also reads every setting from an
 optional TOML file (`moq auth serve auth.toml`), where flags win and
@@ -553,7 +561,11 @@ Its subscriptions take lower priority so the replacement can acquire on a
 congested link. The marked switch drops the old instance's buffered tail, so
 the replacement plays at `--delay` rather than behind it. An unimpaired switch
 usable within that window adds no gap. Congestion can starve the old instance
-sooner or leave the replacement acquiring past the window, causing a gap.
+sooner or leave the replacement acquiring past the window, causing a gap. With
+`--passthrough`, `--stitch` instead switches as soon as the replacement's catalog
+subscription is served, with no overlap window: the old instance's buffered tail
+goes out on its clock, then the replacement's packets verbatim from the first
+group its live subscription delivers, so the seam is each PID's continuity break.
 Timestamps across instances are not aligned. Without `--stitch` the export
 stays on the old publisher while it is up. Only lite-07 sessions carry
 instances, so on the default version every return is a replacement. A failure other than the

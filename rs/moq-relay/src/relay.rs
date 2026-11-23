@@ -116,6 +116,9 @@ pub struct Relay {
 	/// they own the QUIC listen address instead of `workers`.
 	#[cfg(uring)]
 	uring: Option<crate::uring::Workers>,
+	/// The cluster's own QUIC listener, requiring a client certificate. `None`
+	/// unless `cluster.listen.bind` is set.
+	peers: Option<moq_tokio::Listener>,
 	/// The tokio QUIC listener's demux, which every worker shares. `None` when
 	/// nothing on tokio serves QUIC: a stream-only relay, or the io_uring workers.
 	demux: Option<moq_tokio::quic::demux::Demux>,
@@ -163,7 +166,9 @@ impl Relay {
 				(auth, Some(admissions))
 			}
 			false => {
-				let client_ca = !(config.listen.tls.root.is_empty() && config.web.https.root.is_empty());
+				let client_ca = !(config.listen.tls.root.is_empty()
+					&& config.web.https.root.is_empty()
+					&& config.cluster.listen.root.is_empty());
 				(config.auth.init(node, &config.connect.tls, client_ca)?, None)
 			}
 		};
@@ -249,20 +254,25 @@ impl Relay {
 			false => server_config.init()?,
 		};
 
-		// `None` for a stream-only server (no QUIC); any other error is real.
+		// The cluster's own listener, on the shared runtime whichever backend serves
+		// the public port: its peers are few, and it has its own identity to serve.
+		let peers = match config.cluster.listen.server(&config.listen) {
+			Some(listen) => {
+				let mut peers = moq_tokio::server::Config::default();
+				peers.listen = listen;
+				peers.quic = config.quic.clone();
+				peers.admission = shutdown.admission.clone();
+				Some(peers.init().context("failed to start the cluster listener")?)
+			}
+			None => None,
+		};
+
+		// `None` for a stream-only server (no QUIC).
 		#[cfg(uring)]
 		let uring_addr = uring.as_ref().map(crate::uring::Workers::local_addr);
 		#[cfg(not(uring))]
 		let uring_addr: Option<std::net::SocketAddr> = None;
-		let addr = match (workers_addr, uring_addr) {
-			(Some(addr), _) => Some(addr),
-			(None, Some(addr)) => Some(addr),
-			(None, None) => match server.local_addr() {
-				Ok(addr) => Some(addr),
-				Err(moq_tokio::Error::NoBackend(_)) => None,
-				Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
-			},
-		};
+		let addr = workers_addr.or(uring_addr).or_else(|| server.local_addr());
 
 		// The io_uring workers serve QUIC without the demux, and a stream-only relay
 		// has no UDP port at all.
@@ -333,6 +343,10 @@ impl Relay {
 		// they run, and `load` is not yet willing to take a session. `run`
 		// starts them on its first accept.
 		let server = server.bind().await.context("failed to bind listeners")?;
+		let peers = match peers {
+			Some(peers) => Some(peers.bind().await.context("failed to bind the cluster listener")?),
+			None => None,
+		};
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
@@ -371,11 +385,15 @@ impl Relay {
 			Some(addr) => tracing::info!(%addr, kind = "quic", "listening"),
 			None => tracing::info!("listening (stream transports only)"),
 		}
+		if let Some(addr) = peers.as_ref().and_then(moq_tokio::Listener::local_addr) {
+			tracing::info!(%addr, kind = "cluster", "listening");
+		}
 
 		Ok(Relay {
 			ready,
 			config: resolved_config,
 			server,
+			peers,
 			auth,
 			admissions,
 			cluster,
@@ -413,6 +431,11 @@ impl Relay {
 	/// The QUIC bind address, or `None` for a stream-only server (no QUIC).
 	pub fn addr(&self) -> Option<std::net::SocketAddr> {
 		self.addr
+	}
+
+	/// The cluster listener's bound address, or `None` unless `cluster.listen.bind` is set.
+	pub fn cluster_addr(&self) -> Option<std::net::SocketAddr> {
+		self.peers.as_ref().and_then(moq_tokio::Listener::local_addr)
 	}
 
 	/// The QUIC bind address, or an error for a stream-only relay.
@@ -597,6 +620,7 @@ impl Relay {
 		let Relay {
 			ready,
 			mut server,
+			mut peers,
 			auth,
 			admissions,
 			cluster,
@@ -790,6 +814,21 @@ impl Relay {
 			})
 		};
 
+		// Pends without a cluster listener. Handoff refuses one, so nothing hands it on.
+		let serve_peers = {
+			let peers = peers.as_mut();
+			let cluster = cluster.clone();
+			let auth = auth.clone();
+			let shutdown = shutdown.clone();
+			let sessions = sessions.clone();
+			Box::pin(async move {
+				match peers {
+					Some(peers) => serve_listening(peers, cluster, auth, shutdown, sessions).await,
+					None => std::future::pending().await,
+				}
+			})
+		};
+
 		let handoff = {
 			let drain = shutdown_trigger.clone();
 			let window = shutdown.drain_timeout;
@@ -818,6 +857,7 @@ impl Relay {
 			Err(err) = Box::pin(until_handed(handed.clone(), web.serve(web_routes))) => Err(err).context("web server failed"),
 			Err(err) = until_handed(handed.clone(), internal.serve(internal_routes)) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
+			Err(err) = serve_peers => Err(err).context("cluster listener failed"),
 			Err(err) = Box::pin(handoff) => Err(err).context("handoff failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
@@ -832,6 +872,9 @@ impl Relay {
 		// Dropping the listener would leave its QUIC socket open until the
 		// endpoint's closing connections finish in the background, past `run`.
 		server.close().await;
+		if let Some(peers) = peers {
+			peers.close().await;
+		}
 
 		// Explicitly, so the joins land on the blocking pool rather than on the
 		// executor thread this future happens to be running on.

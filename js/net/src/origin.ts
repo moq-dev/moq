@@ -25,6 +25,7 @@ import {
 	Epochs,
 	firstEligible,
 	hiddenBelow,
+	holdsOnTie,
 	hooks,
 	mostSpecific,
 	routeHops,
@@ -53,16 +54,17 @@ class Scope {
 	static readonly all = new Scope(Path.empty());
 
 	readonly root: Path.Valid;
-	readonly allowed?: Path.Patterns;
+	/** The absolute prefixes this handle reaches; unset for every path. */
+	readonly allowed?: Path.Prefixes;
 
-	constructor(root: Path.Valid, allowed?: Path.Patterns) {
+	constructor(root: Path.Valid, allowed?: Path.Prefixes) {
 		this.root = root;
 		this.allowed = allowed;
 	}
 
-	narrow(root: Path.Valid, patterns: Path.Patterns): Scope {
+	narrow(root: Path.Valid, prefixes: Path.Prefixes): Scope {
 		const joined = Path.encode(Path.join(this.root, root));
-		const rooted = patterns.rooted(joined);
+		const rooted = prefixes.rooted(joined);
 		const allowed = this.allowed?.intersect(rooted) ?? rooted;
 		if (allowed.size === 0) throw new Error("origin scopes do not overlap");
 		return new Scope(joined, allowed);
@@ -70,6 +72,21 @@ class Scope {
 
 	matches(path: Path.Valid): boolean {
 		return this.allowed?.matches(path) ?? true;
+	}
+
+	/**
+	 * Where a claim at the absolute `prefix` is filed, so each place serves its whole subtree:
+	 * the prefix itself when this scope covers it, and otherwise each of its prefixes beneath
+	 * it, with how many segments beneath the claim's prefix it lies. Mirrors rs/moq-net's `filed`.
+	 */
+	filed(prefix: Path.Valid): [Path.Valid, bigint][] {
+		if (!this.allowed || this.allowed.matches(prefix)) return [[prefix, 0n]];
+		const depth = Path.parts(prefix).length;
+		return this.allowed
+			.toArray()
+			.map((member) => member.text as Path.Valid)
+			.filter((at) => Path.check(at) === undefined && Path.hasPrefix(prefix, at))
+			.map((at) => [at, BigInt(Path.parts(at).length - depth)]);
 	}
 
 	path(path: Path.Valid): Path.Valid {
@@ -80,22 +97,22 @@ class Scope {
 
 	prefix(prefix: Path.Valid): Path.Valid {
 		const joined = Path.encode(Path.join(this.root, prefix));
-		if (this.allowed && !this.allowed.overlaps(Path.Pattern.subtree(joined))) {
-			throw new Error("prefix is outside the origin scope");
-		}
+		if (!this.overlaps(joined)) throw new Error("prefix is outside the origin scope");
 		return joined;
 	}
 
-	patterns(pattern: Path.Pattern = Path.Pattern.all()): Path.Patterns {
-		const rooted = new Path.Patterns([pattern.rooted(this.root)]);
-		return this.allowed?.intersect(rooted) ?? rooted;
+	/** The absolute paths a reader's `filter`, relative to the root, lists within this scope. */
+	patterns(filter: Path.Pattern = Path.Pattern.all()): Path.Patterns {
+		const rooted = new Path.Patterns([filter.rooted(this.root)]);
+		return this.allowed?.patterns().intersect(rooted) ?? rooted;
 	}
 
-	/** Omit nested heads because the outer subscription already carries their routes. */
+	/** The root-relative prefixes this scope asks its peer about: its own, already disjoint. */
 	#heads(): Path.Valid[] {
 		if (!this.allowed) return [Path.empty()];
-		const heads = [...new Set([...this.allowed.rebase(this.root)].map(scopeHead))].sort();
-		return heads.filter((head) => !heads.some((other) => other !== head && Path.hasPrefix(other, head)));
+		return [...this.allowed.rebase(this.root)]
+			.map((prefix) => prefix.text as Path.Valid)
+			.filter((head) => Path.check(head) === undefined);
 	}
 
 	#headsCache?: Path.Valid[];
@@ -123,12 +140,12 @@ class Scope {
 		if (!this.allowed) return true;
 		// A peer's prefix may fit the wire alone and overflow once joined: nothing allowed lies there.
 		const path = Path.join(this.root, prefix);
-		return !Path.check(path) && this.allowed.contains(Path.Pattern.subtree(path));
+		return !Path.check(path) && this.allowed.matches(path);
 	}
 
 	/** Whether this scope allows anything beneath the absolute `prefix`. */
 	overlaps(prefix: Path.Valid): boolean {
-		return this.allowed?.overlaps(Path.Pattern.subtree(prefix)) ?? true;
+		return this.allowed?.overlaps(prefix) ?? true;
 	}
 
 	/** The exact paths within this scope, relative to its root. */
@@ -146,22 +163,22 @@ class Scope {
 
 	/**
 	 * The advertisements that may serve this scope, relative to its root. Every prefix at or
-	 * above the root presents as the empty path, most specific first, since that is the order
-	 * a request beneath the root resolves in.
+	 * above the root presents as the empty path, as far above it as its claim is above the root,
+	 * most specific first, since that is the order a request beneath the root resolves in.
 	 */
 	projectRoutes(values: Advertisements | undefined): Advertisements | undefined {
 		if (!values || this === Scope.all) return values;
 		const out = new Map<Path.Valid, readonly Advertised[]>();
 		const covering: [Path.Valid, Advertised[]][] = [];
-		const allowed = this.allowed && [...this.allowed];
+		const allowed = this.allowed;
+		const rootDepth = Path.parts(this.root).length;
 		for (const [path, candidates] of values) {
 			const relative = Path.stripPrefix(this.root, path);
 			const above = relative === null || relative === Path.empty();
 			if (above && !Path.hasPrefix(path, this.root)) continue;
-			const visible = candidates
-				.filter((value) => !allowed || allowed.some((pattern) => advertOverlaps(value, path, pattern)))
-				// The claim moves with the key, so it compares against root-relative requests.
-				.map((value) => (value.claim ? { ...value, claim: value.claim.rebase(this.root) } : value));
+			// A route serves the whole subtree it is filed at, so it may serve this scope when the two overlap.
+			if (allowed && !allowed.overlaps(path)) continue;
+			const visible = candidates;
 			if (visible.length === 0) continue;
 			if (!above) {
 				out.set(relative, visible);
@@ -169,11 +186,22 @@ class Scope {
 			}
 			// Hold the empty path's place in the order until every covering prefix is known.
 			if (covering.length === 0) out.set(Path.empty(), []);
-			// Each keeps its own prefix, so supersession never compares across the merged prefixes.
-			covering.push([path, visible.map((value) => ({ ...value, prefix: path }))]);
+			// Each keeps its own prefix, so supersession never compares across the merged prefixes,
+			// and its claim's own prefix: raised to the root, it is that much further above it.
+			const raised = BigInt(rootDepth - Path.parts(path).length);
+			covering.push([
+				path,
+				visible.map((value) => ({
+					...value,
+					prefix: path,
+					route: raised === 0n ? value.route : { ...value.route, above: (value.route.above ?? 0n) + raised },
+				})),
+			]);
 		}
 		if (covering.length > 0) {
-			covering.sort(([a], [b]) => b.length - a.length);
+			// The most specific claim first, as a request beneath the root resolves, then the deeper filing.
+			const rank = ([, visible]: [Path.Valid, Advertised[]]) => claimDepth(Path.empty(), visible[0].route);
+			covering.sort((a, b) => rank(b) - rank(a) || b[0].length - a[0].length);
 			out.set(
 				Path.empty(),
 				covering.flatMap(([, visible]) => visible),
@@ -181,11 +209,6 @@ class Scope {
 		}
 		return out;
 	}
-}
-
-/** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
-function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pattern): boolean {
-	return advert.claim ? advert.claim.overlaps(pattern) : scopeOverlaps(pattern, prefix);
 }
 
 /** One segment of the watched-prefix trie, kept while it or anything beneath it is watched. */
@@ -214,24 +237,29 @@ function frontier(node: WatchNode, out: Path.Valid[] = []): Path.Valid[] {
 
 /**
  * Presents advertised prefixes relative to a root. Every prefix at or above the root
- * collapses to the empty path, where the most specific one wins, since that is the route
- * a request beneath the root resolves through.
+ * collapses to the empty path, where the most specific claim wins, then the deeper filing,
+ * since that is the route a request beneath the root resolves through.
  */
 class CoveringRoot {
 	readonly #root: Path.Valid;
-	#covering?: Path.Valid;
+	#covering?: [number, number];
 
 	constructor(root: Path.Valid) {
 		this.#root = root;
 	}
 
-	/** The presented path for `path`, or undefined when it is outside the root or a broader cover. */
-	relative(path: Path.Valid): Path.Valid | undefined {
+	/**
+	 * The presented path for `route` at `path`, or undefined when it is outside the root or a
+	 * more specific cover.
+	 */
+	relative(path: Path.Valid, route: WireRoute): Path.Valid | undefined {
 		const relative = Path.stripPrefix(this.#root, path);
 		if (relative !== null && relative !== Path.empty()) return relative;
 		if (relative === null && !Path.hasPrefix(path, this.#root)) return undefined;
-		if (this.#covering !== undefined && !Path.hasPrefix(this.#covering, path)) return undefined;
-		this.#covering = path;
+		const rank: [number, number] = [claimDepth(path, route), Path.parts(path).length];
+		const covering = this.#covering;
+		if (covering && (rank[0] < covering[0] || (rank[0] === covering[0] && rank[1] < covering[1]))) return undefined;
+		this.#covering = rank;
 		return Path.empty();
 	}
 }
@@ -303,8 +331,6 @@ interface Resolution {
 interface RouteEntry {
 	readonly identity: object;
 	readonly scope: Scope;
-	/** The paths the entry may serve beneath its prefix, when its producer is scoped. */
-	readonly claim?: Path.Patterns;
 	readonly route: Signal<WireRoute>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
@@ -328,19 +354,31 @@ interface Candidate extends Advertised {
 }
 
 /**
- * Orders advertisements at a prefix: the better route, then a local broadcast on a tie, then
- * fewer hops. A remaining tie is left to the table's newest-first order; see
- * {@link compareRouteCandidates}.
+ * Orders advertisements at a prefix: the most specific claim, then the better route, then a
+ * local broadcast on a tie, then fewer hops. A remaining tie is left to the table's newest-first
+ * order; see {@link compareRouteCandidates}.
  */
 function compareCandidates(a: Candidate, b: Candidate): number {
+	const above = (a.route.above ?? 0n) - (b.route.above ?? 0n);
 	return (
-		compareRoutes(a.route, b.route) || Number(b.exact) - Number(a.exact) || routeHops(a.route) - routeHops(b.route)
+		(above < 0n ? -1 : above > 0n ? 1 : 0) ||
+		compareRoutes(a.route, b.route) ||
+		Number(b.exact) - Number(a.exact) ||
+		routeHops(a.route) - routeHops(b.route)
 	);
 }
 
 /**
+ * How many segments the claim a route at `path` shows has: the path's, less how far above it
+ * the claim is. The most specific claim covering a path wins, however deep it is filed.
+ */
+function claimDepth(path: Path.Valid, route: WireRoute): number {
+	return Path.parts(path).length - Number(route.above ?? 0n);
+}
+
+/**
  * The preferred of `entries` (newest first, at `prefix`) for resolving `path`, not skipped
- * nor superseded: see {@link compareRouteCandidates}, then newest.
+ * nor superseded: see {@link compareRouteCandidates}, then {@link holdsOnTie}.
  */
 function preferredEntry(
 	path: Path.Valid,
@@ -366,9 +404,11 @@ function preferredEntry(
 			best = entry;
 			continue;
 		}
+		// Newest first, so an older entry replaces on a tie only where the tie holds the oldest.
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		if (compareRouteCandidates(path, prefix, a, b) < 0) best = entry;
+		const order = compareRouteCandidates(path, prefix, a, b);
+		if (order < 0 || (order === 0 && holdsOnTie(path, prefix, a, b))) best = entry;
 	}
 	return best;
 }
@@ -613,7 +653,6 @@ class OriginState {
 				list.push({
 					identity: entry.identity,
 					route: entry.route.peek(),
-					claim: entry.claim,
 					exact: false,
 					lost: () => entry.lost,
 				});
@@ -1279,8 +1318,8 @@ export interface Reader {
 	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
 	follow(path: Path.Valid, options?: FollowOptions): Following;
 
-	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	/** The available broadcasts matching `filter`, as a live stream; see {@link Consumer.announced}. */
+	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 }
 
 /**
@@ -1432,12 +1471,12 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Narrow this handle to patterns beneath root, presenting paths relative to that root.
-	 * The result borrows the origin; see {@link close}.
+	 * Narrow this handle to `prefixes` beneath `root`, presenting paths relative to that root.
+	 * Each prefix covers its whole subtree. The result borrows the origin; see {@link close}.
 	 */
-	scope(root: Path.Valid, patterns: Path.Patterns): Producer {
+	scope(root: Path.Valid, prefixes: Path.Prefixes): Producer {
 		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
-		const scope = this.#scope.narrow(root, patterns);
+		const scope = this.#scope.narrow(root, prefixes);
 		const producer = new Producer();
 		producer.#state = this.#state;
 		producer.#scope = scope;
@@ -1668,16 +1707,32 @@ export class Producer implements Table {
 		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix);
 		server.onChange = (path) => this.#state.refresh(path);
-		const entry: RouteEntry = {
-			identity: {},
-			scope: this.#scope,
-			claim: this.#scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)])),
-			route: new Signal(route),
-			originated,
-			server,
-			lost: false,
+		// Filed where the scope lets it serve whole subtrees, each place as many segments above
+		// its path as the claim is broader: one claim, with one identity and one server.
+		const identity = {};
+		let current = route;
+		const lowered = (route: WireRoute, below: bigint): WireRoute =>
+			below === 0n ? route : { ...route, above: (route.above ?? 0n) + below };
+		const filed = this.#scope.filed(prefix).map(([at, below]) => {
+			const entry: RouteEntry = {
+				identity,
+				scope: this.#scope,
+				route: new Signal(lowered(route, below)),
+				originated,
+				server,
+				lost: false,
+			};
+			return { at, below, entry };
+		});
+		if (filed.length === 0) throw new Error("prefix is outside the origin scope");
+		server.onReject = (path, err) => {
+			const place = filed.find(({ at }) => Path.hasPrefix(at, path));
+			if (place) this.#state.refuse(path, place.entry, err);
 		};
-		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
+		const refresh = () => {
+			this.#state.rebuildOriginated();
+			for (const { at } of filed) this.#state.refreshPrefix(at);
+		};
 
 		let inserted = false;
 		let ended = false;
@@ -1693,37 +1748,39 @@ export class Producer implements Table {
 			open();
 			if (inserted) return;
 			this.#state.routes.mutate((routes) => {
-				const entries = routes.get(prefix);
-				if (entries) entries.unshift(entry);
-				else routes.set(prefix, [entry]);
+				for (const { at, entry } of filed) {
+					const entries = routes.get(at);
+					if (entries) entries.unshift(entry);
+					else routes.set(at, [entry]);
+				}
 			});
 			inserted = true;
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
+			refresh();
 		};
-		// Take the entry out of the table, then end (or renew) the server before the requests
-		// beneath it reroute, so none of them resolves through an answer it already gave.
+		// Take the entries out of the table, then end (or renew) the server before the requests
+		// beneath them reroute, so none of them resolves through an answer it already gave.
 		const remove = (server: () => void) => {
 			if (inserted) {
 				inserted = false;
 				this.#state.routes.mutate((routes) => {
-					const entries = routes.get(prefix);
-					if (!entries) return;
-					const index = entries.indexOf(entry);
-					if (index < 0) return;
-					entries.splice(index, 1);
-					if (entries.length === 0) routes.delete(prefix);
+					for (const { at, entry } of filed) {
+						const entries = routes.get(at);
+						if (!entries) continue;
+						const index = entries.indexOf(entry);
+						if (index < 0) continue;
+						entries.splice(index, 1);
+						if (entries.length === 0) routes.delete(at);
+					}
 				});
 			}
 			server();
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
+			refresh();
 		};
 		// A received route torn down by any path (its handle, or the scoped handle it came through)
 		// was lost with its session; only its announcer ending it on the wire withdraws it.
 		let lost = !originated;
 		const release = this.#hold(() => {
-			if (!ended) entry.lost = lost;
+			if (!ended) for (const { entry } of filed) entry.lost = lost;
 			ended = true;
 			this.#state.servers.delete(server);
 			remove(() => server.close());
@@ -1742,31 +1799,44 @@ export class Producer implements Table {
 		// served; only readers restart.
 		const update = (next: WireRoute, advance = false) => {
 			open();
-			const previous = entry.route.peek().instance;
+			const previous = current.instance;
 			const restart = inserted && previous !== next.instance;
-			if (restart) this.#state.restart(entry);
-			entry.route.set(next);
+			const renewed = previous !== next.instance || (current.epoch ?? 0n) !== (next.epoch ?? 0n);
+			current = next;
+			for (const { below, entry } of filed) {
+				if (restart) this.#state.restart(entry);
+				entry.route.set(lowered(next, below));
+			}
 			if (previous !== next.instance) {
 				// Wakes a peer's demand pinned to the old instance, which then refuses it.
 				if (advance) server.settled.update((n) => n + 1);
 				else server.reset();
 			}
 			if (!inserted) return;
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
-			this.#state.routes.mutate(() => {});
+			// A claim is new when it restarts, so it moves to the newest place and yields a tie
+			// it held to one that kept its instance (see bestCandidate).
+			this.#state.routes.mutate((routes) => {
+				if (!renewed) return;
+				for (const { at, entry } of filed) {
+					const entries = routes.get(at);
+					const index = entries?.indexOf(entry) ?? -1;
+					if (!entries || index <= 0) continue;
+					entries.splice(index, 1);
+					entries.unshift(entry);
+				}
+			});
+			refresh();
 		};
 
 		if (publishes && minted) {
 			server.handoff = {
 				current: () => {
-					const { instance, epoch } = entry.route.peek();
+					const { instance, epoch } = current;
 					return { instance: instance as Instance.Valid, epoch: epoch ?? 0n };
 				},
 				advance: (instance) => {
-					if (ended || this.#state.closed.peek() !== undefined || entry.route.peek().instance !== instance)
-						return;
-					update({ ...entry.route.peek(), instance: Instance.random(), epoch: 0n }, true);
+					if (ended || this.#state.closed.peek() !== undefined || current.instance !== instance) return;
+					update({ ...current, instance: Instance.random(), epoch: 0n }, true);
 				},
 			};
 		}
@@ -1774,24 +1844,23 @@ export class Producer implements Table {
 		const publisher = publishes ? this : undefined;
 		return makeClaim(
 			{
-				instance: () => entry.route.peek().instance as Instance.Valid,
+				instance: () => current.instance as Instance.Valid,
 				announce: insert,
 				withdraw: () => {
 					if (ended || !inserted) return;
 					remove(() => server.reset());
 				},
 				announced: () => inserted && this.#state.closed.peek() === undefined,
-				change: (changed) => update(WireRoute.normalize({ ...entry.route.peek(), ...changed })),
+				change: (changed) => update(WireRoute.normalize({ ...current, ...changed })),
 				close: release,
 				end: () => {
 					lost = false;
 					release();
 				},
-				info: () => (inserted && this.#state.closed.peek() === undefined ? entry.route.peek() : undefined),
+				info: () => (inserted && this.#state.closed.peek() === undefined ? current : undefined),
 				update: (next) => {
 					// A route naming no instance keeps the one it serves.
 					const named = WireRoute.normalize(next);
-					const current = entry.route.peek();
 					update(
 						named.instance === undefined
 							? { ...named, instance: current.instance, epoch: current.epoch }
@@ -1914,14 +1983,14 @@ export class Producer implements Table {
 		return this.#reader.follow(path, options);
 	}
 
-	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
-		return this.#reader.announced(scope, options);
+	/** The available broadcasts matching `filter`, as a live stream; see {@link Consumer.announced}. */
+	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
+		return this.#reader.announced(filter, options);
 	}
 
-	/** Every route change under `scope`; see {@link Consumer.routes}. @internal */
-	routes(scope?: Path.Pattern, options?: Announce.Options): announce.Routes {
-		return this.#reader.routes(scope, options);
+	/** Every route change matching `filter`; see {@link Consumer.routes}. @internal */
+	routes(filter?: Path.Pattern, options?: Announce.Options): announce.Routes {
+		return this.#reader.routes(filter, options);
 	}
 
 	/**
@@ -2195,6 +2264,7 @@ export class Consumer implements Reader {
 			local: (path, instance) => this.#local(scope.path(path), instance),
 			demand: (path, instance, signal) => this.#demand(scope.path(path), instance, signal),
 			covers: (prefix: Path.Valid) => scope.covers(prefix),
+			allowed: scope.allowed?.rebase(scope.root),
 		});
 	}
 
@@ -2573,31 +2643,32 @@ export class Consumer implements Reader {
 	}
 
 	/**
-	 * The paths announced matching `scope`, each reported as it becomes present or absent:
-	 * every currently advertised one arrives first as `present`. Another instance taking a
-	 * path over keeps it present; {@link follow} it to see the broadcast change.
-	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
-	 * peer sees it. Only routes whose literal name matches the scope are listed, unless
-	 * `options.covering` also asks for every dynamic or received route whose subtree
-	 * overlaps it. The stream ends when the origin closes or the consumer is closed. Hidden
-	 * routes are left out unless `options.hidden` opts in (see {@link Announce.Options}).
-	 * While open, it watches the scope's literal head: a `consume` session asks its peer for
-	 * announcements there.
+	 * The paths announced matching `filter` within this handle's scope, each reported as it
+	 * becomes present or absent: every currently advertised one arrives first as `present`.
+	 * Another instance taking a path over keeps it present; {@link follow} it to see the
+	 * broadcast change. The filter is any pattern, relative to the root, and only picks what is
+	 * listed: what the wildcards stood for is each announcement's `captures`. A local broadcast
+	 * appears once it announces, exactly as a peer sees it. Only routes whose literal name
+	 * matches the filter are listed, unless `options.covering` also asks for every dynamic or
+	 * received route whose subtree overlaps it. The stream ends when the origin closes or the
+	 * consumer is closed. Hidden routes are left out unless `options.hidden` opts in (see
+	 * {@link Announce.Options}). While open, it watches the filter's literal head: a `consume`
+	 * session asks its peer for announcements there.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		return announce.list(this.routes(scope, options));
+	announced(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
+		return announce.list(this.routes(filter, options));
 	}
 
 	/**
-	 * Every change to the routes matching `scope`, for code that forwards routes: a re-price
-	 * is an `update`, and another instance serving a path a `restart`. Scope, options and the
-	 * watch are as for {@link announced}.
+	 * Every change to the routes matching `filter`, for code that forwards routes: a re-price
+	 * is an `update`, and another instance serving a path a `restart`. The filter, options and
+	 * the watch are as for {@link announced}.
 	 *
 	 * @internal
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): announce.Routes {
+	routes(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): announce.Routes {
 		const producer = new announce.Producer();
-		const patterns = this.#scope.patterns(scope);
+		const patterns = this.#scope.patterns(filter);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
 		void this.#runAnnounced(producer, patterns, options?.hidden ?? false, options?.covering ?? false);
 		const consumer = producer.consume();
@@ -2620,13 +2691,13 @@ export class Consumer implements Reader {
 				scopes.find(
 					({ pattern, head }) =>
 						(covering || pattern.matches(path)) &&
-						(candidate.exact ? pattern.matches(path) : advertOverlaps(candidate, path, pattern)) &&
+						(candidate.exact ? pattern.matches(path) : scopeOverlaps(pattern, path)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
 			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);
 			const scope = entry && scopeOf(entry);
 			if (!entry || !scope) continue;
-			const relative = rooted.relative(path);
+			const relative = rooted.relative(path, entry.route);
 			if (relative === undefined) continue;
 			next.set(relative, {
 				identity: entry.identity,
@@ -2966,6 +3037,7 @@ export class Route {
 	 * Swap the credential the advertising request carries; see {@link RouteOptions.auth}.
 	 * Undefined advertises under the session's scope. Throws once the route or its broadcast closed.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	setAuth(auth?: Credential): void {
 		this.#control.change({ auth });
 	}
@@ -3062,6 +3134,7 @@ export class Claim {
 	 * Swap the credential the advertising request carries; see {@link RouteOptions.auth}.
 	 * Undefined advertises under the session's scope. Throws once the claim or the origin closed.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	setAuth(auth?: Credential): void {
 		this.#control.change({ auth });
 	}
@@ -3104,6 +3177,8 @@ export class Request {
 	// Answered by the application, or withdrawn by the origin before it was.
 	#state: "pending" | "answered" | "withdrawn" = "pending";
 	#publisher?: Producer;
+	// Settled once the origin withdraws it: nobody waits on its answer any more.
+	#unwanted = new Once<true>();
 
 	private constructor(path: Path.Valid, server: ServeState) {
 		this.path = path;
@@ -3131,8 +3206,19 @@ export class Request {
 		requestHandoff = (request) => request.#server.handoff;
 		finishRequest = (request, err) => {
 			request.#state = "withdrawn";
+			if (request.#unwanted.peek() === undefined) request.#unwanted.set(true);
 			void err;
 		};
+	}
+
+	/**
+	 * Resolves once no requester waits on the answer any more: each left, or the origin moved
+	 * them to another route. Final: a later requester gets a new request.
+	 */
+	// Public API for a claimant's owner, such as an orchestrator deciding whether to launch work.
+	// fallow-ignore-next-line unused-class-member
+	async unwanted(): Promise<void> {
+		await this.#unwanted;
 	}
 
 	/**

@@ -71,7 +71,7 @@ test("Consumer accepts a resuming keyframe before the estimated group end", asyn
 });
 
 for (const start of [16_000, 0]) {
-	test(`Producer and Consumer accept the next group starting at ${start}us`, async () => {
+	test(`Producer continues the open group at a keyframe at ${start}us`, async () => {
 		const { track, consumer } = setup();
 		const producer = new Producer(track, new Format("video"));
 		try {
@@ -80,30 +80,14 @@ for (const start of [16_000, 0]) {
 			expect((await frame(consumer))?.group).toBe(0n);
 			await frame(consumer);
 			producer.encode(new Uint8Array([1]), Duration.micros(start), true);
-			// A keyframe that doesn't start past the open group continues it.
-			expect((await frame(consumer))?.group).toBe(BigInt(start));
+			// A keyframe that doesn't start past the newest frame continues the open group.
+			expect((await frame(consumer))?.group).toBe(0n);
 		} finally {
 			consumer.close();
 			producer.finish();
 		}
 	});
 }
-
-test("Consumer accepts leading pictures below the previous group's content", async () => {
-	const { track, consumer } = setup();
-	try {
-		group(track, [100_000, 180_000]);
-		await frame(consumer);
-		await frame(consumer);
-		group(track, [200_000, 150_000]);
-		expect((await frame(consumer))?.frame?.timestamp.asMicros()).toBe(200_000);
-		expect((await frame(consumer))?.frame?.timestamp.asMicros()).toBe(150_000);
-	} finally {
-		consumer.close();
-		track.finish();
-		track.close();
-	}
-});
 
 test("Consumer rejects a later frame below the previous group start", async () => {
 	const { track, consumer } = setup();

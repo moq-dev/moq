@@ -3,15 +3,15 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"check": "tsc --noEmit"
+		"check": "bun check --no-script"
 	},
 	"dependencies": {
 		"@moq/clock": "workspace:*",
+		"@moq/hang": "workspace:*",
+		"@moq/net": "workspace:*",
 		"@moq/publish": "workspace:*",
 		"@moq/signals": "workspace:*",
 		"@moq/video": "workspace:*",
-		"@moq/hang": "workspace:*",
-		"@moq/net": "workspace:*",
 		"@moq/watch": "workspace:*"
 	},
 	"devDependencies": {
@@ -20,6 +20,6 @@
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
 		"playwright": "1.64.1",
 		"typescript": "7.0.2",
-		"vite": "^8.3.6"
+		"vite": "^8.3.8"
 	}
 }

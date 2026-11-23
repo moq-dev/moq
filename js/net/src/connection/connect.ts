@@ -43,7 +43,7 @@ const DEFAULT_MAX_STREAMS = 10_000;
 
 // Match moq-tokio so WebSocket readers have the same bandwidth-delay budget.
 const DEFAULT_RECEIVE_WINDOW = 4 << 20;
-const DEFAULT_STREAM_RECEIVE_WINDOW = 1 << 20;
+const DEFAULT_STREAM_RECEIVE_WINDOW = 4 << 20;
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
@@ -75,7 +75,7 @@ export interface WebSocketProps {
 	/** Connection receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	receiveWindow?: number;
 
-	/** Per-stream receive window in bytes (default: 1 MiB). Must be a positive safe integer. */
+	/** Per-stream receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	streamReceiveWindow?: number;
 }
 
@@ -121,18 +121,21 @@ const VERSIONS: Record<string, { alpn: string; setup?: Lite.Version }> = {
 	"moq-lite-03": { alpn: Lite.ALPN_03, setup: Lite.Version.DRAFT_03 },
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
+	"moq-transport-23": { alpn: Ietf.ALPN.DRAFT_23 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
 	"moq-transport-20": { alpn: Ietf.ALPN.DRAFT_20 },
 	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
 };
 
-// Experimental lite-07 is offered only when named.
-const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-lite-07-wip");
+// Experimental lite-07 and the partial draft-23 port are offered only when named.
+const OPT_IN = new Set(["moq-lite-07-wip", "moq-transport-23"]);
+const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => !OPT_IN.has(name));
 
 // moq-transport is pinned to qmux-01. Every other ALPN is currently
 // negotiated as `qmux-00.{alpn}`, but `null` lets the polyfill advertise every QMux draft
 // it knows and the server pick one.
 const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
+	[Ietf.ALPN.DRAFT_23]: "qmux-01",
 	[Ietf.ALPN.DRAFT_22]: "qmux-01",
 	[Ietf.ALPN.DRAFT_20]: "qmux-01",
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
@@ -261,6 +264,19 @@ export interface ConnectProps {
 	tokens?: readonly string[];
 
 	/**
+	 * Carry the connection credential, the first of {@link ConnectProps.tokens}, in the URL's
+	 * `auth` query parameter instead of SETUP and `jwt`. For a relay that reads a credential of
+	 * its own from the URL and takes a SETUP token or `jwt` to be its own kind. The peer's
+	 * verdict on it is judged like any connection credential, and a credential in a `Signal` of
+	 * tokens is replaced for each dial without changing the URL. Replacing it on a live session
+	 * takes a redial: the new credential rides no AUTH stream, so `answered()` waits for it.
+	 *
+	 * An `auth` parameter the URL already has is replaced. A URL's own `jwt` still wins: then
+	 * every token rides AUTH. A supplied `transport` never dials the URL, so it refuses `urlAuth`.
+	 */
+	urlAuth?: boolean;
+
+	/**
 	 * Build the session on `auth`, so it presents every token the handle holds and a route
 	 * naming one of its `Credential`s keeps it across a reconnect. Omit to give the session a handle
 	 * of its own, which ends with it.
@@ -351,6 +367,8 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.versions = normalizeVersions(props);
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
+	// The URL is never dialed for a supplied transport, so the credential it carries would be dropped.
+	if (props.transport && props.urlAuth) throw new TypeError("urlAuth cannot reach a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	if (signal.aborted) reached?.transport.close();
 	signal.throwIfAborted();
@@ -419,13 +437,14 @@ export class Reached {
  */
 export async function reachable(
 	url: URL,
-	props: Pick<ConnectProps, "tokens" | "versions" | "webtransport" | "websocket" | "timeout">,
+	props: Pick<ConnectProps, "tokens" | "urlAuth" | "versions" | "webtransport" | "websocket" | "timeout">,
 	signal: AbortSignal,
 ): Promise<Reached | undefined> {
 	if (!isWebTransportSupported() || signal.aborted) return undefined;
 	const tokens = props.tokens ?? [];
 	const offered = offer(normalizeVersions(props));
-	const dialUrl = parse(credential(url, tokens, offered.setupToken).url).url;
+	const carrier = { setupToken: offered.setupToken, urlAuth: props.urlAuth };
+	const dialUrl = parse(credential(url, tokens, carrier).url).url;
 	const { promise: cancel, resolve } = Promise.withResolvers<void>();
 	const onAbort = () => resolve();
 	signal.addEventListener("abort", onAbort, { once: true });
@@ -458,9 +477,10 @@ async function connectInner(
 	reached?: WebTransport,
 ): Promise<[Session, Presentation]> {
 	const offered = offer(props.versions);
-	const dial = credential(raw, tokens, offered.setupToken);
+	const carrier = { setupToken: offered.setupToken, urlAuth: props.urlAuth };
+	const dial = credential(raw, tokens, carrier);
 	const url = parse(dial.url).url;
-	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
+	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, carrier);
 	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,
@@ -628,13 +648,15 @@ async function negotiate(
 	console.debug(show(parse(url)), "negotiated ALPN:", protocol ?? "(none)");
 
 	const ietf =
-		protocol === Ietf.ALPN.DRAFT_22
-			? Ietf.Version.DRAFT_22
-			: protocol === Ietf.ALPN.DRAFT_20
-				? Ietf.Version.DRAFT_20
-				: protocol === Ietf.ALPN.DRAFT_18
-					? Ietf.Version.DRAFT_18
-					: undefined;
+		protocol === Ietf.ALPN.DRAFT_23
+			? Ietf.Version.DRAFT_23
+			: protocol === Ietf.ALPN.DRAFT_22
+				? Ietf.Version.DRAFT_22
+				: protocol === Ietf.ALPN.DRAFT_20
+					? Ietf.Version.DRAFT_20
+					: protocol === Ietf.ALPN.DRAFT_18
+						? Ietf.Version.DRAFT_18
+						: undefined;
 	if (ietf !== undefined) {
 		return await handshakeAlpn(url, session, ietf, wiring);
 	} else if (protocol === Lite.ALPN_07_WIP) {

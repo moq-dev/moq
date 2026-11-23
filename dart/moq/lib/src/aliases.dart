@@ -5,7 +5,7 @@ import 'package:moq_ffi/moq_ffi.dart';
 // values are the exact same objects, so every generated method applies
 // unchanged and the prefixed names stay valid. `Delay`, `Subscription`,
 // `TrackInfo`, `TrackRefresh`, and `Timestamp` are extension types instead,
-// which are the same objects too but add constructors: an omitted delay bound or
+// which are the same objects too but add constructors: an omitted max delay or
 // max age is the zero moq-net defaults to, where the generated record leaves it
 // null (no limit), an omitted refresh asks for nothing, and a timestamp is built
 // either scaled or [Timestamp.unscaled], as in Rust.
@@ -158,21 +158,22 @@ extension type Timestamp._(MoqTimestamp _timestamp) implements MoqTimestamp {
 
 /// How far behind the live edge a subscriber or decoder plays: where it starts, and how late it may fall.
 extension type Delay._(MoqDelay _delay) implements MoqDelay {
-  /// `min` is the target latency, where a cold join starts, and how long a decoder waits for a
-  /// missing group, and `max` is how far a non-latest group may fall behind before it is skipped.
-  /// Both default to zero, moq-net's default. An explicit null `min` leaves it unstated, which a
-  /// decoder starts as zero, waiting a missing group for `max` instead (an audio decoder floors it
-  /// at zero and waits only its playout estimate, which can be larger; a catalog warmup or an audio
-  /// decoder's playout delay still states a `min` to the publisher), and an
-  /// explicit null `max` sets no subscriber limit. A `min` past `max` starts at `max`.
-  Delay({Duration? min = Duration.zero, Duration? max = Duration.zero})
+  /// `min` is the target latency, and `max` is how far a non-latest group may fall behind before
+  /// it is skipped, and how far newer media may run past a missing group before a decoder gives
+  /// it up.
+  /// Once `min` is stated, zero included, a [Range] with no start is a live join that far behind
+  /// the live edge. Omitted or null, it is unstated: such a range reaches back as far as `max`
+  /// allows, and a decoder starts it as zero. `max` defaults to zero, moq-net's default, and an
+  /// explicit null sets no subscriber limit. A `min` past `max` starts a live join no further
+  /// back than the group covering the point `max` behind the live edge.
+  Delay({Duration? min, Duration? max = Duration.zero})
     : this._(MoqDelay(min: min, max: max));
 }
 
 /// Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering.
 extension type Subscription._(MoqSubscription _subscription)
     implements MoqSubscription {
-  /// An omitted `delay` is a zero [Delay], so a bare `Subscription()` is moq-net's defaults.
+  /// An omitted `delay` is a bare [Delay], so a bare `Subscription()` is moq-net's defaults.
   Subscription({
     int priority = 0,
     MoqDelay? delay,
@@ -188,16 +189,18 @@ extension type Subscription._(MoqSubscription _subscription)
        );
 }
 
-/// moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once.
+/// moq-net's defaults, whose `delay` (no `min`, a zero `max`) starts at the newest group and skips a superseded one at once.
 ///
 /// A null subscription and a bare `Subscription()` mean the same.
 Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 
-/// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
+/// A span of a track to deliver: from the group containing `start` through the group containing
+/// `end`, each a [Timestamp.unscaled] time in the track's timescale (a scaled one is refused).
+/// Every end includes its whole group. A null `start` is no start, which the subscription's
+/// [Delay] places: a stated `min` is a live join that far behind the live edge (zero is the
+/// latest group), and an unstated one reaches back as far as `max` allows. A null `end` keeps
+/// following the live edge.
 typedef Range = MoqRange;
-
-/// Where one end of a [Range] falls: the oldest group (a start only), absolute, relative to the latest group, or the group containing a time.
-typedef Anchor = MoqAnchor;
 
 /// Which pending group the publisher sends first.
 typedef Order = MoqOrder;

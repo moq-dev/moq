@@ -16,10 +16,11 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn lite07() -> Version {
@@ -32,15 +33,17 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 	let named = |kind: Kind, name: &str| match kind {
 		Kind::Track => name.to_string(),
 		Kind::Datagrams => format!("d:{name}"),
+		kind => panic!("unexpected kind {kind:?}"),
 	};
 	match kio::clock::timeout(TIMEOUT, tracks.next())
 		.await
 		.expect("listing stalled")
 	{
-		Ok(Some(TracksEvent::Added { name, info })) => format!("+{}", named(info.kind(), &name)),
-		Ok(Some(TracksEvent::Removed { kind, name })) => format!("-{}", named(kind, &name)),
-		Ok(Some(TracksEvent::Finished { kind, name })) => format!("~{}", named(kind, &name)),
+		Ok(Some(TracksEvent::Added { name, info, .. })) => format!("+{}", named(info.kind(), &name)),
+		Ok(Some(TracksEvent::Removed { kind, name, .. })) => format!("-{}", named(kind, &name)),
+		Ok(Some(TracksEvent::Finished { kind, name, .. })) => format!("~{}", named(kind, &name)),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
+		Ok(Some(event)) => panic!("unexpected event {event:?}"),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
 	}
@@ -122,6 +125,7 @@ async fn a_listing_carries_track_info() {
 	let Some(TracksEvent::Added {
 		name,
 		info: Listed::Track(info),
+		..
 	}) = event
 	else {
 		panic!("expected an add, got {event:?}");
@@ -165,6 +169,7 @@ async fn a_session_lists_its_peers_datagram_tracks() {
 	let Some(TracksEvent::Added {
 		name,
 		info: Listed::Datagrams(info),
+		..
 	}) = event
 	else {
 		panic!("expected the datagram track, got {event:?}");

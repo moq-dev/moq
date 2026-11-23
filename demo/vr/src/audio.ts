@@ -92,6 +92,7 @@ export class Spatial {
 	}
 
 	// The mix every placement feeds, for meters and the harness.
+	// fallow-ignore-next-line unused-class-member
 	get output(): AudioNode {
 		return this.#out;
 	}

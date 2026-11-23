@@ -120,6 +120,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "listen-version",
+		delimiter = ',',
 		long = "listen-version",
 		env = "MOQ_LISTEN_VERSION",
 		setting = "listen.version",
@@ -133,7 +134,8 @@ pub struct Config {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
@@ -332,7 +334,8 @@ pub(crate) struct Legacy {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		),
 		hide = true
 	)]
@@ -879,7 +882,7 @@ peers = "peers.toml"
 		};
 
 		let server = config.init_streams().unwrap();
-		assert!(matches!(server.local_addr(), Err(crate::Error::NoBackend(_))));
+		assert!(server.local_addr().is_none());
 	}
 
 	/// A stream-only server refuses each setting only QUIC reads rather than
@@ -950,7 +953,7 @@ peers = "peers.toml"
 		config.tls.generate = vec!["localhost".to_string()];
 
 		let server = config.init(Default::default()).unwrap();
-		assert!(server.local_addr().is_ok());
+		assert!(server.local_addr().is_some());
 	}
 
 	/// The handshake deadline defaults on, from the parser and in code alike, and

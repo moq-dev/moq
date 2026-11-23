@@ -27,6 +27,11 @@ Callers left, from `rg 'error::control|protocol_error' rs/moq-net/src`:
 - `auth::protocol_error`: the auth token presenter (`lite/session.rs`), the
   publisher's auth serve (`lite/publisher.rs`), and `lite::error::control`
   itself.
+- `DatagramServe` (`lite/subscriber.rs:2960, 3009-3012, 3179-3185`, added
+  2026-11-21 from the pre-cut audit): currently logs and aborts the track on
+  malformed `DATAGRAMS_INFO` or trailing messages on the datagram subscribe
+  stream instead of closing the session with `SessionError::ProtocolViolation`
+  via `Recv::Malformed`.
 
 Each reader returns the outcome typed, and the session close on a malformed
 message (`SessionError::ProtocolViolation`) moves to where `Malformed` is
@@ -36,7 +41,3 @@ same pattern and leave it out only if it cannot share the reader.
 Public API: none. Wire: none. Cover each reader with a test of the three
 outcomes, as `a_read_tells_a_cut_stream_from_malformed_bytes` does for the
 reader.
-
-## Related
-
-- [moq-net's last pub items with a single container-reader caller go private](/quest/m2/unused-api/net.md) - the rest of the moq-net sweep

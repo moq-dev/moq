@@ -305,6 +305,7 @@ fn waiting(c: &mut Criterion) {
 											| moq_net::origin::RouteKind::Update
 											| moq_net::origin::RouteKind::Restart,
 										announce: update,
+										..
 									} if update.prefix.as_str().starts_with(&prefix) => {
 										seen.insert(update.prefix);
 									}
@@ -381,6 +382,7 @@ fn shared_requests(c: &mut Criterion) {
 								if let moq_net::origin::RouteEvent {
 									kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Restart,
 									announce: update,
+									..
 								} = announced.next().await.unwrap()
 									&& update.prefix.as_str().starts_with(&prefix)
 								{

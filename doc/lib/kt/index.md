@@ -33,7 +33,7 @@ Share `Timebase(broadcast)` through `ContainerInit` when several imports use one
 timeline; omitting it keeps an independent offset. A timebase belongs to its broadcast
 and does not keep it open. `ContainerProducer` takes chunks split anywhere, so a raw
 byte stream needs no other importer.
-`ContainerFormat.FMP4` splits each fragment into one frame per sample.
+`ContainerFormat.fmp4()` splits each fragment into one frame per sample.
 Construct readers with `CatalogConsumer.subscribe`, `TrackConsumer.subscribe`, or
 `GroupConsumer.fetch`; the last two take a catalog `Rendition` and follow its broadcast and
 track themselves. For arrival-order reads, decode each group from
@@ -76,13 +76,13 @@ Moq.connect("https://relay.example.com").use { moq ->
     // Hidden until the catalog is filled; hold the route while it should stay announced.
     val route = moq.route("my-stream.hang", RouteOptions(hidden = true))
     val broadcast = route.broadcast()
-    val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusInit))
+    val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.opus(), data = opusInit))
     audio.writeFrame(Frame(payload = packet, timestamp = Timestamp(960u, 48_000u)))
     audio.cut() // audio has no keyframes, so this is what gives it groups
 
     val video = dev.moq.video.Producer(
         CatalogProducer(broadcast),
-        dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = dev.moq.video.FrameRate(30000u, 1001u)),
+        dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.rgba(), width = 1280u, height = 720u, framerate = dev.moq.video.FrameRate(30000u, 1001u)),
         output = VideoEncoderOutput(codec = VideoCodec.h264(), bitrate = null, join = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestamp = pts, data = rgba))

@@ -1,0 +1,186 @@
+{
+	"about": [
+		"The lite-07 range table: which groups a subscription delivers. rs/moq-net/tests/integration/range_table.rs and js/net/src/range-table.test.ts each run it over lite-07 within their language, and rs/moq-tokio/tests/integration/relay_fill.rs through a JavaScript relay between Rust peers (just test relay-fill).",
+		"Modes: direct, the origin's own track; cold, a copy nothing read before; warm, a copy its readers filled from the origin's history; late, a copy its readers joined before the origin wrote a group, so it received each live; chain, a Rust relay's copy, filled by the case's copy readers, serving a reader one relay hop further; switch, a reader moving mid-read from one route to another whose copy the case's copy readers filled (in Rust, each route a relay two hops from the origin), the first stalled after the oldest half of the range and the head of the origin's last group, still open until the switch, so the second supplies the rest, and a reader joining after the switch gets the same; relay-cold and relay-warm, the JavaScript relay's copy.",
+		"groups: the origin's group starts in milliseconds, appended (linked by Previous Start) unless append is false. frames: how many frames each group holds, one per millisecond from its start; a reader gets each group it gets whole. span: how many milliseconds after its start each group ends whole (GROUP_END), omitted for no declared end, so the time from that End to the next group's start is a pause no group contains. open: the group starts the origin leaves unfinished, so whether they end whole is not yet known.",
+		"copy: the readers that shape what the copy holds before the case's reader joins; each stays subscribed. evict ages out every group nobody touches but the live edge.",
+		"read: the case's reader. ranges default to one with no start; a range's start is a time, or { live } in milliseconds behind the live edge, and its end a time, either omitted for none.",
+		"deliver: the group starts the reader gets, in every mode alike. asks: whether the warm copy must ask upstream rather than answer from what it holds, shown by stalling its upstream.",
+		"known: a mode, and lang (rs or js) when only one diverges, that still gets the case wrong, skipped until the quest that owns the fix removes the marker. A warm marker covers relay-warm too, and a cold one relay-cold."
+	],
+	"groups": [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000],
+	"frames": 3,
+	"cases": [
+		{
+			"name": "a time range delivers the groups containing its start and its end",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 2500, "end": 4500 }] },
+			"deliver": [2000, 3000, 4000],
+			"asks": false
+		},
+		{
+			"name": "a time end between two groups stops after the group containing it",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 1500, "end": 1999 }] },
+			"deliver": [1000],
+			"asks": false
+		},
+		{
+			"name": "a time range inside the newest group delivers it",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 9500, "end": 9999 }] },
+			"deliver": [9000]
+		},
+		{
+			"name": "a copy holding only an older group asks for a time range inside one group",
+			"copy": [{ "ranges": [{ "start": 1000, "end": 1000 }] }],
+			"read": { "ranges": [{ "start": 5500, "end": 5999 }] },
+			"deliver": [5000],
+			"asks": true
+		},
+		{
+			"name": "a time start in the pause past a whole group starts at the next group",
+			"span": 400,
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 1700, "end": 3500 }] },
+			"deliver": [2000, 3000],
+			"asks": false
+		},
+		{
+			"name": "a time end in the pause past a whole group stops after that group",
+			"span": 400,
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 300, "end": 1700 }] },
+			"deliver": [0, 1000],
+			"asks": false
+		},
+		{
+			"name": "a time start with no end follows the live edge",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 7500 }] },
+			"deliver": [7000, 8000, 9000],
+			"asks": false
+		},
+		{
+			"name": "a sparse copy asks for a time range it holds none of",
+			"copy": [{ "ranges": [{ "start": 1000, "end": 2000 }] }, { "ranges": [{ "start": { "live": 0 } }] }],
+			"read": { "ranges": [{ "start": 7000, "end": 8000 }] },
+			"deliver": [7000, 8000],
+			"asks": true
+		},
+		{
+			"name": "a live join starts at the group containing the live edge minus its lag, which only upstream answers",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": { "live": 2000 } }] },
+			"deliver": [7000, 8000, 9000],
+			"asks": true
+		},
+		{
+			"name": "a live join reaching past what the copy holds asks upstream",
+			"copy": [{ "ranges": [{ "start": { "live": 1000 } }] }],
+			"read": { "ranges": [{ "start": { "live": 3500 } }] },
+			"deliver": [5000, 6000, 7000, 8000, 9000],
+			"asks": true
+		},
+		{
+			"name": "a live join an earlier reader's was answered for asks upstream again",
+			"copy": [{ "ranges": [{ "start": { "live": 2000 } }] }],
+			"read": { "ranges": [{ "start": { "live": 2000 } }] },
+			"deliver": [7000, 8000, 9000],
+			"asks": true
+		},
+		{
+			"name": "a live join with an end delivers up to it",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": { "live": 2500 }, "end": 8000 }] },
+			"deliver": [6000, 7000, 8000],
+			"asks": true
+		},
+		{
+			"name": "a live join starting past its end delivers nothing",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": { "live": 1000 }, "end": 5000 }] },
+			"deliver": [],
+			"asks": true
+		},
+		{
+			"name": "an oldest reader on a copy a live reader started",
+			"copy": [{ "ranges": [{ "start": { "live": 0 } }] }],
+			"read": {},
+			"deliver": [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000],
+			"asks": true
+		},
+		{
+			"name": "a live reader on a copy an oldest reader filled",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": { "live": 0 } }] },
+			"deliver": [9000],
+			"asks": true
+		},
+		{
+			"name": "a time range and a live join in one subscription",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 1000, "end": 2000 }, { "start": { "live": 1000 } }] },
+			"deliver": [1000, 2000, 8000, 9000],
+			"asks": true,
+			"known": [
+				{
+					"mode": "chain",
+					"lang": "rs",
+					"quest": "/quest/m2/time-addressing/relayed-live-join-start.md",
+					"why": "a relay whose copy holds the track sends SUBSCRIBE_START before upstream places the join, naming it no start"
+				},
+				{
+					"mode": "relay-warm",
+					"quest": "/quest/m2/time-addressing/relayed-live-join-start.md",
+					"why": "the JavaScript relay's warm copy delivers only the time range's groups"
+				}
+			]
+		},
+		{
+			"name": "a time start between held groups linked by Previous Start is answered from the copy",
+			"copy": [{ "ranges": [{ "start": 2000, "end": 3000 }] }],
+			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
+			"deliver": [2000, 3000],
+			"asks": false
+		},
+		{
+			"name": "a time start past the frames of an open held group asks upstream, since its End may leave the time in a pause",
+			"open": [2000],
+			"copy": [{ "ranges": [{ "start": 2000, "end": 3000 }] }],
+			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
+			"deliver": [2000, 3000],
+			"asks": true
+		},
+		{
+			"name": "a time start between held groups with one missing between them asks upstream",
+			"copy": [{ "ranges": [{ "start": 1000, "end": 1000 }] }, { "ranges": [{ "start": 3000, "end": 3000 }] }],
+			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
+			"deliver": [2000, 3000],
+			"asks": true
+		},
+		{
+			"name": "a time start at a group the copy lacks asks upstream",
+			"copy": [{ "ranges": [{ "start": { "live": 0 } }] }],
+			"read": { "ranges": [{ "start": 3000, "end": 3000 }] },
+			"deliver": [3000],
+			"asks": true
+		},
+		{
+			"name": "a copy that evicted a time range asks for it again",
+			"copy": [{}],
+			"evict": true,
+			"read": { "ranges": [{ "start": 2000, "end": 4000 }] },
+			"deliver": [2000, 3000, 4000],
+			"asks": true
+		},
+		{
+			"name": "a time start between groups a publisher created unlinked",
+			"append": false,
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
+			"deliver": [2000, 3000],
+			"asks": true
+		}
+	]
+}

@@ -10,15 +10,17 @@ use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Pattern, Patterns, Version, origin, track};
+use moq_net::{Prefixes, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Publish a broadcast at `path` whose `video` track carries the path.
@@ -50,9 +52,8 @@ fn tenant(origin: &origin::Producer, root: &str) -> origin::Consumer {
 	origin
 		.mount("tenant-b/shared", "tenant-a/public")
 		.unwrap()
-		.scope(root, &Patterns::from(Pattern::all()))
+		.scope(root, &Prefixes::all())
 		.unwrap()
-		.with_proxy(true)
 		.consume()
 }
 
@@ -72,14 +73,17 @@ async fn drain(routes: &mut origin::Routes) -> Vec<(bool, String)> {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start,
 				announce,
+				..
 			} => events.push((true, announce.prefix.to_string())),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End,
 				announce,
+				..
 			} => events.push((false, announce.prefix.to_string())),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Offline,
 				announce,
+				..
 			} => events.push((false, format!("offline {}", announce.prefix))),
 			_ => {}
 		}
@@ -247,9 +251,8 @@ async fn a_claim_above_the_target_outranks_a_claim_above_the_mount_point() {
 	let handle = relay
 		.mount("tenant-b/x/shared", "tenant-a/public")
 		.unwrap()
-		.scope("", &Patterns::from(Pattern::all()))
+		.scope("", &Prefixes::all())
 		.unwrap()
-		.with_proxy(true)
 		.consume();
 	let _downstream = link(version, handle, &viewer).await;
 	settle().await;

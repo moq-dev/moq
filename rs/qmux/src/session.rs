@@ -27,7 +27,7 @@ pub(crate) struct Inner {
 	state: Mutex<State>,
 	/// Updated by the driver, so stats never take the lock.
 	pub(crate) wire: net::Wire,
-	socket_stats: Option<SharedSocketStats>,
+	pub(crate) socket_stats: Option<SharedSocketStats>,
 	address: Address,
 }
 
@@ -523,16 +523,16 @@ impl poll::SendStream for SendStream {
 		self.inner.lock().conn.send_stream(self.id).offset()
 	}
 
-	/// [`Acked::Sent`](poll::Acked::Sent) once the transport took the bytes, which is not the
-	/// peer acknowledging them. A reset or stop keeps the prefix that went out before it.
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &send::Offset) -> Poll<Result<poll::Acked, Error>> {
+	/// Ready once the transport took the bytes, which TCP then delivers unless the link fails.
+	/// A reset or stop keeps the prefix that went out before it.
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &send::Offset) -> Poll<Result<(), Error>> {
 		let mut state = self.inner.lock();
 		let mut stream = state.conn.send_stream(self.id);
 		if u64::from(*offset) <= stream.acked_len() {
-			return Poll::Ready(Ok(poll::Acked::Sent));
+			return Poll::Ready(Ok(()));
 		}
 		match ready!(stream.poll_acked(waiter, *offset)) {
-			Ok(()) => Poll::Ready(Ok(poll::Acked::Sent)),
+			Ok(()) => Poll::Ready(Ok(())),
 			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
@@ -731,6 +731,13 @@ impl poll::RecvStream for RecvStream {
 		self.inner.lock().conn.recv_stream(self.id).set_priority(priority);
 	}
 
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		if self.end != RecvEnd::Open {
+			return Some(0);
+		}
+		Some(self.inner.lock().conn.recv_stream(self.id).set_window(window))
+	}
+
 	fn stop(&mut self, code: u32) {
 		if self.end != RecvEnd::Open {
 			return;
@@ -826,6 +833,10 @@ impl poll::Lease for RecvLease<'_> {
 
 	fn is_fin(&self) -> bool {
 		self.lease().is_fin()
+	}
+
+	fn set_window(&mut self, window: u64) {
+		self.lease_mut().set_window(window);
 	}
 
 	fn release(mut self) {

@@ -19,14 +19,12 @@ const PEER: NodeId = NodeId {
 };
 
 fn subscriber() -> (Subscriber, crate::origin::Consumer) {
-	super::super::tests::restart_subscriber(SinkSession::new(Default::default()))
+	super::super::tests::restart_subscriber(SinkSession::new(Default::default()), false)
 }
 
 /// A subscriber whose origin forwards, as a relay's does.
 fn forwarding() -> (Subscriber, crate::origin::Consumer) {
-	let (mut subscriber, consumer) = subscriber();
-	subscriber.origin = subscriber.origin.with_proxy(true);
-	(subscriber, consumer)
+	super::super::tests::restart_subscriber(SinkSession::new(Default::default()), true)
 }
 
 /// The peer's route to `node`, which it reaches itself or through the hops after it.
@@ -71,8 +69,8 @@ fn start(path: &'static str) -> Wire {
 	}
 }
 
-fn limited(pattern: &str) -> Permit {
-	Permit::limited([pattern.parse::<crate::Pattern>().unwrap()].into_iter().collect())
+fn limited(prefix: &str) -> Permit {
+	Permit::limited(crate::Prefix::try_from(prefix).unwrap().into())
 }
 
 /// Send the peer what the node asks of it, which the peer answers at once, then serve
@@ -254,8 +252,8 @@ async fn claims_never_pass_the_announce_cap() {
 #[kio::test]
 async fn the_limit_admits_each_claim() {
 	let (subscriber, _consumer) = subscriber();
-	let public = limited("live/*/public/**");
-	let everything = limited("live/**");
+	let public = limited("live/a/public");
+	let everything = limited("live");
 
 	let mut routed = asking(&subscriber, &public);
 	for msg in [start("live/a/public/x"), start("live/a/private/y")] {
@@ -271,6 +269,177 @@ async fn the_limit_admits_each_claim() {
 	routed.limit(&public).unwrap();
 	pump(&mut routed, &subscriber);
 	assert_eq!(served(&routed), ["live/a/public/x"]);
+}
+
+/// A claim broader than the limit is filed at each prefix of the limit beneath it, as many
+/// segments above it as it is broader, and moves as the limit does.
+#[kio::test]
+async fn a_claim_broader_than_the_limit_is_filed_at_the_limit() {
+	let (subscriber, consumer) = subscriber();
+	let mut cursor = consumer.routes();
+	let mut routed = asking(&subscriber, &limited("customer"));
+	routed.receive(start("")).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["customer"]);
+	assert_eq!(cursor.expect_next_active("customer").await.lane.above, 1);
+
+	let both = Permit::limited(
+		["customer/a/b", "other"]
+			.map(|prefix| crate::Prefix::try_from(prefix).unwrap())
+			.into_iter()
+			.collect(),
+	);
+	routed.limit(&both).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["customer/a/b", "other"]);
+
+	// A claim within the limit stays where it is.
+	routed.receive(start("other/x")).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["customer/a/b", "other", "other/x"]);
+	let above = |path: &str| {
+		let ((_, _, _), entry) = (routed.served.iter())
+			.find(|((_, served, _), _)| served.as_str() == path)
+			.expect("served");
+		entry.route.route.lane.above
+	};
+	assert_eq!((above("customer/a/b"), above("other"), above("other/x")), (3, 1, 0));
+}
+
+/// A grant change holds unsynced only the readers whose prefix it newly shows something
+/// in, until an answer after it is in; a reader it misses, and every reader on a
+/// narrowing, stays synced, since nothing new can arrive there.
+#[kio::test]
+async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
+	let (subscriber, consumer) = subscriber();
+	let granting = |paths: &[&str]| {
+		Permit::granting(
+			paths
+				.iter()
+				.map(|path| crate::Prefix::try_from(*path).unwrap())
+				.collect(),
+		)
+	};
+	let all = crate::Prefixes::all();
+	let everything = consumer.routes();
+	let a = consumer.scope("a", &all).unwrap().routes();
+	let synced = |routes: &crate::origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+	let answer = |routed: &mut Routed, prefix: u64| {
+		pump(routed, &subscriber);
+		routed.receive(Wire::Synced { prefix }).unwrap();
+		routed.release();
+	};
+
+	let mut routed = Routed::new(&subscriber, 1, &granting(&["a"]), None, None).unwrap();
+	routed.want(Path::empty(), subscriber.origin.snapshot(""));
+	answer(&mut routed, 0);
+	assert!(synced(&everything) && synced(&a));
+
+	// `b` joins the grant: the whole tree waits for it, and `a` cannot gain from it.
+	routed.limit(&granting(&["a", "b"])).unwrap();
+	assert!(!synced(&everything), "the whole tree holds the new region");
+	assert!(synced(&a), "a region the change misses stays synced");
+	answer(&mut routed, 1);
+	assert!(synced(&everything));
+
+	// A narrowing shows nothing new.
+	routed.limit(&granting(&["a"])).unwrap();
+	assert!(
+		synced(&everything) && synced(&a),
+		"a narrowing keeps every reader synced"
+	);
+
+	// Two gains before an answer hold only what each shows.
+	routed.limit(&granting(&["a", "b"])).unwrap();
+	routed.limit(&granting(&["a", "b", "c"])).unwrap();
+	assert!(!synced(&everything));
+	assert!(synced(&a), "neither gain shows `a` anything new");
+
+	// Narrowed within a gain still unanswered, what it keeps is still held.
+	let bc = consumer.scope("b/c", &all).unwrap().routes();
+	let bd = consumer.scope("b/d", &all).unwrap().routes();
+	routed.limit(&granting(&["a", "b/c"])).unwrap();
+	assert!(!synced(&bc), "`b/c` may still be in the unheard answer");
+	assert!(synced(&bd), "`b/d` is no longer shown");
+	answer(&mut routed, 2);
+	assert!(synced(&everything) && synced(&bc));
+}
+
+/// A grant change that shows more within a prefix asked, though within no reader's, still
+/// sends an edit: a reader arriving there before its answer waits for it, since the peer
+/// may already have sent what the change shows.
+#[kio::test]
+async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
+	let (subscriber, consumer) = subscriber();
+	let wants = prefixes("a", 17, 4000);
+	let granting = |more: &[&str]| {
+		Permit::granting(
+			(wants.iter().map(|want| crate::Prefix::try_from(want.as_str()).unwrap()))
+				.chain(more.iter().map(|prefix| crate::Prefix::try_from(*prefix).unwrap()))
+				.collect(),
+		)
+	};
+	// The grant covers each want and nothing else under `a`.
+	let mut routed = Routed::new(&subscriber, 1, &granting(&[]), None, None).unwrap();
+	// Too many to ask for one by one: the session asks for `a`.
+	for want in wants.iter().cloned() {
+		routed.want(want.clone(), subscriber.origin.snapshot(want));
+	}
+	pump(&mut routed, &subscriber);
+	let asked: Vec<u64> = routed.asked.keys().copied().collect();
+	assert_eq!(asked.len(), 1);
+	routed.receive(Wire::Synced { prefix: asked[0] }).unwrap();
+	routed.release();
+
+	routed.limit(&granting(&["a/new"])).unwrap();
+	let fresh = Path::from_static("a/new/x");
+	let reader = consumer.scope(fresh.as_str(), &crate::Prefixes::all());
+	let reader = reader.unwrap().routes();
+	routed.want(fresh.clone(), subscriber.origin.snapshot(fresh));
+	routed.release();
+	let synced = |routes: &crate::origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+	assert!(!synced(&reader), "the change's answer is still to come");
+	pump(&mut routed, &subscriber);
+	routed.release();
+	assert!(synced(&reader));
+}
+
+/// A peer that leaves an edit unanswered while its grant keeps changing holds one prefix
+/// per want and prefix it still grants, however many changes it sends; and a region too
+/// deep to lie beneath the session's root shows nothing there, holding no reader back.
+#[kio::test]
+async fn grant_changes_hold_only_what_the_grant_still_shows() {
+	let (mut subscriber, _consumer) = subscriber();
+	subscriber.origin = subscriber.origin.scope("r", &crate::Prefixes::all()).unwrap();
+	let granting = |prefixes: &[String]| {
+		Permit::granting(
+			(prefixes.iter())
+				.map(|prefix| crate::Prefix::try_from(prefix.as_str()).unwrap())
+				.collect(),
+		)
+	};
+	let held = ["a".to_string(), "c".to_string()];
+	let mut routed = Routed::new(&subscriber, 1, &granting(&held[..1]), None, None).unwrap();
+	routed.want(Path::empty(), subscriber.origin.snapshot(""));
+	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
+	pump(&mut routed, &subscriber);
+	let stream = routed.stream();
+	// The answer never comes.
+	routed.limit(&granting(&held)).unwrap();
+	assert!(matches!(stream.try_wire(), Some(Msg::Ask(_))));
+	// Each gain the grant takes back again lets go of what it held.
+	for i in 0..64 {
+		let mut more = held.to_vec();
+		more.push(format!("b{i}"));
+		routed.limit(&granting(&more)).unwrap();
+		routed.limit(&granting(&held)).unwrap();
+	}
+	assert_eq!(routed.gained.len(), 1, "only `c` is held, for the whole tree");
+
+	let mut deep = held.to_vec();
+	deep.push("x".repeat(crate::Path::MAX_BYTES));
+	routed.limit(&granting(&deep)).unwrap();
+	assert_eq!(routed.gained.len(), 1);
 }
 
 /// A forwarding neighbour's claims wait for the floor that closes their batch, and are
@@ -408,8 +577,8 @@ async fn a_routing_neighbour_keeps_a_whole_permit() {
 	let mut routed = routing(&subscriber);
 	routed.limit(&Permit::default()).unwrap();
 	// A grant that names everything confines nothing, as a relay's token for a peer does.
-	routed.limit(&limited("**")).unwrap();
-	let narrowed = routed.limit(&limited("live/**"));
+	routed.limit(&limited("")).unwrap();
+	let narrowed = routed.limit(&limited("live"));
 	assert!(matches!(narrowed, Err(Error::Unauthorized)), "{narrowed:?}");
 }
 
@@ -520,6 +689,23 @@ fn a_set_past_one_request_is_asked_for_more_coarsely() {
 			.all(|prefix| regions.iter().any(|region| prefix.has_prefix(region)))
 	);
 	assert_eq!(asked.len(), 17);
+
+	// Regions too many on their own give way to the longest prefix at least two of them
+	// share, up to the root, and none goes unasked.
+	let mut regions = prefixes("g/h", 16, 4000);
+	let lone = prefixes("g/i", 1, 4000);
+	regions.extend(lone.iter().cloned());
+	regions.insert(path("k"));
+	assert!(!fits(&regions));
+	let mut expected = lone;
+	expected.extend([path("g/h"), path("k")]);
+	assert_eq!(super::coarsen(regions.clone(), &regions), expected);
+	let regions: std::collections::BTreeSet<Path> =
+		(0..17).map(|i| path(&format!("r{i}/{}", "x".repeat(4000)))).collect();
+	assert_eq!(
+		super::coarsen(regions.clone(), &regions),
+		[Path::empty()].into_iter().collect()
+	);
 }
 
 /// A claim whose path this node cannot resolve lies in a prefix it cannot name, so
@@ -658,13 +844,13 @@ fn routes(registry: &crate::stats::Registry) -> crate::stats::Routes {
 async fn a_claim_outside_the_limit_counts_once() {
 	let (mut subscriber, _consumer) = subscriber();
 	let registry = counted(&mut subscriber);
-	let public = limited("live/*/public/**");
+	let public = limited("live/a/public");
 	let mut routed = asking(&subscriber, &public);
 	for msg in [start("live/a/public/x"), start("live/a/private/y")] {
 		routed.receive(msg).unwrap();
 	}
 	routed.receive(Wire::Change { id: 1, claim: claim(1) }).unwrap();
-	routed.limit(&limited("live/**")).unwrap();
+	routed.limit(&limited("live")).unwrap();
 	routed.limit(&public).unwrap();
 	pump(&mut routed, &subscriber);
 	let refused = routes(&registry).refused;

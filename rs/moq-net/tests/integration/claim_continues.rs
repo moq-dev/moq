@@ -19,9 +19,11 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn lite07() -> Version {
@@ -110,23 +112,29 @@ pub(super) async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, 
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start,
 				announce: a,
+				..
 			} => ("start", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Update,
 				announce: a,
+				..
 			} => ("update", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce: a,
+				..
 			} => ("restart", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End,
 				announce: a,
+				..
 			} => ("end", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Offline,
 				announce: a,
+				..
 			} => ("offline", a),
+			other => panic!("unexpected route event {other:?}"),
 		};
 		events.push((kind, announce.prefix.to_string(), announce.route.instance().clone()));
 	}

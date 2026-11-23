@@ -385,17 +385,17 @@ mod tests {
 	/// control's alone.
 	#[test]
 	fn quality_under_a_cap() {
-		use super::super::test_util::spend;
+		use super::super::test_util::{Scene, spend};
 
 		let at = |bps: u64| Config {
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(bps)),
 			join: std::time::Duration::from_secs(10),
 			..config()
 		};
-		let calm = spend(&at(4_000_000), false, None).unwrap();
+		let calm = spend(&at(4_000_000), Scene::Calm, None).unwrap();
 		assert!(calm.mean < 800_000, "a calm scene filled the cap: {calm:?}");
 
-		let busy = spend(&at(500_000), true, None).unwrap();
+		let busy = spend(&at(500_000), Scene::Busy, None).unwrap();
 		assert!(
 			(400_000..520_000).contains(&busy.mean),
 			"a busy scene missed the cap: {busy:?}"

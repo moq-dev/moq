@@ -324,19 +324,34 @@ impl Rendition {
 
 		match &self {
 			Self::Audio(name, config) => {
-				let track = source
-					.subscribe_track(config.broadcast(), config.instance(), config.track(name))
-					.await?;
+				let track = subscribe_live(&source, config.broadcast(), config.instance(), config.track(name)).await?;
 				codec::Track::opus(track, config)
 			}
 			Self::Video(name, config) => {
-				let track = source
-					.subscribe_track(config.broadcast(), config.instance(), config.track(name))
-					.await?;
+				let track = subscribe_live(&source, config.broadcast(), config.instance(), config.track(name)).await?;
 				codec::Track::video(track, config)
 			}
 		}
 	}
+}
+
+/// How long a group may trail its successor before the publisher gives up on it. A live group
+/// finishes the instant the next starts, so a zero budget would reset each one just after its
+/// last frame went out and the transport would drop that unread tail.
+const MAX_DELAY: Duration = Duration::from_millis(100);
+
+/// Subscribe to a rendition's track with the [`MAX_DELAY`] budget, resolving its
+/// cross-broadcast reference (the catalog `broadcast` field) and `instance`.
+async fn subscribe_live(
+	source: &moq_mux::Source,
+	rel: Option<&moq_net::path::Relative>,
+	instance: Option<&moq_net::Instance>,
+	name: &str,
+) -> Result<moq_net::track::Subscriber> {
+	let broadcast = source.resolve(rel, instance).await?;
+	let delay = moq_net::track::Delay::default().with_max(MAX_DELAY);
+	let subscription = moq_net::track::Subscription::default().with_delay(delay);
+	Ok(broadcast.track(name)?.subscribe(subscription).await?)
 }
 
 /// The best [enabled](hang::catalog::Audio::enabled) Opus rendition that `source` can reach.
@@ -850,7 +865,7 @@ mod tests {
 	) -> moq_mux::container::Producer<moq_mux::catalog::hang::Container> {
 		config.container = hang::catalog::Container::Legacy;
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -906,7 +921,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, name: &str, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -974,7 +989,7 @@ mod tests {
 			config.track = Some(track.to_string());
 			config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1053,7 +1068,7 @@ mod tests {
 		assert_eq!(next(&mut writes).await, (Bytes::from_static(b"vp9-0"), 98));
 
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -1077,7 +1092,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1141,7 +1156,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1199,7 +1214,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1252,7 +1267,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, name: &str, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1279,7 +1294,7 @@ mod tests {
 		idle(&mut writes).await;
 
 		{
-			let mut modify = catalog.modify().unwrap();
+			let mut modify = catalog.modify(catalog.next_timestamp()).unwrap();
 			for config in modify.video.renditions.values_mut() {
 				config.enabled = false;
 			}
@@ -1320,7 +1335,7 @@ mod tests {
 		config.coded_height = Some(1080);
 		config.broadcast = Some(Relative::new("./missing").unwrap());
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -1330,7 +1345,7 @@ mod tests {
 		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
 
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions

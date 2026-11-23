@@ -317,6 +317,8 @@ impl Launch {
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
+		// Budgets of its own, so what the peer publishes crowds out no other session.
+		let subscribe = subscribe.with_own_budgets(limits.live_edges);
 		// Counted for the peak only: stream credit bounds them.
 		let subscriptions =
 			crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
@@ -1980,9 +1982,9 @@ mod tests {
 	#[kio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let scope: crate::Patterns = ["cam", "mic"]
+		let scope: crate::Prefixes = ["cam", "mic"]
 			.into_iter()
-			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
+			.map(|prefix| crate::Prefix::try_from(prefix).unwrap())
 			.collect();
 		let scoped = origin
 			.scope("rootns", &scope)
@@ -2054,7 +2056,7 @@ mod tests {
 	fn watch(origin: &crate::origin::Producer, prefix: &str) -> crate::origin::Routes {
 		origin
 			.consume()
-			.scope(prefix, &crate::Patterns::from(crate::Pattern::all()))
+			.scope(prefix, &crate::Prefixes::all())
 			.unwrap()
 			.routes()
 	}
@@ -2154,7 +2156,7 @@ mod tests {
 	/// reset on draft-22: a peer that never closes it never sees the two overlap.
 	#[kio::test]
 	async fn a_broader_watch_waits_for_the_narrower_to_leave_the_wire() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let subscribe = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _front = watch(&subscribe, "cam/front");
 			let (log, _driver) = client(version, subscribe.clone(), None).await;
@@ -2179,7 +2181,7 @@ mod tests {
 	/// broader request that replaced it goes out alone once the credit arrives.
 	#[kio::test]
 	async fn a_request_ended_before_it_opened_does_not_block_the_broader_one() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let subscribe = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let gate = kio::Producer::new(true);
 			let credit = kio::Producer::new(true);
@@ -2973,7 +2975,7 @@ mod tests {
 	/// Padding is read and dropped: no STOP_SENDING, and the session stays up.
 	#[kio::test]
 	async fn a_padding_stream_is_discarded() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let (log, result) = dispatch_uni(version, uni_stream(version, PADDING), None).await;
 
 			assert!(
@@ -3044,12 +3046,12 @@ mod tests {
 	/// The bidi dispatcher closes the session for an unknown full-width message type.
 	#[kio::test]
 	async fn an_unknown_bidi_type_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for kind in [0u64, 1 << 53] {
 				let mut payload = Vec::new();
 				let mut w = crate::coding::Encoder::new(&mut payload, version.into());
 				w.varint(kind).unwrap();
-				w.u16(0);
+				w.slice(&ietf::message::length_bytes(0, version));
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
@@ -3096,7 +3098,7 @@ mod tests {
 
 	#[kio::test]
 	async fn an_invalid_group_order_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for (value, nested) in [
 				(0u8, false),
 				(3, false),
@@ -3110,7 +3112,10 @@ mod tests {
 					continue;
 				}
 				let mut body = vec![0, 1, 1, b'a', 1, b'b', 1];
-				if nested {
+				if nested && version == Version::Draft23 {
+					// Draft-23 drops FILL_PARAMETERS' length: the count follows the key.
+					body.extend([0x23, 1, 0x22, value]);
+				} else if nested {
 					body.extend([0x23, 3, 1, 0x22, value]);
 				} else {
 					body.extend([0x22, value]);
@@ -3118,7 +3123,7 @@ mod tests {
 				let mut payload = Vec::new();
 				let mut w = crate::coding::Encoder::new(&mut payload, version.into());
 				w.varint(ietf::Subscribe::ID).unwrap();
-				w.u16(body.len() as u16);
+				w.slice(&ietf::message::length_bytes(body.len(), version));
 				w.slice(&body);
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
@@ -3174,7 +3179,7 @@ mod tests {
 		let mut payload = Vec::new();
 		let mut w = crate::coding::Encoder::new(&mut payload, version.into());
 		w.varint(ietf::Subscribe::ID).unwrap();
-		w.u16(body.len() as u16);
+		w.slice(&ietf::message::length_bytes(body.len(), version));
 		w.slice(&body);
 		payload
 	}
@@ -3183,7 +3188,7 @@ mod tests {
 	/// endpoint cannot use closes the session with the draft's code.
 	#[kio::test]
 	async fn a_request_token_that_cannot_be_used_closes_the_session() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for (token, expected, why) in [
 				(
 					&[0x01, 0x07, 0x00][..],
@@ -3260,7 +3265,7 @@ mod tests {
 		let mut buf = Vec::new();
 		let mut w = crate::coding::Encoder::new(&mut buf, version.into());
 		w.varint(id).unwrap();
-		w.u16(body.len() as u16);
+		w.slice(&ietf::message::length_bytes(body.len(), version));
 		w.slice(body);
 		buf
 	}
@@ -3307,7 +3312,7 @@ mod tests {
 	/// What a server may not send in its SETUP closes the session with the draft's code.
 	#[kio::test]
 	async fn a_server_setup_with_path_or_authority_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for (param, expected) in [
 				(ietf::ParameterBytes::Path, crate::ietf::error::session::INVALID_PATH),
 				(
@@ -3328,7 +3333,7 @@ mod tests {
 	/// read as the value it carries (draft-22 section 9.1.4).
 	#[kio::test]
 	async fn a_server_setup_token_decodes_by_the_setup_rules() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for (token, expected) in [
 				// An Alias Type of 4 does not exist.
 				(&[0x04][..], Some(crate::ietf::error::session::KEY_VALUE_FORMATTING)),
@@ -3347,7 +3352,7 @@ mod tests {
 	/// is malformed, closes the session as a PROTOCOL_VIOLATION. One GOAWAY leaves it up.
 	#[kio::test]
 	async fn the_setup_stream_carries_at_most_one_goaway() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let request_id = (version == Version::Draft18).then_some(0);
 			let one = goaway(version, request_id);
 			let two = [one.clone(), one.clone()].concat();
@@ -3394,7 +3399,7 @@ mod tests {
 	#[kio::test]
 	async fn a_control_stream_fin_or_reset_is_a_protocol_violation() {
 		use crate::lite::test_transport::{Close, DeadStreamSession, ScriptedSession};
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let session = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![setup_stream(
 				version,
 				ietf::Parameters::default(),
@@ -3425,7 +3430,7 @@ mod tests {
 	/// so an application leaving over it cannot close first, without our code.
 	#[kio::test]
 	async fn a_goaway_with_more_behind_it_never_surfaces() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let request_id = (version == Version::Draft18).then_some(0);
 			let two = [goaway(version, request_id), goaway(version, request_id)].concat();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
@@ -3631,7 +3636,7 @@ mod tests {
 	/// its length.
 	#[kio::test]
 	async fn a_malformed_request_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let subscribe = |body: &[u8]| frame(version, ietf::Subscribe::ID, body);
 			// Request ID 1, the namespace "n", the name "x", and no parameters.
 			let valid = [1, 1, 1, b'n', 1, b'x', 0];
@@ -3703,7 +3708,7 @@ mod tests {
 	/// message, closes the session as a PROTOCOL_VIOLATION.
 	#[kio::test]
 	async fn a_request_stream_carries_at_most_one_goaway() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let one = goaway(version, None);
 			let two = [one.clone(), one.clone()].concat();
 
@@ -3732,7 +3737,7 @@ mod tests {
 	/// closes the session as a PROTOCOL_VIOLATION.
 	#[kio::test]
 	async fn a_request_stream_goaway_redirects_only_from_a_server() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut body = Vec::new();
 			ietf::GoAway {
 				new_session_uri: "https://example.com/moq".into(),

@@ -46,8 +46,8 @@ RELAY="${RELAY_BIN:-moq-relay}"
 # so the wrapper binds the same name; ignored by the non-docker channels.
 RELAY_CONTAINER="${SMOKE_RELAY_CONTAINER:-moq-relay-smoke}"
 export SMOKE_RELAY_CONTAINER="$RELAY_CONTAINER"
-# The CLI binary under test. The package/crate is still distributed as moq-cli in
-# some channels, but the installed executable is `moq`. Honor CLI_BIN if set.
+# The CLI binary under test. Only the crates.io crate is still named moq-cli; the
+# other channels ship `moq`, which is also the executable. Honor CLI_BIN if set.
 MOQ="${CLI_BIN:-}"
 
 require_value() {
@@ -212,7 +212,7 @@ require_tools() {
     if [[ ${#EXTERNAL_RELAYS[@]} -eq 0 ]]; then
         have "$RELAY" || missing+=("$RELAY (cargo/brew/apt/nix install moq-relay)")
     fi
-    have "$MOQ" || missing+=("moq (cargo/brew/apt install moq-cli, or nix build github:moq-dev/moq#moq)")
+    have "$MOQ" || missing+=("moq (cargo install moq-cli, brew/apt install moq, or nix build github:moq-dev/moq#moq)")
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "error: missing required tools: ${missing[*]}" >&2
         exit 1
@@ -656,11 +656,15 @@ if [[ ${#EXTERNAL_RELAYS[@]} -eq 0 ]]; then
     # smoke.toml is the source of truth; rewrite its port into a scratch copy so a
     # busy 4443 (a dev relay, a parallel run) doesn't require editing the committed file.
     # Relays before 0.15 (no --listen flag) reject the renamed keys, so they get the
-    # legacy layout until every channel ships 0.15.
+    # legacy layout until every channel ships 0.15. Relays since then took pattern
+    # grants until their help began "Prefixes an anonymous session", so they get the
+    # `**` rule until every channel reads prefixes.
     relay_config="$SMOKE_DIR/smoke.toml"
     relay_help=$("$RELAY" --help 2>&1 || true)
     if ! grep -q -- '--listen\b' <<<"$relay_help"; then
         relay_config="$SMOKE_DIR/smoke-legacy.toml"
+    elif ! tr -s '[:space:]' ' ' <<<"$relay_help" | grep -q 'Prefixes an anonymous session'; then
+        relay_config="$SMOKE_DIR/smoke-patterns.toml"
     fi
     echo "relay config: $(basename "$relay_config")"
     sed "s/4443/${PORT}/g" "$relay_config" >"$TMP/relay.toml"

@@ -231,9 +231,14 @@ export class StreamLimit {
 		return this.#max;
 	}
 
+	/** Whether the advertised limit lets the peer open stream `index`. */
+	allows(index: bigint): boolean {
+		return index < this.#advertised;
+	}
+
 	/** Open stream `index` and every lower one, or return false if that passes the limit. */
 	open(index: bigint): boolean {
-		if (index >= this.#advertised) return false;
+		if (!this.allows(index)) return false;
 		if (index >= this.#opened) {
 			this.#opened = index + 1n;
 			// The peer moved closer to the limit, so slots held back may be due now.

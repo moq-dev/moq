@@ -76,7 +76,7 @@ async fn handle(
 /// [`accept`], using the request path as the (unauthenticated) broadcast name.
 #[cfg(feature = "server")]
 async fn accept_offer(state: &RouterState, path: &str, headers: &HeaderMap, body: Bytes) -> Result<Response> {
-	if !is_sdp(headers) {
+	if !crate::server::is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
@@ -223,15 +223,6 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 			role: "whip server",
 		},
 	})
-}
-
-#[cfg(feature = "server")]
-fn is_sdp(headers: &HeaderMap) -> bool {
-	headers
-		.get(header::CONTENT_TYPE)
-		.and_then(|v| v.to_str().ok())
-		.map(|v| v.eq_ignore_ascii_case("application/sdp"))
-		.unwrap_or(false)
 }
 
 #[cfg(feature = "server")]

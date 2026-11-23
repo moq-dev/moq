@@ -99,11 +99,16 @@ struct AnnouncedRecord {
 unsafe impl Send for AnnouncedRecord {}
 
 impl AnnouncedRecord {
-	fn new(event: moq_net::announce::Event, instances: &mut NonZeroSlab<moq_net::Instance>) -> Result<Self, Error> {
+	/// Buffer an event, or `None` for one this ABI has no kind for.
+	fn new(
+		event: moq_net::announce::Event,
+		instances: &mut NonZeroSlab<moq_net::Instance>,
+	) -> Result<Option<Self>, Error> {
 		use moq_net::announce::Event;
 		let (update, kind) = match event {
 			Event::Present(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT),
 			Event::Absent(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_ABSENT),
+			_ => return Ok(None),
 		};
 		let captures: Vec<_> = update
 			.captures
@@ -119,7 +124,7 @@ impl AnnouncedRecord {
 			})
 			.collect();
 
-		Ok(Self {
+		Ok(Some(Self {
 			prefix: update.prefix.to_string(),
 			_captures: captures,
 			capture_views,
@@ -127,7 +132,7 @@ impl AnnouncedRecord {
 			cost: update.route.cost().value(),
 			available: update.route.available(),
 			instance: instances.insert(update.route.instance().clone())?,
-		})
+		}))
 	}
 }
 
@@ -193,7 +198,7 @@ impl Origin {
 	pub fn announced(
 		&mut self,
 		origin: Id,
-		scope: moq_net::Pattern,
+		filter: moq_net::Pattern,
 		hidden: bool,
 		on_announce: OnStatus,
 	) -> Result<Id, Error> {
@@ -203,7 +208,7 @@ impl Origin {
 		let consumer = origin
 			.producer
 			.consume()
-			.scope("", &moq_net::Patterns::from(scope))?
+			.filter(&filter)?
 			.with_hidden(hidden)
 			.announced();
 		self.announced_task.spawn(
@@ -231,7 +236,9 @@ impl Origin {
 
 			// Hold the lock only to buffer the event; release it before the callback.
 			let announced_id = State::lock().origin.announced_insert(event)?;
-			callback.call(announced_id);
+			if let Some(announced_id) = announced_id {
+				callback.call(announced_id);
+			}
 		}
 	}
 
@@ -266,10 +273,12 @@ impl Origin {
 	}
 
 	/// Buffer a delivered announce event, with a handle for its route's instance.
-	fn announced_insert(&mut self, event: moq_net::announce::Event) -> Result<Id, Error> {
-		let record = AnnouncedRecord::new(event, &mut self.instances)?;
+	fn announced_insert(&mut self, event: moq_net::announce::Event) -> Result<Option<Id>, Error> {
+		let Some(record) = AnnouncedRecord::new(event, &mut self.instances)? else {
+			return Ok(None);
+		};
 		let instance = record.instance;
-		self.announced.insert(record).inspect_err(|_| {
+		self.announced.insert(record).map(Some).inspect_err(|_| {
 			self.instances.remove(instance);
 		})
 	}

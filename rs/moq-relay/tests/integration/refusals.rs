@@ -140,7 +140,7 @@ async fn assert_refused(url: url::Url, publisher: bool) {
 async fn refused_sessions_are_counted() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path(), false);
-	config.auth.public = vec!["anon/**".parse().unwrap()];
+	config.auth.public = vec!["anon".parse().unwrap()];
 	let relay = start(config).await;
 
 	assert_eq!(relay.refused("refused").await, 0);
@@ -155,7 +155,7 @@ async fn refused_sessions_are_counted() {
 async fn websocket_refused_sessions_are_counted() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path(), true);
-	config.auth.public = vec!["anon/**".parse().unwrap()];
+	config.auth.public = vec!["anon".parse().unwrap()];
 	let relay = start(config).await;
 
 	assert_refused(format!("ws://{}/rooms", relay.http).parse().unwrap(), false).await;
@@ -168,7 +168,7 @@ async fn websocket_refused_sessions_are_counted() {
 async fn forbidden_sessions_are_counted() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path(), false);
-	config.auth.public_subscribe = vec!["anon/**".parse().unwrap()];
+	config.auth.public_subscribe = vec!["anon".parse().unwrap()];
 	let relay = start(config).await;
 
 	assert_refused(format!("https://{}/anon", relay.quic).parse().unwrap(), true).await;
@@ -183,7 +183,7 @@ async fn forbidden_sessions_are_counted() {
 async fn lan_refusals_are_counted() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path(), false);
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	let relay = start(config).await;
 
 	assert_refused(
@@ -236,7 +236,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	use moq_net::stats::{RefusalKind, Tier};
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = config(dir.path(), false);
-	config.auth.public = vec!["anon/**".parse().unwrap()];
+	config.auth.public = vec!["anon".parse().unwrap()];
 	config.stats.enabled = true;
 	config.stats.depth = 1;
 	config.stats.node = Some("test".into());
@@ -303,7 +303,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 async fn peer_zero_close_is_clean_and_application_close_counts_once() {
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = config(dir.path(), false);
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config.stats.enabled = true;
 	config.stats.node = Some("test".into());
 	let relay = start(config).await;
@@ -383,7 +383,7 @@ async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
 	key.to_file(&key_path).unwrap();
 	let mut claims = moq_auth::Claims::default()
 		.with_root("verified/tenant")
-		.with_subscribe([moq_auth::Pattern::all()]);
+		.with_subscribe([moq_auth::Prefix::all()]);
 	claims.expires = Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
 	let token = key.sign(&claims).unwrap();
 	for tier in [None, Some("edge")] {

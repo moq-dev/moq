@@ -1,11 +1,11 @@
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { decodePayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
-import { concat, encodeVarint, Writer } from "../stream.ts";
+import { asIetf, concat, encodeVarint, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import { type IetfVersion, isDraft23, Version } from "./version.ts";
 
 // Implementation limit for object extension blocks, independent of the IETF draft.
 const MAX_OBJECT_EXTENSIONS = 64 * 1024;
@@ -481,6 +481,8 @@ export const EndOfRange = {
 	Unknown: 0x10c,
 	/** The FILL_TIMEOUT ran out before they arrived, from draft-22. */
 	TimedOut: 0x20c,
+	/** They are gone, from draft-23. */
+	Gone: 0x40c,
 } as const;
 
 /** A reason {@link EndOfRange} names. */
@@ -490,9 +492,10 @@ export type EndOfRange = (typeof EndOfRange)[keyof typeof EndOfRange];
  * An End of Range on a fetch stream: every Location after the prior object, through this
  * one, is missing for its reason.
  *
- * Its Group and Object IDs are absolute, wherever it falls. Read as deltas, the Group ID could
- * never name the group it follows, and every implementation reads them as absolute
- * (moq-wg/moq-transport#1861). Nothing follows them: no payload length.
+ * Through draft-22 its Group and Object IDs are absolute, wherever it falls: read as deltas,
+ * the Group ID could never name the group it follows, and every implementation reads them as
+ * absolute (moq-wg/moq-transport#1861). Draft-23 makes them deltas from the prior entry after
+ * the stream's first (section 11.4.2.1); this writes the fields as given. Nothing follows them.
  */
 export class FetchEndOfRange {
 	reason: EndOfRange;
@@ -509,13 +512,36 @@ export class FetchEndOfRange {
 		if (this.reason === EndOfRange.TimedOut && version === Version.DRAFT_18) {
 			throw new Error("End of Timed-Out Range needs draft-22");
 		}
+		if (this.reason === EndOfRange.Gone && !hasGroupEnd(version)) {
+			throw new Error("End of Gone Range needs draft-23");
+		}
 		await w.u53(this.reason);
 		await w.u62(this.group);
 		await w.u62(this.object);
 	}
 }
 
-const END_OF_RANGE: readonly number[] = Object.values(EndOfRange);
+const END_OF_RANGE: readonly number[] = [EndOfRange.NonExistent, EndOfRange.Unknown, EndOfRange.TimedOut];
+
+// Draft-23's indicators: the prior object ends its group, or the track (section 11.4.2.2).
+const FETCH_END_OF_GROUP = 0x80;
+const FETCH_END_OF_TRACK = 0x81;
+
+/**
+ * Whether the fetch stream has draft-23's End of Group, End of Track and End of Gone Range
+ * (section 11.4.1), and reads its End of Range IDs as deltas (section 11.4.2.1).
+ */
+export function hasGroupEnd(version: IetfVersion): boolean {
+	return isDraft23(version);
+}
+
+/**
+ * How far past its own value an Object ID Delta reaches within a group: draft-23 (section
+ * 11.4.1) adds two, so a delta is only sent for a gap. Earlier drafts add the delta alone.
+ */
+export function objectDeltaBias(version: IetfVersion): number {
+	return isDraft23(version) ? 2 : 0;
+}
 
 // Serialization Flags at or above this are named values, not a set of flags.
 const FETCH_NAMED = 0x80;
@@ -525,7 +551,7 @@ const FETCH_DATAGRAM = 0x40;
 const FETCH_SUBGROUP = 0x03;
 
 /** How a fetched object names its Subgroup ID. */
-export type FetchSubgroup = "zero" | "prior" | "next" | "explicit" | "datagram";
+type FetchSubgroup = "zero" | "prior" | "next" | "explicit" | "datagram";
 
 /** One object read off a fetch stream, the inverse of {@link FetchFrame.encode}. */
 export type FetchedObject =
@@ -546,17 +572,27 @@ export type FetchedObject =
 			/** The payload length; past one segment, the payload follows on the stream. */
 			size: number;
 	  }
-	| { kind: "endOfRange"; reason: EndOfRange; group: bigint; object: number };
+	/** The Group and Object ID fields: absolute, or from draft-23 deltas after the first entry. */
+	| { kind: "endOfRange"; reason: EndOfRange; group: bigint; object: bigint }
+	/** Draft-23's End of Group, or with `track` its End of Track. */
+	| { kind: "endOfGroup"; track: boolean };
 
 /** Decode the next object on a fetch stream. Its properties are skipped. */
 export function decodeFetchObject(c: Cursor): FetchedObject {
-	const flags = c.u53();
-	if (flags >= FETCH_NAMED) {
-		if (!END_OF_RANGE.includes(flags)) {
-			throw new ProtocolViolation(`unknown fetch serialization flags: 0x${flags.toString(16)}`);
+	// Any 62-bit value is a legal field, so an unknown one is a violation, not a decode failure.
+	const wide = c.varint();
+	if (wide.hi !== 0 || wide.lo >= FETCH_NAMED) {
+		const version = asIetf(c.version);
+		const named = version !== undefined && hasGroupEnd(version);
+		if (wide.hi === 0 && named && (wide.lo === FETCH_END_OF_GROUP || wide.lo === FETCH_END_OF_TRACK)) {
+			return { kind: "endOfGroup", track: wide.lo === FETCH_END_OF_TRACK };
 		}
-		return { kind: "endOfRange", reason: flags as EndOfRange, group: c.u62(), object: c.u53() };
+		if (wide.hi !== 0 || (!END_OF_RANGE.includes(wide.lo) && !(named && wide.lo === EndOfRange.Gone))) {
+			throw new ProtocolViolation(`unknown fetch serialization flags: 0x${wide.toBigInt().toString(16)}`);
+		}
+		return { kind: "endOfRange", reason: wide.lo as EndOfRange, group: c.u62(), object: c.u62() };
 	}
+	const flags = wide.lo;
 
 	// Wire order: Group ID, Subgroup ID, Object ID, Priority, Properties.
 	const group = flags & FETCH_GROUP_ID ? c.u62() : undefined;

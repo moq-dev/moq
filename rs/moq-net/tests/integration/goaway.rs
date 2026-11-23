@@ -24,9 +24,11 @@ fn timed() -> moq_net::track::Info {
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin() -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+	let mut config = moq_net::origin::Config::default();
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Maximum time any single test may run before being treated as a deadlock.
@@ -34,7 +36,13 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every version with GOAWAY support, across both wires and their distinct
 /// channels: the lite Goaway control stream and the IETF SETUP uni streams.
-const GOAWAY_VERSIONS: &[&str] = &["moq-lite-04", "moq-lite-05", "moq-transport-18", "moq-transport-22"];
+const GOAWAY_VERSIONS: &[&str] = &[
+	"moq-lite-04",
+	"moq-lite-05",
+	"moq-transport-18",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 /// A full receive window or missing FIN ACK cannot hold a drain beyond its local deadline.
 async fn closes_stalled_goaway(version: Version, writes: bool) {
@@ -538,6 +546,7 @@ async fn route_at(
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: update,
+			..
 		} = announced.next().await.expect("update")
 		else {
 			continue;

@@ -37,6 +37,8 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
@@ -116,7 +118,7 @@ class SmokeTest {
                     assertFailsWith<MoqException.Codec> {
                         ContainerProducer(
                             other,
-                            ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase),
+                            ContainerInit(ContainerFormat.fmp4(), byteArrayOf(), timebase),
                         )
                     }
                     owner.end()
@@ -347,7 +349,7 @@ class SmokeTest {
 
     @Test
     fun `a default subscription skips superseded groups at once`() {
-        assertEquals(java.time.Duration.ZERO, Subscription.default().delay.min)
+        assertNull(Subscription.default().delay.min)
         assertEquals(java.time.Duration.ZERO, Subscription.default().delay.max)
     }
 
@@ -374,7 +376,7 @@ class SmokeTest {
                                 min = java.time.Duration.ZERO,
                                 max = java.time.Duration.ofSeconds(10),
                             ),
-                        ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                        ranges = listOf(Range(start = Timestamp.unscaled(0uL))),
                         order = Order.ASCENDING,
                     )
                 )
@@ -544,7 +546,7 @@ class SmokeTest {
                 dev.moq.media.TrackProducer.audio(
                     broadcast,
                     Named(null),
-                    AudioInit(format = AudioFormat.OPUS, data = opusHead()),
+                    AudioInit(format = AudioFormat.opus(), data = opusHead()),
                 )
             val consumer = broadcast.consume()
             val (name, audio) = catalog(consumer).audio.entries.single()
@@ -664,6 +666,16 @@ class SmokeTest {
         assertFailsWith<IllegalArgumentException> {
             Timestamp((1uL shl 61) - 1uL, 1uL).toDuration()
         }
+        // A quotient past a Long fails rather than wrapping to a negative duration.
+        assertFailsWith<IllegalArgumentException> { Timestamp(ULong.MAX_VALUE, 1uL).toDuration() }
+        assertFailsWith<IllegalArgumentException> { Timestamp(1uL, 0uL).toDuration() }
+        // Past what `inWholeNanoseconds` holds, the duration fails rather than saturating.
+        assertFailsWith<IllegalArgumentException> { Duration.INFINITE.toTimestamp() }
+        assertFailsWith<IllegalArgumentException> { (600 * 365).days.toTimestamp() }
+        assertEquals(
+            Timestamp(400uL * 365uL * 86_400uL * 1_000_000_000uL, 1_000_000_000uL),
+            (400 * 365).days.toTimestamp(),
+        )
         assertNull(AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
@@ -1208,7 +1220,7 @@ class SmokeTest {
                     )
                 moq.use {
                     val everything =
-                        Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
+                        Grant(publish = listOf(""), subscribe = listOf(""), expires = null)
                     assertEquals(everything, moq.grants().updates().first { it != null })
                     val session = accepted.await()
                     assertEquals(everything, session.grants().updates().first { it != null })
@@ -1436,7 +1448,7 @@ class SmokeTest {
                             VideoProducerOptions(
                                 input =
                                     VideoEncoderInput(
-                                        format = VideoPixelFormat.RGBA,
+                                        format = VideoPixelFormat.rgba(),
                                         width = 320u,
                                         height = 240u,
                                         framerate = VideoFrameRate(30000u, 1001u),
@@ -1482,13 +1494,13 @@ class SmokeTest {
                         decoder.cancel()
                         assertNull(frame.surface())
 
-                        val planar = frame.pixels(VideoPixelFormat.I420)
+                        val planar = frame.pixels(VideoPixelFormat.i420())
                         assertEquals(
                             frame.width().toInt() * frame.height().toInt() * 3 / 2,
                             planar.size,
                         )
 
-                        val packed = frame.pixels(VideoPixelFormat.RGBA)
+                        val packed = frame.pixels(VideoPixelFormat.rgba())
                         assertEquals(
                             frame.width().toInt() * frame.height().toInt() * 4,
                             packed.size,

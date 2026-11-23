@@ -154,8 +154,8 @@ impl Version {
 	}
 
 	/// Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices
-	/// alongside their group keys, so a subscription or fetch can start and end
-	/// partway through a group. Added in lite-06.
+	/// alongside their group keys, so a subscription or fetch can start partway through a
+	/// group. Added in lite-06; lite-07 bounds a range's start or end at a Position.
 	///
 	/// Older versions only address whole groups, so a route change has to wait for the
 	/// next group before it can resume.
@@ -164,12 +164,6 @@ impl Version {
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05
 		)
-	}
-
-	/// Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
-	/// earlier versions have no frame bounds, and a lite-07 subscription reads whole groups.
-	pub(crate) fn has_group_frame_start(self) -> bool {
-		matches!(self, Self::Lite06)
 	}
 
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.
@@ -185,15 +179,6 @@ impl Version {
 	/// relative to the latest group, or at a presentation time. Added in lite-07; an earlier
 	/// subscription carries one span with absolute ends.
 	pub(crate) fn has_ranges(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
-	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
-	pub(crate) fn has_min_delay(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -295,9 +280,10 @@ impl Version {
 		)
 	}
 
-	/// Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream
-	/// ends a finished group with GROUP_END and a closed one with a bare FIN. Added in lite-07;
-	/// earlier versions end every group with a bare FIN.
+	/// Whether a Group or Fetch Stream ends a finished group with GROUP_END, its end counted
+	/// from the stream's highest timestamp, and a closed one with a bare FIN, and counts its
+	/// first FRAME's timestamp from the group's start. Added in lite-07; earlier versions end
+	/// every group with a bare FIN and count the first timestamp from 0.
 	pub(crate) fn has_group_end(self) -> bool {
 		!matches!(
 			self,
@@ -388,9 +374,10 @@ impl Version {
 		)
 	}
 
-	/// Whether received frame timestamps are the publisher's media time. Lite05/06 stamp an
-	/// untimed track's payloads with their send time, which a receiver cannot tell from it,
-	/// so it passes them through as the track's time without checking them for a rewind.
+	/// Whether received frame timestamps are the publisher's media time. A released Lite05/06
+	/// publisher may stamp an untimed track's payloads with their send time, which a receiver
+	/// cannot tell from it, so it passes them through as the track's time without checking
+	/// them for a rewind.
 	pub(crate) fn has_media_time(self) -> bool {
 		!matches!(
 			self,

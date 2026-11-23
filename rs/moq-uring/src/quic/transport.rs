@@ -29,7 +29,7 @@ pub struct Config {
 	///   it to fit the largest message it assembles,
 	///   [`MIN_RECEIVE_WINDOW`](moq_net::transport::MIN_RECEIVE_WINDOW), or a
 	///   partial one can stall the connection.
-	/// - A 1 MiB stream window. Stream credit returns as bytes are read,
+	/// - A 4 MiB stream window. Stream credit returns as bytes are read,
 	///   whether or not their message is complete, so this only paces one
 	///   stream.
 	/// - 4 MiB of unacknowledged outgoing data, whatever the peer allows.

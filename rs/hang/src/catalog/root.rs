@@ -81,7 +81,8 @@ pub struct Catalog<E = ()> {
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	///
-	/// The root `version` is reserved: serializing fails if the extension names a member `version`.
+	/// The root `version` and every section name are reserved: serializing fails if the extension
+	/// names one.
 	pub ext: E,
 
 	/// The entries decoding skipped because a newer moq-hang draft defines them.
@@ -166,18 +167,23 @@ struct Wire<E> {
 	skipped: crate::catalog::Skipped,
 }
 
-/// Refuse an extension member named `version`: the root `version` is reserved for this
-/// specification, and a reader would refuse a catalog whose extension claimed a newer draft.
+/// The root members this specification defines: `version` and each [`Wire`] section.
+const RESERVED: [&str; 10] = [
+	"version", "video", "audio", "sync", "text", "json", "binary", "stats", "echo", "include",
+];
+
+/// Refuse an extension member the specification reserves. One beside a section would write a
+/// duplicate key that a reader resolves to either copy, and an extension `version` would claim a
+/// newer draft that a reader refuses.
 fn serialize_ext<E: Serialize, S: serde::Serializer>(ext: &E, serializer: S) -> std::result::Result<S::Ok, S::Error> {
 	use serde::ser::Error;
 
 	// Inspected as a `Value` but written from `ext` itself, which keeps its member order.
-	if serde_json::to_value(ext)
-		.map_err(S::Error::custom)?
-		.get("version")
-		.is_some()
-	{
-		return Err(S::Error::custom("catalog extension must not name a member `version`"));
+	let value = serde_json::to_value(ext).map_err(S::Error::custom)?;
+	if let Some(key) = RESERVED.into_iter().find(|key| value.get(key).is_some()) {
+		return Err(S::Error::custom(format!(
+			"catalog extension must not name the reserved member `{key}`"
+		)));
 	}
 	ext.serialize(serializer)
 }
@@ -350,14 +356,34 @@ impl<E> Catalog<E> {
 		Ok(())
 	}
 
-	/// Copy the media sections into a catalog with no application extension.
+	/// Copy every section into a catalog with no application extension.
 	pub fn without_ext(&self) -> Catalog<()> {
+		// Destructured without `..`, so a new field fails to compile until it is carried over.
+		let Catalog {
+			video,
+			audio,
+			sync,
+			text,
+			json,
+			binary,
+			stats,
+			echo,
+			include,
+			ext: _,
+			skipped,
+		} = self;
 		Catalog {
-			video: self.video.clone(),
-			audio: self.audio.clone(),
-			sync: self.sync,
-			text: self.text.clone(),
-			..Default::default()
+			video: video.clone(),
+			audio: audio.clone(),
+			sync: *sync,
+			text: text.clone(),
+			json: json.clone(),
+			binary: binary.clone(),
+			stats: stats.clone(),
+			echo: echo.clone(),
+			include: include.clone(),
+			ext: (),
+			skipped: skipped.clone(),
 		}
 	}
 }
@@ -1467,10 +1493,10 @@ mod test {
 		assert!(!catalog.ext.contains_key("version"));
 	}
 
-	/// An extension's own `version` would sit beside the computed one as a duplicate key, letting it
-	/// override what the catalog actually needs.
+	/// An extension member the specification reserves would sit beside the base member as a
+	/// duplicate key: an extension `version` could override what the catalog actually needs.
 	#[test]
-	fn an_extension_version_is_refused() {
+	fn an_extension_reserved_member_is_refused() {
 		#[derive(Serialize, Default)]
 		struct Ext {
 			version: u64,
@@ -1481,11 +1507,15 @@ mod test {
 			..Default::default()
 		};
 		let err = catalog.to_json().unwrap_err();
-		assert!(err.to_string().contains("must not name a member `version`"), "{err}");
+		assert!(err.to_string().contains("reserved member `version`"), "{err}");
 
-		let mut passthrough = Catalog::<serde_json::Map<String, serde_json::Value>>::default();
-		passthrough.ext.insert("version".into(), 3.into());
-		assert!(passthrough.to_json().is_err());
+		// Every section name too, which would otherwise sit beside the section as a duplicate key.
+		for key in RESERVED {
+			let mut passthrough = Catalog::<serde_json::Map<String, serde_json::Value>>::default();
+			passthrough.ext.insert(key.into(), serde_json::json!({}));
+			let err = passthrough.to_json().unwrap_err();
+			assert!(err.to_string().contains(&format!("`{key}`")), "{key}: {err}");
+		}
 
 		// Any other member still flattens beside the base sections.
 		let ok = Catalog {
@@ -1688,5 +1718,59 @@ mod test {
 		catalog.json.insert("chat", chat).unwrap();
 		let err = catalog.to_json().unwrap_err();
 		assert!(err.to_string().contains("must not carry a member `version`"), "{err}");
+	}
+
+	/// `without_ext` clears only the extension: every other field, including those a decoder fills,
+	/// survives the copy.
+	#[test]
+	fn without_ext_keeps_every_other_field() {
+		let mut catalog = Catalog::<serde_json::Map<String, serde_json::Value>> {
+			echo: Some(crate::catalog::Echo::new(moq_net::path::Relative::new("echo").unwrap())),
+			stats: Some(crate::catalog::Stats::new("stats")),
+			..Default::default()
+		};
+		catalog.ext.insert("app".into(), 1.into());
+		catalog.video.renditions.insert(
+			"video".into(),
+			VideoConfig::new(H264 {
+				profile: 0x64,
+				constraints: 0,
+				level: 0x28,
+				inline: false,
+			}),
+		);
+		catalog
+			.audio
+			.renditions
+			.insert("audio".into(), AudioConfig::new(Opus, 48_000, 2));
+		catalog.sync.interval = Some(std::time::Duration::from_secs(2));
+		catalog.json.insert("chat", JsonConfig::new(Mode::Stream)).unwrap();
+		catalog
+			.binary
+			.insert("blob", BinaryConfig::new(Mode::Snapshot))
+			.unwrap();
+		catalog.include.insert(
+			"other".into(),
+			crate::catalog::Include::new(moq_net::path::Relative::new("other").unwrap()),
+		);
+		catalog.skipped.video.insert("future".into(), 9);
+
+		let stripped = catalog.without_ext();
+		let expected = Catalog::<()> {
+			video: catalog.video.clone(),
+			audio: catalog.audio.clone(),
+			sync: catalog.sync,
+			text: catalog.text.clone(),
+			json: catalog.json.clone(),
+			binary: catalog.binary.clone(),
+			stats: catalog.stats.clone(),
+			echo: catalog.echo.clone(),
+			include: catalog.include.clone(),
+			ext: (),
+			skipped: catalog.skipped.clone(),
+		};
+		assert_eq!(stripped, expected);
+		assert!(!stripped.json.tracks.is_empty() && !stripped.skipped.video.is_empty());
+		assert!(stripped.stats.is_some() && stripped.echo.is_some() && !stripped.include.is_empty());
 	}
 }

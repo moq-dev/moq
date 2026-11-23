@@ -24,15 +24,19 @@ export class Consumer {
 }
 
 export interface ConsumerProps {
-	delay?: Signals.GetterInit<Net.Track.Delay>;
+	delay?: Signals.GetterInit<Delay>;
 	format: Format;
 	ordered?: Net.Track.Ordered;
-	playhead?: Playhead;
 	predecessor?: Consumer;
 	warmup?: Net.Clock.Duration;
 }
 
 export const DELAY_MAX: Net.Clock.Duration;
+
+export interface Delay {
+	max?: Net.Clock.Duration | null;
+	min?: Net.Clock.Duration | null;
+}
 
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp): Frame[];
@@ -80,11 +84,6 @@ export * as Loc from "@moq/loc";
 
 export const MAX_AGE: Net.Clock.Duration;
 
-export interface Playhead {
-	readonly anchor: Signals.Getter<unknown>;
-	now(): Net.Clock.Duration | undefined;
-}
-
 export type Read = {
 	frame: ReceivedFrame;
 	group: bigint;
@@ -109,6 +108,8 @@ export type TrackInfoOptions = {
 };
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
+
+export function subscription(delay: Delay, subscription?: Net.Track.Subscription): Net.Track.Subscription;
 
 export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
 ```

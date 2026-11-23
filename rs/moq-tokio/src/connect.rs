@@ -226,7 +226,8 @@ pub(crate) struct Legacy {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		),
 		hide = true
 	)]
@@ -607,6 +608,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-version",
+		delimiter = ',',
 		long = "connect-version",
 		env = "MOQ_CONNECT_VERSION",
 		setting = "connect.version",
@@ -620,7 +622,8 @@ pub struct Config {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		)
 	)]
 	pub version: Vec<moq_net::Version>,

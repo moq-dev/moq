@@ -75,6 +75,15 @@ impl Group {
 			.poll_paced(waiter, header.info.size.saturating_add(metadata), window)
 	}
 
+	/// How many more bytes the writer may take, a frame's included, before
+	/// [`Self::poll_admit`] holds it at `window`, or `None` while nothing would.
+	pub fn room(&self, window: u64) -> Option<u64> {
+		self.writer
+			.as_ref()
+			.expect("group writer is available between frames")
+			.room(0, window)
+	}
+
 	/// Restore the writer returned by a completed frame.
 	pub fn restore(&mut self, writer: group::Producer) {
 		debug_assert!(self.writer.is_none());

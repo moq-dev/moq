@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{Error, Pattern, Patterns, Timestamp, group, origin, stats, track};
+use moq_net::{Error, Prefixes, Timestamp, group, origin, stats, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer_with_latency};
 
@@ -65,6 +65,7 @@ impl Watch {
 					origin::RouteKind::Restart => Kind::Restart,
 					origin::RouteKind::End => Kind::End,
 					origin::RouteKind::Offline => Kind::Offline,
+					kind => panic!("unexpected route kind {kind:?}"),
 				};
 				let seen = Seen {
 					at: kio::clock::now().saturating_duration_since(start),
@@ -363,8 +364,8 @@ fn cut(pair: &MockPair) {
 	pair.client.abort(Error::Cancel);
 }
 
-/// How long the moves in [`next_hop_moves_keep_a_live_reader`] take to land: past the
-/// origin's update hold, and the new next hop's upstream latency both ways.
+/// How long the moves in [`next_hop_moves_keep_a_live_reader`] take to land: past the new
+/// next hop's upstream latency both ways.
 const MOVE: u64 = 75;
 
 /// `P` publishes `live` to `A` and `B`, and the relay `R` pulls both, preferring `A`. A
@@ -470,11 +471,7 @@ async fn a_narrower_next_hop_fails_over_to_a_wider_route() {
 	let mut options = links.options("p-c", &p, &c);
 	options.client_discovers_all = false;
 	let _p_c = connect_mock(options).await;
-	let _c_reads_other = c
-		.consume()
-		.scope("other", &Patterns::from(Pattern::all()))
-		.unwrap()
-		.routes();
+	let _c_reads_other = c.consume().scope("other", &Prefixes::all()).unwrap().routes();
 	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let mut watched = Vec::new();
@@ -605,8 +602,9 @@ async fn live_mesh_withdraw_retracts_once_without_latency() {
 /// A stale route resets a subscription `Unroutable` before its withdrawal arrives (3
 /// readers' relays, all for publisher 22). That judges the route, not the track, so those
 /// readers wait for the next route rather than end.
-#[kio::test]
-async fn live_mesh_link_failure_keeps_presence() {
+/// Run one publisher from [`PUBLISHERS`] against the 34-relay production mesh; split across
+/// tests so nextest runs the five publishers in parallel.
+async fn live_mesh_link_failure_for_publisher(publisher: usize) {
 	let version = lite07();
 	let nodes: Vec<_> = (1..=34).map(crate::mesh_withdraw::produce_origin).collect();
 	let mut links: Vec<Option<MockPair>> = Vec::new();
@@ -615,98 +613,113 @@ async fn live_mesh_link_failure_keeps_presence() {
 		links.push(Some(peer_with_latency(version, &nodes[a], &nodes[b], latency).await));
 	}
 
+	let name = format!("room/{publisher}");
+	let start = kio::clock::now();
+	let broadcast = nodes[publisher]
+		.route(name.clone(), origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	let mut feed = Feed::new(track, start, MESH_STEP);
+	broadcast.announce().unwrap();
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let mut watched: Vec<_> = nodes.iter().map(|node| Watch::new(node, &name, start)).collect();
+	let mut readers = Vec::new();
+	for (relay, node) in nodes.iter().enumerate() {
+		if relay != publisher {
+			readers.push((relay, reader(node, &name, start).await));
+		}
+	}
+	feed.run(5).await;
+
+	// Cut every link of the publisher's relay but its slowest.
+	let touching: Vec<_> = (0..PRODUCTION.len())
+		.filter(|&index| PRODUCTION[index].0 == publisher || PRODUCTION[index].1 == publisher)
+		.collect();
+	let kept = *touching
+		.iter()
+		.max_by_key(|&&index| PRODUCTION_LATENCY_MS[index])
+		.unwrap();
+	let cut_links: Vec<_> = touching.into_iter().filter(|&index| index != kept).collect();
+	for &index in &cut_links {
+		cut(links[index].as_ref().unwrap());
+		links[index] = None;
+	}
+	feed.run(((HOLD + DEBOUNCE).as_millis() / MESH_STEP.as_millis()) as u64)
+		.await;
+	// The last frames cross the mesh.
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let end = kio::clock::now().saturating_duration_since(start);
+
 	let mut worst = Duration::ZERO;
-	let (mut dark_relays, mut retracting, mut lost_readers) = (0, 0, 0);
-	for publisher in PUBLISHERS {
-		let name = format!("room/{publisher}");
-		let start = kio::clock::now();
-		let broadcast = nodes[publisher]
-			.route(name.clone(), origin::RouteOptions::hidden())
-			.unwrap();
-		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-		let mut feed = Feed::new(track, start, MESH_STEP);
-		broadcast.announce().unwrap();
-		kio::clock::sleep(Duration::from_secs(1)).await;
-		let mut watched: Vec<_> = nodes.iter().map(|node| Watch::new(node, &name, start)).collect();
-		let mut readers = Vec::new();
-		for (relay, node) in nodes.iter().enumerate() {
-			if relay != publisher {
-				readers.push((relay, reader(node, &name, start).await));
-			}
-		}
-		feed.run(5).await;
-
-		// Cut every link of the publisher's relay but its slowest.
-		let touching: Vec<_> = (0..PRODUCTION.len())
-			.filter(|&index| PRODUCTION[index].0 == publisher || PRODUCTION[index].1 == publisher)
-			.collect();
-		let kept = *touching
+	let mut retracting = 0;
+	let mut dark = Vec::new();
+	for (relay, watch) in watched.iter_mut().enumerate() {
+		let seen = watch.seen();
+		assert!(
+			seen.first()
+				.is_some_and(|seen| seen.kind == Kind::Start && seen.available),
+			"publisher {publisher}, relay {relay}: {seen:?}"
+		);
+		let churn = Churn::of(&seen[1..], end);
+		assert!(
+			churn.retractions <= 1 && churn.reannouncements <= churn.retractions,
+			"publisher {publisher}, relay {relay} hunted: {seen:?}"
+		);
+		let last = seen.last().unwrap();
+		assert!(
+			last.available && !matches!(last.kind, Kind::End | Kind::Offline),
+			"publisher {publisher}, relay {relay}: {seen:?}"
+		);
+		worst = worst.max(churn.dark);
+		retracting += churn.retractions;
+		if seen[1..]
 			.iter()
-			.max_by_key(|&&index| PRODUCTION_LATENCY_MS[index])
-			.unwrap();
-		let cut_links: Vec<_> = touching.into_iter().filter(|&index| index != kept).collect();
-		for &index in &cut_links {
-			cut(links[index].as_ref().unwrap());
-			links[index] = None;
+			.any(|seen| !seen.available || seen.kind == Kind::Offline)
+		{
+			dark.push(relay);
 		}
-		feed.run(((HOLD + DEBOUNCE).as_millis() / MESH_STEP.as_millis()) as u64)
-			.await;
-		// The last frames cross the mesh.
-		kio::clock::sleep(Duration::from_secs(1)).await;
-		let end = kio::clock::now().saturating_duration_since(start);
-
-		let mut dark = Vec::new();
-		for (relay, watch) in watched.iter_mut().enumerate() {
-			let seen = watch.seen();
+	}
+	let mut lost_readers = 0;
+	for (relay, rx) in &mut readers {
+		let live = Liveness::of(rx, &feed);
+		if !live.seamless() {
+			lost_readers += 1;
 			assert!(
-				seen.first()
-					.is_some_and(|seen| seen.kind == Kind::Start && seen.available),
-				"publisher {publisher}, relay {relay}: {seen:?}"
+				dark.contains(relay),
+				"publisher {publisher}: relay {relay} kept a usable route but its reader got {live:?}"
 			);
-			let churn = Churn::of(&seen[1..], end);
-			assert!(
-				churn.retractions <= 1 && churn.reannouncements <= churn.retractions,
-				"publisher {publisher}, relay {relay} hunted: {seen:?}"
-			);
-			let last = seen.last().unwrap();
-			assert!(
-				last.available && !matches!(last.kind, Kind::End | Kind::Offline),
-				"publisher {publisher}, relay {relay}: {seen:?}"
-			);
-			worst = worst.max(churn.dark);
-			retracting += churn.retractions;
-			if seen[1..]
-				.iter()
-				.any(|seen| !seen.available || seen.kind == Kind::Offline)
-			{
-				dark.push(relay);
-			}
 		}
-		dark_relays += dark.len();
-		for (relay, rx) in &mut readers {
-			let live = Liveness::of(rx, &feed);
-			if !live.seamless() {
-				lost_readers += 1;
-				assert!(
-					dark.contains(relay),
-					"publisher {publisher}: relay {relay} kept a usable route but its reader got {live:?}"
-				);
-			}
-		}
-
-		drop(broadcast);
-		for &index in &cut_links {
-			let (a, b) = PRODUCTION[index];
-			let latency = Duration::from_millis(PRODUCTION_LATENCY_MS[index]);
-			links[index] = Some(peer_with_latency(version, &nodes[a], &nodes[b], latency).await);
-		}
-		kio::clock::sleep(HOLD + DEBOUNCE).await;
 	}
 	println!(
-		"live mesh link failure over {} publishers: {dark_relays} relays went unavailable, {retracting} retracted and \
+		"live mesh link failure for publisher {publisher}: {} relays went unavailable, {retracting} retracted and \
 		 announced again, {lost_readers} readers lost their subscription, longest without a path {worst:?}",
-		PUBLISHERS.len()
+		dark.len()
 	);
+}
+
+#[kio::test]
+async fn live_mesh_link_failure_keeps_presence_p5() {
+	live_mesh_link_failure_for_publisher(PUBLISHERS[0]).await;
+}
+
+#[kio::test]
+async fn live_mesh_link_failure_keeps_presence_p13() {
+	live_mesh_link_failure_for_publisher(PUBLISHERS[1]).await;
+}
+
+#[kio::test]
+async fn live_mesh_link_failure_keeps_presence_p22() {
+	live_mesh_link_failure_for_publisher(PUBLISHERS[2]).await;
+}
+
+#[kio::test]
+async fn live_mesh_link_failure_keeps_presence_p26() {
+	live_mesh_link_failure_for_publisher(PUBLISHERS[3]).await;
+}
+
+#[kio::test]
+async fn live_mesh_link_failure_keeps_presence_p32() {
+	live_mesh_link_failure_for_publisher(PUBLISHERS[4]).await;
 }
 
 /// Seeded random meshes of 5 to 8 relays at random link latencies, the publisher on relay

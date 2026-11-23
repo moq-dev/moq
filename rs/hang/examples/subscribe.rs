@@ -63,6 +63,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 					old.abort();
 				}
 			}
+			_ => {}
 		}
 	}
 	anyhow::bail!("origin closed")
@@ -118,7 +119,7 @@ async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_priority(1)
-				.with_delay(moq_net::track::Delay::default().with_min(None).with_max(latency)),
+				.with_delay(moq_net::track::Delay::default().with_max(latency)),
 		)
 		.await?;
 	let mut ordered =

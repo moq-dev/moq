@@ -54,11 +54,11 @@ pub async fn connect(
 /// `public_subscribe` to anyone, as the `[auth]` config does.
 #[cfg(feature = "test-support")]
 pub fn public(public: &[&str], publish: &[&str], subscribe: &[&str]) -> auth::Auth {
-	let patterns = |texts: &[&str]| texts.iter().map(|text| text.parse().expect("pattern")).collect();
+	let prefixes = |texts: &[&str]| texts.iter().map(|text| text.parse().expect("prefix")).collect();
 	let mut config = auth::Config::default();
-	config.public = patterns(public);
-	config.public_publish = patterns(publish);
-	config.public_subscribe = patterns(subscribe);
+	config.public = prefixes(public);
+	config.public_publish = prefixes(publish);
+	config.public_subscribe = prefixes(subscribe);
 	config
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init")
@@ -96,6 +96,7 @@ pub fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::syn
 				moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					announce: route,
+					..
 				} => (route, false),
 				moq_net::origin::RouteEvent {
 					kind:
@@ -103,7 +104,9 @@ pub fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::syn
 						| moq_net::origin::RouteKind::Update
 						| moq_net::origin::RouteKind::Restart,
 					announce: route,
+					..
 				} => (route, true),
+				other => panic!("unexpected route event {other:?}"),
 			};
 			recorded
 				.lock()

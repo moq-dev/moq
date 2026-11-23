@@ -34,6 +34,7 @@ if (input.mode === "answer") {
 	broadcast.createTrack("b");
 	// A namespace apart from the track of the same name.
 	const datagrams = broadcast.createDatagrams("a", { timescale: Timescale.MILLI, priority: 2 });
+	if (!datagrams) throw new Error("the track already exists");
 
 	const publisher = new Publisher(createMockTransportPair().server, version, randomHop(), origin.consume());
 	const stream = new Stream({

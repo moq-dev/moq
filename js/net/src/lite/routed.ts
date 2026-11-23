@@ -10,8 +10,9 @@
 // Each claim is one instance's at a path, with what the peer's own reader shows of it: its cost,
 // how far above the path it was made, and whether a route still reaches it.
 
-import { type Dispose, type GetPromise, race } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, race } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import type { Grant } from "../auth.ts";
 import type { Goaway } from "../connection/goaway.ts";
 import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
@@ -53,6 +54,8 @@ export interface Session {
 	/** Rank a route last once the peer sent GOAWAY. */
 	drained(route: WireRoute): WireRoute;
 	goaway?: GetPromise<Goaway>;
+	/** Our grant: the peer answers a prefix wider than what it lets us subscribe to region by region. */
+	grant?: Getter<Grant | undefined>;
 	/** Send one message on this session's Announce Stream. */
 	send(msg: AnnounceBroadcast): Promise<void>;
 }
@@ -109,6 +112,11 @@ export class Routed {
 	#finished = false;
 	/** This side finished its stream: it asks for nothing more. */
 	#silent = false;
+	/** The grant showed a reader more since the last edit: the next goes even when it changes
+	 * nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix. */
+	#regranted = false;
+	/** What our grant lets us subscribe to, as last seen. */
+	#granted?: Path.Prefixes;
 
 	// Each live claim holds one of the session's announce slots.
 	#claims: SlotMap<bigint, Live>;
@@ -119,6 +127,7 @@ export class Routed {
 	// Set once the session lets go of its claims, which then show nothing anew.
 	#closing = false;
 	#stopDrain?: Dispose;
+	#stopGrant?: Dispose;
 
 	constructor(session: Session) {
 		this.#session = session;
@@ -128,6 +137,34 @@ export class Routed {
 			if (this.#closing) return;
 			for (const [id, live] of this.#claims) this.#serve(id, live, false, false);
 		});
+		this.#granted = session.grant?.peek()?.subscribe;
+		this.#stopGrant = session.grant?.subscribe(() => {
+			this.#ask();
+			this.#release();
+		});
+	}
+
+	// Note a grant change, read as it is set rather than when its listeners run, so a reader
+	// attached between the two waits too. What it newly shows within a prefix asked may already be
+	// in the peer's answer, unheard here: the next edit goes, since its answer follows the change,
+	// and the readers there and any reader arriving before that answer wait for it. Elsewhere, and
+	// on a narrowing, nothing new can arrive, and a reader stays synced. Mirrors rs/moq-net.
+	#regrant(): void {
+		const next = this.#session.grant?.peek()?.subscribe;
+		const granted = this.#granted;
+		if (next === granted || (next && granted?.equals(next))) return;
+		this.#granted = next;
+		const regions = gained(granted, next);
+		const overlaps = (prefix: Path.Valid) =>
+			regions.some((region) => Path.hasPrefix(region, prefix) || Path.hasPrefix(prefix, region));
+		if ([...this.#asked.values()].some((asked) => overlaps(asked.path))) this.#regranted = true;
+		for (const reader of this.#readers) {
+			if (!overlaps(reader.prefix)) continue;
+			this.#regranted = true;
+			if (!reader.synced) continue;
+			reader.synced = false;
+			reader.announced.behind();
+		}
 	}
 
 	/** Feed `announced` what the stream carries for `request`, until its last consumer leaves. */
@@ -193,9 +230,11 @@ export class Routed {
 
 	// Ask the peer for what the readers now want, one edit at a time.
 	#ask(): void {
+		this.#regrant();
 		if (this.#editing || this.#finished || this.#silent || this.#closing) return;
 		const { remove, add } = this.#edit();
-		if (remove.length === 0 && add.length === 0) return;
+		if (remove.length === 0 && add.length === 0 && !this.#regranted) return;
+		this.#regranted = false;
 		const added: bigint[] = [];
 		for (const { prefix, hidden } of add) {
 			const id = this.#nextPrefix++;
@@ -215,6 +254,7 @@ export class Routed {
 	#release(): void {
 		const done = this.#finished || this.#silent;
 		if (!done) {
+			this.#ask();
 			if (this.#editing) return;
 			const { remove, add } = this.#edit();
 			if (remove.length > 0 || add.length > 0) return;
@@ -250,6 +290,7 @@ export class Routed {
 		if (this.#closing) return;
 		this.#closing = true;
 		this.#stopDrain?.();
+		this.#stopGrant?.();
 		for (const live of this.#claims.values()) {
 			if (live.path !== undefined && live.taken) this.#session.consumes.withdraw(live.path, live.owner);
 		}
@@ -266,9 +307,10 @@ export class Routed {
 		return found;
 	}
 
-	// A claim through this session: its cost past this session's link cost of 1, as Rust's
-	// default, ranked last while the peer or a node on its way drains, then by the lowest
-	// priority on its way, past this link's 0, and unavailable while no route reaches it.
+	// A claim through this session: its cost plus a local link cost of 1, which the draft lets
+	// a receiver charge in place of the peer's declared cost; ranked last while the peer or a
+	// node on its way drains, then by the lowest priority on its way, past this link's 0; and
+	// unavailable while no route reaches it.
 	#candidate(live: Live, claim: Claim): WireRoute {
 		return this.#session.drained(
 			WireRoute.normalize({
@@ -481,11 +523,11 @@ export class Routed {
 				this.#end(msg.id, msg.lost ?? false);
 				break;
 			case "skipped":
-				break;
 			case "active":
 			case "update":
 			case "ended":
-				// Lite-07 names every claim's instance, and ends one by its Announce ID.
+				// Lite-07 names every claim's instance, ends one by its Announce ID, and decoding
+				// refuses an unknown type, which only lite-06 skips.
 				throw new ProtocolViolation(`${msg.status} announcement on lite-07`);
 		}
 	}
@@ -502,4 +544,17 @@ function visible(reader: Reader, path: Path.Valid): boolean {
 function presentedAt(reader: Reader, path: Path.Valid): Path.Valid | undefined {
 	if (Path.hasPrefix(reader.prefix, path)) return path;
 	return Path.hasPrefix(path, reader.prefix) ? reader.prefix : undefined;
+}
+
+// The prefixes holding what the grant `next` shows that `before` did not: each of its prefixes
+// `before` does not cover, less any too long for a path, which covers nothing a peer could name.
+// Empty for a narrowing. Mirrors rs/moq-net's `Permit::beyond`.
+function gained(before: Path.Prefixes | undefined, next: Path.Prefixes | undefined): Path.Valid[] {
+	if (!before) return [];
+	if (!next) return [Path.empty()];
+	return next
+		.toArray()
+		.filter((prefix) => !before.matches(prefix.text))
+		.map((prefix) => prefix.text as Path.Valid)
+		.filter((region) => Path.check(region) === undefined);
 }

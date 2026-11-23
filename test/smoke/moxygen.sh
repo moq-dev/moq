@@ -101,12 +101,12 @@ if ! openssl req -x509 -newkey rsa:2048 -nodes \
 fi
 
 echo "starting moq-dev relay on 127.0.0.1:${PORT}..."
-# Git HEAD relay: the >= 0.15 flag names and pattern-based public auth.
+# Git HEAD relay: the >= 0.15 flag names and prefix-based public auth.
 "$MOQ_RELAY" --listen "127.0.0.1:${PORT}" \
     --listen-tls-cert "$TMP/localhost.crt" --listen-tls-key "$TMP/localhost.key" \
     --web-https-listen "127.0.0.1:${PORT}" \
     --web-https-cert "$TMP/localhost.crt" --web-https-key "$TMP/localhost.key" \
-    --auth-public "**" >"$TMP/relay.log" 2>&1 &
+    --auth-public "" >"$TMP/relay.log" 2>&1 &
 RELAY_PID=$!
 
 ready=0

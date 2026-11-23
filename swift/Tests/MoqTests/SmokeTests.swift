@@ -55,7 +55,7 @@ final class SmokeTests: XCTestCase {
     }
 
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
-        XCTAssertEqual(Subscription.default.delay.min, 0)
+        XCTAssertNil(Subscription.default.delay.min)
         XCTAssertEqual(Subscription.default.delay.max, 0)
     }
 
@@ -65,7 +65,7 @@ final class SmokeTests: XCTestCase {
         let timebase = try Media.Timebase(broadcast: owner)
         XCTAssertThrowsError(
             try Media.ContainerProducer(
-                broadcast: other, initData: Media.ContainerInit(format: .fmp4, data: Data(), timebase: timebase)))
+                broadcast: other, initData: Media.ContainerInit(format: .fmp4(), data: Data(), timebase: timebase)))
         try owner.close()
         XCTAssertThrowsError(try Media.Timebase(broadcast: owner))
         try other.close()
@@ -101,7 +101,7 @@ final class SmokeTests: XCTestCase {
         let consumer = try track.consume(
             subscription: Subscription(
                 delay: Delay(min: 0, max: 10),
-                ranges: [Subscription.Range(start: .relative(groups: 2))],
+                ranges: [Subscription.Range(start: .unscaled(0))],
                 order: .ascending
             ))
         var starts: [UInt64] = []
@@ -195,6 +195,9 @@ final class SmokeTests: XCTestCase {
             var info = try broadcast.publishTrack(name: "info").consume().info()
             info.maxAge = bad
             assertConfig({ _ = try broadcast.publishTrack(name: "bad", info: info) }, "max age \(bad)")
+            info.maxAge = 0
+            info.refresh = TrackRefresh(interval: bad)
+            assertConfig({ _ = try broadcast.publishTrack(name: "bad", info: info) }, "refresh interval \(bad)")
 
             var subscription = Subscription.default
             subscription.delay.max = bad
@@ -213,7 +216,7 @@ final class SmokeTests: XCTestCase {
                 {
                     _ = try Video.Encoder(
                         input: VideoEncoderInput(
-                            format: .rgba, width: 64, height: 64,
+                            format: .rgba(), width: 64, height: 64,
                             framerate: Video.FrameRate(numerator: 30, denominator: 1)),
                         output: VideoEncoderOutput(codec: VideoCodec.h264(), join: bad, kind: .software))
                 }, "video join \(bad)")
@@ -251,7 +254,7 @@ final class SmokeTests: XCTestCase {
         }
         defer { watchdog.cancel() }
 
-        let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
+        let everything = Grant(publish: [""], subscribe: [""], expires: nil)
         for side in [session, peer] {
             for try await grant in side.grants() where grant == everything {
                 break
@@ -619,7 +622,7 @@ final class SmokeTests: XCTestCase {
             optimizeForLatency: true
         )
         let media = try Media.TrackProducer.video(
-            broadcast: broadcast, initData: Media.VideoInit(format: .h264, data: Data(), hint: hint))
+            broadcast: broadcast, initData: Media.VideoInit(format: .h264(), data: Data(), hint: hint))
         try media.finish()
         try broadcast.close()
     }
@@ -1139,7 +1142,8 @@ final class SmokeTests: XCTestCase {
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(
-                format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+                format: .rgba(), width: 320, height: 240,
+                framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
             output: VideoEncoderOutput(codec: VideoCodec.h264(), kind: .software),
             track: "camera"
         )
@@ -1173,10 +1177,10 @@ final class SmokeTests: XCTestCase {
         decoder.cancel()
         XCTAssertNil(frame.surface())
 
-        let planar = try frame.pixels(format: .i420)
+        let planar = try frame.pixels(format: .i420())
         XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)
 
-        let packed = try frame.pixels(format: .rgba)
+        let packed = try frame.pixels(format: .rgba())
         XCTAssertEqual(packed.count, Int(frame.width()) * Int(frame.height()) * 4)
         XCTAssertTrue(stride(from: 3, to: packed.count, by: 4).allSatisfy { packed[$0] == 0xFF })
 

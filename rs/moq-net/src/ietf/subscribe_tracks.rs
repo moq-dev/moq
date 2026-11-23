@@ -46,7 +46,8 @@ impl<'a> Message<'a> for SubscribeTracks {
 		let defaults = version != Version::Draft18;
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
-			0x10 => (!self.forward).then_some(false),
+			0x10 => (!self.forward && !version.paused()).then_some(false),
+			0x11 => (!self.forward && version.paused()).then_some(true),
 			0x22 => self.group_order.filter(|_| defaults),
 			0x35 => include_properties,
 		);
@@ -66,7 +67,8 @@ impl<'a> Message<'a> for SubscribeTracks {
 			0x03 => authorization_token: Vec<RequestToken>,
 			0x04 => _rendezvous_timeout: Option<u64> where defaults,
 			0x06 => _subgroup_delivery_timeout: Option<u64> where defaults,
-			0x10 => forward: Option<bool>,
+			0x10 => forward: Option<bool> where !version.paused(),
+			0x11 => paused: Option<bool> where version.paused(),
 			0x20 => _subscriber_priority: Option<u8> where defaults,
 			0x21 => _filter: Option<Filter> where defaults,
 			0x22 => group_order: Option<GroupOrder> where defaults,
@@ -87,7 +89,7 @@ impl<'a> Message<'a> for SubscribeTracks {
 		Ok(Self {
 			request_id,
 			prefix,
-			forward: forward.unwrap_or(true),
+			forward: Version::forward_state(forward, paused).unwrap_or(true),
 			group_order,
 			properties_wanted: include_properties.unwrap_or(true),
 			authorization_token,
@@ -150,9 +152,25 @@ mod tests {
 		}
 	}
 
+	/// Draft-23 spells a paused listing PAUSED = 1 (section 9.19.18), and an omitted
+	/// parameter still means unpaused.
+	#[test]
+	fn draft23_listing_carries_paused() {
+		let version = Version::Draft23;
+		// Request ID 4, prefix "room", then the parameters.
+		let head = [0x04, 0x01, 0x04, b'r', b'o', b'o', b'm'];
+		assert_eq!(encode(&paused(), version), [&head[..], &[0x01, 0x11, 0x01]].concat());
+
+		let wire = [&head[..], &[0x00]].concat();
+		let decoded: SubscribeTracks = decode(&wire, version).unwrap();
+		assert!(decoded.forward);
+		let wire = [&head[..], &[0x01, 0x10, 0x00]].concat();
+		assert!(decode::<SubscribeTracks>(&wire, version).is_err());
+	}
+
 	#[test]
 	fn a_paused_listing_round_trips() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let decoded: SubscribeTracks = decode(&encode(&paused(), version), version).unwrap();
 			assert_eq!(decoded.request_id, RequestId(4), "{version}");
 			assert_eq!(decoded.prefix.as_str(), "room", "{version}");
@@ -200,7 +218,7 @@ mod tests {
 			group_order: Some(GroupOrder::Ascending),
 			..paused()
 		};
-		for version in [Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft20, Version::Draft22, Version::Draft23] {
 			assert_ne!(encode(&ordered, version), encode(&paused(), version), "{version}");
 			let decoded: SubscribeTracks = decode(&encode(&ordered, version), version).unwrap();
 			assert_eq!(decoded.group_order, Some(GroupOrder::Ascending), "{version}");
@@ -212,7 +230,7 @@ mod tests {
 
 	#[test]
 	fn publish_skipped_round_trips() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let msg = PublishSkipped {
 				suffix: Path::from_static("cam"),
 				track_name: "video".into(),

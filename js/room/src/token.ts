@@ -22,16 +22,16 @@ export type Claims = {
 /**
  * Token claims for a participant in `room`.
  *
- * `root` is the room prefix, `subscribe` is `**` (everything under the room), and
- * `publish` is `<identity>/**` so a participant cannot publish at anyone else's
- * paths. Throws on an identity that is empty, has an empty segment, or contains `*`,
- * since a wildcard would let the participant publish as someone else.
+ * `root` is the room prefix, `subscribe` is the empty prefix (everything under the room),
+ * and `publish` is the prefix `<identity>` (it and everything beneath it) so a participant
+ * cannot publish at anyone else's paths. Throws on an identity that is empty, has an empty
+ * segment, or contains `*`, which no grant takes.
  */
 export function claims(room: string, identity: string): Claims {
 	if (!Path.from(identity)) throw new Error("participant identity must not be empty");
 	return {
 		root: room,
-		subscribe: [Path.Pattern.all().text],
-		publish: [Path.Pattern.subtree(identity).text],
+		subscribe: [Path.Prefix.all().text],
+		publish: [Path.Prefix.parse(identity).text],
 	};
 }

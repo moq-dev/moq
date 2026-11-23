@@ -68,7 +68,7 @@ export class Jitter {
 	#oldest = 0;
 	/** The first arrival, when the subscription began, unset until the first observation. */
 	#start?: number;
-	/** The latest a frame produced before the subscription arrived, starting at `#start`. */
+	/** The latest a frame produced before the subscription arrived, no earlier than `#start`. */
 	#joined = 0;
 	/** Every interval closed so far measured the join, so a skipped backlog can still extend it. */
 	#open = true;
@@ -106,9 +106,11 @@ export class Jitter {
 		// A frame due before the first arrival by the window's fastest path was produced before the
 		// subscription began: it is the backlog a join delivers, and the join lasts until it has all
 		// arrived.
+		// A backlog skipped before this may have landed after it, as when a newest-first replay lands
+		// the newer group first.
 		if (this.#start === undefined) {
 			this.#start = arrival;
-			this.#joined = arrival;
+			this.#joined = Math.max(this.#joined, arrival);
 		} else if (media + this.#history.fastest() < this.#start) {
 			this.#joined = Math.max(this.#joined, arrival);
 		}
@@ -226,9 +228,9 @@ export class Jitter {
 	 * milliseconds and was skipped unread, so the join lasts until then as if it had been observed.
 	 */
 	backlog(arrival: number): void {
-		// Before any observation the join has not started, and starts later than this.
+		// Before any observation the join has not started, and lasts at least until this once it does.
 		// Once an interval measured the path the join is over, and a skip is an outage's.
-		if (this.#start !== undefined && this.#open) this.#joined = Math.max(this.#joined, arrival);
+		if (this.#open) this.#joined = Math.max(this.#joined, arrival);
 	}
 
 	/**

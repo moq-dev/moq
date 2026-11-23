@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::{io, path::Path};
 
@@ -9,9 +10,6 @@ mod detail {
 
 	pub unsafe fn open(path: *const std::os::raw::c_char, flags: i32) -> std::os::raw::c_int {
 		libc::open(path, flags)
-	}
-	pub unsafe fn close(fd: std::os::raw::c_int) -> std::os::raw::c_int {
-		libc::close(fd)
 	}
 	pub unsafe fn ioctl(
 		fd: std::os::raw::c_int,
@@ -42,10 +40,10 @@ mod detail {
 	}
 }
 
-/// A convenience wrapper around v4l2_open.
+/// Opens the device node at `path`, closed when the returned fd drops.
 ///
-/// Returns the file descriptor on success.
 /// In case of errors, the last OS error will be reported, aka errno on Linux.
+/// A path holding a NUL byte fails with [`io::ErrorKind::InvalidInput`].
 ///
 /// # Arguments
 ///
@@ -55,55 +53,20 @@ mod detail {
 /// # Example
 ///
 /// ```
-/// ///
 /// use moq_v4l::v4l2;
 ///
 /// let fd = v4l2::open("/dev/video0", libc::O_RDWR);
 /// ```
-pub fn open<P: AsRef<Path>>(path: P, flags: i32) -> io::Result<std::os::raw::c_int> {
-	let fd: std::os::raw::c_int;
-	let c_path = CString::new(path.as_ref().as_os_str().as_bytes()).unwrap();
+pub fn open<P: AsRef<Path>>(path: P, flags: i32) -> io::Result<OwnedFd> {
+	let c_path = CString::new(path.as_ref().as_os_str().as_bytes())
+		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
-	unsafe {
-		fd = detail::open(c_path.as_ptr(), flags);
-	}
-
+	let fd = unsafe { detail::open(c_path.as_ptr(), flags) };
 	if fd == -1 {
 		Err(io::Error::last_os_error())
 	} else {
-		Ok(fd)
-	}
-}
-
-/// A convenience wrapper around v4l2_close.
-///
-/// In case of errors, the last OS error will be reported, aka errno on Linux.
-///
-/// # Arguments
-///
-/// * `fd` - File descriptor of a previously opened device
-///
-/// # Example
-///
-/// ```
-/// ///
-/// use moq_v4l::v4l2;
-///
-/// let fd = v4l2::open("/dev/video0", libc::O_RDWR);
-/// if let Ok(fd) = fd {
-///     v4l2::close(fd).unwrap();
-/// }
-/// ```
-pub fn close(fd: std::os::raw::c_int) -> io::Result<()> {
-	let ret: std::os::raw::c_int;
-	unsafe {
-		ret = detail::close(fd);
-	}
-
-	if ret == -1 {
-		Err(io::Error::last_os_error())
-	} else {
-		Ok(())
+		// SAFETY: open just returned this fd, and nothing else owns it.
+		Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 	}
 }
 
@@ -124,8 +87,8 @@ pub fn close(fd: std::os::raw::c_int) -> io::Result<()> {
 /// # Example
 ///
 /// ```
-/// ///
 /// use std::mem;
+/// use std::os::fd::AsRawFd;
 ///
 /// use moq_v4l::sys::*;
 /// use moq_v4l::v4l2;
@@ -138,7 +101,7 @@ pub fn close(fd: std::os::raw::c_int) -> io::Result<()> {
 ///
 /// if let Ok(fd) = fd {
 ///     unsafe {
-///         v4l2::ioctl(fd, v4l2::vidioc::VIDIOC_QUERYCAP,
+///         v4l2::ioctl(fd.as_raw_fd(), v4l2::vidioc::VIDIOC_QUERYCAP,
 ///                     &mut v4l2_caps as *mut _ as *mut std::os::raw::c_void);
 ///     }
 /// }
@@ -177,7 +140,7 @@ pub unsafe fn ioctl(
 /// # Example
 ///
 /// ```
-/// ///
+/// use std::os::fd::AsRawFd;
 /// use std::ptr;
 /// use moq_v4l::v4l2;
 ///
@@ -190,9 +153,8 @@ pub unsafe fn ioctl(
 ///     unsafe {
 ///         let mapping = v4l2::mmap(ptr::null_mut(), mapping_length,
 ///                                  libc::PROT_READ | libc::PROT_WRITE,
-///                                  libc::MAP_SHARED, fd, 0);
+///                                  libc::MAP_SHARED, fd.as_raw_fd(), 0);
 ///     }
-///     v4l2::close(fd).unwrap();
 /// }
 /// ```
 pub unsafe fn mmap(
@@ -227,7 +189,7 @@ pub unsafe fn mmap(
 /// # Example
 ///
 /// ```
-/// ///
+/// use std::os::fd::AsRawFd;
 /// use std::ptr;
 /// use moq_v4l::v4l2;
 ///
@@ -240,12 +202,11 @@ pub unsafe fn mmap(
 ///     unsafe {
 ///         let mapping = v4l2::mmap(ptr::null_mut(), mapping_length,
 ///                                  libc::PROT_READ | libc::PROT_WRITE,
-///                                  libc::MAP_SHARED, fd, 0);
+///                                  libc::MAP_SHARED, fd.as_raw_fd(), 0);
 ///         if let Ok(mapping) = mapping {
 ///             v4l2::munmap(mapping, mapping_length).unwrap();
 ///         }
 ///     }
-///     v4l2::close(fd).unwrap();
 /// }
 /// ```
 pub unsafe fn munmap(start: *mut std::os::raw::c_void, length: usize) -> io::Result<()> {
@@ -254,5 +215,16 @@ pub unsafe fn munmap(start: *mut std::os::raw::c_void, length: usize) -> io::Res
 		Err(io::Error::last_os_error())
 	} else {
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn open_rejects_interior_nul() {
+		let err = open("/dev/vid\0eo0", libc::O_RDWR).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 	}
 }

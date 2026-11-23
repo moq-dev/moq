@@ -30,7 +30,7 @@ struct TrackRequest {
 /// several times the size of a fill.
 enum Request {
 	Track(Box<TrackRequest>),
-	Fill(moq_net::track::Fill),
+	Fill(moq_net::track::FillGroups),
 	Datagram(DatagramRequest),
 }
 
@@ -442,7 +442,7 @@ impl Publish {
 		let result = (|| {
 			// Retire caller-authored entries while the catalog track is still open.
 			{
-				let mut guard = broadcast.catalog.modify()?;
+				let mut guard = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 				for name in broadcast.video.keys() {
 					guard.video.renditions.remove(name);
 				}
@@ -517,7 +517,7 @@ impl Publish {
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
 		let name = broadcast.unique_name(init.format.track_suffix());
-		let request = broadcast.reserve_track(name)?;
+		let request = broadcast.reserve_track(name).ok_or(moq_net::Error::Duplicate)?;
 
 		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
@@ -539,7 +539,7 @@ impl Publish {
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
 		let name = broadcast.unique_name(init.format.track_suffix());
-		let request = broadcast.reserve_track(name)?;
+		let request = broadcast.reserve_track(name).ok_or(moq_net::Error::Duplicate)?;
 
 		let priority = init.priority;
 		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
@@ -752,7 +752,7 @@ impl Publish {
 			return Err(moq_mux::Error::IdentityChanged(name.to_string()).into());
 		}
 		broadcast.video.insert(name.to_string(), config.clone());
-		let mut catalog = broadcast.catalog.modify()?;
+		let mut catalog = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 		catalog.video.renditions.insert(name.to_string(), config);
 		catalog.commit()?;
 		Ok(())
@@ -772,7 +772,7 @@ impl Publish {
 			return Err(moq_mux::Error::IdentityChanged(name.to_string()).into());
 		}
 		broadcast.audio.insert(name.to_string(), config.clone());
-		let mut catalog = broadcast.catalog.modify()?;
+		let mut catalog = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 		catalog.audio.renditions.insert(name.to_string(), config);
 		catalog.commit()?;
 		Ok(())
@@ -786,7 +786,7 @@ impl Publish {
 	pub fn video_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if broadcast.video.remove(name).is_some() {
-			let mut catalog = broadcast.catalog.modify()?;
+			let mut catalog = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 			catalog.video.renditions.remove(name);
 			catalog.commit()?;
 		}
@@ -799,7 +799,7 @@ impl Publish {
 	pub fn audio_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if broadcast.audio.remove(name).is_some() {
-			let mut catalog = broadcast.catalog.modify()?;
+			let mut catalog = broadcast.catalog.modify(broadcast.catalog.next_timestamp())?;
 			catalog.audio.renditions.remove(name);
 			catalog.commit()?;
 		}
@@ -809,7 +809,7 @@ impl Publish {
 	/// Replace the properties shared by every video rendition as one catalog update.
 	pub fn video_properties(&mut self, broadcast: Id, properties: hang::catalog::VideoProperties) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		let mut catalog = catalog.modify()?;
+		let mut catalog = catalog.modify(catalog.next_timestamp())?;
 		catalog.video.set_properties(properties)?;
 		catalog.commit()?;
 		Ok(())
@@ -824,7 +824,7 @@ impl Publish {
 	/// automatically.
 	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		let mut guard = catalog.modify()?;
+		let mut guard = catalog.modify(catalog.next_timestamp())?;
 		guard.set_section(name.to_string(), value)?;
 		guard.commit()?;
 		Ok(())
@@ -835,7 +835,7 @@ impl Publish {
 	/// A no-op if no section with that name exists. Republishes the catalog if it did.
 	pub fn catalog_section_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		let mut guard = catalog.modify()?;
+		let mut guard = catalog.modify(catalog.next_timestamp())?;
 		guard.remove_section(name);
 		guard.commit()?;
 		Ok(())
@@ -1059,12 +1059,6 @@ impl Publish {
 				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
 				Request::Datagram(request) => State::lock().publish.datagram_request.insert(request)?,
 				Request::Fill(fill) => {
-					// A lookup of a time owes no group, and a request names one: drop it
-					// unanswered, as a handler that can't resolve times does, so the reader
-					// falls back to the groups held.
-					let moq_net::track::Fill::Groups(fill) = fill else {
-						continue;
-					};
 					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
 					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
 					continue;
@@ -1190,22 +1184,36 @@ impl Publish {
 	/// indices they have in the group rather than restarting at 0.
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		let group = request.fill.accept(request.start, None)?;
+		let group = request
+			.fill
+			.accept(request.start, None)?
+			.ok_or(moq_net::Error::Duplicate)?;
 		self.insert_group(group)
 	}
 
-	/// Reject a group request like [`Self::group_request_free`]; `error_code` is not delivered.
+	/// Refuse a group request, failing the readers waiting on it now as not found, so a later
+	/// reader asks again; `error_code` is not delivered. A reader's time start fails with it
+	/// until its ranges change, as serving it failed.
 	pub fn group_request_abort(&mut self, request: Id, _error_code: u16) -> Result<(), Error> {
-		self.group_request_free(request)
-	}
-
-	/// Drop a group request, failing the readers waiting on it as not found. The group is
-	/// refused rather than dropped, so a later reader asks again.
-	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
 		request
 			.fill
 			.refuse_groups(request.start..request.start + 1, moq_net::Error::NotFound);
+		Ok(())
+	}
+
+	/// Free a group request unanswered: refused as [`Self::group_request_abort`] refuses it,
+	/// except a reader's time start, which is dropped. A C handler knows its groups only by
+	/// key, so one lacking the time's key says no group starts there, and its reader starts at
+	/// the group below rather than failing.
+	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
+		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
+		let fill = &request.fill;
+		let groups = request.start..request.start + 1;
+		match fill.is_time_start() {
+			true => fill.drop_groups(groups),
+			false => fill.refuse_groups(groups, moq_net::Error::NotFound),
+		}
 		Ok(())
 	}
 
@@ -1218,7 +1226,7 @@ impl Publish {
 		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;
 		let info = info.unwrap_or_default();
-		let track = broadcast.create_track(name, info)?;
+		let track = broadcast.create_track(name, info).ok_or(moq_net::Error::Duplicate)?;
 		let raw = Kept {
 			inner: track,
 			children: children.clone(),
@@ -1334,7 +1342,10 @@ impl Publish {
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_compression(moq_net::track::Compression::Deflate);
 		info.refresh = moq_net::track::Refresh::default().with_ratio(refresh);
-		let track = broadcast.producer.create_track(name, info)?;
+		let track = broadcast
+			.producer
+			.create_track(name, info)
+			.ok_or(moq_net::Error::Duplicate)?;
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {
 			producer,
@@ -1884,7 +1895,10 @@ struct DatagramDemand {
 impl Publish {
 	pub fn datagrams(&mut self, broadcast: Id, name: &str, info: moq_net::datagram::Info) -> Result<Id, Error> {
 		let children = self.children(broadcast)?;
-		let producer = self.producer(broadcast)?.create_datagrams(name, info)?;
+		let producer = self
+			.producer(broadcast)?
+			.create_datagrams(name, info)
+			.ok_or(moq_net::Error::Duplicate)?;
 		let entry = Datagrams {
 			producer,
 			children: children.clone(),

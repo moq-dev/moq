@@ -29,9 +29,11 @@ const BUDGET: Duration = Duration::from_secs(100);
 const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
@@ -104,7 +106,7 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 /// A refused history fill or FETCH never ends its live subscription.
 #[kio::test]
 async fn a_refused_transport_backfill_keeps_delivering_live() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		let publisher = origin(1);
 		let relay = origin(2);
 		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;

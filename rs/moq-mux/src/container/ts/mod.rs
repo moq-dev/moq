@@ -21,7 +21,8 @@
 //! [`Passthrough`] is the other shape: it publishes the multiplex whole, every packet
 //! verbatim on one track named by [`Mpegts::passthrough`], for what
 //! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored), and
-//! [`Release`] writes that track back out on a fixed delay.
+//! [`Release`] writes that track back out on a fixed delay. A [`Follower`] carries either
+//! across its broadcast's returns and replacements.
 
 use crate::codec::aac::adts;
 mod damage;
@@ -52,7 +53,7 @@ pub use catalog::{
 };
 pub use error::Error;
 pub use export::Export;
-pub use follower::Follower;
+pub use follower::{Followed, Follower};
 pub use import::*;
 pub use passthrough::Passthrough;
 pub use programs::Programs;

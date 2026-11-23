@@ -26,7 +26,7 @@ export interface Broadcast {
 	datagrams(name: string): datagram.Consumer;
 	liveDatagrams(name: string): datagram.Consumer | undefined;
 	/** Create a datagram track, listed unless `listed` is false, as a session's track riding a stream track's subscription. */
-	createDatagrams(name: string, info: Partial<datagram.Info>, listed?: boolean): datagram.Producer;
+	createDatagrams(name: string, info: Partial<datagram.Info>, listed?: boolean): datagram.Producer | undefined;
 	requestedDatagrams(): Promise<datagram.Request | undefined>;
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
@@ -108,14 +108,14 @@ export interface OriginConsumer {
 	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 	/** Whether the handle's scope admits everything beneath the root-relative `prefix`. */
 	covers(prefix: Path.Valid): boolean;
+	/** The root-relative prefixes the handle's scope admits; unset for every path. */
+	readonly allowed?: Path.Prefixes;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
 export interface Advertised {
 	readonly identity: object;
 	readonly route: WireRoute;
-	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
-	readonly claim?: Path.Patterns;
 	/**
 	 * The prefix the route was advertised at, when a scope's projection merged several covering
 	 * prefixes under one key; unset when the key is its prefix. Supersession compares only routes

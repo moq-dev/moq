@@ -3,7 +3,7 @@ import { decodeProtectedHeader } from "jose";
 import { Key } from "./key.ts";
 import { KeySet } from "./set.ts";
 
-const CLAIMS = { root: "demo", publish: ["alice/**"], subscribe: ["**"] };
+const CLAIMS = { root: "demo", publish: ["alice"], subscribe: [""] };
 
 async function keySet(...kids: (string | undefined)[]): Promise<KeySet> {
 	return { keys: await Promise.all(kids.map((kid) => Key.generate("HS256", kid))) };
@@ -29,7 +29,7 @@ test("sign / verify - round trip selects the key by kid", async () => {
 	const token = await KeySet.sign(set, CLAIMS);
 	const claims = await KeySet.verify(set, token);
 	expect(claims.root).toBe("demo");
-	expect(claims.publish).toEqual(["alice/**"]);
+	expect(claims.publish).toEqual(["alice"]);
 });
 
 test("verify - a token signed by a key outside the set is rejected", async () => {
@@ -50,6 +50,14 @@ test("verify - a kid-less token is accepted only when the set holds one key", as
 	const other = await Key.generate("HS256");
 	other.kid = undefined;
 	await expect(KeySet.verify({ keys: [key, other] }, token)).rejects.toThrow(/Missing kid/);
+});
+
+test("verify - a set holding a private key verifies with its public half", async () => {
+	const set: KeySet = { keys: [await Key.generate("ES256", "key-1"), await Key.generate("EdDSA", "key-2")] };
+	for (const key of set.keys) {
+		const token = await Key.sign(key, CLAIMS);
+		expect((await KeySet.verify(set, token)).root).toBe("demo");
+	}
 });
 
 test("sign - fails when no key can sign", async () => {

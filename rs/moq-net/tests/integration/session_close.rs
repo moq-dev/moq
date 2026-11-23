@@ -11,6 +11,7 @@ use support::AtStart;
 
 use std::time::Duration;
 
+use moq_net::transport::poll::{SendStream as _, Session as _};
 use moq_net::{Error, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -22,10 +23,11 @@ fn timed() -> moq_net::track::Info {
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// The payloads the server read, then how the track ended.
@@ -202,6 +204,45 @@ async fn close_gives_up_on_a_live_track_for(version: &str) {
 	assert_eq!((kio::clock::now() - started), Duration::from_secs(1));
 }
 
+/// A transport that never confirms this side's close, as WebTransport waits for a peer
+/// that is gone to acknowledge its close capsule, still ends the session after a grace,
+/// whether a handle closed it or the protocol did over a peer's violation.
+#[kio::test]
+async fn an_unconfirmed_close_still_ends_the_session() {
+	for by_protocol in [false, true] {
+		let pair = connect_mock(MockConnectOptions::new("moq-lite-06".parse().unwrap())).await;
+		pair.client_transport.withhold_close_confirmation();
+		let started = kio::clock::now();
+		// A second SETUP stream, which lite's protocol answers by closing the session. Held
+		// open, since dropping it resets it before the client reads it.
+		let transport = pair.server_transport.clone();
+		let _setup = match by_protocol {
+			true => {
+				let mut send = transport.open_uni(Default::default()).await.expect("open_uni");
+				send.write(&[0x01]).await.expect("write");
+				Some(send)
+			}
+			false => {
+				pair.client.abort(Error::GoawayTimeout);
+				None
+			}
+		};
+
+		let err = kio::clock::timeout(TIMEOUT, pair.client.closed())
+			.await
+			.unwrap_or_else(|_| panic!("by protocol {by_protocol}: the unconfirmed close never ended the session"));
+		assert!(
+			kio::clock::now() - started < Duration::from_secs(1),
+			"by protocol {by_protocol}: ended after {:?} with {err:?}",
+			kio::clock::now() - started
+		);
+		match by_protocol {
+			true => assert!(!matches!(err, Error::GoawayTimeout | Error::Cancel), "{err:?}"),
+			false => assert!(matches!(err, Error::GoawayTimeout), "{err:?}"),
+		}
+	}
+}
+
 /// An abort from another handle cuts a drain short.
 #[kio::test]
 async fn abort_cuts_a_drain_short() {
@@ -238,7 +279,13 @@ async fn abort_cuts_a_drain_short_for(version: &str) {
 
 #[kio::test]
 async fn close_withdraws_announcements_before_closing_the_transport() {
-	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	for version in [
+		"moq-lite-01",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let publisher = produce_origin(1);
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
@@ -261,7 +308,13 @@ async fn close_withdraws_announcements_before_closing_the_transport() {
 
 #[kio::test]
 async fn close_times_out_waiting_for_announcement_acknowledgements() {
-	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	for version in [
+		"moq-lite-01",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let publisher = produce_origin(1);
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
@@ -277,6 +330,38 @@ async fn close_times_out_waiting_for_announcement_acknowledgements() {
 		let started = kio::clock::now();
 		assert!(matches!(pair.client.close().await, Err(Error::Timeout)), "{version}");
 		assert_eq!(kio::clock::now() - started, Duration::from_secs(1));
+	}
+}
+
+/// A subscriber that announced nothing has nothing to withdraw, so its close never waits
+/// on an acknowledgement, however late the peer sends it.
+#[kio::test]
+async fn close_without_announcements_waits_on_no_acknowledgement() {
+	for version in [
+		"moq-lite-01",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+	] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		broadcast.announce().unwrap();
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		let pair = connect_mock(options).await;
+		crate::support::announced(&subscriber.consume(), "bcast").await;
+		pair.client_transport.hold_fin_acknowledgements();
+		let started = kio::clock::now();
+		pair.client
+			.close()
+			.await
+			.unwrap_or_else(|err| panic!("{version}: {err}"));
+		assert_eq!(kio::clock::now(), started, "{version}");
 	}
 }
 
@@ -357,7 +442,7 @@ async fn earlier_lite_peer_close_reads_buffered_tail() {
 
 #[kio::test]
 async fn ietf_peer_close_reads_buffered_tail() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		peer_close_reads_buffered_tail(version).await;
 	}
 }
@@ -414,7 +499,13 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 /// A locally unsupported feature uses only the negotiated session registry.
 #[kio::test]
 async fn unsupported_abort_uses_the_negotiated_session_registry() {
-	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	for protocol in [
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let version: Version = protocol.parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 		pair.client.abort(Error::Unsupported);
@@ -427,7 +518,13 @@ async fn unsupported_abort_uses_the_negotiated_session_registry() {
 /// A Lite-only close code arriving on IETF stays unknown instead of gaining Lite semantics.
 #[kio::test]
 async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
-	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	for protocol in [
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let version: Version = protocol.parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 		moq_net::transport::poll::Session::close(&pair.server_transport, 0x30, "unsupported");
@@ -445,7 +542,13 @@ async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
 /// wire, while a code outside it passes through.
 #[kio::test]
 async fn an_unknown_lite_range_abort_is_unspecified_on_every_wire() {
-	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	for protocol in [
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		for (unknown, expected) in [(0x31, 0x1), (0x20, 0x20)] {
 			let version: Version = protocol.parse().unwrap();
 			let pair = connect_mock(MockConnectOptions::new(version)).await;
@@ -483,7 +586,7 @@ async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net:
 #[kio::test]
 async fn a_session_records_how_it_ended() {
 	use moq_net::stats::Failures;
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let (err, failed) = ended(version, |pair| pair.client.abort(Error::Cancel)).await;
 		assert!(matches!(err, Error::Cancel), "{version}: {err:?}");
 		assert_eq!(failed, Failures::default(), "{version}");

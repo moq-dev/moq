@@ -63,7 +63,7 @@ pub mod origin {
 		RouteOptions,
 	};
 	#[cfg(feature = "async")]
-	pub(crate) use super::origin_impl::{Lane, NodeFilter};
+	pub(crate) use super::origin_impl::{Lane, NodeFilter, filed};
 
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.
@@ -83,10 +83,6 @@ pub use origin_impl::Consume;
 // Hop chains are transit facts the origin and sessions fill in; applications see
 // plain ids.
 pub(crate) use origin_impl::{Hop, Hops, InvalidHop};
-
-// The announce-interest prefixes a scope needs on a prefix-shaped wire.
-#[cfg(feature = "async")]
-pub(crate) use origin_impl::interest_prefixes;
 
 // Held by a session while its peer's initial announcements arrive.
 #[cfg(feature = "async")]

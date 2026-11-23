@@ -158,6 +158,7 @@ async fn dropped_flow_recovers(budget: Option<Duration>, effective: Duration) {
 			if let moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 				announce: update,
+				..
 			} = event && update.prefix.as_str() == "peer"
 			{
 				break;

@@ -200,10 +200,10 @@ impl Media {
 		}
 	}
 
-	fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+	fn seek(&mut self, start: u64) -> crate::Result<()> {
 		match self {
-			Self::Video(track) => track.seek(sequence),
-			Self::Audio(track) => track.seek(sequence),
+			Self::Video(track) => track.seek(start),
+			Self::Audio(track) => track.seek(start),
 		}
 	}
 
@@ -655,10 +655,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::StreamedCmaf.into());
 		}
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(suffix),
-			self.catalog.track_info(kind.priority()),
-		)?;
+		let track = self
+			.broadcast
+			.unique_track(suffix, self.catalog.track_info(kind.priority()));
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.
@@ -921,8 +920,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			BlockState::Skip => {}
 		}
-		if let Some(sequence) = self.seek.take() {
-			self.seek(sequence)?;
+		if let Some(start) = self.seek.take() {
+			self.seek(start)?;
 		}
 		Ok(())
 	}

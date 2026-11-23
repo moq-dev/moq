@@ -214,13 +214,13 @@ class SelectionTest(unittest.TestCase):
             set(self.plan(["js/view/src/index.ts"])["packages"]), {"@example/core", "@example/view", "docs"}
         )
 
-    def calls(self, paths, action="check", github_actions=False, reports=None):
+    def calls(self, paths, action="check", github_actions=False):
         calls = []
         self.configurations = []
 
         def invoke(args, **kwargs):
             calls.append(list(args))
-            if args[:2] == ("bunx", "tsc") and args[-1] != "test/tsconfig.json":
+            if args[:3] == ("bun", "check", "--no-script") and args[-1] != "test/tsconfig.json":
                 self.configurations.append(json.loads(Path(args[-1]).read_text()))
             return type("Result", (), {"returncode": 1 if args[0] == "grep" else 0})()
 
@@ -230,10 +230,6 @@ class SelectionTest(unittest.TestCase):
             patch.object(selector.os, "chdir"),
             patch.object(selector.subprocess, "run", side_effect=invoke),
         ):
-            # The nightly gate cost scenarios set this for the whole gate, these tests included.
-            selector.os.environ.pop("JS_TEST_REPORTS", None)
-            if reports:
-                selector.os.environ["JS_TEST_REPORTS"] = str(reports)
             selector.run(action, self.plan(paths))
         return calls
 
@@ -266,7 +262,7 @@ class SelectionTest(unittest.TestCase):
                 for action in ("check", "build")
             ],
         )
-        self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
+        self.assertTrue(any(c[:3] == ["bun", "check", "--no-script"] for c in calls))
         self.assertEqual(
             self.configurations,
             [{"extends": "./tsconfig.json", "exclude": ["**/dist", str(self.root / "test/browser")]}],
@@ -277,31 +273,51 @@ class SelectionTest(unittest.TestCase):
         calls = self.calls(["doc/index.md"], "test")
         self.assertIn(["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", "test"], calls)
         hosted = self.calls(["doc/index.md"], "test", github_actions=True)
-        self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], hosted)
+        self.assertIn(["bun", "run", "--parallel", "--filter=docs", "--elide-lines=0", "test"], hosted)
         self.assertFalse(any(c[0] == "just" for c in calls))
-
-    def test_reports_keep_one_junit_per_package(self):
-        reports = self.root / "reports"
-        calls = self.calls(["js/view/src/index.ts"], "test", reports=reports)
-
-        def junit(directory):
-            return ["--reporter=junit", f"--reporter-outfile={reports / directory / 'junit.xml'}"]
-
-        self.assertEqual(
-            [c for c in calls if c[:2] == ["bun", "run"]],
-            [["bun", "run", "test", *junit(d)] for d in ("js/view", "doc")],
-        )
-        root_test = ["bun", "--no-env-file", "test", *junit(".")]
-        self.assertTrue(any(c[: len(root_test)] == root_test for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):
         self.packages["doc"].pop("scripts")
         self.write()
         calls = self.calls(["doc/index.md"])
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in calls))
-        self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
+        self.assertTrue(any(c[:3] == ["bun", "check", "--no-script"] for c in calls))
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "test")))
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "build")))
+
+    def test_install_built_packages_skip_unlocked_build(self):
+        self.packages["js/libav"] = {
+            "name": "@moq/libav",
+            "scripts": {"check": "bun check --no-script", "build": "bun build.ts"},
+        }
+        self.packages["js/core"]["dependencies"] = {"@moq/libav": "workspace:*"}
+        self.packages["js/core"]["scripts"]["build"] = "tsc -p tsconfig.json"
+        self.packages["js/core"]["scripts"]["release"] = "bun ../common/release.ts"
+        self.write()
+        check_calls = self.calls(["js/libav/build.ts"], "check")
+        self.assertIn(
+            [
+                "bun",
+                "run",
+                "--sequential",
+                "--filter=@example/core",
+                "--filter=@example/view",
+                "--filter=@moq/libav",
+                "--filter=docs",
+                "--elide-lines=0",
+                "check",
+            ],
+            check_calls,
+        )
+        build_calls = [c for c in check_calls if c[:2] == ["bun", "run"] and c[-1] == "build"]
+        self.assertTrue(build_calls)
+        self.assertFalse(any("--filter=@moq/libav" in c for c in build_calls), build_calls)
+        # Runtime closure for unselected deps must also reuse the install-built libav artifact.
+        dep_calls = self.calls(["js/core/src/index.ts"], "check")
+        self.assertIn(["node", "sh/js/dist-imports.test.mjs", "js/core"], dep_calls)
+        dep_builds = [c for c in dep_calls if c[:2] == ["bun", "run"] and c[-1] == "build"]
+        self.assertTrue(dep_builds)
+        self.assertFalse(any("--filter=@moq/libav" in c for c in dep_builds), dep_builds)
 
     def test_empty_selection_runs_nothing(self):
         self.assertEqual(self.calls([]), [])

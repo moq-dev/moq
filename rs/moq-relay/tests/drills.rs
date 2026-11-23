@@ -30,6 +30,7 @@ use std::time::Duration;
 use futures::FutureExt;
 
 use moq_relay::{Config, Relay};
+use moq_tokio::connection::Phase;
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
 /// and superseded groups stay readable.
@@ -284,7 +285,7 @@ fn relay_config() -> Config {
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config
 }
 
@@ -595,11 +596,11 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 		.broadcast()
 		.create_track(TRACK, timed())
 		.expect("create track");
-	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
+	let publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
 
 	let subscriber = moq_tokio::origin::spawn();
 	let subscribed = subscriber.consume();
-	let mut subscribe_loop = client(&url).consume(subscriber).expect("no connect url");
+	let subscribe_loop = client(&url).consume(subscriber).expect("no connect url");
 
 	write_group(&mut track, b"before");
 	let mut reader = subscribe(&subscribed, "live").await;
@@ -640,14 +641,14 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	println!("fault activated: interrupted group aborted with {err}");
 
 	// Fault activation: both loops noticed they lost the relay.
-	expect_status(&mut subscribe_loop, moq_tokio::Status::Disconnected, "subscriber").await;
-	expect_status(&mut publish_loop, moq_tokio::Status::Disconnected, "publisher").await;
+	expect_phase(&subscribe_loop, disconnected, "subscriber").await;
+	expect_phase(&publish_loop, disconnected, "publisher").await;
 
 	let relay = replacement;
 	path.retarget(&relay);
 
-	expect_status(&mut subscribe_loop, moq_tokio::Status::Connected, "subscriber").await;
-	expect_status(&mut publish_loop, moq_tokio::Status::Connected, "publisher").await;
+	expect_phase(&subscribe_loop, connected, "subscriber").await;
+	expect_phase(&publish_loop, connected, "publisher").await;
 
 	// The outage is observed, not hidden: the broadcast the dead session fed closed
 	// with it, so the old subscription ends rather than reading from a stale route.
@@ -677,16 +678,23 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 
 lanes!(relay_killed_mid_group_aborts_then_resumes);
 
-/// Wait for a reconnect loop to report `want`, failing with what it said instead.
-async fn expect_status(reconnect: &mut moq_tokio::Connection, want: moq_tokio::Status, who: &str) {
-	loop {
-		let status = kio::clock::timeout(TIMEOUT, reconnect.status())
+fn connected(phase: &Phase) -> bool {
+	matches!(phase, Phase::Connected { .. })
+}
+
+fn disconnected(phase: &Phase) -> bool {
+	matches!(phase, Phase::Disconnected { .. })
+}
+
+/// Wait for a reconnect loop's phase to match `want`, failing with what it reached instead.
+async fn expect_phase(reconnect: &moq_tokio::Connection, want: fn(&Phase) -> bool, who: &str) {
+	let monitor = reconnect.monitor();
+	let mut seen = monitor.state();
+	while !want(&seen.phase) {
+		seen = kio::clock::timeout(TIMEOUT, monitor.state_changed(seen.revision))
 			.await
-			.unwrap_or_else(|_| panic!("{who}: no status change within {TIMEOUT:?}, wanted {want:?}"))
+			.unwrap_or_else(|_| panic!("{who}: still {:?} after {TIMEOUT:?}", seen.phase))
 			.unwrap_or_else(|err| panic!("{who}: reconnect loop gave up: {err}"));
-		if status == want {
-			return;
-		}
 	}
 }
 
@@ -1411,11 +1419,14 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }
 
