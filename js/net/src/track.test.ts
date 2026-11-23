@@ -5298,6 +5298,21 @@ test("a stale skip at the max age bound may not be taken", async () => {
 	}
 });
 
+// Groups stale at the max age bound are settled as handed out, and compacted like them: sparse
+// lower groups arriving after a newer one leave the reader's record as small as it was.
+test("final stale skips do not grow the delivery record", () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Duration.ZERO });
+	const subscriber = producer.subscribe();
+	producer.createGroup(100n).finish();
+	expect(drainGroups(subscriber)).toEqual([100n]);
+	for (let key = 99n; key > 0n; key -= 2n) {
+		producer.createGroup(key).finish();
+		expect(drainGroups(subscriber)).toEqual([]);
+	}
+	expect(hooks.deliveredRuns(subscriber)).toBeLessThanOrEqual(1);
+	producer.close();
+});
+
 // A read already parked when the budget widens wakes for the re-offer.
 test("a widened maxDelay wakes a parked read", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });

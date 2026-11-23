@@ -5265,19 +5265,19 @@ export class Subscriber {
 			}
 			if (this.#staleAt(group.start, drift)) {
 				group.close();
-				// Stale at the bound is final: settled as handed out, as the Rust `retire_written_off`
-				// does, so nothing counts on this reader to hand it out once what convicted it leaves.
-				if (drift.bounded) {
-					this.#skipped.delete(group.start);
-					this.#delivered.add(group.start);
-				} else this.#skip(group.start, drift.budget);
+				let dropped: (Recv & { kind: "drop" }) | undefined;
 				if (dispositions) {
-					const dropped = this.#report(group.start, group.start + 1n, staleHole(drift.budget));
-					if (dropped) return dropped;
+					dropped = this.#report(group.start, group.start + 1n, staleHole(drift.budget));
 				} else if (this.#dropsSeen) {
 					// A cursor #tryDrop reads reports it there.
 					this.#pending = insertDrop(this.#pending, group.start, group.start + 1n, staleHole(drift.budget));
 				}
+				// Stale at the bound is final: settled as handed out, compacted the same way, as the
+				// Rust `retire_written_off` does, so nothing counts on this reader to hand it out once
+				// what convicted it leaves.
+				if (drift.bounded) this.#handOut(group.start, false);
+				else this.#skip(group.start, drift.budget);
+				if (dropped) return dropped;
 				continue;
 			}
 			// A group missing its head comes from the fill asked for it, in its turn.
