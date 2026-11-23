@@ -9,7 +9,6 @@ import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import {
 	bestCandidate,
-	chainHash,
 	compareRouteCandidates,
 	hooks,
 	mostSpecific,
@@ -17,6 +16,7 @@ import {
 	spreadHash,
 	superseded,
 } from "./internal.ts";
+import * as Mint from "./mint.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -2285,8 +2285,6 @@ test("an announcement counts a lite-07 claim as one hop", async () => {
 test("the spread hash matches rs/moq-net byte for byte", () => {
 	expect(spreadHash("pool/job-0", "a")).toBe(0x3df8f75a44f8eefbn);
 	expect(spreadHash("pool/job-0", "b")).toBe(0x3df8f85a44f8f0aen);
-	expect(chainHash("pool/job-0", [10n])).toBe(0xefb5e20a66101c32n);
-	expect(chainHash("pool/job-0", [11n])).toBe(0x0eb0a91370ff6653n);
 });
 
 test("an equal-cost pool spreads its paths the same way on every node", async () => {
@@ -2356,6 +2354,53 @@ test("an equal-cost replacement at its own path wins whatever its hop", async ()
 		request.close();
 		for (const handle of handles) handle.close();
 		origin.close();
+	}
+});
+
+// Beneath a prefix, a later route that ties the one in use never displaces it, whichever hop it
+// names: of one named instance, or of instances sessions minted (moq-lite-06 carries none). A
+// route that restarts under a fresh instance is new, so it yields the tie to one that kept its
+// instance. As `an_equal_route_keeps_the_one_in_use` in rs/moq-net.
+test("an equal route beneath its prefix keeps the one in use", async () => {
+	const named = Instance.parse("worker");
+	const at = (prefix: string) => Array.from({ length: 16 }, (_, i) => Path.from(`pool/${prefix}-${i}`));
+	for (const minted of [false, true]) {
+		for (const order of [
+			[11n, 10n],
+			[10n, 11n],
+		].map((hops) => hops.map((id) => toHop(id)))) {
+			const origin = new Producer();
+			const served = new Map<Path.Valid, bigint>();
+			const handles = order.map((hop) => {
+				const instance = minted ? Mint.fresh() : named;
+				const handle = wireOf(origin).receive(Path.from("pool"), { instance, hops: [hop], cost: 3n });
+				void (async () => {
+					for await (const request of handle.requested()) {
+						served.set(request.path, hop);
+						request.serve(new BroadcastProducer());
+					}
+				})();
+				return handle;
+			});
+			const paths = at("job");
+			const requests = paths.map((path) => origin.request(path));
+			await settle();
+			expect(paths.map((path) => served.get(path))).toEqual(paths.map(() => order[0]));
+
+			if (minted) {
+				// A lite-06 RESTART: its session mints a fresh instance for the route in use.
+				const held = wireOf(defined(handles[0]));
+				held.update({ ...held.info, instance: Mint.fresh(), epoch: 0n });
+				const next = at("next");
+				requests.push(...next.map((path) => origin.request(path)));
+				await settle();
+				expect(next.map((path) => served.get(path))).toEqual(next.map(() => order[1]));
+			}
+
+			for (const request of requests) request.close();
+			for (const handle of handles) handle.close();
+			origin.close();
+		}
 	}
 });
 
