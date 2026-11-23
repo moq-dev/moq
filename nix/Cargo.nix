@@ -20136,6 +20136,11 @@ rec {
             rename = "criterion";
           }
           {
+            name = "block2";
+            packageId = "block2 0.6.2";
+            target = { target, features }: ("macos" == target."os" or null);
+          }
+          {
             name = "futures";
             packageId = "futures";
           }
@@ -20164,6 +20169,17 @@ rec {
             name = "moq-net";
             packageId = "moq-net";
             features = [ "fuzz" ];
+          }
+          {
+            name = "objc2-av-foundation";
+            packageId = "objc2-av-foundation";
+            target = { target, features }: ("macos" == target."os" or null);
+            features = [ "objc2-core-media" ];
+          }
+          {
+            name = "objc2-foundation";
+            packageId = "objc2-foundation 0.3.2";
+            target = { target, features }: ("macos" == target."os" or null);
           }
           {
             name = "proptest";
@@ -27367,6 +27383,24 @@ rec {
             ];
           }
           {
+            name = "objc2-core-media";
+            packageId = "objc2-core-media";
+            optional = true;
+            usesDefaultFeatures = false;
+            features = [
+              "CMBase"
+              "CMFormatDescription"
+              "CMSampleBuffer"
+              "CMSync"
+              "CMTag"
+              "CMTagCollection"
+              "CMTaggedBufferGroup"
+              "CMTime"
+              "CMTimeRange"
+              "objc2"
+            ];
+          }
+          {
             name = "objc2-core-video";
             packageId = "objc2-core-video";
             optional = true;
@@ -28312,6 +28346,7 @@ rec {
           "objc2-core-foundation"
           "objc2-core-graphics"
           "objc2-core-image"
+          "objc2-core-media"
           "objc2-core-video"
           "objc2-image-io"
           "objc2-media-toolbox"
@@ -60013,6 +60048,12 @@ rec {
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
+            name = "objc2-av-foundation";
+            packageId = "objc2-av-foundation";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [ "objc2-core-media" ];
+          }
+          {
             name = "objc2-core-audio";
             packageId = "objc2-core-audio";
             usesDefaultFeatures = false;
@@ -60040,6 +60081,11 @@ rec {
           {
             name = "objc2-core-graphics";
             packageId = "objc2-core-graphics";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-core-media";
+            packageId = "objc2-core-media";
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
@@ -61474,6 +61520,12 @@ rec {
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
+            name = "objc2-av-foundation";
+            packageId = "objc2-av-foundation";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [ "objc2-core-media" ];
+          }
+          {
             name = "objc2-core-audio";
             packageId = "objc2-core-audio";
             usesDefaultFeatures = false;
@@ -61501,6 +61553,11 @@ rec {
           {
             name = "objc2-core-graphics";
             packageId = "objc2-core-graphics";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-core-media";
+            packageId = "objc2-core-media";
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
