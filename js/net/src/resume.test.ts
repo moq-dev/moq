@@ -4733,7 +4733,7 @@ test.each(["lands", "dropped", "expired"])(
 		const tb = copy(b);
 		hooks.receiveTrack(ta.producer);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: SECOND } }));
+		const sub = front.consumer.track("seq").subscribe(joining(SECOND));
 		try {
 			ta.write(0n);
 			expect(drain(sub)).toEqual([0n]);
