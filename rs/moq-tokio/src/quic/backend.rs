@@ -4,7 +4,6 @@ use super::{driver, web};
 use crate::RedactedUrl;
 use crate::connect;
 use crate::listen;
-use crate::quic::CongestionControl;
 use crate::quic::Resolved;
 use crate::quic::ServerId;
 use crate::tls::FingerprintVerifier;
@@ -26,10 +25,7 @@ fn transport(quic: &Resolved, role: &str) -> Result<driver::transport::Config> {
 	if let Some(gso) = quic.gso {
 		transport.segmentation_offload = gso;
 	}
-	transport.congestion = match &quic.controller {
-		Some(controller) => controller.0.clone(),
-		None => congestion_factory(quic.congestion()),
-	};
+	transport.congestion = quic.congestion_control.into();
 	transport.validate()?;
 	apply_qlog(&mut transport, quic, role)?;
 	Ok(transport)
@@ -64,15 +60,6 @@ fn apply_qlog(transport: &mut driver::transport::Config, quic: &Resolved, role: 
 	Ok(())
 }
 
-/// The controller factory for a congestion control family. moq-quic's BBR is v3.
-fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::Factory + Send + Sync> {
-	match family {
-		CongestionControl::Loss => Arc::new(moq_congestion::cubic::Config::default()),
-		CongestionControl::Delay => Arc::new(moq_congestion::bbr3::Config::default()),
-		CongestionControl::None => Arc::new(moq_congestion::Unlimited),
-	}
-}
-
 /// Errors specific to the QUIC backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -83,13 +70,13 @@ pub enum Error {
 
 	/// A client on a simulated host was asked to look a name up, which only a real resolver can.
 	/// The payload is the name.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	#[error("{0} can't be resolved from a simulated host; dial an IP literal or pinned addresses")]
 	SimResolve(String),
 
 	/// The QUIC endpoint could not be created around the bound socket.
 	#[error("failed to create QUIC endpoint")]
-	CreateEndpoint(#[source] driver::endpoint::Error),
+	CreateEndpoint(#[source] std::io::Error),
 
 	/// The resolved transport settings are ones the QUIC stack refuses.
 	#[error("invalid quic config: {0}")]
@@ -203,8 +190,8 @@ pub enum Error {
 		message: String,
 		/// The HTTP status the server answered the CONNECT with, when it answered with one.
 		///
-		/// Read at conversion time rather than kept as a [`web`] error, so the
-		/// classification survives without that crate appearing in this crate's public API.
+		/// Read at conversion time rather than kept as a WebTransport error, so the
+		/// classification survives without that module appearing in this crate's public API.
 		status: Option<u16>,
 	},
 
@@ -316,7 +303,7 @@ enum Bind {
 	/// A UDP socket at this address
 	Udp(net::SocketAddr),
 	/// This port, or an ephemeral one for 0, on a simulated host
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	Sim(driver::sim::Host, u16),
 }
 
@@ -324,14 +311,14 @@ impl Bind {
 	fn port(&self) -> u16 {
 		match self {
 			Self::Udp(addr) => addr.port(),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			Self::Sim(_, port) => *port,
 		}
 	}
 
 	/// A new endpoint, and whether its socket reaches IPv4 destinations as well as its own family
 	#[cfg_attr(
-		not(feature = "sim"),
+		not(feature = "test-support"),
 		allow(unused_mut, reason = "only a simulated socket seeds the endpoint")
 	)]
 	fn endpoint(&self) -> Result<(driver::endpoint::Endpoint, bool)> {
@@ -342,7 +329,7 @@ impl Bind {
 				let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 				(socket.into(), dual_stack)
 			}
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			Self::Sim(host, port) => {
 				let (socket, seed) = host.bind(*port).map_err(Error::BindSocket)?;
 				config.rng_seed = Some(seed);
@@ -350,7 +337,7 @@ impl Bind {
 				(socket.into(), false)
 			}
 		};
-		let endpoint = driver::endpoint::Endpoint::new(config, socket).map_err(Error::CreateEndpoint)?;
+		let endpoint = driver::endpoint::Endpoint::new(config, socket).map_err(endpoint_error)?;
 		Ok((endpoint, dual_stack))
 	}
 }
@@ -369,7 +356,7 @@ impl Client {
 	pub fn is_simulated(&self) -> bool {
 		match self.bind {
 			Bind::Udp(_) => false,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			Bind::Sim(..) => true,
 		}
 	}
@@ -379,7 +366,7 @@ impl Client {
 	}
 
 	/// [`Self::new`], binding each endpoint on `host` at the configured port.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	pub fn simulated(config: &connect::Config, quic: &crate::quic::Config, host: driver::sim::Host) -> Result<Self> {
 		Self::bound(config, quic, Bind::Sim(host, config.resolve().bind.port()))
 	}
@@ -478,7 +465,7 @@ impl Client {
 		// answers Happy Eyeballs style as they land, so neither a broken family nor a
 		// lookup still waiting on its AAAA record can stall the connect.
 		let local = self.quic.local_addr();
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		if self.is_simulated()
 			&& addr.addresses().is_none()
 			&& let url::Host::Domain(domain) = &target
@@ -614,6 +601,14 @@ impl Error {
 	}
 }
 
+/// Map a driver endpoint failure onto the public error, which names no driver type.
+fn endpoint_error(err: driver::endpoint::Error) -> Error {
+	match err {
+		driver::endpoint::Error::Config(err) => Error::Config(err),
+		driver::endpoint::Error::Io(err) => Error::CreateEndpoint(err),
+	}
+}
+
 fn map_client_error(err: web::Error) -> Error {
 	let status = client_status(&err);
 	match status.and_then(crate::ConnectError::from_status_u16) {
@@ -660,7 +655,7 @@ pub(crate) struct Options {
 	pub tls: crate::tls::Serve,
 	pub demux: super::demux::Demux,
 	/// Bind on this simulated host instead of a UDP socket.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	pub sim: Option<driver::sim::Host>,
 }
 
@@ -672,7 +667,7 @@ impl Server {
 			member,
 			tls: served,
 			demux,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim,
 		} = options;
 		let quic = quic.resolve();
@@ -776,7 +771,7 @@ impl Server {
 
 		// A group socket was released only after every member bound and the
 		// steering filter covered the final array.
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		let simulated = match &sim {
 			Some(host) => {
 				let (socket, seed) = host.bind(listen.port()).map_err(Error::BindSocket)?;
@@ -785,7 +780,7 @@ impl Server {
 			}
 			None => None,
 		};
-		#[cfg(not(feature = "sim"))]
+		#[cfg(not(feature = "test-support"))]
 		let simulated = None;
 		let socket = match simulated {
 			Some(socket) => socket,
@@ -794,7 +789,7 @@ impl Server {
 					Some(member) => member.into_inner(),
 					None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
 				};
-				driver::wrap_udp_socket(socket).map_err(|err| Error::CreateEndpoint(err.into()))?
+				driver::wrap_udp_socket(socket).map_err(Error::CreateEndpoint)?
 			}
 		};
 		let socket = demux.wrap(socket);
@@ -805,7 +800,7 @@ impl Server {
 			),
 			None => (driver::endpoint::Endpoint::new(endpoint_config, socket), None),
 		};
-		let quic = quic.map_err(Error::CreateEndpoint)?;
+		let quic = quic.map_err(endpoint_error)?;
 		demux.attach(&quic);
 
 		Ok(Self {
@@ -1096,7 +1091,7 @@ mod tests {
 			member: None,
 			tls,
 			demux,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim: None,
 		})
 		.expect("server init");
@@ -1188,7 +1183,7 @@ mod tests {
 			member: None,
 			tls,
 			demux: Default::default(),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim: None,
 		})
 		.expect("server init");
@@ -1246,33 +1241,45 @@ mod tests {
 		assert_eq!(limits.send_window.unwrap().get(), crate::quic::DEFAULT_SEND_WINDOW);
 	}
 
-	/// Each family supplies its advertised congestion behavior.
+	/// Each algorithm builds the controller it is named after.
 	#[test]
-	fn congestion_factory_maps_each_family() {
+	fn each_algorithm_builds_its_controller() {
+		use crate::quic::CongestionControl;
+
 		let init = moq_congestion::Init {
 			now: kio::clock::Instant::now(),
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
 			seed: 0,
 		};
+		let build = |algorithm: CongestionControl| {
+			let factory: Arc<dyn moq_congestion::Factory + Send + Sync> = algorithm.into();
+			factory.build(init)
+		};
 
-		let loss = congestion_factory(CongestionControl::Loss).build(init);
-		assert!(loss.metrics().ssthresh.is_some());
-		assert!(!loss.probes());
+		let cubic = build(CongestionControl::Cubic);
+		assert!(cubic.metrics().ssthresh.is_some());
+		assert!(!cubic.probes());
 
-		let delay = congestion_factory(CongestionControl::Delay).build(init);
-		assert!(delay.probes());
-		assert!(delay.metrics().pacing_rate.is_some());
+		let bbr = build(CongestionControl::Bbr);
+		assert!(bbr.probes());
+		assert!(bbr.metrics().pacing_rate.is_some());
 
-		let none = congestion_factory(CongestionControl::None).build(init);
-		assert_eq!(none.window(), u64::MAX);
-		assert!(!none.probes());
+		let unlimited = build(CongestionControl::Unlimited);
+		assert_eq!(unlimited.window(), u64::MAX);
+		assert!(!unlimited.probes());
 	}
 
-	/// Loopback regression test: with the knob unset, live QUIC connections must run
-	/// BBRv3 on both ends.
-	#[tokio::test]
-	async fn default_reaches_the_live_connection() {
+	/// Each end's controller on a live loopback connection, and whether the client's offers
+	/// moq-net a probe target.
+	struct Live {
+		client: Box<dyn moq_congestion::Controller>,
+		server: Box<dyn moq_congestion::Controller>,
+		probe: bool,
+	}
+
+	/// Dials a loopback server with `quic` on both ends.
+	async fn live(quic: crate::quic::Config) -> Live {
 		let server_config = listen::Config {
 			bind: Some("127.0.0.1:0".parse().unwrap()),
 			tls: crate::tls::Listen {
@@ -1282,9 +1289,6 @@ mod tests {
 			..Default::default()
 		};
 
-		// The knob left unset, the way a binary that never mentions it runs.
-		let quic = crate::quic::Config::default();
-
 		let tls = server_config.tls.load().unwrap();
 		let server = Server::new(Options {
 			config: server_config,
@@ -1292,7 +1296,7 @@ mod tests {
 			member: None,
 			tls,
 			demux: Default::default(),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim: None,
 		})
 		.expect("server init");
@@ -1301,7 +1305,7 @@ mod tests {
 		let accepted = tokio::spawn(async move {
 			let incoming = server.accept().await.expect("no incoming connection");
 			let conn = incoming.accept().expect("accept").await.expect("handshake");
-			conn.congestion_state().probes()
+			conn.congestion_state()
 		});
 
 		// tls::Connect has a private field, so it can't be built with a struct literal.
@@ -1319,123 +1323,49 @@ mod tests {
 		// Dial the loopback IP directly so the system resolver is never involved.
 		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
 
-		// Bound the whole connect + accept + assert flow so a handshake
-		// regression fails fast instead of stalling CI.
+		// Bound the whole connect + accept flow so a handshake regression fails fast
+		// instead of stalling CI.
 		kio::clock::timeout(Duration::from_secs(5), async move {
 			let session = client
 				.connect(&tls, url.into(), &moq_net::Versions::default())
 				.await
 				.expect("connect failed");
-
-			// Inspect the driver through the explicit connection accessor.
-			assert!(
-				session.connection().congestion_state().probes(),
-				"client controller cannot probe"
-			);
-			// BBRv3 can probe, so moq-net gets a target to write.
-			assert!(
-				session.connection().probe().is_some(),
-				"BBRv3 connection has no probe target"
-			);
-			assert!(
-				accepted.await.expect("server task panicked"),
-				"server controller cannot probe"
-			);
+			Live {
+				client: session.connection().congestion_state(),
+				probe: session.connection().probe().is_some(),
+				server: accepted.await.expect("server task panicked"),
+			}
 		})
 		.await
-		.expect("test timed out");
+		.expect("test timed out")
 	}
 
-	/// A factory that counts the controllers it builds, each a BBRv3.
-	#[derive(Default)]
-	struct Counted(std::sync::atomic::AtomicUsize);
-
-	impl moq_congestion::Factory for Counted {
-		fn build(self: Arc<Self>, init: moq_congestion::Init) -> Box<dyn moq_congestion::Controller> {
-			self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-			Arc::new(moq_congestion::bbr3::Config::default()).build(init)
-		}
-	}
-
-	/// Loopback test: an application's controller runs both ends' live connections in
-	/// place of the configured family, here CUBIC. CUBIC cannot probe and BBRv3 can, so a
-	/// probing connection is running the factory's controller.
+	/// Loopback regression test: with the knob unset, live QUIC connections must run
+	/// BBRv3 on both ends, which can probe.
 	#[tokio::test]
-	async fn a_custom_controller_reaches_the_live_connection() {
-		let server_config = listen::Config {
-			bind: Some("127.0.0.1:0".parse().unwrap()),
-			tls: crate::tls::Listen {
-				generate: vec!["localhost".into()],
-				..Default::default()
-			},
+	async fn default_reaches_the_live_connection() {
+		// The knob left unset, the way a binary that never mentions it runs.
+		let live = live(crate::quic::Config::default()).await;
+		assert!(live.client.probes(), "client controller cannot probe");
+		assert!(live.server.probes(), "server controller cannot probe");
+		// BBRv3 can probe, so moq-net gets a target to write.
+		assert!(live.probe, "BBRv3 connection has no probe target");
+	}
+
+	/// Loopback test: a configured `cubic` runs both ends' live connections. CUBIC has a
+	/// slow-start threshold and cannot probe, which BBRv3 can.
+	#[tokio::test]
+	async fn cubic_reaches_the_live_connection() {
+		let quic = crate::quic::Config {
+			congestion_control: Some(crate::quic::CongestionControl::Cubic),
 			..Default::default()
 		};
-
-		let server_factory = Arc::new(Counted::default());
-		let server_quic = crate::quic::Config {
-			congestion_control: Some(CongestionControl::Loss),
-			controller: Some(crate::quic::Controller(server_factory.clone())),
-			..Default::default()
-		};
-
-		let tls = server_config.tls.load().unwrap();
-		let server = Server::new(Options {
-			config: server_config,
-			quic: server_quic,
-			member: None,
-			tls,
-			demux: Default::default(),
-			#[cfg(feature = "sim")]
-			sim: None,
-		})
-		.expect("server init");
-		let addr = server.local_addr();
-
-		let accepted = tokio::spawn(async move {
-			let incoming = server.accept().await.expect("no incoming connection");
-			let conn = incoming.accept().expect("accept").await.expect("handshake");
-			conn.congestion_state().probes()
-		});
-
-		let mut tls_config = crate::tls::Connect::default();
-		tls_config.insecure = Some(true);
-		let client_config = connect::Config {
-			bind: Some("127.0.0.1:0".parse().unwrap()),
-			tls: tls_config,
-			..Default::default()
-		};
-
-		let client_factory = Arc::new(Counted::default());
-		let client_quic = crate::quic::Config {
-			congestion_control: Some(CongestionControl::Loss),
-			controller: Some(crate::quic::Controller(client_factory.clone())),
-			..Default::default()
-		};
-
-		let tls = client_config.tls.build().expect("tls config");
-		let client = Client::new(&client_config, &client_quic).expect("client init");
-		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
-
-		kio::clock::timeout(Duration::from_secs(5), async move {
-			let session = client
-				.connect(&tls, url.into(), &moq_net::Versions::default())
-				.await
-				.expect("connect failed");
-
-			assert!(
-				session.connection().congestion_state().probes(),
-				"client connection is not running its own controller"
-			);
-			assert!(
-				accepted.await.expect("server task panicked"),
-				"server connection is not running its own controller"
-			);
-		})
-		.await
-		.expect("test timed out");
-
-		assert!(client_factory.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
-		assert!(server_factory.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+		let live = live(quic).await;
+		assert!(!live.probe, "CUBIC connection has a probe target");
+		for (end, controller) in [("client", live.client), ("server", live.server)] {
+			assert!(!controller.probes(), "{end} is not running CUBIC");
+			assert!(controller.metrics().ssthresh.is_some(), "{end} is not running CUBIC");
+		}
 	}
 
 	/// The peers file skips this server's own entry, so every server can share it, and refuses

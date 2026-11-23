@@ -2,9 +2,6 @@ import * as Moq from "@moq/net";
 
 import { Decoder, type Event, type Group } from "./decoder.ts";
 
-/** Window consumer options, including the source track. */
-export type ConsumerConfig = { track: Moq.Track.Subscriber };
-
 // A group that ended early rather than failing: the next one restates the window, so a gap is
 // something to resync from. Old and Evicted are how the publisher says it dropped a group it was
 // still serving, which reads the same here.
@@ -42,12 +39,13 @@ export class Consumer<T> {
 	#at?: Moq.Time.Timestamp;
 	#reading = false;
 
-	constructor(config: ConsumerConfig) {
+	constructor(config: Consumer.Config) {
 		this.#track = config.track.ordered();
 		this.#decoder = new Decoder();
 	}
 
 	/** Absolute index of the oldest record in the window. */
+	// fallow-ignore-next-line unused-class-member
 	get offset(): number {
 		return this.#decoder.offset;
 	}
@@ -109,4 +107,10 @@ export class Consumer<T> {
 			yield event;
 		}
 	}
+}
+
+/** Types for {@link Consumer}. */
+export namespace Consumer {
+	/** Window consumer options, including the source track. */
+	export type Config = { track: Moq.Track.Subscriber };
 }

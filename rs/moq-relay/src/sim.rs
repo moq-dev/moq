@@ -41,6 +41,8 @@ struct Hosts {
 	ports: Vec<String>,
 	/// Pairs of hosts whose links are held down, each sorted.
 	down: BTreeSet<(String, String)>,
+	/// Hosts whose dials to another are refused, dialer first.
+	refused: BTreeSet<(String, String)>,
 	/// The links accepted and not yet closed, so a cut can close them.
 	open: Vec<Open>,
 }
@@ -80,7 +82,7 @@ impl Hosts {
 		let Some(to) = port.and_then(|port| self.ports.get(port.wrapping_sub(1))).cloned() else {
 			return;
 		};
-		if self.down.contains(&pair(from, &to)) {
+		if self.down.contains(&pair(from, &to)) || self.refused.contains(&(from.to_string(), to.clone())) {
 			return;
 		}
 		let accepted = match self.up.get(&to) {
@@ -169,6 +171,8 @@ impl Net {
 		let cache = crate::cache::Config {
 			// Past what the pool counts in milliseconds, so it never expires idle groups.
 			duration: Some(Duration::MAX.into()),
+			// No governor either: its timer would keep the mesh from settling.
+			headroom: Some("0".to_string()),
 			..Default::default()
 		};
 		let mut options = cluster::Options::new(config).with_cache(cache.init().expect("cache"));
@@ -224,6 +228,14 @@ impl Net {
 		hosts.cut(|open| pair(&open.from, &open.to) == pair(a, b));
 	}
 
+	/// Refuse `from`'s dials to `to` and cut the links it dialed there, leaving the links
+	/// `to` dialed alone, as a firewall blocking one direction would.
+	pub fn dial_down(&self, from: &str, to: &str) {
+		let mut hosts = self.hosts.lock().unwrap();
+		hosts.refused.insert((from.to_string(), to.to_string()));
+		hosts.cut(|open| open.from == from && open.to == to);
+	}
+
 	/// Let `a` and `b` dial each other again.
 	pub fn link_up(&self, a: &str, b: &str) {
 		self.hosts.lock().unwrap().down.remove(&pair(a, b));
@@ -259,7 +271,7 @@ impl Net {
 				let (cluster, auth, shutdown) = (cluster.clone(), auth.clone(), shutdown.clone());
 				drop(kio::clock::sim::spawn(async move {
 					let server = moq_net::Server::new().with_versions(version.into());
-					let Ok(handshake) = server.accept_request(moq_net::time::Instant::now(), link).await else {
+					let Ok(handshake) = server.handshake(moq_net::time::Instant::now(), link).await else {
 						return;
 					};
 					let request = Accepted::new(handshake, moq_auth::Transport::Quic);
@@ -273,16 +285,16 @@ impl Net {
 		accepts
 	}
 
-	/// Serve `name` as a bare server publishing `origin` to every peer it accepts,
-	/// including broadcasts it learned from its own upstream, since a test may relay
-	/// through it, and hand each session to the returned stream.
+	/// Serve `name` as a bare server publishing `origin` to every peer it accepts, and
+	/// hand each session to the returned stream. Pass a [`relay_origin`] when a test
+	/// relays through it, so it forwards what it learned from its own upstream.
 	pub fn upstream(
 		&self,
 		name: &str,
 		origin: &moq_net::origin::Producer,
 	) -> mpsc::UnboundedReceiver<moq_net::Session> {
 		let mut accepted = self.listen(name);
-		let origin = origin.clone().with_proxy(true);
+		let origin = origin.clone();
 		let (sessions, received) = mpsc::unbounded();
 		drop(kio::clock::sim::spawn(async move {
 			while let Some((link, version)) = accepted.next().await {
@@ -307,8 +319,19 @@ impl Net {
 ///
 /// Its cache never reclaims idle groups, as in [`Net::options`].
 pub fn origin() -> moq_net::origin::Producer {
+	spawn_origin(false)
+}
+
+/// An [`origin`] that forwards what it learned from one peer to the others, as a
+/// relay's does.
+pub fn relay_origin() -> moq_net::origin::Producer {
+	spawn_origin(true)
+}
+
+fn spawn_origin(proxy: bool) -> moq_net::origin::Producer {
 	let mut config = moq_net::origin::Config::default();
 	config.pool = moq_net::cache::Pool::unbounded();
+	config.proxy = proxy;
 	let (origin, driver) = moq_net::origin::Producer::new(config);
 	drop(kio::clock::sim::spawn(moq_net::time::run(driver)));
 	origin

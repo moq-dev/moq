@@ -25,17 +25,17 @@ const LEAST: Duration = Duration::from_millis(700);
 
 /// A grant of everything, with `publish` and `subscribe` caps.
 fn grant(publish: Option<u64>, subscribe: Option<u64>) -> moq_auth::Grant {
-	let all: moq_auth::Patterns = moq_auth::Pattern::all().into();
+	let all = moq_auth::Prefixes::all();
 	let mut grant = moq_auth::Grant::new(all.clone(), all);
-	grant.publish_rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
-	grant.subscribe_rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+	grant.publish.rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+	grant.subscribe.rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
 	grant
 }
 
 /// Where a relay's QUIC listener is, and the clients and sockets that reach it.
 enum Dial {
 	/// Real sockets on loopback.
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	Real(u16),
 	/// A simulated host serving at `addr`, trusting `fingerprints`.
 	#[cfg(feature = "test-support")]
@@ -51,7 +51,7 @@ impl Dial {
 	fn client(&self, host: std::net::IpAddr) -> moq_tokio::Client {
 		let _ = host;
 		match self {
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			Dial::Real(_) => {
 				let mut config = moq_tokio::connect::Config::default();
 				config.tls.insecure = Some(true);
@@ -78,7 +78,7 @@ impl Dial {
 
 	fn addr(&self) -> SocketAddr {
 		match self {
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			Dial::Real(port) => ([127, 0, 0, 1], *port).into(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { addr, .. } => *addr,
@@ -87,7 +87,7 @@ impl Dial {
 
 	fn url(&self) -> url::Url {
 		match self {
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			Dial::Real(port) => format!("https://localhost:{port}/room").parse().unwrap(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { addr, .. } => format!("moqt://{addr}/room").parse().unwrap(),
@@ -98,7 +98,7 @@ impl Dial {
 	fn endpoint(&self, host: std::net::IpAddr) -> driver::endpoint::Endpoint {
 		let _ = host;
 		let socket: driver::endpoint::Socket = match self {
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			Dial::Real(_) => std::net::UdpSocket::bind("127.0.0.1:0").unwrap().into(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { network, .. } => (Box::new(network.bind(SocketAddr::new(host, 4433)))
@@ -167,12 +167,12 @@ async fn transfer(
 
 	let start = kio::clock::now();
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![7u8; FRAME])
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 	let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 		.await
 		.expect("recv_group timeout")
@@ -250,6 +250,8 @@ async fn window_opens_once_admitted(dial: &Dial, admissions: &mut Admissions, ho
 		"sent {} bytes before admission",
 		stats.udp_tx.bytes
 	);
+	// Reading SETUP returns a little credit, so the window may hold the writer more than once.
+	assert!(stats.send_credit.stalls > 0, "the SETUP window held the writer");
 
 	// Nothing reads the blocked stream before admission, so only opening the window
 	// credits more. The session then stops that stream, so watch the credit, not the data.
@@ -267,6 +269,8 @@ async fn window_opens_once_admitted(dial: &Dial, admissions: &mut Admissions, ho
 			opened.expect("the window never opened once admitted");
 		}
 	}
+	let waited = conn.stats().send_credit.stalled;
+	assert!(waited > Duration::ZERO, "the wait for admission counts, not {waited:?}");
 
 	conn.close(driver::VarInt::from_u32(0), "done");
 	endpoint.close(driver::VarInt::from_u32(0), "done").await;
@@ -326,7 +330,7 @@ mod sim {
 	}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 mod uring {
 	use std::net::{IpAddr, Ipv4Addr};
 

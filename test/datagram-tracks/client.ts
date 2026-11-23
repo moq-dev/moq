@@ -79,8 +79,11 @@ try {
 	if (mode === "publish") {
 		const route = origin.route(Moq.Path.from("dg"), { hidden: true });
 		const audio = route.broadcast.createDatagrams("audio", { timescale: Moq.Time.Timescale.MICRO, priority: -7 });
+		if (!audio) throw new Error("the track already exists");
 		const events = route.broadcast.createDatagrams("events");
+		if (!events) throw new Error("the track already exists");
 		const track = route.broadcast.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
+		if (!track) throw new Error("the track already exists");
 		route.announce();
 		console.log("ready");
 
@@ -119,8 +122,7 @@ try {
 		}
 		announcements.close();
 		const request = origin.consume().request(Moq.Path.from("dg"));
-		let broadcast = request.active.peek();
-		while (!broadcast) broadcast = await request.active.changed();
+		const broadcast = await request.broadcast();
 
 		const audio = broadcast.datagrams("audio");
 		audio.setPriority(PRIORITY);
@@ -148,7 +150,8 @@ try {
 		for (const [i, want] of EVENTS.entries()) {
 			const got = eventsGot[i];
 			assert.equal(got.sequence, want.sequence, "events sequence");
-			assert.equal(got.timestamp, undefined, "an untimed datagram has no timestamp");
+			assert.equal(got.timestamp.scale, undefined, "an untimed datagram's timestamp is unscaled");
+			assert.equal(got.timestamp.value, Number(want.sequence), "an unscaled timestamp is its sequence");
 			assert.deepEqual([...got.payload], want.payload, "events payload");
 		}
 		const group = await track.recvGroup();

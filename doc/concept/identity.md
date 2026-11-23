@@ -72,9 +72,13 @@ A route resolving a path is chosen in this order:
 2. Within one instance, only its highest epoch is eligible, even over a
    cheaper route. Readers continue across an epoch change without a seam,
    because the timeline continues.
-3. Among eligible routes: a route from a peer that has not sent GOAWAY
-   (a draining peer's routes rank below every other, whatever their preference
-   or cost, and serve only as a last resort), then the preferred link, then an
+3. Among eligible routes: a route that still reaches its publisher, from a
+   peer that has not sent GOAWAY (an unavailable route, held while the network
+   may recover a path, and a draining peer's routes rank below every other,
+   whatever their priority or cost, and serve only as a last resort, so a
+   restarted publisher's lingering instance never takes the path back), then
+   the highest priority, which on
+   moq-lite 07 is the lowest of any link along the route's path, then an
    identified chain
    over an anonymous one, then the lowest cost, then a broadcast published on
    this origin, then the shortest hop chain, then a hash of the full requested
@@ -138,12 +142,9 @@ goes offline; JavaScript `origin.follow(path)`, whose `active` is undefined
 between instances; the moq-ffi bindings `follow(path)`, whose `available()`
 returns null once the path goes offline; and C `moq_origin_follow`, whose
 callback reports `MOQ_FOLLOW_EVENT_OFFLINE`.
-An announcement listing (`announced()`) reports a path becoming present,
-unavailable while the network holds its route without a path to it, available
-again once it recovers one, and finally absent once the origin withdraws it or
-offline once this side lets go of it, which says nothing of whether the origin
-still serves it. An instance change keeps it present, so a reader that needs
-one holds a follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, and
+An announcement listing (`announced()`) only reports a path becoming present or
+absent, whether the origin withdrew it or this side let go of it: an instance
+change keeps it present, so a reader that needs one holds a follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, and
 `moq export ts --stitch` can splice a replacement as a marked program switch. A
 request failing is never the signal to restart; the follower handing out a new
 broadcast is. Nor is a track's error kind: a track withdrawn
@@ -196,7 +197,7 @@ while let Some(request) = claim.requested().await {
     // Takes the claim's instance, so readers resolved through the claim continue.
     // Hidden until its tracks exist.
     let job = request.route(RouteOptions::hidden())?;
-    let video = job.broadcast().create_track("video", info.clone())?;
+    let video = job.broadcast().create_track("video", info.clone()).context("video exists")?;
     // Announces the exact path under that instance and answers the waiting request.
     job.announce()?;
     spawn(run_job(video, job));

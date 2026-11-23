@@ -13,14 +13,17 @@
  *
  * Counts come from weak references after full collections, so they are exact only under a precise
  * collector: run it in Chromium with `bench/browser/micro.ts --bench resume-history`, which
- * exposes `gc` and fails once a retired route stays reachable. Bun scans its stack conservatively,
- * so a dead reference there can survive a collection.
+ * exposes `gc`, compiles on the main thread so no queued optimization job pins a closure's context,
+ * and fails once a retired route stays reachable. Bun scans its stack conservatively, so a dead
+ * reference there can survive a collection.
  */
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import type { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
+import { defined } from "../src/defined.test-util.ts";
+import { hooks } from "../src/internal.ts";
 import { ALPN_06 } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer as OriginProducer } from "../src/origin.ts";
@@ -225,9 +228,9 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 	for (const broadcast of broadcasts) {
 		const all = new Set(Array.from({ length: routes }, (_, route) => names(history, route, perRoute)).flat());
 		for (const name of all) {
-			const track = broadcast.createTrack(name);
-			const group = track.appendGroup();
-			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+			const track = defined(broadcast.createTrack(name));
+			const group = hooks.appendNext(track);
+			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		}
 	}

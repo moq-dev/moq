@@ -72,16 +72,17 @@ type Datagram = ffi.MoqDatagram
 type DatagramInfo = ffi.MoqDatagramInfo
 
 // Delay is how far behind the live edge a subscriber or decoder plays: where it starts, and
-// how late it may fall. The zero Delay is moq-net's default, a stated zero for both, which
+// how late it may fall. The zero Delay is moq-net's default, no Min and a zero Max, which
 // starts at the newest group and skips a superseded group at once.
 type Delay struct {
 	// Min is the target latency: the playout or jitter-buffer delay held behind the live edge,
-	// and where a cold join starts. A Min past Max starts at Max, since the publisher serves
-	// nothing older. moq-lite-07 sends it upstream.
-	Min time.Duration
-	// MinUnstated leaves Min unstated, ignoring it. A decoder plays it as zero, while the
-	// subscription keeps it unstated, so it never pulls the aggregate across subscribers to zero.
-	MinUnstated bool
+	// or nil to leave it unstated. Once stated, zero included, a Range with no Start is a live
+	// join that far behind the live edge; unstated, such a range reaches back as far as Max
+	// allows, and a decoder starts it as zero. A range with a Start ignores it, and a missing
+	// group is given up by Max alone. A Min past Max starts a live join no further back than the
+	// group covering the point Max behind the live edge, since the publisher serves no older
+	// group. moq-lite-07 sends it upstream.
+	Min *time.Duration
 	// Max is how far a non-latest group may fall behind the live edge before it is skipped. Zero
 	// skips immediately; a larger value tolerates that much reordering. It caps every range,
 	// and bounds lateness only, never the start.
@@ -92,10 +93,7 @@ type Delay struct {
 }
 
 func (d Delay) ffi() (ffi.MoqDelay, error) {
-	var out ffi.MoqDelay
-	if !d.MinUnstated {
-		out.Min = &d.Min
-	}
+	out := ffi.MoqDelay{Min: d.Min}
 	if !d.MaxUnlimited {
 		out.Max = &d.Max
 	}
@@ -106,19 +104,16 @@ func (d Delay) ffi() (ffi.MoqDelay, error) {
 }
 
 func delayFromFFI(d ffi.MoqDelay) Delay {
-	out := Delay{MinUnstated: d.Min == nil, MaxUnlimited: d.Max == nil}
-	if d.Min != nil {
-		out.Min = *d.Min
-	}
+	out := Delay{Min: d.Min, MaxUnlimited: d.Max == nil}
 	if d.Max != nil {
 		out.Max = *d.Max
 	}
 	return out
 }
 
-// Subscription holds subscriber-side delivery preferences: priority, the Delay (where a cold
-// join starts and how late a non-latest group may fall before it is skipped), the ranges of
-// the track to deliver (nil for everything Delay.Max still allows, while an empty non-nil
+// Subscription holds subscriber-side delivery preferences: priority, the Delay (where a range
+// with no start begins and how late a non-latest group may fall before it is skipped), the
+// ranges of the track to deliver (nil for one Range with no start, while an empty non-nil
 // slice asks for nothing), and the order the publisher sends pending groups in (nil for
 // newest first).
 //
@@ -130,8 +125,8 @@ type Subscription struct {
 	Order    *Order
 }
 
-// DefaultSubscription returns moq-net's defaults, whose zero Delay starts at the newest group
-// and skips a superseded group at once. A nil *Subscription means the same.
+// DefaultSubscription returns moq-net's defaults, whose zero Delay (no Min, a zero Max) starts
+// at the newest group and skips a superseded group at once. A nil *Subscription means the same.
 func DefaultSubscription() Subscription {
 	d := ffi.MoqSubscriptionDefaults()
 	var ranges []Range
@@ -163,22 +158,37 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 	return &out, err
 }
 
+// TrackRefresh says when a subscriber asks a track's publisher for a new group,
+// which TrackDemand.Refresh reports. The zero value asks for nothing.
+//
+// A track opting in starts each group with an independent frame (a keyframe or a
+// snapshot), so a new group is something the publisher can make on request.
+type TrackRefresh struct {
+	// Ratio is how many times its first frame a group's later bytes may grow before
+	// a joining subscriber asks for a new group. Zero asks on any join once a frame
+	// follows the first; nil leaves joins to Interval alone.
+	Ratio *uint32
+	// Interval is how long after the newest group arrived a request may ask for
+	// another, or nil for no wait. It caps how often the publisher makes groups
+	// however many subscribers ask.
+	Interval *time.Duration
+}
+
 // TrackInfo holds publisher-side track properties: priority, how long a
-// superseded group stays fresh, how many times its first frame a group's later
-// bytes may grow before a joining subscriber asks for a new group (nil never
-// asks), and the timescale in ticks per second (nil means untimed on both publish
-// and receive). Priority is higher first; the zero Priority is the midpoint a nil
-// TrackInfo uses. Compression compresses each group on the wire to peers that
-// support it, nil sending frames as written; readers always see the original frames.
+// superseded group stays fresh, when a subscriber asks for a new group, and the
+// timescale in ticks per second (nil means untimed on both publish and receive).
+// Priority is higher first; the zero Priority is the midpoint a nil TrackInfo
+// uses. Compression compresses each group on the wire to peers that support it,
+// nil sending frames as written; readers always see the original frames.
 type TrackInfo struct {
 	Priority int8
 	// MaxAge is how long a superseded group stays fresh. Zero, the default, serves
 	// only the live edge.
 	MaxAge time.Duration
 	// MaxAgeUnlimited ignores MaxAge and sets no publisher limit, leaving only the
-	// cache to bound how long a superseded group is served.
+	// cache to bound how long a superseded group is served: the ffi record's null MaxAge.
 	MaxAgeUnlimited bool
-	Refresh         *uint32
+	Refresh         TrackRefresh
 	Timescale       *uint64
 	Compression     *Compression
 }
@@ -188,28 +198,38 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		return nil, nil
 	}
 	out := &ffi.MoqTrackInfo{
-		Priority:        info.Priority,
-		MaxAgeUnlimited: info.MaxAgeUnlimited,
-		Refresh:         info.Refresh,
-		Timescale:       info.Timescale,
-		Compression:     info.Compression,
+		Priority: info.Priority,
+		Refresh: ffi.MoqTrackRefresh{
+			Ratio:    info.Refresh.Ratio,
+			Interval: info.Refresh.Interval,
+		},
+		Timescale:   info.Timescale,
+		Compression: optional(info.Compression),
 	}
 	if !info.MaxAgeUnlimited {
 		out.MaxAge = &info.MaxAge
 	}
-	return out, bridge.NonNegative(out.MaxAge, "max age")
+	if err := bridge.NonNegative(out.MaxAge, "max age"); err != nil {
+		return nil, err
+	}
+	return out, bridge.NonNegative(info.Refresh.Interval, "refresh interval")
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 	out := TrackInfo{
 		Priority:        info.Priority,
-		MaxAgeUnlimited: info.MaxAgeUnlimited,
-		Refresh:         info.Refresh,
-		Timescale:       info.Timescale,
-		Compression:     info.Compression,
+		MaxAgeUnlimited: info.MaxAge == nil,
+		Refresh: TrackRefresh{
+			Ratio:    info.Refresh.Ratio,
+			Interval: info.Refresh.Interval,
+		},
+		Timescale: info.Timescale,
 	}
-	if info.MaxAge != nil && !info.MaxAgeUnlimited {
+	if info.MaxAge != nil {
 		out.MaxAge = *info.MaxAge
+	}
+	if info.Compression != nil {
+		out.Compression = *info.Compression
 	}
 	return out
 }
@@ -247,12 +267,13 @@ func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 	}
 }
 
-// Grant is what the peer lets this side do, in this side's own paths. An empty
-// pattern list grants nothing in that direction; "**" grants everything.
+// Grant is what the peer lets this side do, in this side's own paths. Each prefix
+// covers its path and everything beneath it. An empty list grants nothing in that
+// direction; the empty prefix "" grants everything.
 type Grant struct {
-	// Publish lists the broadcast patterns this side may publish to the peer.
+	// Publish lists the broadcast prefixes this side may publish to the peer.
 	Publish []string
-	// Subscribe lists the broadcast patterns this side may subscribe to from the peer.
+	// Subscribe lists the broadcast prefixes this side may subscribe to from the peer.
 	Subscribe []string
 	// Expires is how long until the grant lapses, measured when it was read, or nil for never.
 	Expires *time.Duration

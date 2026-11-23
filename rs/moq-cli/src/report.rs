@@ -53,8 +53,10 @@ impl<T: serde::Serialize> ReportTrack<T> {
 		let info = moq_net::track::Info::default()
 			.with_priority(PRIORITY)
 			.with_compression(moq_net::track::Compression::Deflate)
-			.with_refresh(8);
-		let track = broadcast.create_track(name, info)?;
+			.with_refresh(moq_net::track::Refresh::default().with_ratio(8));
+		let track = broadcast
+			.create_track(name, info)
+			.ok_or_else(|| anyhow::anyhow!("the track {name} already exists"))?;
 		Ok(Self {
 			track: Some(moq_json::snapshot::Producer::new(track.clone(), Default::default())),
 			inner: track,
@@ -63,11 +65,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 
 	/// Publish `value`, unless nobody subscribes.
 	fn update(&mut self, value: &T) {
-		if self
-			.track
-			.as_ref()
-			.is_some_and(|track| track.demand().wanted().is_some())
-		{
+		if self.track.as_ref().is_some_and(|track| track.demand().wanted()) {
 			self.write(value);
 		}
 	}
@@ -90,7 +88,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 			.largest()
 			.map_or(0, |largest| largest.group.saturating_add(1));
 		let at = moq_net::Timestamp::unscaled(next);
-		if let Err(err) = refreshed.and_then(|()| track.update(moq_json::Timed::new(value, at))) {
+		if let Err(err) = refreshed.and_then(|()| track.update(value, at)) {
 			tracing::warn!(%err, "a report track failed; closing it");
 			if let Some(track) = self.track.take() {
 				let _ = track.abort(moq_net::Error::Transport(err.to_string()));
@@ -177,7 +175,7 @@ impl Stats {
 	) -> anyhow::Result<Self> {
 		let tracks = ReportTrack::create(broadcast, STATS_TRACK)?;
 		let mut catalog = catalog.clone();
-		let mut guard = catalog.modify()?;
+		let mut guard = catalog.modify(catalog.next_timestamp())?;
 		guard.stats = Some(hang::catalog::Stats::new(STATS_TRACK));
 		guard.commit()?;
 		Ok(Self {
@@ -489,8 +487,8 @@ async fn write_echo(
 	mut stdout: impl tokio::io::AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
 	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
-	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
 	let prefix = moq_net::Path::new(&prefix)?;
+	let hidden = prefix.parts().any(|segment| segment.starts_with('.'));
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let (lines, mut written) = tokio::sync::mpsc::channel::<String>(LINES);
 	let mut readers = Readers::default();
@@ -500,9 +498,7 @@ async fn write_echo(
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
 					moq_net::announce::Event::Present(announce) => (announce, true),
-					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => (announce, false),
-					// A reader rides out its path being held.
-					moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+					moq_net::announce::Event::Absent(announce) => (announce, false),
 				};
 				let path = announce.prefix;
 				if !path.has_prefix(&prefix) || !hang::echo::is_echo(&path) {
@@ -642,10 +638,10 @@ mod tests {
 		let mut read = reader(track.consume());
 		let mut report = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		report
-			.update(moq_json::Timed::new(
+			.update(
 				&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }),
 				moq_net::Timestamp::unscaled(0),
-			))
+			)
 			.unwrap();
 		assert!(matches!(read.next().await, Err(moq_json::Error::TooLarge(MAX_REPORT))));
 	}
@@ -663,7 +659,10 @@ mod tests {
 		}
 
 		let mut late = track.consume();
-		assert_eq!(track.demand().wanted(), Some(1), "the join asks for a fresh group");
+		assert!(
+			track.demand().poll_refresh(&kio::Waiter::noop()).is_ready(),
+			"the join asks for a fresh group"
+		);
 		report.write(&serde_json::json!({ "n": 100 }));
 		assert_eq!(late.largest().await.map(|position| position.group), Some(1));
 	}
@@ -684,10 +683,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), String::new(), out));
 
 		feedback
-			.update(moq_json::Timed::new(
-				&serde_json::json!({ "n": 1 }),
-				moq_net::Timestamp::unscaled(1),
-			))
+			.update(&serde_json::json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
 			.unwrap();
 		let line = lines.next_line().await.unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
@@ -695,10 +691,7 @@ mod tests {
 		broadcast.withdraw();
 		kio::clock::sleep(DRAIN * 2).await;
 		feedback
-			.update(moq_json::Timed::new(
-				&serde_json::json!({ "n": 2 }),
-				moq_net::Timestamp::unscaled(2),
-			))
+			.update(&serde_json::json!({ "n": 2 }), moq_net::Timestamp::unscaled(2))
 			.unwrap();
 		let late = kio::clock::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
@@ -730,10 +723,7 @@ mod tests {
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		route.announce().unwrap();
 		feedback
-			.update(moq_json::Timed::new(
-				&serde_json::json!({ "n": 1 }),
-				moq_net::Timestamp::unscaled(1),
-			))
+			.update(&serde_json::json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
 			.unwrap();
 		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("the takeover was never read").unwrap().unwrap();
@@ -776,10 +766,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), ".viewers".to_string(), out));
 
 		feedback
-			.update(moq_json::Timed::new(
-				&serde_json::json!({ "n": 1 }),
-				moq_net::Timestamp::unscaled(1),
-			))
+			.update(&serde_json::json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
 			.unwrap();
 		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("no feedback read").unwrap().unwrap();

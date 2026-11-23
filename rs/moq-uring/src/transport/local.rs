@@ -7,7 +7,7 @@ use std::task::Poll;
 ///
 /// moq-net boxes every transport with a native `Send` bound, which a worker's
 /// `!Send` session cannot meet, so wrap the session in this
-/// before `Server::accept_request` or `Client::connect`. The session, its
+/// before `Server::handshake` or `Client::connect`. The session, its
 /// streams, and its send groups never leave the worker that polls them, so
 /// this checks the thread on every use and panics anywhere else instead of
 /// proving it at compile time.
@@ -117,10 +117,6 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
 		self.0.set_limits(limits)
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.0.export_keying_material(label, context)
-	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
@@ -132,7 +128,7 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 		self.0.offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_acked(waiter, offset)
 	}
 
@@ -178,6 +174,10 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 
 	fn set_priority(&mut self, priority: i64) {
 		self.0.set_priority(priority)
+	}
+
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		self.0.set_window(window)
 	}
 
 	fn stop(&mut self, code: u32) {

@@ -317,7 +317,7 @@ mod tests {
 	/// A catalog config declaring a two-second join interval up front, so its renditions are listed.
 	fn hls_config() -> moq_mux::catalog::Config {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+		catalog.sync.interval = Some(Duration::from_secs(2));
 		moq_mux::catalog::Config::default().with_catalog(catalog)
 	}
 
@@ -477,7 +477,7 @@ mod tests {
 			.consume()
 			.scope(
 				"",
-				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
+				&moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()),
 			)
 			.unwrap();
 		let app = Server::new(restricted, Default::default()).unwrap().router();
@@ -772,11 +772,11 @@ mod tests {
 		write_three_gops(&mut allowed);
 		write_three_gops(&mut denied);
 
-		let patterns = ["room/live", "room/source"]
+		let prefixes = ["room/live", "room/source"]
 			.into_iter()
-			.map(|path| path.parse::<moq_net::Pattern>().unwrap())
+			.map(|path| path.parse::<moq_net::Prefix>().unwrap())
 			.collect();
-		let restricted = origin.consume().scope("", &patterns).unwrap();
+		let restricted = origin.consume().scope("", &prefixes).unwrap();
 		let server = Server::new(restricted, Default::default()).unwrap();
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
@@ -842,7 +842,7 @@ mod tests {
 			.consume()
 			.scope(
 				"",
-				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
+				&moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()),
 			)
 			.unwrap();
 		let all_denied = Server::new(only_catalog, Default::default()).unwrap();

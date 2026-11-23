@@ -18,7 +18,6 @@ mod play;
 mod publish;
 mod repair;
 mod report;
-mod rtc;
 mod rtmp;
 mod rtsp;
 mod srt;
@@ -26,6 +25,7 @@ mod subscribe;
 #[cfg(feature = "transcode")]
 mod transcode;
 mod web;
+mod webrtc;
 
 use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide, TsImport, TsProgram};
 use publish::Publish;
@@ -39,6 +39,17 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static ALLOC: moq_tokio::jemalloc::Allocator = moq_tokio::jemalloc::Allocator;
+
+/// The device a render node flag (`--vaapi-device`) and a V4L2 node flag name.
+/// Each command declares the two in conflict, so at most one is set.
+#[cfg(any(feature = "capture", feature = "transcode", feature = "play"))]
+fn device(render: &Option<std::path::PathBuf>, video: &Option<std::path::PathBuf>) -> moq_video::Device {
+	match (render, video) {
+		(Some(node), _) => moq_video::Device::Render(node.clone()),
+		(None, Some(node)) => moq_video::Device::Video(node.clone()),
+		(None, None) => moq_video::Device::Auto,
+	}
+}
 
 /// Everything needed to build MoQ clients/servers.
 #[derive(Clone)]
@@ -194,11 +205,11 @@ impl Serving {
 		let token = lease.token();
 		let publish = directions
 			.publish
-			.then(|| origin.scope(&token.root, &token.subscribe).ok())
+			.then(|| origin.scope(&token.root, &token.subscribe.path).ok())
 			.flatten();
 		let subscribe = directions
 			.consume
-			.then(|| origin.scope(&token.root, &token.publish).ok())
+			.then(|| origin.scope(&token.root, &token.publish.path).ok())
 			.flatten();
 		if publish.is_none() && subscribe.is_none() {
 			request.reject(moq_net::SessionError::Unauthorized).await.ok();
@@ -222,17 +233,18 @@ impl Serving {
 	}
 }
 
-/// Whether ordinary clients may use this transport on the shared LAN server.
+/// Whether ordinary clients may use this transport on the shared LAN server. A TLS stream link is
+/// public the same way plaintext TCP is.
 fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
 	match transport {
-		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Tls | moq_tokio::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
 
 /// Serve ordinary clients from an already-bound listener, each through its lease.
 fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio::Listener, serving: Serving) {
-	if let Ok(addr) = listener.local_addr() {
+	if let Some(addr) = listener.local_addr() {
 		tracing::info!(%addr, "listening");
 	}
 	tasks.spawn(async move {
@@ -749,10 +761,10 @@ fn spawn_import(
 	bandwidth: moq_net::bandwidth::Allocator,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
-	if let ImportSource::Rtc(rtc) = &import.source
-		&& rtc.connect.is_some()
+	if let ImportSource::Webrtc(webrtc) | ImportSource::Rtc(webrtc) = &import.source
+		&& webrtc.connect.is_some()
 	{
-		reject_listener_cors(&rtc.cors, "import rtc")?;
+		reject_listener_cors(&webrtc.cors, "import webrtc")?;
 	}
 
 	let mut ingest = moq_mux::Ingest::default();
@@ -816,20 +828,20 @@ fn spawn_import(
 			ImportSource::Rtsp(rtsp) => {
 				tasks.spawn(rtsp::connect_import(target(name), rtsp.connect));
 			}
-			ImportSource::Rtc(rtc) => {
-				if let Some(addr) = rtc.listen {
-					let name = require_broadcast(name, "import rtc --listen")?;
-					tasks.spawn(rtc::listen_import(
+			ImportSource::Webrtc(webrtc) | ImportSource::Rtc(webrtc) => {
+				if let Some(addr) = webrtc.listen {
+					let name = require_broadcast(name, "import webrtc --listen")?;
+					tasks.spawn(webrtc::listen_import(
 						target(name),
-						rtc::Listen {
+						webrtc::Listen {
 							addr,
-							udp_bind: rtc.udp_bind,
-							public_addr: rtc.public_addr,
-							cors: rtc.cors,
+							udp_bind: webrtc.udp_bind,
+							public_addr: webrtc.public_addr,
+							cors: webrtc.cors,
 						},
 					));
-				} else if let Some(url) = rtc.connect {
-					tasks.spawn(rtc::connect_import(target(name), url, instance));
+				} else if let Some(url) = webrtc.connect {
+					tasks.spawn(webrtc::connect_import(target(name), url, instance));
 				}
 			}
 			ImportSource::Archive(args) => {
@@ -871,10 +883,10 @@ fn spawn_export(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 	recordings: &mut Recordings,
 ) -> anyhow::Result<()> {
-	if let ExportSink::Rtc(rtc) = &export.sink
-		&& rtc.connect.is_some()
+	if let ExportSink::Webrtc(webrtc) | ExportSink::Rtc(webrtc) = &export.sink
+		&& webrtc.connect.is_some()
 	{
-		reject_listener_cors(&rtc.cors, "export rtc")?;
+		reject_listener_cors(&webrtc.cors, "export webrtc")?;
 	}
 
 	if let Some(container) = export.sink.container() {
@@ -924,21 +936,21 @@ fn spawn_export(
 					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt));
 				}
 			}
-			ExportSink::Rtc(rtc) => {
-				if let Some(addr) = rtc.listen {
-					let name = require_broadcast(name, "export rtc --listen")?;
-					tasks.spawn(rtc::listen_export(
+			ExportSink::Webrtc(webrtc) | ExportSink::Rtc(webrtc) => {
+				if let Some(addr) = webrtc.listen {
+					let name = require_broadcast(name, "export webrtc --listen")?;
+					tasks.spawn(webrtc::listen_export(
 						origin.consume(),
 						name,
-						rtc::Listen {
+						webrtc::Listen {
 							addr,
-							udp_bind: rtc.udp_bind,
-							public_addr: rtc.public_addr,
-							cors: rtc.cors,
+							udp_bind: webrtc.udp_bind,
+							public_addr: webrtc.public_addr,
+							cors: webrtc.cors,
 						},
 					));
-				} else if let Some(url) = rtc.connect {
-					tasks.spawn(rtc::connect_export(origin.consume(), url, name));
+				} else if let Some(url) = webrtc.connect {
+					tasks.spawn(webrtc::connect_export(origin.consume(), url, name));
 				}
 			}
 			ExportSink::Archive(args) => {
@@ -1210,7 +1222,7 @@ mod tests {
 		let (trigger, observer) = moq_relay::shutdown::Observer::new(window);
 
 		let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test");
-		let all = moq_auth::Pattern::all;
+		let all = moq_auth::Prefixes::all;
 		let (producer, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 		let (lease, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Tcp, "/room")), async {
 			admissions.next().await.unwrap().grant(consumer);
@@ -1301,11 +1313,11 @@ mod tests {
 					.unwrap();
 				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 				let track = broadcast.broadcast().create_track("status", info).unwrap();
-				let mut group = track.append_group(0).unwrap();
+				let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 				group
 					.write_frame(moq_net::Timestamp::ZERO, b"admitted".as_ref())
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				let (auth, admissions) = moq_relay::auth::Auth::embedded("test-cli");
 				let (trigger, observer) = moq_relay::shutdown::Observer::new(TIMEOUT);
 				let serving = Serving {
@@ -1384,8 +1396,8 @@ mod tests {
 					"{timeout}: decided before the grant"
 				);
 				admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(
-					moq_auth::Pattern::all(),
-					moq_auth::Pattern::all(),
+					moq_auth::Prefixes::all(),
+					moq_auth::Prefixes::all(),
 				)));
 				tokio::time::resume();
 				let connection = kio::clock::timeout(TIMEOUT, listening.connection.clone().established())
@@ -1502,9 +1514,9 @@ mod tests {
 			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.broadcast().create_track("live", info).unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"live".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let reader = relay.consume();
 		let mut live = reader
@@ -1561,7 +1573,7 @@ mod tests {
 			"--listen-tcp-bind",
 			&addr,
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])
@@ -1623,7 +1635,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])
@@ -1733,6 +1745,7 @@ mod tests {
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
 		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Tls, false));
 		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
 		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
 		assert!(is_public_transport(moq_tokio::Transport::Quic, true));

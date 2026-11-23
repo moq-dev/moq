@@ -28,9 +28,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const STUCK_AFTER: Duration = Duration::from_secs(120);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
@@ -327,7 +329,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		match *op {
 			Op::Write => write(&mut group, &mut written, &mut readers, &format!("d{step}")),
 			Op::NewGroup => {
-				group.close().unwrap();
+				group.finish().unwrap();
 				group = track.append_next().unwrap();
 				written.clear();
 				write(&mut group, &mut written, &mut readers, "snapshot");

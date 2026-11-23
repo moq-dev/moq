@@ -13,31 +13,27 @@ additional_cargo_test_args = ["--lib", "--test", "integration"]
 # only where the same function has another such mutant that tests do catch.
 exclude_re = [
     # Debug output only feeds logs.
-    '<impl (std::)?fmt::Debug for (Scope|Node|Stream|RouteKey|Proof)>::fmt',
-    # The rotation's xorshift step only picks which fresh identity comes next,
-    # and the guard after it enforces freshness and range.
-    'replace (\^= with \|=|<< with >>|>> with <<) in Router<N, A>::rotate',
-    # `full(old) == full(new)` is the same with both sides negated.
-    'replace >= with < in Router<N, A>::route$',
-    # The test-only `Proof::LEN`.
-    'proof\.rs:\d+:\d+: replace \+ with \*$',
-    # A claim an answering certifier certifies is always in the merged view.
-    ':\d+:35: replace && with \|\| in Router<N, A>::meets$',
-    # A new stream's first batch either flips its certifier's answer, which marks
-    # every claim, or reaches the reader only through the merge, which marks its own
-    # changes; marking all only reorders independent changes in a forwarded batch.
-    ':\d+:32: replace != with == in Router<N, A>::batch$',
-    # The full presentation of a stream the interest misses is empty, and a full
-    # presentation equals the incremental one.
-    'replace match guard (!self\.meets\(id, ctx, watch\)|!dirty\.all) with false in Router<N, A>::advertise$',
-    # `advertised` is read only for qualified identities.
-    'replace & with (\^|\|) in Router<N, A>::advertise$',
-    # For its own identity, the node's own view answers every claim, `current`
-    # never holds it, and nothing serves it.
-    ':\d+:31: replace && with \|\| in Router<N, A>::shown_now$',
-    # The nearest home with a slot at or above a presented claim always serves
-    # that claim's instance and epoch, so a looser match picks the same home.
-    'node\.rs:\d+:57: replace && with \|\| in awaits$',
+    '<impl (std::)?fmt::Debug for (Node|Stream|Router<N, I, A>)>::fmt',
+    # node.rs: the extra `Lost` reaches a key that holds no such claim, which ignores
+    # it: a first filing has no other key, and an end already went to the old one.
+    'replace && with \|\| in Node::own$',
+    # Race-only, as `Fetching::poll_moved` below: taking the lock wakes every waiter
+    # whatever the count, which only sends round again a request that read it just
+    # before another thread bumped it.
+    'replace \+= with \*= in (Stream::serving|State::flush)$',
+    # relay.rs: `visit` and `count` only feed the tests' work budgets, which read the
+    # count as an upper bound.
+    'replace Router<N, I, A>::(visit|count) with \(\)$',
+    'replace \+ with (-|\*) in Router<N, I, A>::withdraw$',
+    # A pick's key ends in its next hop or its claimant, so no two keys tie.
+    'replace < with <= in Router<N, I, A>::(reselect|closest)$',
+    # A session closed at a floor already recorded touches routes that stay as they
+    # were, and reselecting an unchanged route does nothing.
+    'replace > with >= in Router<N, I, A>::closed$',
+    # What a claim leaves when dropped is read only for a lost broadcast that did not
+    # end, and `restate` already dropped this node's own claim first, with its source,
+    # which wins the tie.
+    'replace && with \|\| in Router<N, I, A>::publish$',
     # resume.rs: the sweep of handed-out groups only bounds memory, since
     # `let_go` drops dead entries itself before anything reads `out`.
     'replace (== with !=|> with >=) in Reader::hand_out$',
@@ -59,12 +55,28 @@ exclude_re = [
     # poll, so these differ only when another thread writes the route between that
     # read and this check, a window no deterministic test can stage. There the
     # original retries on the new copy and the arm prevents a lost wake.
-    'replace \|\| with && in Fetching::poll_moved$',
+    'replace \|\| with && in Fetching::(poll_moved|moved)$',
+    'replace Fetching::moved -> bool with false$',
+    # The same for `Recover::poll`'s route watch, whose generation it just read; once no
+    # front moves the copy, the read never continues on the watch.
+    ':\d+:43: replace \|\| with && in Recover::poll$',
     ':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
     # The reader list's sweep only bounds memory: a dead entry fails every
     # `Weak::upgrade`, and `subscribe` sweeps the list again.
     'replace > with >= in Producer::serve_from$',
     'replace == with != in Consumer::subscribe$',
+    # Ranges a reader asks again unchanged, once its log no longer reaches back: asked whole
+    # they place and backfill as before, and each copy's replace of equal ranges is a no-op,
+    # so treating them as unchanged only saves that work.
+    'replace match guard ranges == self.mirrored.ranges with false in Reader::sync$',
+    # A backfill fails only with its route's track, so asking that route again for what it
+    # refused fails at once too and is let go: skipping the ask only saves the subscribe.
+    # `poll_lowest` records that refusal for the skip.
+    ':\d+:19: replace <= with > in Reader::backfill$',
+    ':\d+:30: replace == with != in Reader::poll_lowest$',
+    # With no resume point `raised` names no start, and a settled window has no unsettled
+    # range: each guard only skips the walk.
+    'replace \|\| with && in Reader::raised$',
     # Dead: every write of `until` also writes `since`, so the superseded check
     # never runs. `ResumeReader.tla` models it, so it goes with the model.
     'replace >= with < in Copy::retains$',
@@ -72,26 +84,21 @@ exclude_re = [
     # and nothing is missing.
     'replace < with <= in Copy::retains$',
     'replace < with <= in Retain<.*>::holds_window$',
+    # `Placed` only sees ranges `Reader::resolve` placed, with no latest group: each
+    # start is a time it contains or the oldest, so it never looks a start up, waits on
+    # one, or counts one back, and an `Oldest` end only reaches it from a copy that
+    # accepted one, which every copy refuses.
+    'replace <impl Holdings for Placed>::(back|next_start|complete|resolves) ',
+    'replace == with != in <impl Holdings for Placed>::back$',
+    # A copy leaves a non-empty range starting at the oldest group or time 0 unresolved
+    # only when a cap at 0 empties every range, so a waiting range stops the window too.
+    'replace && with \|\| in Reader::resolve$',
+    # A range placed with its relative end still open stays unsettled, so a copy places it
+    # again once it resolves that end: skipping it only saves the window an edit.
+    ':\d+:7: delete ! in Reader::resolve$',
+    # `owes_below` is asked only of a key outside the window, where no run starts.
+    'replace < with <= in Reader::owes_below$',
     # Walking again before anything the read parked on fires returns the same
     # `Pending`, so the idle shortcut only saves work.
     'replace Subscriber::parked -> bool with false$',
-    # path.rs: `step` only counts visits for the tests' work budgets, which
-    # read the count as an upper bound.
-    'path\.rs:\d+:\d+: replace Router<N, A>::step with \(\)$',
-    # A path-rule identity nothing holds has no route left, and the update that
-    # removed its last one already dropped its views, so `collect` changes nothing.
-    'path\.rs:\d+:\d+: replace Router<N, A>::collect with \(\)$',
-    # Tied candidates share a floor, so by the identity rule they present the
-    # same content at the prefix.
-    'path\.rs:\d+:\d+: replace > with >= in Router<N, A>::know$',
-    # A route's change updates every view it covers, so a batch's only newer
-    # candidate is its own route and peer: these only turn off the incremental
-    # presentation, which the test build asserts equals the full one.
-    'path\.rs:\d+:(51|74): replace == with != in Router<N, A>::know$',
-    # An ended stream's final batch always has a floor and withdraws claims: an
-    # offer is sent only while a claim meets it.
-    'path\.rs:\d+:\d+: (replace \|\| with &&|delete !) in Router<N, A>::end_sent$',
-    # The full diff it skips holds the same changes in another order, and a source
-    # switch has already marked every claim that differs.
-    'path\.rs:\d+:80: replace != with == in Router<N, A>::present$',
 ]

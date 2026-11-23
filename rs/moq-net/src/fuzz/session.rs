@@ -28,7 +28,7 @@ use bytes::Bytes;
 use kio::clock::sim::{self, JoinHandle};
 
 use crate::{
-	Client, Pattern, Patterns, Server, Session, Version, broadcast, cache,
+	Client, Prefixes, Server, Session, Version, broadcast, cache,
 	coding::{Encoder, Form},
 	origin, track,
 	transport::{
@@ -489,7 +489,7 @@ impl Bystander {
 			group.write_frame(key, payload.clone()).expect("the bystander's frame");
 			frames.push(payload);
 		}
-		group.close().expect("the bystander's group finish");
+		group.finish().expect("the bystander's group finish");
 		sent.push(frames);
 	}
 
@@ -573,9 +573,9 @@ impl Relay {
 		let mut config = origin::Config::new(1.try_into().expect("a nonzero hop"));
 		// The cache's idle expiry is the longest wait in the drain, so keep it short.
 		config.pool = cache::Pool::new(cache::Config::default().with_expiry(EXPIRY));
-		let (origin, driver) = origin::Producer::new(config);
 		// A relay carries every peer's routes on to the others.
-		let origin = origin.with_proxy(true);
+		config.proxy = true;
+		let (origin, driver) = origin::Producer::new(config);
 		let driver = Rc::new(RefCell::new(driver));
 		let driving = {
 			let driver = driver.clone();
@@ -602,10 +602,7 @@ impl Relay {
 	/// Accept the peer's session as a relay would: it may publish only beneath [`PEER`], and
 	/// subscribe to anything.
 	fn serve(&self, versions: &[Version], transport: memory::Session) -> Victim {
-		let publish = self
-			.origin
-			.scope(PEER, &Patterns::from(Pattern::all()))
-			.expect("the peer's scope");
+		let publish = self.origin.scope(PEER, &Prefixes::all()).expect("the peer's scope");
 		let server = Server::new()
 			.with_versions(versions.to_vec().into())
 			.with_publisher(self.origin.consume())
@@ -781,7 +778,7 @@ fn record(version: Version, scenario: Scenario) -> Vec<Action> {
 					let mut group = track.append_next().expect("the client's group");
 					let key = crate::Timestamp::unscaled(group.start);
 					group.write_frame(key, Bytes::from_static(b"frame")).expect("a frame");
-					group.close().expect("the client's group finish");
+					group.finish().expect("the client's group finish");
 					kio::clock::sleep(timeout).await;
 				}
 				Scenario::Subscribe => {
@@ -947,10 +944,6 @@ impl poll::Session for Recorder {
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		self.inner.receive_window()
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.inner.export_keying_material(label, context)
-	}
 }
 
 impl Recorder {
@@ -985,7 +978,7 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 		self.inner.offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
 		self.inner.poll_acked(waiter, offset)
 	}
 

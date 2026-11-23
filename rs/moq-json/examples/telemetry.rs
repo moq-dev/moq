@@ -101,9 +101,7 @@ fn frame_bytes(config: snapshot::Config, ticks: u64) -> usize {
 	let mut producer = Producer::<Value>::new(track, config);
 
 	for tick in 0..ticks {
-		producer
-			.update(moq_json::Timed::new(&telemetry(tick), at(tick)))
-			.unwrap();
+		producer.update(&telemetry(tick), at(tick)).unwrap();
 	}
 	let _finished = producer.finish().unwrap();
 
@@ -129,7 +127,7 @@ fn verify(producer_config: snapshot::Config, compress: bool, ticks: u64) {
 
 	for tick in 0..ticks {
 		let expected = telemetry(tick);
-		producer.update(moq_json::Timed::new(&expected, at(tick))).unwrap();
+		producer.update(&expected, at(tick)).unwrap();
 		// The producer emits exactly one frame per update, so the live consumer yields exactly one
 		// reconstructed value: it must match the input byte-for-byte after patching.
 		match consumer.poll_latest(&waiter) {
@@ -157,9 +155,7 @@ fn verify_late_joiner(producer_config: snapshot::Config, compress: bool, ticks: 
 	let mut consumer = Consumer::<Value>::new(track.consume(), Default::default());
 	let mut producer = Producer::<Value>::new(track, producer_config);
 	for tick in 0..ticks {
-		producer
-			.update(moq_json::Timed::new(&telemetry(tick), at(tick)))
-			.unwrap();
+		producer.update(&telemetry(tick), at(tick)).unwrap();
 	}
 	let _finished = producer.finish().unwrap();
 

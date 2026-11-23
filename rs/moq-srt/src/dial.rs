@@ -20,15 +20,14 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use moq_net::origin;
 use srt_tokio::SrtSocket;
 
-use crate::server::{DEFAULT_LATENCY, configure_buffers, serve_publish, serve_subscribe};
-use crate::{Program, Result};
+use crate::server::{DEFAULT_LATENCY, configure, serve_publish, serve_subscribe, settled, track};
+use crate::{Export, Import, Result};
 
 /// An SRT caller that can publish a MoQ broadcast or pull a remote stream.
 ///
-/// Construct via [`Client::new`] and chain the `with_*` setters.
+/// Construct via [`Client::new`], then set any other field.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Client {
@@ -40,19 +39,9 @@ pub struct Client {
 	pub resource: String,
 
 	/// SRT receive latency, negotiated at handshake time: the buffer that trades delay
-	/// for loss recovery. It doubles as [`publish`]'s egress skip threshold.
-	latency: Duration,
-
-	/// The programs of a multi-program remote [`pull`] publishes, or `None` to refuse one.
-	program: Option<Program>,
-
-	/// How long [`publish`] waits for the same publisher instance to come back once its
-	/// broadcast ends. [`publish`] only.
-	follow: Duration,
-
-	/// Whether [`publish`] follows another instance replacing its broadcast, as a program
-	/// switch on the same connection. [`publish`] only.
-	stitch: bool,
+	/// for loss recovery. 500 ms by default. Both directions; [`publish`](Self::publish)
+	/// also uses it as the MPEG-TS release delay, but no less than a second.
+	pub latency: Duration,
 }
 
 impl Client {
@@ -62,72 +51,45 @@ impl Client {
 			addr,
 			resource: resource.into(),
 			latency: DEFAULT_LATENCY,
-			program: None,
-			follow: Duration::ZERO,
-			stitch: false,
 		}
 	}
 
-	/// Set the SRT receive latency negotiated at handshake time (500 ms by default): the
-	/// buffer that trades delay for loss recovery.
-	///
-	/// Both directions; [`publish`](Self::publish) also uses it as the MPEG-TS release
-	/// delay, but no less than a second.
-	pub fn with_latency(mut self, latency: Duration) -> Self {
-		self.latency = latency;
-		self
-	}
-
-	/// Publish one program of a multi-program stream [`pull`](Self::pull) receives, or each as
-	/// its own broadcast under the pulled path. `None` (the default) refuses a multiplex.
-	pub fn with_program(mut self, program: impl Into<Option<Program>>) -> Self {
-		self.program = program.into();
-		self
-	}
-
-	/// Wait up to `follow` for the same publisher instance, or when stitching a replacement, to
-	/// come back once the broadcast [`publish`](Self::publish) reads ends, carrying on with the
-	/// same stream. Zero (the default) follows only an instance already serving.
-	pub fn with_follow(mut self, follow: Duration) -> Self {
-		self.follow = follow;
-		self
-	}
-
-	/// Follow another publisher instance replacing the broadcast [`publish`](Self::publish)
-	/// reads, as a full program switch on the same connection. Off by default, which ends the
-	/// push with [`moq_mux::Error::Replaced`].
-	pub fn with_stitch(mut self, stitch: bool) -> Self {
-		self.stitch = stitch;
-		self
-	}
-
-	/// Push the broadcast `request` names in `origin` out to the remote as MPEG-TS until the
-	/// broadcast ends.
-	pub async fn publish(&self, origin: &origin::Consumer, request: Publish) -> Result<()> {
-		let Publish { path } = request;
-		let socket = self.call(Mode::Publish).await?;
+	/// Push the [`Export`]'s broadcast out to the remote as MPEG-TS until the broadcast ends.
+	pub async fn publish(&self, export: Export<'_>) -> Result<()> {
+		let mut socket = self.call(Mode::Publish).await?;
+		let tracking = track(&mut socket, export.wire.clone());
 		let options = crate::ts::Options {
 			latency: self.latency,
-			follow: self.follow,
-			stitch: self.stitch,
+			follow: export.follow,
+			stitch: export.stitch,
 		};
-		serve_subscribe(origin, path.as_str(), socket, options).await
+		settled(
+			tracking,
+			serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options),
+		)
+		.await
 	}
 
-	/// Pull a remote MPEG-TS stream into `origin` at `path`, published as `ingest` says, until
-	/// the remote ends.
+	/// Pull a remote MPEG-TS stream into the [`Import`]'s broadcast, published as its ingest
+	/// says, until the remote ends.
 	///
 	/// The finished broadcast then stays up for the ingest's [linger](moq_mux::Ingest::linger),
 	/// as [`Publish::accept`](crate::Publish::accept) describes, and the future resolves after that.
-	pub async fn pull(
-		&self,
-		origin: &origin::Producer,
-		path: impl Into<moq_net::Path>,
-		ingest: &moq_mux::Ingest,
-	) -> Result<()> {
-		let path: moq_net::Path = path.into();
-		let socket = self.call(Mode::Request).await?;
-		serve_publish(origin, path.as_str(), socket, ingest, self.program).await
+	pub async fn pull(&self, import: Import<'_>) -> Result<()> {
+		let Import {
+			publisher,
+			broadcast,
+			ingest,
+			program,
+			wire,
+		} = import;
+		let mut socket = self.call(Mode::Request).await?;
+		let tracking = track(&mut socket, wire);
+		settled(
+			tracking,
+			serve_publish(publisher, broadcast.as_str(), socket, &ingest, program),
+		)
+		.await
 	}
 
 	async fn call(&self, mode: Mode) -> Result<SrtSocket> {
@@ -137,26 +99,11 @@ impl Client {
 		let stream_id = format!("#!::r={},m={}", self.resource, mode.as_str());
 		let socket = SrtSocket::builder()
 			.latency(self.latency)
-			.set(configure_buffers)
+			.set(configure)
 			.call(self.addr, Some(&stream_id))
 			.await?;
 		tracing::info!(addr = %self.addr, resource = %self.resource, mode = mode.as_str(), "SRT caller connected");
 		Ok(socket)
-	}
-}
-
-/// What [`Client::publish`] pushes: the broadcast to read.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct Publish {
-	/// The broadcast to push, relative to the origin's root.
-	pub path: moq_net::Path,
-}
-
-impl Publish {
-	/// Push the broadcast at `path`.
-	pub fn new(path: impl Into<moq_net::Path>) -> Self {
-		Self { path: path.into() }
 	}
 }
 
@@ -228,12 +175,9 @@ mod tests {
 			let is_publish = matches!(request, Request::Publish(_));
 			if let Request::Publish(publish) = request {
 				// Runs until the caller disconnects, then closes at once.
-				let mut ingest = moq_mux::Ingest::default();
-				ingest.linger = Duration::ZERO;
-				publish
-					.accept(&origin, moq_net::Path::from_static("ingested/cam0"), &ingest)
-					.await
-					.ok();
+				let mut import = Import::new(&origin, moq_net::Path::from_static("ingested/cam0"));
+				import.ingest.linger = Duration::ZERO;
+				publish.accept(import).await.ok();
 			}
 			(resource, is_publish)
 		});
@@ -256,28 +200,27 @@ mod tests {
 		assert!(is_publish, "m=publish should route to a server Publish request");
 	}
 
-	/// Loopback: dial with `m=request`; the server classifies it as a subscribe and
+	/// Loopback: dial with `m=request`; the server classifies it as a play and
 	/// accepts it, so the caller connects. Proves the `#!::r=..,m=request` stream id
-	/// routes to a server [`Request::Subscribe`].
+	/// routes to a server [`Request::Play`].
 	#[tokio::test]
 	async fn request_caller_connects_and_routes() {
 		let (mut server, addr) = loopback().await;
 
-		// Empty origin: the subscribe accept parks waiting for the broadcast, which is
+		// Empty origin: the play accept parks waiting for the broadcast, which is
 		// fine -- the caller still connects, and the test aborts the wait.
 		let origin = produce_origin();
 		let consumer = origin.consume();
 		let server_task = tokio::spawn(async move {
 			let request = server.accept().await.expect("a request");
 			let resource = request.resource().to_string();
-			let is_subscribe = matches!(request, Request::Subscribe(_));
-			if let Request::Subscribe(subscribe) = request {
-				subscribe
-					.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			let is_play = matches!(request, Request::Play(_));
+			if let Request::Play(play) = request {
+				play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 					.await
 					.ok();
 			}
-			(resource, is_subscribe)
+			(resource, is_play)
 		});
 
 		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Request).await });
@@ -289,12 +232,12 @@ mod tests {
 			.expect("SRT caller should connect");
 		drop(socket);
 
-		let (resource, is_subscribe) = kio::clock::timeout(Duration::from_secs(10), server_task)
+		let (resource, is_play) = kio::clock::timeout(Duration::from_secs(10), server_task)
 			.await
 			.expect("server timed out")
 			.expect("server task");
 		assert_eq!(resource, "cam0");
-		assert!(is_subscribe, "m=request should route to a server Subscribe request");
+		assert!(is_play, "m=request should route to a server Play request");
 	}
 
 	/// Reject a caller server-side and hand back the error it saw.
@@ -311,7 +254,7 @@ mod tests {
 			async {
 				match (mode, server.accept().await.expect("a request")) {
 					(Mode::Publish, Request::Publish(request)) => request.reject(reason).await.unwrap(),
-					(Mode::Request, Request::Subscribe(request)) => request.reject(reason).await.unwrap(),
+					(Mode::Request, Request::Play(request)) => request.reject(reason).await.unwrap(),
 					_ => panic!("request routed in the wrong direction"),
 				}
 			},
@@ -338,7 +281,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn subscribe_rejection_carries_unavailable_code() {
+	async fn play_rejection_carries_unavailable_code() {
 		rejected(Mode::Request, Reject::Unavailable, 1503).await;
 	}
 }

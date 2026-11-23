@@ -9,7 +9,6 @@ from . import audio as audio
 
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
 from . import json as json
-from . import socket as socket
 from . import video as video
 from .client import Client, CongestionControl, connect, versions
 from .datagram import DatagramConsumer, DatagramProducer, DatagramRequest, DatagramRequests
@@ -20,10 +19,7 @@ from .origin import (
     AnnounceConsumer,
     AnnounceEvent,
     AnnounceEventAbsent,
-    AnnounceEventAvailable,
-    AnnounceEventOffline,
     AnnounceEventPresent,
-    AnnounceEventUnavailable,
     BroadcastRequest,
     Claim,
     Following,
@@ -60,7 +56,6 @@ from .subscribe import (
     TrackConsumer,
 )
 from .types import (
-    Anchor,
     AudioCodec,
     AudioEncoderInput,
     AudioSampleFormat,
@@ -89,6 +84,7 @@ from .types import (
     Subscription,
     Timestamp,
     TrackInfo,
+    TrackRefresh,
     VideoCodec,
     VideoDecodedFrame,
     VideoEncoderInput,
@@ -96,22 +92,16 @@ from .types import (
     VideoEncoderOutput,
     VideoPixelFormat,
     VideoSurface,
-    VideoSurfacePixelBuffer,
-    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
 __all__ = [
     "Allocator",
-    "Anchor",
     "Announce",
     "AnnounceConsumer",
     "AnnounceEvent",
     "AnnounceEventAbsent",
-    "AnnounceEventAvailable",
-    "AnnounceEventOffline",
     "AnnounceEventPresent",
-    "AnnounceEventUnavailable",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
@@ -171,6 +161,7 @@ __all__ = [
     "TrackDemand",
     "TrackRequests",
     "TrackInfo",
+    "TrackRefresh",
     "TrackProducer",
     "TrackRequest",
     "Transport",
@@ -180,8 +171,6 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoSurface",
-    "VideoSurfacePixelBuffer",
-    "VideoSurfaceUnknown",
     "VideoPixelFormat",
     "Viewer",
     "Viewers",

@@ -46,7 +46,7 @@ async fn shaped_uplink_disables_and_resumes() {
 		tls: insecure_tls(),
 		once: true,
 		quic: MoqQuicConfig {
-			congestion_control: Some(MoqCongestionControl::delay()),
+			congestion_control: Some(MoqCongestionControl::bbr()),
 			..Default::default()
 		},
 		websocket: MoqWebSocketConfig {
@@ -81,7 +81,7 @@ async fn shaped_uplink_disables_and_resumes() {
 					.first()
 					.cloned()
 					.map(|producer| MoqMediaProducer::Track { producer }),
-				..video_init(MoqVideoFormat::Avc3, h264_init())
+				..video_init(MoqVideoFormat::h264(), h264_init())
 			},
 		)
 		.unwrap();
@@ -93,7 +93,9 @@ async fn shaped_uplink_disables_and_resumes() {
 		tracks.push(track);
 	}
 	let remote = await_announced(&receiver.consume(), "ladder").await;
-	let catalog = MoqMediaCatalogConsumer::subscribe(&remote).await.unwrap();
+	let catalog = MoqMediaCatalogConsumer::subscribe(&remote, Duration::ZERO)
+		.await
+		.unwrap();
 	let first = catalog.next().await.unwrap().expect("catalog ended");
 	let low = MoqMediaTrackConsumer::subscribe(
 		&remote,

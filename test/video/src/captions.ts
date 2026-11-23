@@ -9,7 +9,7 @@ import { Renderer } from "../../../js/watch/src/text/renderer";
 import { Source } from "../../../js/watch/src/text/source";
 
 /** Caption selection controls exercised by the browser harness. */
-export function captions() {
+function captions() {
 	const origin = new Origin.Producer();
 	const producerRoute = origin.route(Path.from("captions"), { hidden: true });
 	const producer = producerRoute.broadcast;
@@ -21,10 +21,11 @@ export function captions() {
 	]) {
 		textCatalog.renditions[name] = { format: "utf8", role: "subtitle", container: { kind: "legacy" } };
 		const track = producer.createTrack(name);
-		const group = track.appendGroup();
+		if (!track) throw new Error("the track already exists");
+		const group = track.appendGroup(Time.Timestamp.unscaled(0n));
 		group.writeFrame({
 			payload: Legacy.encodeFrame(new TextEncoder().encode(text), Duration.micros(1_000_000)),
-			timestamp: Time.Timestamp.unscaled(group.sequence),
+			timestamp: Time.Timestamp.unscaled(group.start),
 		});
 		group.finish();
 	}

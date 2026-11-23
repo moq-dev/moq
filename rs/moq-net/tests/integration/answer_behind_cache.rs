@@ -14,9 +14,11 @@ use support::harness::{MockConnectOptions, connect_mock, peer};
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn write_group(track: &track::Producer, payload: &'static [u8]) {
@@ -24,7 +26,7 @@ fn write_group(track: &track::Producer, payload: &'static [u8]) {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The next group `subscriber` receives, with its first frame.
@@ -160,7 +162,7 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 			.unwrap()
 			.unwrap();
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (0, b"0a".to_vec()));
-		g0.close().unwrap();
+		g0.finish().unwrap();
 		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1a"[..])
 			.unwrap();

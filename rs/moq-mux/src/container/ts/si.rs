@@ -36,6 +36,7 @@ use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::catalog;
+use super::error::{Result, bail};
 use super::mux_rate::{MAX_INTERVAL, PCR_WRAP};
 use super::passthrough::PCR_HZ;
 use super::psi::{self, CRC};
@@ -421,7 +422,7 @@ impl Entry {
 		(pid, table_id): (u16, u8),
 		pts: Timestamp,
 		now: Instant,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let frames: Vec<Vec<u8>> = self
 			.active
 			.values()
@@ -440,21 +441,20 @@ impl Entry {
 			None => {
 				let info = track_info(max_age);
 				self.track.insert(
-					match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone()) {
-						Ok(track) => track,
-						Err(_) => broadcast.unique_track(".si", info)?,
-					},
+					broadcast
+						.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone())
+						.unwrap_or_else(|| broadcast.unique_track(".si", info)),
 				)
 			}
 		};
 		// A cut can land on the same millisecond as the last one (a retraction cuts at once, and SI
 		// without media PTS cuts at zero), so it is stamped a unit later instead of refused.
-		let (start, pts) = crate::start::next(track, pts)?;
-		let mut group = track.append_group(start)?;
+		let (_, pts) = crate::start::next(track, pts)?;
+		let mut group = track.append_group(pts)?;
 		for payload in frames {
 			group.write_frame(pts, payload)?;
 		}
-		group.close()?;
+		group.finish()?;
 		self.last_cut = Some(now);
 		Ok(())
 	}
@@ -647,7 +647,7 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// `pts` is the media clock, used to stamp the frames; the cut debounce runs on
 	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
 	/// overrides the debounce, for end of stream.
-	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
+	pub fn flush(&mut self, pts: Timestamp, force: bool) -> Result<()> {
 		let now = kio::clock::now();
 		// The max age this catalog mints media with, which its SI shares.
 		let max_age = self.catalog.track_info(hang::catalog::PRIORITY.catalog).max_age;
@@ -666,9 +666,9 @@ impl<E: catalog::Catalog> Capture<E> {
 		}
 
 		if self.entries.values().any(|e| e.advertised != e.populated) {
-			let mut guard = self.catalog.modify()?;
+			let mut guard = self.catalog.edit()?;
 			let Some(mpegts) = guard.ext.mpegts_mut() else {
-				anyhow::bail!("catalog extension no longer carries an mpegts section");
+				bail!("catalog extension no longer carries an mpegts section");
 			};
 			for ((pid, table_id), entry) in self.entries.iter_mut() {
 				// Either flag implies the track exists.
@@ -695,7 +695,7 @@ impl<E: catalog::Catalog> Capture<E> {
 	}
 
 	/// Flush everything and finish every track.
-	pub fn finish(&mut self, pts: Timestamp) -> anyhow::Result<()> {
+	pub fn finish(&mut self, pts: Timestamp) -> Result<()> {
 		self.flush(pts, true)?;
 		// Each entry keeps its own clone, whose appends the end refuses.
 		for track in self.entries.values().filter_map(|entry| entry.track.as_ref()) {
@@ -723,7 +723,7 @@ impl<E: catalog::Catalog> Capture<E> {
 			return;
 		}
 		// A closed catalog has nothing left to unadvertise from.
-		let Ok(mut guard) = self.catalog.modify() else {
+		let Ok(mut guard) = self.catalog.edit() else {
 			return;
 		};
 		let Some(mpegts) = guard.ext.mpegts_mut() else {
@@ -822,6 +822,7 @@ mod tests {
 				.ordered();
 			let waiter = kio::Waiter::noop();
 			let mut read = Vec::new();
+			// A group given up on is passed over.
 			while let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) {
 				read.push(group.start);
 			}

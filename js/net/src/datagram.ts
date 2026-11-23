@@ -7,10 +7,9 @@ import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { rescaleIn } from "./rescale.ts";
-import { keyOf, Timescale, type Timestamp } from "./time.ts";
-import { checkSequence, max } from "./util/sequence.ts";
-
-export { rescale, rescaleIn } from "./rescale.ts";
+import { Timescale, type Timestamp } from "./time.ts";
+import { checkKey, max } from "./util/key.ts";
+import { checkName } from "./util/utf8.ts";
 
 /** A single unreliable payload, addressed within its datagram track. */
 export interface Datagram {
@@ -104,11 +103,13 @@ export class Producer {
 	#state = new State();
 
 	constructor(name: string) {
+		checkName(name);
 		this.name = name;
 	}
 
 	static {
 		hooks.observeDatagrams = (producer) => consume(producer.name, producer.#state, undefined, null);
+		hooks.datagramInfo = (producer) => producer.#state.info.peek();
 		hooks.closeUnusedDatagrams = (producer) => {
 			if (producer.#state.consumers.size > 0) return false;
 			producer.abort(new StreamError(StreamCode.Cancel));
@@ -159,7 +160,7 @@ export class Producer {
 	 * throws a `TimestampMismatch`.
 	 */
 	append(timestamp: Timestamp, payload: Uint8Array): bigint {
-		const sequence = keyOf(timestamp) ?? this.#state.next;
+		const sequence = timestamp.key ?? this.#state.next;
 		this.insert({ sequence, timestamp, payload });
 		return sequence;
 	}
@@ -171,7 +172,7 @@ export class Producer {
 		if (closed !== undefined) throw closed ?? new Error("datagram track is closed");
 		const properties = state.info.peek();
 		if (!properties) throw new Error("datagram track has not been accepted");
-		const sequence = checkSequence(datagram.sequence);
+		const sequence = checkKey(datagram.sequence);
 		if (datagram.payload.byteLength > MAX_PAYLOAD) throw new Error("datagram payload too large");
 		// A scale-less datagram's timestamp is its sequence.
 		const timestamp = rescaleIn(properties, datagram.timestamp, sequence);

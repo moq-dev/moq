@@ -8,7 +8,31 @@
  * @module
  */
 
+import type { SessionCode } from "../error.ts";
 import { type IetfVersion, Version } from "./version.ts";
+
+/**
+ * Session close codes only moq-transport defines.
+ *
+ * moq-lite assigns none of them, so {@link SessionCode} names none: this layer sends them, and
+ * one a peer sends reads back as its number. Mirrors the Rust `ietf::error::session` module.
+ *
+ * @internal
+ */
+export const IetfSessionCode = Object.freeze({
+	/** A request ID was reused or broke the negotiated draft's order or parity rules. */
+	InvalidRequestId: 0x4 as SessionCode,
+	/** A key-value pair was malformed or repeated more than allowed. */
+	KeyValueFormatting: 0x6 as SessionCode,
+	/** A PATH the peer may not send, such as a server sending one at all. */
+	InvalidPath: 0x8 as SessionCode,
+	/** A token registration would exceed the advertised token cache size, which is 0 when unadvertised. */
+	AuthTokenCacheOverflow: 0x13 as SessionCode,
+	/** A token named an alias that was never registered. */
+	UnknownAuthTokenAlias: 0x17 as SessionCode,
+	/** An AUTHORITY the peer may not send, such as a server sending one at all. */
+	InvalidAuthority: 0x19 as SessionCode,
+} as const);
 
 /**
  * Whether `code` means the same thing in the moq-transport stream reset registry as it does

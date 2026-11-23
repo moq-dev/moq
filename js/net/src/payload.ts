@@ -5,12 +5,13 @@
  * @module
  */
 import { race } from "@moq/signals";
+import { FrameTooLarge } from "./error.ts";
 import type * as frame from "./frame.ts";
 import type * as group from "./group.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
 import type { Cursor, Reader } from "./stream.ts";
 import { received, type Timestamp } from "./time.ts";
-import { SEGMENT_BYTES } from "./util/limits.ts";
+import { MAX_FRAME_BYTES, SEGMENT_BYTES } from "./util/limits.ts";
 
 /** A decoded frame header, and its payload unless that streams in after it. */
 export interface WirePayload {
@@ -22,8 +23,13 @@ export interface WirePayload {
 	timestamp?: Timestamp;
 }
 
-/** Read a `size`-byte payload with its header when it fits one segment; a larger one is left on the stream. */
+/**
+ * Read a `size`-byte payload with its header when it fits one segment; a larger one is left on the
+ * stream. A size past {@link MAX_FRAME_BYTES} throws `FrameTooLarge` before any of it is read, as
+ * the group a reader joins keeps every chunk of the frame.
+ */
 export function decodePayload(c: Cursor, size: number): Uint8Array | undefined {
+	if (size > MAX_FRAME_BYTES) throw new FrameTooLarge();
 	return size > SEGMENT_BYTES ? undefined : c.read(size);
 }
 
@@ -38,19 +44,12 @@ export async function receiveFrame(
 	frame: WirePayload,
 	inflated?: number,
 ): Promise<boolean> {
-	const timestamp = received(frame.timestamp, producer.sequence);
+	const timestamp = received(frame.timestamp, producer.start);
 	if (frame.payload) {
 		hooks.writeGroupFrame(producer, { payload: frame.payload, timestamp }, inflated);
 		return true;
 	}
-	return fillFrame(stream, producer, producer.createFrame({ size: frame.size, timestamp }));
-}
-
-/**
- * Stream the rest of `open`, a frame of `producer`, from `stream`, then finish it. Resolves false
- * if the group closed first, which already failed the frame.
- */
-export async function fillFrame(stream: Reader, producer: group.Producer, open: frame.Producer): Promise<boolean> {
+	const open = producer.createFrame({ size: frame.size, timestamp });
 	while (open.remaining > 0) {
 		const chunk = await race([stream.readChunk(Math.min(open.remaining, SEGMENT_BYTES)), producer.closed]);
 		if (!(chunk instanceof Uint8Array)) return false;

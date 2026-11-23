@@ -973,7 +973,11 @@ async fn admit_http(
 		state.cluster.refusals.record(crate::refusals::RefusalKind::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
-	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.label);
+	let stats = state
+		.cluster
+		.stats
+		.tier(token.tier.clone())
+		.request(moq_net::stats::SessionInfo::new(&token.label).with_root(token.root.clone()));
 	let origin = origin.consume().with_stats(stats.clone());
 	Ok((lease.with_stats(stats), origin))
 }
@@ -1241,7 +1245,7 @@ mod tests {
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
 		let auth = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -1259,13 +1263,15 @@ mod tests {
 			)
 			.unwrap();
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut refused = Web::new(
 			auth::Auth::refuse("test"),
 			cluster.clone(),
@@ -1338,7 +1344,7 @@ mod tests {
 			for publish_only in [false, true] {
 				let auth = if publish_only {
 					crate::auth::Config {
-						public_publish: vec![moq_auth::Pattern::all()],
+						public_publish: vec![moq_auth::Prefix::all()],
 						..Default::default()
 					}
 					.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -1470,7 +1476,7 @@ mod tests {
 			for _ in 0..6 {
 				let admission = admissions.next().await.unwrap();
 				assert_eq!(admission.request.transport, moq_auth::Transport::Http);
-				let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Pattern::all());
+				let mut grant = moq_auth::Grant::new(moq_auth::Prefixes::new(), moq_auth::Prefix::all());
 				grant.tier = Some(
 					admission
 						.request
@@ -1501,12 +1507,14 @@ mod tests {
 			)
 			.unwrap();
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		for tier in ["first", "second"] {
 			for selector in [FetchGroup::Num(0), FetchGroup::Latest] {
@@ -1594,7 +1602,7 @@ mod tests {
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
 		let auth = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -1616,11 +1624,13 @@ mod tests {
 		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
 		// edge: past the 500ms max age, so it is no longer served.
 		for millis in [0, 1000, 2000] {
-			let mut group = track.append_group(millis).unwrap();
+			let mut group = track
+				.append_group(moq_net::Timestamp::from_millis(millis).unwrap())
+				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let status = serve_fetch(
@@ -1654,7 +1664,7 @@ mod tests {
 			for _ in 0..2 {
 				let admission = admissions.next().await.unwrap();
 				// Publish-only: admitted by auth, but forbidden from reading.
-				let grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Patterns::new());
+				let grant = moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefixes::new());
 				let (producer, consumer) = moq_auth::lease::Producer::new(grant);
 				leases.push(producer);
 				admission.grant(consumer);
@@ -2002,7 +2012,7 @@ mod tests {
 		// The probed route is the test's own, so auth never runs; it just has to be
 		// configured with something for `Web` to build.
 		let auth_config = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		};
 		let auth = auth_config
@@ -2123,8 +2133,8 @@ mod tests {
 				"WebSocket, tls={tls}"
 			);
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(
-				moq_auth::Pattern::all(),
-				moq_auth::Pattern::all(),
+				moq_auth::Prefix::all(),
+				moq_auth::Prefix::all(),
 			)));
 			drop(client.await.expect("the WebSocket session connects"));
 		}
@@ -2147,7 +2157,7 @@ mod tests {
 		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.web.https.cert = vec![cert];
 		config.web.https.key = vec![key];
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.auth.public = vec![moq_auth::Prefix::all()];
 		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let https = relay.web_addrs().https.unwrap();
 		let ready = relay.ready();
@@ -2204,8 +2214,8 @@ mod tests {
 	}
 
 	/// `tls://` on the HTTPS port applies the listen client-certificate policy, as the
-	/// `listen.tcp` `tls://` listener does: under pinned peers a dial without a pinned
-	/// certificate is refused. HTTPS on the same port is never asked for one.
+	/// `listen.tcp` `tls://` listener does: a certificate the client roots did not issue is
+	/// refused, and one they did is accepted. HTTPS on the same port is never asked for one.
 	#[tokio::test]
 	async fn https_listener_verifies_tls_qmux_client_certificates() {
 		use rustls::pki_types::{CertificateDer, pem::PemObject};
@@ -2213,14 +2223,21 @@ mod tests {
 
 		let dir = TempDir::new().unwrap();
 		let (ca, cert, key) = make_certs(&dir);
+		let (client_ca, client_cert, client_key) = make_named_certs(&dir, "client", "client.invalid");
 		let mut config = crate::Config::default();
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.generate = vec!["localhost".into()];
-		config.listen.tls.peers = Some(moq_tokio::tls::Peers::new());
+		config.listen.tls.root = vec![client_ca];
 		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
-		config.web.https.cert = vec![cert];
-		config.web.https.key = vec![key];
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.web.https.cert = vec![cert.clone()];
+		config.web.https.key = vec![key.clone()];
+		// A client CA needs a server to grant certificates; this one grants them everything.
+		let mut policy = moq_auth::serve::Policy::default();
+		policy.mtls = moq_auth::Permissions::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
+		let auth = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		config.auth.url = Some(format!("http://{}/", auth.local_addr().unwrap()).parse().unwrap());
+		let auth_server = moq_auth::serve::Server::new(policy).unwrap();
+		tokio::spawn(async move { auth_server.serve(auth).await });
 		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let https = relay.web_addrs().https.unwrap();
 		let ready = relay.ready();
@@ -2229,17 +2246,30 @@ mod tests {
 		ready.wait().await.unwrap();
 
 		let url: url::Url = format!("tls://localhost:{}/room", https.port()).parse().unwrap();
-		let mut config = moq_tokio::connect::Config::default();
-		config.tls.insecure = Some(true);
-		let connection = config
-			.init(Default::default())
-			.unwrap()
-			.with_reconnect(false)
-			.connect(url);
-		let refused = kio::clock::timeout(std::time::Duration::from_secs(10), connection.established())
+		let dial = |cert: &PathBuf, key: &PathBuf| {
+			let mut config = moq_tokio::connect::Config::default();
+			config.tls.insecure = Some(true);
+			config.tls.cert = Some(cert.clone());
+			config.tls.key = Some(key.clone());
+			let connection = config
+				.init(Default::default())
+				.unwrap()
+				.with_reconnect(false)
+				.connect(url.clone());
+			async move {
+				kio::clock::timeout(std::time::Duration::from_secs(10), connection.established())
+					.await
+					.expect("the tls:// dial timed out")
+			}
+		};
+		// The server's own certificate chains to a CA the client roots do not hold.
+		assert!(
+			dial(&cert, &key).await.is_err(),
+			"tls:// accepted a certificate its client roots did not issue"
+		);
+		let _accepted = dial(&client_cert, &client_key)
 			.await
-			.expect("the tls:// dial timed out");
-		assert!(refused.is_err(), "tls:// accepted a dial without a pinned certificate");
+			.expect("tls:// refused a certificate its client roots issued");
 
 		let mut roots = rustls::RootCertStore::empty();
 		for cert in CertificateDer::pem_slice_iter(&std::fs::read(&ca).unwrap()) {
@@ -2299,7 +2329,7 @@ mod tests {
 			config.https.cert = vec![cert.clone()];
 			config.https.key = vec![key.clone()];
 			let auth = crate::auth::Config {
-				public_subscribe: vec![moq_auth::Pattern::all()],
+				public_subscribe: vec![moq_auth::Prefix::all()],
 				..Default::default()
 			}
 			.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -2401,7 +2431,7 @@ mod tests {
 		let mut config = Config::default();
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		let auth = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -2460,7 +2490,7 @@ mod tests {
 	#[tokio::test]
 	async fn unreachable_timeout_waits_forever() {
 		let auth_config = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		};
 		let auth = auth_config
@@ -2486,7 +2516,7 @@ mod tests {
 		let mut config = Config::default();
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		let auth_config = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		};
 		let auth = auth_config
@@ -2630,7 +2660,7 @@ mod tests {
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.web.ws = true;
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.auth.public = vec![moq_auth::Prefix::all()];
 		config.quic.receive_window = Some(3 << 20);
 		config.quic.stream_receive_window = Some(384 << 10);
 		config.quic.max_streams = Some(17);
@@ -2698,7 +2728,7 @@ mod tests {
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.ws = true;
 		let auth_config = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		};
 		let auth = auth_config
@@ -2852,7 +2882,7 @@ mod tests {
 				config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 				config.listen.timeout = Some((std::time::Duration::ZERO).into());
 				config.web.ws = true;
-				config.auth.public = vec![moq_auth::Pattern::all()];
+				config.auth.public = vec![moq_auth::Prefix::all()];
 				config.drain_timeout = Some((DRAIN_WINDOW).into());
 				if tls {
 					config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());

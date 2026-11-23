@@ -363,7 +363,7 @@ pub(crate) fn populate(
 	out.audio = hang::catalog::Audio::default();
 	// The derivative republishes the child's timeline, so its timestamps only mean something under
 	// the child's wall mapping.
-	out.media.clock = source.media.clock;
+	out.sync.clock = source.sync.clock;
 
 	// Display metadata applies to the rungs too (same picture, smaller).
 	out.video.display = source.video.display.clone();
@@ -377,8 +377,8 @@ pub(crate) fn populate(
 	// Every rung mirrors the source's groups one for one, so it promises the source's join
 	// interval, and nothing else measures one for tracks written group by group. An HLS export
 	// numbers segments on it, so the rungs share the source's segment numbers. Fixed once set.
-	if out.media.join.is_none() {
-		out.media.join = source.media.join;
+	if out.sync.interval.is_none() {
+		out.sync.interval = source.sync.interval;
 	}
 
 	let Some(rel) = source_rel else {
@@ -497,10 +497,10 @@ mod tests {
 	#[test]
 	fn rungs_never_upscale() {
 		let rungs = crate::Config::default().ladder;
-		let resolved = resolve_rungs(&rungs, "video", &source(854, 480, Some(2_000_000))).unwrap();
+		let resolved = resolve_rungs(&rungs, "video", &source(854, 480, Some(3_000_000))).unwrap();
 		let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
 		// A 480p source keeps only the strictly-lower rungs: the 480p rung is
-		// admitted only because its bitrate (1.2M) undercuts the source (2M).
+		// admitted only because its bitrate (2.3M) undercuts the source (3M).
 		assert_eq!(names, ["video/240p", "video/360p", "video/480p"]);
 	}
 
@@ -1004,45 +1004,45 @@ mod tests {
 			.insert("video", source(1920, 1080, Some(6_000_000)))
 			.unwrap();
 		let clock = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
-		child.media.clock = Some(clock);
+		child.sync.clock = Some(clock);
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
-		assert_eq!(out.media.clock, Some(clock), "a derivative keeps the child's clock");
+		assert_eq!(out.sync.clock, Some(clock), "a derivative keeps the child's clock");
 	}
 
 	/// A derivative joins on the source's interval, whether it lists only its rungs or the source's
 	/// renditions too, and keeps the first one declared.
 	#[test]
 	fn populate_carries_the_source_interval() {
-		let interval = |secs| hang::catalog::Join::new(std::time::Duration::from_secs(secs));
+		let interval = |secs| Some(std::time::Duration::from_secs(secs));
 		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
 		let rel = Relative::new(".").unwrap();
 
 		// The source declares its interval only once it has measured one.
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
-		assert_eq!(out.media.join, None, "nothing to promise yet");
+		assert_eq!(out.sync.interval, None, "nothing to promise yet");
 
-		child.media.join = interval(4);
+		child.sync.interval = interval(4);
 		populate(&mut out, &child, &[], None).unwrap();
 		assert_eq!(
-			out.media.join,
+			out.sync.interval,
 			interval(4),
 			"only rungs: they cut where the source does"
 		);
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], Some(&rel)).unwrap();
-		assert_eq!(out.media.join, interval(4));
+		assert_eq!(out.sync.interval, interval(4));
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
-		out.media.join = interval(2);
+		out.sync.interval = interval(2);
 		populate(&mut out, &child, &[], Some(&rel)).unwrap();
-		assert_eq!(out.media.join, interval(2), "fixed once declared");
+		assert_eq!(out.sync.interval, interval(2), "fixed once declared");
 	}
 
-	/// A derivative runs on its source's mapping: `populate` writes the source's `media.clock` through
+	/// A derivative runs on its source's mapping: `populate` writes the source's `sync.clock` through
 	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
 	#[tokio::test(start_paused = true)]
 	async fn a_derivative_stamps_on_its_source_clock() {
@@ -1066,7 +1066,7 @@ mod tests {
 
 		let mut output = moq_net::broadcast::Info::default().produce();
 		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();
-		let mut guard = derived.modify().unwrap();
+		let mut guard = derived.modify(derived.next_timestamp()).unwrap();
 		populate(&mut guard, &source.snapshot(), &[], None).unwrap();
 		guard.commit().unwrap();
 		let adopted = derived.clock();

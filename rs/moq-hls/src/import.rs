@@ -639,6 +639,10 @@ impl TrackState {
 			if segment.map.is_some() {
 				map = segment.map.as_ref();
 			}
+			if is_gap(segment) {
+				self.skip_gap(segment, base, sequence)?;
+				continue;
+			}
 			// m3u8-rs only attaches `EXT-X-MAP` to the segment directly after the tag, so
 			// on every segment but that one this is the map carried down from the prefix.
 			if let Some(map) = map {
@@ -689,6 +693,22 @@ impl TrackState {
 		Ok(())
 	}
 
+	/// Pass over an `EXT-X-GAP` entry without requesting it: the source has no media there, so its
+	/// URI is not loaded. Open groups close without an end, as for a skipped sequence, so a reader
+	/// sees the gap rather than a group that seems to run up to the media after it.
+	fn skip_gap(&mut self, segment: &MediaSegment, base: &Url, sequence: u64) -> Result<()> {
+		// A gap keeps its slot in a byte-range chain, so the next implicit offset follows it.
+		if !segment.uri.is_empty() {
+			let url = resolve_uri(base, &segment.uri)?;
+			self.media_range.resolve(url, segment.byte_range.as_ref())?;
+		}
+		if let Some(generation) = self.generation.as_mut() {
+			generation.importer.rejoin()?;
+		}
+		self.next_sequence = Some(sequence + 1);
+		Ok(())
+	}
+
 	async fn push_segment(
 		&mut self,
 		fetcher: &Fetcher,
@@ -733,9 +753,9 @@ impl TrackState {
 		// memory than a chunk, and a slow importer slows the transfer.
 		//
 		// Once the importer has read part of a segment it cannot take that segment again from the
-		// start, so a failure past that point retires the generation and the next pass rejoins
-		// with a gap. A rewind keeps it instead: it ends the import, and the tracks are aborted
-		// with the cause rather than dropped.
+		// start, so a failed fetch past that point retires the generation and the next pass
+		// rejoins with a gap. A decode failure keeps it instead: it ends the import, and the
+		// tracks are aborted with the cause rather than dropped.
 		let mut evict = false;
 		let streamed = loop {
 			let chunk = match body.chunk().await {
@@ -744,19 +764,13 @@ impl TrackState {
 				Err(err) => break Err(err),
 			};
 			evict = true;
-			if let Err(err) = importer.decode(&chunk) {
-				break Err(match err {
-					// Timestamp resets are unsupported: the published tracks never rewind, and no
-					// later pass can import this segment, so it is refused rather than retried.
-					moq_mux::Error::TimestampRewind(_)
-					| moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }) => {
-						evict = false;
-						Error::Rewind {
-							rendition: self.label.clone(),
-							source: err,
-						}
-					}
-					err => err.into(),
+			if let Err(source) = importer.decode(&chunk) {
+				// Media the importer refuses, such as a timestamp reset, is refused on every later
+				// pass too, so it ends the import rather than being retried.
+				evict = false;
+				break Err(Error::Decode {
+					rendition: self.label.clone(),
+					source,
 				});
 			}
 		};
@@ -848,13 +862,14 @@ impl Import {
 	/// An `EXT-X-DISCONTINUITY` keeps the source's timestamps: a forward jump continues the same
 	/// tracks, and a changed `EXT-X-MAP` starts a fresh generation of them. Timestamps that go
 	/// backwards on the same tracks, such as an encoder restart that reuses its init segment,
-	/// end the import with [`Error::Rewind`] instead of publishing a group that rewinds.
+	/// are a decode failure rather than a group that rewinds.
 	///
-	/// A failed step is logged and retried with escalating backoff, and the import ends with the
-	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
-	/// instead of looping forever. A settled answer ends the import immediately: an HTTP status
-	/// the origin actually sent, such as a `404` playlist, or [`Error::PlaylistEnded`], since no
-	/// amount of waiting changes either.
+	/// Any segment the importer fails to decode ends the import with [`Error::Decode`] and is
+	/// never retried. A failed fetch is logged and retried with escalating backoff, and the import
+	/// ends with the last error once the backoff budget is spent, so a broken source surfaces
+	/// within seconds instead of looping forever. A settled answer ends the import immediately: an
+	/// HTTP status the origin actually sent, such as a `404` playlist, or
+	/// [`Error::PlaylistEnded`], since no amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
 		let mut deadline = kio::clock::now().saturating_add(STEP_RETRY_BUDGET);
@@ -890,8 +905,8 @@ impl Import {
 				Err(err) if err.settled() => {
 					return Err(err);
 				}
-				// The source rewound its timestamps, which no later pass can import.
-				Err(err @ Error::Rewind { .. }) => return Err(err),
+				// Media the importer refused, which no later pass can import.
+				Err(err @ Error::Decode { .. }) => return Err(err),
 				Err(err) => {
 					let now = kio::clock::now();
 					if now >= deadline {
@@ -1014,9 +1029,9 @@ impl Import {
 					// dead variant the others can cover for: importing the rest would publish a
 					// broadcast silently missing it.
 					OnError::Warn if matches!(err, Error::PlaylistEnded) => return Err(err),
-					// A rewind ends the import: no sibling covers for it, and evicting the
-					// rendition would rejoin it as fresh tracks, accepting the reset after all.
-					OnError::Warn if matches!(err, Error::Rewind { .. }) => return Err(err),
+					// A decode failure ends the import: no sibling covers for it, and evicting the
+					// rendition would rejoin it as fresh tracks, accepting the bad media after all.
+					OnError::Warn if matches!(err, Error::Decode { .. }) => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
@@ -1273,6 +1288,11 @@ fn sequence_end(playlist: &MediaPlaylist) -> Result<u64> {
 			kind: SequenceKind::Media,
 			value: playlist.media_sequence,
 		})
+}
+
+/// The segment carries `EXT-X-GAP`: its media is missing and its URI must not be loaded.
+fn is_gap(segment: &MediaSegment) -> bool {
+	segment.unknown_tags.iter().any(|tag| tag.tag == "X-GAP")
 }
 
 /// Advance the running discontinuity sequence, rejecting a u64 wrap on absurd input.
@@ -2185,12 +2205,10 @@ mod tests {
 		assert!(import.video[0].generation.is_none(), "the dead rendition is retired");
 	}
 
-	/// A decode refusal retires its importer at once, rather than after
-	/// [`MAX_RENDITION_FAILURES`] consecutive failures, so the next pass rebuilds it under fresh
-	/// track names and can import a repaired source. The refusal is not settled, so `run` still
-	/// retries the step within its backoff budget.
+	/// A segment the importer refuses ends the import, unwrapped or CMAF: it is not retried, and
+	/// the rendition is not evicted and rejoined as fresh tracks.
 	#[tokio::test]
-	async fn a_refused_segment_recovers_through_a_new_importer() {
+	async fn a_malformed_segment_ends_the_import() {
 		for cmaf in [false, true] {
 			let dir = temp_dir();
 			write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
@@ -2201,25 +2219,22 @@ mod tests {
 			let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 			let mut cfg = Config::new(Url::from_file_path(dir.join("media.m3u8")).unwrap());
 			cfg.cmaf = cmaf;
-			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+			let mut import = Import::new(broadcast, catalog, cfg).unwrap();
 			import.init().await.unwrap();
-			let previous = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 
-			let segment = std::fs::read(dir.join("video1.m4s")).unwrap();
 			// An mdat without a moof is refused at its header.
 			std::fs::write(dir.join("video1.m4s"), b"\0\0\0\x0cmdatdata").unwrap();
 			std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
-			let step = import.step(OnError::Warn).await.unwrap();
-			assert!(step.failed.is_some());
-			assert!(import.video[0].generation.is_none());
-			std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
-			let step = import.step(OnError::Warn).await.unwrap();
-			assert!(step.failed.is_none());
-			assert_eq!(step.wrote_segments, 2);
-			let snapshot = catalog.snapshot();
-			assert_eq!(snapshot.video.renditions.len(), 1);
-			assert_ne!(*snapshot.video.renditions.keys().next().unwrap(), previous);
-			drop(import.finish().unwrap());
+			let step = import.step(OnError::Warn).await;
+			assert!(
+				matches!(step, Err(Error::Decode { .. })),
+				"cmaf={cmaf}: {:?}",
+				step.err()
+			);
+			assert!(
+				import.video[0].generation.is_some(),
+				"cmaf={cmaf}: the rendition is kept"
+			);
 			std::fs::remove_dir_all(dir).unwrap();
 		}
 	}
@@ -2579,9 +2594,125 @@ mod tests {
 		}
 	}
 
+	/// A live playlist that declares a segment missing (`EXT-X-GAP`, as the exporter lists a grid
+	/// slot no group starts in) is followed past it across reloads: the gap's URI, which answers
+	/// 404, is never requested, the sequence advances over it, and the media after it is delivered
+	/// as a group of its own.
+	#[tokio::test]
+	async fn a_declared_gap_is_skipped_and_the_media_after_it_delivered() {
+		kio::clock::host_time(); // real TCP sockets
+		for cmaf in [false, true] {
+			let dir = temp_dir();
+			let muxer = synth(true);
+			write_synth(&dir, &muxer, "", &[5_000_000, 7_000_000, 9_000_000]);
+			let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
+			// `1.m4s` is the gap: the server has nothing for it.
+			let routes = Arc::new(std::sync::Mutex::new(HashMap::from([
+				("/init.mp4".to_string(), read("init.mp4")),
+				("/0.m4s".to_string(), read("0.m4s")),
+				("/2.m4s".to_string(), read("2.m4s")),
+			])));
+			let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let address = listener.local_addr().unwrap();
+			let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+			let server = serve_routes(listener, routes.clone(), requested.clone());
+			let set_playlist = |body: &str| {
+				routes
+					.lock()
+					.unwrap()
+					.insert("/media.m3u8".to_string(), body.as_bytes().to_vec());
+			};
+
+			let head =
+				"#EXTM3U\n#EXT-X-VERSION:8\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\n0.m4s\n";
+			let gap = format!("{head}#EXT-X-GAP\n#EXTINF:2,\n1.m4s\n");
+			set_playlist(head);
+
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut cfg = Config::new(Url::parse(&format!("http://{address}/media.m3u8")).unwrap());
+			cfg.cmaf = cmaf;
+			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+			import.init().await.unwrap();
+
+			let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+			let replay = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+			let mut track = consumer
+				.track(&name)
+				.unwrap()
+				.subscribe(replay)
+				.await
+				.unwrap()
+				.ordered();
+
+			// The reload ends on the gap: nothing is fetched for it, and the cursor moves past it.
+			set_playlist(&gap);
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_none(), "cmaf={cmaf}: {:?}", step.failed);
+			assert_eq!(import.video[0].next_sequence, Some(2), "cmaf={cmaf}");
+
+			// The next reload lists the media after it.
+			set_playlist(&format!("{gap}#EXTINF:2,\n2.m4s\n"));
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_none(), "cmaf={cmaf}: {:?}", step.failed);
+			assert_eq!(step.wrote_segments, 1, "cmaf={cmaf}");
+			assert_eq!(import.video[0].next_sequence, Some(3), "cmaf={cmaf}");
+
+			let (groups, terminal) = group_stamps(&mut track);
+			assert!(terminal.is_none(), "cmaf={cmaf}: {terminal:?}");
+			assert_eq!(groups, [5_000_000, 9_000_000], "cmaf={cmaf}");
+			assert!(
+				!requested.lock().unwrap().iter().any(|path| path == "/1.m4s"),
+				"cmaf={cmaf}: the gap was requested"
+			);
+
+			drop(import.finish().unwrap());
+			server.abort();
+			std::fs::remove_dir_all(dir).unwrap();
+		}
+	}
+
+	/// A segment the playlist does not mark as a gap still fails when its URI answers 404.
+	#[tokio::test]
+	async fn an_unmarked_missing_segment_still_fails() {
+		kio::clock::host_time(); // real TCP sockets
+		let dir = temp_dir();
+		let muxer = synth(true);
+		write_synth(&dir, &muxer, "", &[5_000_000]);
+		let head = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\n0.m4s\n";
+		let routes = Arc::new(std::sync::Mutex::new(HashMap::from([
+			("/init.mp4".to_string(), std::fs::read(dir.join("init.mp4")).unwrap()),
+			("/0.m4s".to_string(), std::fs::read(dir.join("0.m4s")).unwrap()),
+			("/media.m3u8".to_string(), head.as_bytes().to_vec()),
+		])));
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = serve_routes(listener, routes.clone(), Default::default());
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let cfg = Config::new(Url::parse(&format!("http://{address}/media.m3u8")).unwrap());
+		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
+		import.init().await.unwrap();
+
+		routes.lock().unwrap().insert(
+			"/media.m3u8".to_string(),
+			format!("{head}#EXTINF:2,\n1.m4s\n").into_bytes(),
+		);
+		let step = import.step(OnError::Warn).await.unwrap();
+		assert!(step.failed.is_some(), "a 404 for a listed segment is a failure");
+		assert_eq!(import.video[0].next_sequence, Some(1), "the missing segment is retried");
+
+		drop(import.finish().unwrap());
+		server.abort();
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
 	const DISCONTINUITY: &str = "#EXT-X-DISCONTINUITY\n";
 
-	/// A timestamp reset under the same init segment is refused as a rewind, unwrapped or
+	/// A timestamp reset under the same init segment is refused as a decode failure, unwrapped or
 	/// CMAF, with or without the discontinuity the source should have signalled, and
 	/// without publishing anything for it: the track keeps its media and its name, and no group
 	/// (not even an aborted one) opens for the refused segment.
@@ -2593,16 +2724,7 @@ mod tests {
 					let case = discontinuity(video, cmaf, tags, 0).await;
 					let label = format!("video={video} cmaf={cmaf} tags={tags:?}");
 					assert!(
-						matches!(
-							case.result,
-							Err(Error::Rewind {
-								source: moq_mux::Error::TimestampRewind(_)
-									| moq_mux::Error::Cmaf(
-										moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }
-									),
-								..
-							})
-						),
+						matches!(case.result, Err(Error::Decode { .. })),
 						"{label}: {:?}",
 						case.result
 					);
@@ -2614,10 +2736,10 @@ mod tests {
 		}
 	}
 
-	/// A rewind ends the import at once, even while a sibling rendition is healthy: it is not
-	/// retried, and the rendition is not evicted and rejoined as fresh tracks.
+	/// A decode failure, here a rewind, ends the import at once, even while a sibling rendition
+	/// is healthy: it is not retried, and the rendition is not evicted and rejoined as fresh tracks.
 	#[tokio::test]
-	async fn a_rewind_ends_the_import() {
+	async fn a_decode_failure_ends_the_import() {
 		let dir = temp_dir();
 		write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
 		write_synth(&dir, &synth(false), "audio", &[5_000_000, 0]);
@@ -2650,9 +2772,9 @@ mod tests {
 		);
 		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
-			.expect("a rewind is not retried");
+			.expect("a decode failure is not retried");
 		assert!(
-			matches!(&run, Err(Error::Rewind { rendition, .. }) if rendition == "audio"),
+			matches!(&run, Err(Error::Decode { rendition, .. }) if rendition == "audio"),
 			"{run:?}"
 		);
 		std::fs::remove_dir_all(dir).unwrap();
@@ -2949,6 +3071,42 @@ video.m3u8
 						&body[start..=end],
 					),
 					None => http_response("200 OK", &[], body),
+				};
+				stream.write_all(&response).await.unwrap();
+			}
+		})
+	}
+
+	/// Answer each request from `routes`, which the test may change between reloads, and 404 any
+	/// path it lacks, recording every path requested.
+	fn serve_routes(
+		listener: TcpListener,
+		routes: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
+		requested: Arc<std::sync::Mutex<Vec<String>>>,
+	) -> tokio::task::JoinHandle<()> {
+		tokio::spawn(async move {
+			loop {
+				let (mut stream, _) = listener.accept().await.unwrap();
+				let mut request = Vec::new();
+				loop {
+					let mut chunk = [0; 1024];
+					let read = stream.read(&mut chunk).await.unwrap();
+					if read == 0 {
+						break;
+					}
+					request.extend_from_slice(&chunk[..read]);
+					if request.windows(4).any(|window| window == b"\r\n\r\n") {
+						break;
+					}
+				}
+				let Some(path) = request_path(&request) else {
+					continue;
+				};
+				requested.lock().unwrap().push(path.to_string());
+				let body = routes.lock().unwrap().get(path).cloned();
+				let response = match body {
+					Some(body) => http_response("200 OK", &[], &body),
+					None => http_response("404 Not Found", &[], b""),
 				};
 				stream.write_all(&response).await.unwrap();
 			}

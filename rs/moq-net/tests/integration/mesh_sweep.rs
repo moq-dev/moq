@@ -7,8 +7,7 @@
 //! broadcasts, then applies one external change at a time: a link flap, a relay
 //! restart, a publisher restarting under a fresh identity, a client joining or
 //! leaving, or a broadcast published or withdrawn. Once the mesh goes quiet, every
-//! relay and client must have followed the rules the `verify-route` skill states on
-//! what it showed, and must now show exactly what it can reach. The announce
+//! relay and client must have followed the route rules on what it showed, and must now show exactly what it can reach. The announce
 //! messages each change cost are counted against [`budget`].
 //!
 //! `MOQ_ROUTE_SEED` and `MOQ_ROUTE_CASES` pick the cases; a failure prints the seed
@@ -259,9 +258,10 @@ impl Mesh {
 		let mut config = origin::Config::new(std::num::NonZeroU64::new(self.next_hop).unwrap());
 		// Nothing expires, so no expiry sweep keeps a timer armed and the mesh can go idle.
 		config.pool = cache::Pool::unbounded();
+		config.proxy = proxy;
 		let (origin, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
-		origin.with_proxy(proxy)
+		origin
 	}
 
 	fn stats(&self) -> moq_net::stats::Session {
@@ -367,7 +367,7 @@ impl Mesh {
 			group
 				.write_frame(group.at_start(), bytes::Bytes::from(path.clone()))
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			route.announce().unwrap();
 			Held { route, _track: track }
 		};

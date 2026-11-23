@@ -65,7 +65,7 @@ export class Publication {
 	readonly renames: Getter<number> = this.#renames;
 
 	/**
-	 * The catalog's `media.join.interval` in milliseconds, fixed when the catalog first lists a video
+	 * The catalog's `sync.interval` in milliseconds, fixed when the catalog first lists a video
 	 * or audio rendition here, since an export numbers this network broadcast's segments on it.
 	 */
 	join?: Catalog.U53;

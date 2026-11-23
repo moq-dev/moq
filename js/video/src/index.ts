@@ -23,6 +23,5 @@
  *
  * @module
  */
-/** Swap a width and height for a quarter-turn rotation. @internal */
-export { rotateVideoDimensions } from "./presentation";
-export * from "./renderer";
+export { rotateDimensions } from "./presentation.ts";
+export * from "./renderer.ts";

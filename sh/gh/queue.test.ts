@@ -257,14 +257,14 @@ for (const name of ["x11", "android", "cpp", "audio-quality", "oss-scanner", "ru
 		`nightly must call ${name}.yml`,
 	);
 }
-for (const job of ["release-swift-lib", "release-dart-ffi", "release-dart", "release-js", "release-kt-lib"]) {
+for (const job of ["release-swift-lib", "release-shared-ffi", "release-dart", "release-js", "release-kt-lib"]) {
 	assert.ok(nightly.jobs[job], `nightly must dry-run ${job}`);
 }
 
 assert.deepEqual((await workflow("obs")).on.push.branches, ["release"]);
 
 // Release Dart FFI only runs on release PRs and nightly, so it packages every platform.
-const targets = JSON.parse(dart.jobs.ffi.with.targets);
+const targets = JSON.parse(dart.jobs.plan.steps[0].env.ALL);
 assert.ok(targets.some((target: string) => target.includes("-apple-")));
 assert.ok(targets.some((target: string) => target.includes("-windows-")));
 
@@ -272,6 +272,14 @@ assert.ok(targets.some((target: string) => target.includes("-windows-")));
 // it must block a release.
 const features = await workflow("features");
 assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features"]);
-// Nightly runs the whole gate over every package in one Tests job.
-assert.ok(nightly.jobs.tests.strategy.matrix.recipe.includes("gate"));
+// Nightly runs the whole gate over every package on the queue's runners, on main's code alone.
+// The exact command: `just gate -rs` would skip a module.
+assert.match(nightly.jobs.gate.steps.at(-1).run, /^nix develop --command just gate$/m);
+assert.deepEqual(nightly.jobs.gate["runs-on"], ["self-hosted", "moq-queue"]);
+assert.equal(
+	nightly.jobs.gate.if,
+	"github.ref == 'refs/heads/main'",
+	"gate runs only main's code on the queue's runners",
+);
+assert.ok(!/secrets\s*[.[]/.test(JSON.stringify(nightly.jobs.gate)), "a self-hosted Nightly job gets no secrets");
 console.log("queue event policy passed");

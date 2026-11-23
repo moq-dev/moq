@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import type MoqPublish from "@moq/publish/element";
 import type { JSHandle, Page } from "playwright";
 import { createServer } from "vite";
-import { worklet } from "../../../../js/common/vite-plugin-worklet";
 import { launch } from "./harness";
 
 /** The microphone and camera tracks a `<moq-publish>` holds open, in that order. */
@@ -105,7 +105,7 @@ test.each(["video", "canvas"] as const)(
 				const publish = document.querySelector<MoqPublish>("moq-publish");
 				if (!publish) throw new Error("missing publish element");
 				publish.backend = "2d";
-				publish.capture = "hold";
+				publish.idle = "hold";
 				const preview = document.createElement(tag);
 				preview.style.width = "100%";
 				preview.style.height = "auto";
@@ -329,8 +329,8 @@ test.each(["video", "canvas"] as const)(
 );
 
 test.each(["hold", "release"] as const)(
-	"a loading video preserves the last media aspect with capture=%s",
-	async (capture) => {
+	"a loading video preserves the last media aspect with idle=%s",
+	async (idle) => {
 		const server = await createServer({
 			configFile: false,
 			root: `${import.meta.dir}/publish-ui`,
@@ -343,7 +343,7 @@ test.each(["hold", "release"] as const)(
 			const page = await browser.newPage({ viewport: { width: 960, height: 720 } });
 			await page.goto(server.resolvedUrls?.local[0] ?? "");
 			await page.getByRole("button", { name: "Settings", exact: true }).waitFor();
-			const fixture = await page.evaluateHandle((capture) => {
+			const fixture = await page.evaluateHandle((idle) => {
 				const publish = document.querySelector<MoqPublish>("moq-publish");
 				const player = publish?.parentElement?.shadowRoot?.querySelector<HTMLElement>(".player");
 				if (!publish || !player) throw new Error("missing publish controls");
@@ -353,7 +353,7 @@ test.each(["hold", "release"] as const)(
 				preview.style.width = "100%";
 				preview.style.height = "auto";
 				publish.append(preview);
-				publish.capture = capture;
+				publish.idle = idle;
 				publish.muted = true;
 				publish.invisible = false;
 				const fixture = { publish, preview, player, observed: -1, metadata: 0, unsized: false };
@@ -363,7 +363,7 @@ test.each(["hold", "release"] as const)(
 				}).observe(publish);
 				publish.source = "camera";
 				return fixture;
-			}, capture);
+			}, idle);
 			const shown = () =>
 				page.waitForFunction(({ publish, preview, player, observed }) => {
 					const height = publish.getBoundingClientRect().height;
@@ -433,8 +433,8 @@ test.each(["hold", "release"] as const)(
 );
 
 test.each(["hold", "release"] as const)(
-	"a ready video preserves page display choices across media resizes with capture=%s",
-	async (capture) => {
+	"a ready video preserves page display choices across media resizes with idle=%s",
+	async (idle) => {
 		const server = await createServer({
 			configFile: false,
 			root: `${import.meta.dir}/publish-ui`,
@@ -447,7 +447,7 @@ test.each(["hold", "release"] as const)(
 			const page = await browser.newPage();
 			await page.goto(server.resolvedUrls?.local[0] ?? "");
 			await page.getByRole("button", { name: "Settings", exact: true }).waitFor();
-			const fixture = await page.evaluateHandle((capture) => {
+			const fixture = await page.evaluateHandle((idle) => {
 				const publish = document.querySelector<MoqPublish>("moq-publish");
 				if (!publish) throw new Error("missing publisher");
 				const canvas = document.createElement("canvas");
@@ -465,13 +465,13 @@ test.each(["hold", "release"] as const)(
 				preview.autoplay = true;
 				preview.muted = true;
 				publish.append(preview);
-				publish.capture = capture;
+				publish.idle = idle;
 				publish.muted = true;
 				publish.backend = "2d";
 				publish.invisible = false;
 				publish.source = "camera";
 				return { publish, preview, canvas, draw, timer };
-			}, capture);
+			}, idle);
 			const shown = () =>
 				page.waitForFunction(
 					({ preview, canvas }) =>
@@ -555,7 +555,7 @@ test("canvas previews wait for dimensions and paint fresh frames under a strict 
 			const preview = publish?.querySelector("canvas");
 			if (!publish || !preview) throw new Error("missing preview");
 			publish.backend = "2d";
-			publish.capture = "hold";
+			publish.idle = "hold";
 			publish.muted = true;
 			publish.style.display = "block";
 			preview.style.width = "320px";
@@ -865,7 +865,7 @@ test("a camera holds both devices until its source clears or the element detache
 	}
 }, 30_000);
 
-test('capture="release" closes each device while it is muted or hidden', async () => {
+test('idle="release" closes each device while it is muted or hidden', async () => {
 	const server = await createServer({
 		configFile: false,
 		root: `${import.meta.dir}/publish-ui`,
@@ -881,10 +881,10 @@ test('capture="release" closes each device while it is muted or hidden', async (
 		const publication = await page.evaluateHandle(() => {
 			const publish = document.querySelector<MoqPublish>("moq-publish");
 			if (!publish) throw new Error("missing publish element");
-			publish.setAttribute("capture", "release");
+			publish.setAttribute("idle", "release");
 			return { publish };
 		});
-		expect(await publication.evaluate(({ publish }) => publish.capture)).toBe("release");
+		expect(await publication.evaluate(({ publish }) => publish.idle)).toBe("release");
 		// Wait until the microphone and camera are each open or closed as given.
 		const opened = (audio: boolean, video: boolean) =>
 			page.waitForFunction(

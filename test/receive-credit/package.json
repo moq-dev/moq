@@ -3,10 +3,13 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"check": "tsc --noEmit"
+		"check": "bun check --no-script"
 	},
 	"dependencies": {
 		"@moq/net": "workspace:*",
 		"@moq/web-transport": "^0.1.6"
+	},
+	"devDependencies": {
+		"typescript": "7.0.2"
 	}
 }

@@ -38,7 +38,7 @@ fn one_relay() {
 		for seed in 0..2 {
 			let network = Network::new(seed);
 			let relay = SocketAddr::new(ip(1), PORT);
-			let auth = memory::public(&["**"], &[], &[]);
+			let auth = memory::public(&[""], &[], &[]);
 			let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
 			let relay = serve(&network, relay, &cluster, &auth).await;
 			for client in [PUBLISHER, SUBSCRIBER] {
@@ -59,7 +59,7 @@ fn one_relay() {
 fn two_relays() {
 	memory::run(|| async {
 		let network = Network::new(1);
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 
 		let cluster_a = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
 		let a = serve(&network, SocketAddr::new(ip(1), PORT), &cluster_a, &auth).await;
@@ -70,6 +70,8 @@ fn two_relays() {
 		let mut cache = moq_relay::cache::Config::default();
 		// Past what the pool counts in milliseconds, so it never expires idle groups.
 		cache.duration = Some(Duration::MAX.into());
+		// And no governor, whose timer would never let the simulation settle.
+		cache.headroom = Some("0".to_string());
 		let mut options = cluster::Options::new(config).with_cache(cache.init().expect("cache"));
 		options.sim = Some(network.host(b.ip()));
 		// A fixed port, which the static peer dials share, so the test can impair that path.
@@ -100,25 +102,7 @@ pub(crate) struct Relay {
 /// Serve `cluster` on `addr` through `auth`: each session the server accepts runs a relay
 /// [`Connection`] on its own simulator task.
 pub(crate) async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
-	serve_versions(network, addr, cluster, auth, Vec::new()).await
-}
-
-/// [`serve`], accepting only `versions`, or every default one when empty.
-async fn serve_versions(
-	network: &Network,
-	addr: SocketAddr,
-	cluster: &cluster::Cluster,
-	auth: &auth::Auth,
-	versions: Vec<moq_net::Version>,
-) -> Relay {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
-	let mut config = moq_tokio::server::Config::default();
-	config.listen.version = versions;
-	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(addr));
-	config.listen.tls.generate = vec!["localhost".into()];
-	config.sim = Some(network.host(addr.ip()));
-	let mut listener = config.init().expect("init server").listen().await.expect("listen");
-	let fingerprints = listener.certificates().fingerprints();
+	let (mut listener, relay) = listen(network, addr).await;
 	let (cluster, auth) = (cluster.clone(), auth.clone());
 	drop(kio::clock::sim::spawn(async move {
 		while let Ok(request) = listener.accept().await {
@@ -126,7 +110,63 @@ async fn serve_versions(
 			drop(kio::clock::sim::spawn(Connection::new(request, cluster, auth).run()));
 		}
 	}));
-	Relay { addr, fingerprints }
+	relay
+}
+
+/// A QUIC listener on `addr`, with a generated certificate
+async fn listen(network: &Network, addr: SocketAddr) -> (moq_tokio::Listener, Relay) {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let mut config = moq_tokio::server::Config::default();
+	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(addr));
+	config.listen.tls.generate = vec!["localhost".into()];
+	config.sim = Some(network.host(addr.ip()));
+	let listener = config.init().expect("init server").listen().await.expect("listen");
+	let fingerprints = listener.certificates().fingerprints();
+	(listener, Relay { addr, fingerprints })
+}
+
+/// A drain deadline does not wait for a WebTransport peer that vanished to acknowledge
+/// the close capsule, which it never will, until the idle timeout. The listener closes
+/// after the drain, as `Relay::run`'s does.
+#[test]
+fn a_drain_waits_on_no_vanished_peer() {
+	memory::run(|| async {
+		let network = Network::new(0);
+		let addr = SocketAddr::new(ip(1), PORT);
+		let auth = memory::public(&[""], &[], &[]);
+		let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
+		let (trigger, observer) = moq_relay::shutdown::Observer::new(Duration::ZERO);
+		let (mut listener, relay) = listen(&network, addr).await;
+		let served = kio::clock::sim::spawn(async move {
+			let accept = async {
+				while let Ok(request) = listener.accept().await {
+					let connection =
+						Connection::new(request, cluster.clone(), auth.clone()).with_shutdown(observer.clone());
+					drop(kio::clock::sim::spawn(connection.run()));
+				}
+			};
+			futures::future::select(std::pin::pin!(accept), std::pin::pin!(observer.drained())).await;
+			listener.close().await;
+		});
+
+		let url: url::Url = format!("https://{addr}/").parse().unwrap();
+		let _vanished = client(&network, PUBLISHER, &relay)
+			.with_reconnect(false)
+			.connect(url)
+			.established()
+			.await
+			.expect("connect");
+		let gone = SocketAddr::new(PUBLISHER, CLIENT_PORT);
+		for (from, to) in [(gone, addr), (addr, gone)] {
+			network.path(from, to, |path| path.link.loss = 1.0);
+		}
+
+		trigger.start();
+		kio::clock::timeout(Duration::from_secs(1), served)
+			.await
+			.expect("the drain waited on the vanished peer")
+			.unwrap();
+	});
 }
 
 /// Publish [`GROUPS`] groups to `publish` from [`PUBLISHER`], subscribe from `subscribe` on
@@ -162,7 +202,7 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = moq_net::Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
 		let _source = source.finish().unwrap();
@@ -234,102 +274,152 @@ fn lossy(network: &Network, a: SocketAddr, b: SocketAddr) {
 	network.path(b, a, |p| *p = path);
 }
 
-/// The bytes a socket session carries in one group: past the 32 MB live tail, so a hop that
-/// sheds rather than paces loses some
+/// The bytes the bulk transfer carries in one group: past the 32 MB live tail, so a hop
+/// that sheds rather than paces loses some
 const BULK: usize = 40 * 1024 * 1024;
 /// The size of each frame of [`BULK`]
 const CHUNK: usize = 8 * 1024;
-/// The only moq-lite that carries hidden broadcasts, which socket endpoints need at every hop
-const LITE_07: &str = "moq-lite-07-wip";
 
-/// A socket session's group carries a bulk transfer through a relay without loss: the writer
-/// waits on `ready` before each frame, and the reader drains at its own pace, slower than
-/// the writer, so every hop has to pace its ingest to that reader rather than shed.
+/// A group carries a bulk transfer through a relay without loss: the writer waits on `ready`
+/// before each frame, and the reader drains at its own pace, slower than the writer, so
+/// every hop has to pace its ingest to that reader rather than shed.
 ///
 /// A paused stream must hold no more than the credit its session reserves for it, or the
 /// connection window fills with bytes nobody takes and the transport evicts the stream.
 #[test]
-fn a_socket_session_carries_a_bulk_transfer_losslessly() {
-	memory::run(|| async {
-		let network = Network::new(0);
-		let auth = memory::public(&["**"], &[], &[]);
-		let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
-		let lite = vec![LITE_07.parse().unwrap()];
-		let relay = serve_versions(&network, SocketAddr::new(ip(1), PORT), &cluster, &auth, lite).await;
-
-		let (writer, _writing) = endpoint(&network, PUBLISHER, &relay, "writer");
-		let (reader, _reading) = endpoint(&network, SUBSCRIBER, &relay, "reader");
-
-		let dial = reader.dial_track(writer.id(), None).unwrap();
-		let accept = async { writer.accept_track().await?.accept(None).await };
-		let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
-			.await
-			.expect("connect timeout");
-		let (dialed, accepted) = (dialed.expect("dial"), accepted.expect("accept"));
-
-		let write = async {
-			let mut group = accepted.producer.append_group(0).unwrap();
-			let info = moq_net::frame::Info {
-				size: CHUNK as u64,
-				timestamp: moq_net::Timestamp::unscaled(0),
-			};
-			for index in 0..BULK / CHUNK {
-				group.ready(&info).await;
-				group
-					.write_frame(moq_net::Timestamp::unscaled(0), vec![index as u8; CHUNK])
-					.unwrap();
-			}
-			group.close().unwrap();
-		};
-		let read = async {
-			let mut ordered = dialed.consumer.ordered();
-			let mut group = ordered.next_group().await.unwrap().expect("a group");
-			let mut read = 0;
-			while let Some(frame) = group
-				.read_frame()
-				.await
-				.unwrap_or_else(|err| panic!("after {read} bytes: {err}"))
-			{
-				let index = read / CHUNK;
-				assert_eq!(frame.payload.len(), CHUNK, "frame {index} is cut short");
-				assert!(
-					frame.payload.iter().all(|&byte| byte == index as u8),
-					"frame {index} is corrupted"
-				);
-				read += CHUNK;
-				// A consumer draining at about 64 MB/s, slower than the writer.
-				kio::clock::sleep(Duration::from_micros(CHUNK as u64 / 64)).await;
-			}
-			read
-		};
-		let read = kio::clock::timeout(Duration::from_secs(600), async { futures::join!(write, read).1 })
-			.await
-			.expect("the transfer stalled");
-		assert_eq!(read, BULK);
-	});
+fn a_group_carries_a_bulk_transfer_losslessly() {
+	memory::run(|| bulk(1, CHUNK, BULK));
 }
 
-/// A socket endpoint `id` on the host at `ip`, publishing and subscribing through `relay`.
-fn endpoint(
-	network: &Network,
-	ip: IpAddr,
-	relay: &Relay,
-	id: &str,
-) -> (moq_net::socket::Endpoint, moq_tokio::Connection) {
+/// Many groups on one connection each carry a bulk transfer without loss, every one read
+/// slower than it is written, so every hop has all of them paused at once. A group that
+/// could not pause would read on and shed past the live tail before its reader got far.
+#[test]
+fn concurrent_groups_carry_bulk_transfers_losslessly() {
+	memory::run(|| bulk(SESSIONS, 64 * 1024, 1024 * 1024));
+}
+
+/// [`concurrent_groups_carry_bulk_transfers_losslessly`] at [`MANY`] sessions, past what any
+/// fixed credit per paused stream fits in half the connection window. Every one still
+/// pauses, since a paused stream holds a share of that half set by its slot, not by how many
+/// pause.
+#[test]
+#[ignore = "a hundred bulk transfers, about a minute in debug: run in release by `just rs quic-sim`"]
+fn many_groups_carry_bulk_transfers_losslessly() {
+	memory::run(|| bulk(MANY, 64 * 1024, 1024 * 1024));
+}
+
+/// How many bulk transfers share one connection in
+/// [`concurrent_groups_carry_bulk_transfers_losslessly`]: well past the two that pause when
+/// each paused stream holds its whole stream window.
+const SESSIONS: usize = 12;
+
+/// How many share one in [`many_groups_carry_bulk_transfers_losslessly`]. Past a couple of
+/// hundred, the frames in flight at once each hold credit until they seal, and that fills
+/// the connection window whatever the paused streams hold.
+const MANY: usize = 100;
+
+/// Write `tracks` tracks of one group each, [`BULK`] bytes in `chunk`-byte frames, through
+/// one relay, and read the first `read` bytes of each slower than they are written,
+/// asserting every one arrives.
+async fn bulk(tracks: usize, chunk: usize, read: usize) {
+	let network = Network::new(0);
+	let auth = memory::public(&[""], &[], &[]);
+	let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
+	let relay = serve(&network, SocketAddr::new(ip(1), PORT), &cluster, &auth).await;
+
 	let origin = moq_tokio::origin::spawn();
-	let mut connect = moq_tokio::connect::Config::default();
-	connect.bind = Some(SocketAddr::new(ip, CLIENT_PORT));
-	connect.tls.fingerprint = relay.fingerprints.clone();
-	// Every hop between two socket endpoints carries hidden broadcasts.
-	connect.version = vec![LITE_07.parse().unwrap()];
-	let mut config = moq_tokio::client::Config::default();
-	config.connect = connect;
-	config.sim = Some(network.host(ip));
-	let connection = config
-		.init()
-		.expect("init client")
+	let broadcast = origin
+		.route("bulk", moq_net::origin::RouteOptions::default())
+		.expect("route");
+	let sources: Vec<_> = (0..tracks)
+		.map(|index| {
+			broadcast
+				.broadcast()
+				.create_track(format!("data{index}"), moq_net::track::Info::default())
+				.expect("track")
+		})
+		.collect();
+	broadcast.announce().expect("announce");
+	let _publisher = client(&network, PUBLISHER, &relay)
 		.with_publisher(&origin)
-		.with_subscriber(origin.clone())
-		.connect(url(relay));
-	(moq_net::socket::Endpoint::new(&origin, "room", id).unwrap(), connection)
+		.connect(url(&relay));
+
+	let viewer = moq_tokio::origin::spawn();
+	let _subscriber = client(&network, SUBSCRIBER, &relay)
+		.with_subscriber(viewer.clone())
+		.connect(url(&relay));
+
+	let write = |mut track: moq_net::track::Producer| async move {
+		while track.subscription_changed().await.unwrap().is_none() {}
+		let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+		let info = moq_net::frame::Info {
+			size: chunk as u64,
+			timestamp: moq_net::Timestamp::unscaled(0),
+		};
+		for index in 0..BULK / chunk {
+			group.ready(&info).await;
+			group
+				.write_frame(moq_net::Timestamp::unscaled(0), vec![index as u8; chunk])
+				.unwrap();
+			// Other tasks run between frames, as on a real runtime.
+			kio::clock::sim::yield_now().await;
+		}
+		group.finish().unwrap();
+		// Held until the reads end: dropping a track unfinished aborts it.
+		futures::future::pending::<()>().await;
+	};
+	let read = |name: String| {
+		let viewer = viewer.clone();
+		async move {
+			let remote = loop {
+				match viewer.consume().request("bulk", None).await {
+					Ok(remote) => break remote,
+					// Not announced through the relay yet.
+					Err(_) => kio::clock::sleep(Duration::from_millis(50)).await,
+				}
+			};
+			let consumer = remote
+				.track(&name)
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(600))),
+				)
+				.await
+				.unwrap();
+			let mut ordered = consumer.ordered();
+			let mut group = ordered.next_group().await.unwrap().expect("a group");
+			for index in 0..read / chunk {
+				let frame = group
+					.read_frame()
+					.await
+					.unwrap_or_else(|err| panic!("{name} frame {index}: {err}"))
+					.unwrap_or_else(|| panic!("{name} ended at frame {index}"));
+				assert_eq!(frame.payload.len(), chunk, "{name} frame {index} is cut short");
+				assert!(
+					frame.payload.iter().all(|&byte| byte == index as u8),
+					"{name} frame {index} is corrupted"
+				);
+				// A consumer draining at about 64 MB/s, slower than the writer.
+				kio::clock::sleep(Duration::from_micros(chunk as u64 / 64)).await;
+			}
+			// A group read whole ends cleanly right after, never with more or a failure.
+			if read == BULK {
+				let end = group
+					.read_frame()
+					.await
+					.unwrap_or_else(|err| panic!("{name} end: {err}"));
+				assert!(end.is_none(), "{name} carries more than {BULK} bytes");
+			}
+		}
+	};
+	let writes = futures::future::join_all(sources.into_iter().map(write));
+	let reads = futures::future::join_all((0..tracks).map(|index| read(format!("data{index}"))));
+	kio::clock::timeout(Duration::from_secs(600), async {
+		futures::pin_mut!(writes, reads);
+		futures::future::select(writes, reads).await;
+	})
+	.await
+	.expect("the transfer stalled");
 }

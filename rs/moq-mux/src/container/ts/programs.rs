@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use anyhow::Context;
 use mpeg2ts::ts::Pid;
 
 use super::demux::{Demux, Packet};
+use super::error::{Error, Result, ensure_supported};
 use super::health::{Checks, Health, PmtPacket};
 use super::import::SectionReassembler;
 use super::unclaimed::Unclaimed;
@@ -77,10 +77,12 @@ pub struct Programs {
 	/// Times the programs waiting for their PMT.
 	clock: Clock,
 	/// The [`Clock`] reading past which a waiting program is late or a PMT PID it waits on is
-	/// overdue, while one waits.
+	/// overdue, while one waits. A PMT only moves it later, so one may leave it early: passing
+	/// it then times the waits again and finds nothing due.
 	deadline: Option<u64>,
-	/// Whether a waiting program is not late yet, so a PID no program claims may be its.
-	joining: bool,
+	/// How many waiting programs are not late yet: while one is, a PID no program claims may
+	/// be its. Counted as each one's PMT arrives, so that costs no pass over every program.
+	joining: usize,
 	/// Where the input can next expire a program's health check, so a program that reads no
 	/// packet is advanced without a scan of every program per packet. Kept early when a routed
 	/// packet moves its check later.
@@ -193,8 +195,8 @@ struct Program {
 
 impl Program {
 	/// Announce the broadcast once its catalog has gone out.
-	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
-		super::republish::listed(&mut self.pending, &self.route).with_context(|| format!("program {}", self.number))
+	fn announce_if_listed(&mut self) -> Result<bool> {
+		super::republish::listed(&mut self.pending, &self.route)
 	}
 }
 
@@ -358,21 +360,21 @@ impl Programs {
 			announced: false,
 			clock: Clock::default(),
 			deadline: None,
-			joining: false,
+			joining: 0,
 			due: health::Due::default(),
 			unclaimed: Unclaimed::default(),
 		}
 	}
 
 	/// Demux a chunk of the multiplex. A trailing partial packet is retained for the next call.
-	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
 		self.demux = demux;
 		result
 	}
 
-	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
+	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> Result<()> {
 		demux.push(data);
 		let mut read = None;
 		while let Some(packet) = demux.next() {
@@ -465,13 +467,13 @@ impl Programs {
 	///
 	/// Fails on a PAT naming another transport stream while a program runs, as each program's
 	/// importer would, and when a retired program cannot finish.
-	fn follow(&mut self, pat: &psi::Pat) -> anyhow::Result<()> {
+	fn follow(&mut self, pat: &psi::Pat) -> Result<()> {
 		// The PAT repeats several times a second, mostly unchanged.
 		if self.pat.as_ref() == Some(pat) {
 			return Ok(());
 		}
 		if let Some(running) = self.pat.as_ref().filter(|_| !self.programs.is_empty()) {
-			anyhow::ensure!(
+			ensure_supported!(
 				running.transport_stream_id == pat.transport_stream_id,
 				"the PAT changed transport_stream_id from {} to {} while its programs run, which their carried service information does not describe",
 				running.transport_stream_id,
@@ -543,21 +545,21 @@ impl Programs {
 		Ok(())
 	}
 
-	/// Time the next wait for a PMT to run out, once the programs waiting have changed.
+	/// Time the next wait for a PMT to run out, and count the programs not late yet, once a
+	/// PAT or an expiry changed which programs wait.
 	fn time_waits(&mut self) {
-		self.joining = false;
+		self.joining = 0;
 		self.deadline = None;
 		for (pid, waiting) in &self.waiting {
 			let overdue = self.pmts.get(pid).map(|pmt| pmt.section + PMT_LIMIT);
-			let late = waiting
-				.values()
-				.filter_map(|wait| match wait {
-					Wait::Since(since) => Some(since + PMT_LIMIT),
-					Wait::Late | Wait::Described => None,
-				})
-				.min();
-			self.joining |= late.is_some();
-			self.deadline = self.deadline.into_iter().chain(overdue).chain(late).min();
+			for wait in waiting.values() {
+				if let Wait::Since(since) = wait {
+					self.joining += 1;
+					let late = since + PMT_LIMIT;
+					self.deadline = Some(self.deadline.map_or(late, |deadline| deadline.min(late)));
+				}
+			}
+			self.deadline = self.deadline.into_iter().chain(overdue).min();
 		}
 	}
 
@@ -594,7 +596,7 @@ impl Programs {
 	/// The programs and the PIDs they read are rebuilt once, so a PAT costs what the programs
 	/// claim however many it drops. Fails when a program cannot finish, as an import does at
 	/// the end of its input.
-	fn retire(&mut self, listed: &HashMap<u16, u16>) -> anyhow::Result<()> {
+	fn retire(&mut self, listed: &HashMap<u16, u16>) -> Result<()> {
 		let leaving = |program: &Program| !listed.contains_key(&program.number);
 		if !self.programs.iter().any(leaving) {
 			return Ok(());
@@ -704,7 +706,7 @@ impl Programs {
 			return;
 		}
 		// A program still waiting for its PMT may claim it, until it is late.
-		if self.pat.is_some() && !self.joining {
+		if self.pat.is_some() && self.joining == 0 {
 			self.unclaimed.packet(packet.pid);
 		}
 	}
@@ -715,7 +717,7 @@ impl Programs {
 	/// A started program reads this packet itself, from the reassembler as it stood before it,
 	/// so its own PMT path applies the PMT and starts its clock from the PCR already seen. Of
 	/// several revisions in the packet, the last decides.
-	fn describe(&mut self, packet: &Packet) -> anyhow::Result<()> {
+	fn describe(&mut self, packet: &Packet) -> Result<()> {
 		let Some(pmt) = self.pmts.get_mut(&packet.pid) else {
 			return Ok(());
 		};
@@ -758,44 +760,35 @@ impl Programs {
 		let (Some(waiting), Some(before)) = (waiting.as_mut(), before) else {
 			return Ok(());
 		};
-		let mut described = false;
+		// A program no longer waiting only moves the deadline later, so it stays as it is.
+		let mut joined = 0;
 		for pmt in latest.iter().filter(|pmt| pmt.streams.is_empty()) {
-			described |= matches!(
-				waiting.insert(pmt.program_number, Wait::Described),
-				Some(Wait::Since(_))
-			);
+			let wait = waiting.insert(pmt.program_number, Wait::Described);
+			joined += usize::from(matches!(wait, Some(Wait::Since(_))));
 		}
 		latest.retain(|pmt| !pmt.streams.is_empty());
-		if latest.is_empty() {
-			if described {
-				self.time_waits();
-			}
-			return Ok(());
-		}
 		for pmt in &latest {
-			waiting.remove(&pmt.program_number);
+			let wait = waiting.remove(&pmt.program_number);
+			joined += usize::from(matches!(wait, Some(Wait::Since(_))));
 		}
 		if waiting.is_empty() {
 			self.waiting.remove(&packet.pid);
 		}
+		self.joining -= joined;
 		for pmt in latest {
 			self.start(pmt.program_number, packet.pid, before.clone())?;
 		}
-		self.time_waits();
 		Ok(())
 	}
 
 	/// Create the broadcast of program `number`, its importer seeded with the PAT and carrying
 	/// on the PMT `sections` began on `pmt_pid`.
-	fn start(&mut self, number: u16, pmt_pid: u16, sections: SectionReassembler) -> anyhow::Result<()> {
+	fn start(&mut self, number: u16, pmt_pid: u16, sections: SectionReassembler) -> Result<()> {
 		let pat = self.pat.as_ref().expect("a program waits on its PAT");
 		let name = program_broadcast(self.name.as_str(), number);
 		// Each program is its own publisher instance for this run, minted by its route, so a
 		// restart replaces it rather than resuming into it.
-		let route = self
-			.origin
-			.route(&name, moq_net::origin::RouteOptions::hidden())
-			.with_context(|| format!("failed to create broadcast {name}"))?;
+		let route = self.origin.route(&name, moq_net::origin::RouteOptions::hidden())?;
 		// TS carries undecoded elementary streams verbatim, so each catalog carries the
 		// `mpegts` extension, and owns its broadcast's catalog tracks.
 		let config = self
@@ -946,27 +939,29 @@ impl Programs {
 	/// late subscribers. Fails when the input ended before its PAT listed a program or any program
 	/// declared a track. A finish that fails aborts every program with the cause, so it can't be
 	/// retried.
-	pub fn finish(mut self) -> anyhow::Result<Finished> {
+	pub fn finish(mut self) -> Result<Finished> {
 		if let Err(err) = self.end() {
-			// The copy keeps the whole chain in its message, since only the first report can move the
-			// original.
-			self.fail(crate::Error::from(anyhow::anyhow!("{err:#}")));
+			self.fail(err.clone().into());
 			return Err(err);
 		}
 		Ok(Finished { programs: self })
 	}
 
 	/// Finish every program, stopping at the first failure.
-	fn end(&mut self) -> anyhow::Result<()> {
+	fn end(&mut self) -> Result<()> {
 		self.demux.finish();
-		anyhow::ensure!(self.pat.is_some(), "input ended before its PAT listed a program");
+		if self.pat.is_none() {
+			return Err(Error::Empty("its PAT listed a program"));
+		}
 		let mut announced = self.announced;
 		for program in &mut self.programs {
 			program.import.finish_in_place()?;
 			announced |= program.announce_if_listed()?;
 			program.catalog.finish()?;
 		}
-		anyhow::ensure!(announced, "input ended before any program declared a track");
+		if !announced {
+			return Err(Error::Empty("any program declared a track"));
+		}
 		Ok(())
 	}
 
@@ -1818,7 +1813,10 @@ mod test {
 		steps.step(&mut programs, &[(1, 0x100)]);
 		steps.mux.pat_in(2, &[(2, 0x200)]);
 		let err = programs.decode(&std::mem::take(&mut steps.mux.out)).unwrap_err();
-		assert!(format!("{err:#}").contains("transport_stream_id"), "{err:#}");
+		assert!(
+			matches!(&err, Error::Unsupported(msg) if msg.contains("transport_stream_id")),
+			"{err}"
+		);
 		assert_eq!(programs.programs.len(), 1, "a refused PAT retires nothing");
 	}
 
@@ -1849,7 +1847,10 @@ mod test {
 
 		mux.pat(&[(1, 0x100)]);
 		let err = programs.decode(&std::mem::take(&mut mux.out)).unwrap_err();
-		assert!(format!("{err:#}").contains("without a media timestamp"), "{err:#}");
+		assert!(
+			matches!(&err, Error::Malformed(msg) if msg.contains("without a media timestamp")),
+			"{err}"
+		);
 		programs.abort(moq_net::Error::Transport("decode failed".into()));
 		let err = loop {
 			match catalog.next().await {
@@ -1942,7 +1943,8 @@ mod test {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		assert_eq!(catalog.audio.renditions.len(), 1, "program 50 publishes its stream");
 	}
 
@@ -1982,7 +1984,8 @@ mod test {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		catalog.audio.renditions.len()
 	}
 
@@ -2228,7 +2231,8 @@ mod test {
 		assert_eq!(programs.stats().crc_error, 1);
 
 		// A waiting program's PMT PID that a started program reads only as media: no program
-		// reassembles PMTs there, so the scan counts the corrupt section.
+		// reassembles PMTs there, so the scan counts the corrupt section, before the started
+		// program ends on reading a section as a PES header.
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(
 			origin,
@@ -2238,7 +2242,8 @@ mod test {
 		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0061)]));
 		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
 		data.extend(psi_packets(0x0061, &mut 0, &[], &corrupt(pmt(2))));
-		programs.decode(&data).unwrap();
+		let err = programs.decode(&data).expect_err("a section is no PES");
+		assert!(err.to_string().contains("PES header on PID 97"), "{err}");
 		assert_eq!(programs.programs.len(), 1);
 		assert_eq!(programs.stats().crc_error, 1);
 	}
@@ -2314,7 +2319,7 @@ mod test {
 		null.resize(188, 0xff);
 		programs.decode(&null).unwrap();
 		let Err(err) = programs.finish() else { panic!("no PAT") };
-		assert!(err.to_string().contains("PAT"), "{err:#}");
+		assert!(matches!(err, Error::Empty("its PAT listed a program")), "{err}");
 	}
 
 	/// PAT and PMT metadata can name elementary streams before their codec config is known. EOF
@@ -2334,7 +2339,7 @@ mod test {
 		let Err(err) = programs.end() else {
 			panic!("the PMTs have no configured media")
 		};
-		assert!(err.to_string().contains("declared a track"), "{err:#}");
+		assert!(matches!(err, Error::Empty("any program declared a track")), "{err}");
 		assert!(
 			programs.programs.iter().all(|program| !program.route.is_announced()),
 			"no empty program is announced"
@@ -2445,7 +2450,8 @@ mod test {
 				.next()
 				.await
 				.unwrap()
-				.expect("a catalog");
+				.expect("a catalog")
+				.value;
 			let renditions: Vec<_> = catalog.audio.renditions.iter().collect();
 			assert_eq!(renditions.len(), 1, "{path} carries its own program's one stream");
 			let (name, config) = renditions[0];
@@ -2459,7 +2465,7 @@ mod test {
 			assert!(fills.contains(&frame.payload[4]), "{path} carries only its own program");
 			let skew = Duration::from_secs(2);
 			let wall = catalog
-				.media
+				.sync
 				.clock
 				.expect("the catalog advertises a clock")
 				.wall_clock(frame.timestamp)

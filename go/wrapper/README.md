@@ -56,8 +56,6 @@ for event, err := range announced.All(ctx) {
 		fmt.Println("broadcast online", event.Announce.Prefix)
 	case moq.AnnounceEventAbsent:
 		fmt.Println("broadcast ended", event.Announce.Prefix)
-	case moq.AnnounceEventOffline:
-		fmt.Println("broadcast offline", event.Announce.Prefix)
 	}
 }
 ```
@@ -146,8 +144,7 @@ broadcast := route.Broadcast()
 // Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
 // compress it on the wire.
 scale := uint64(1_000)
-deflate := moq.CompressionDeflate
-track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
+track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: moq.DeflateCompression()})
 status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
 catalog, _ := moqmedia.NewCatalogProducer(broadcast)
 now, _ := catalog.Now()
@@ -166,7 +163,9 @@ re-exported as sentinels (`moq.ErrClosed`, `moq.ErrUnauthorized`, ...) so you ca
 `errors.Is` against them without importing `moq.dev/moq-ffi`. Two helpers cover the
 common cases: `moq.IsShutdown(err)` (a stream ended because it was cancelled or
 the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
-401/403 or an expired token).
+401/403, an expired or malformed token, or a protocol refusal). Both ask moq-ffi,
+so every binding classifies alike; a bare sentinel is not a native error and
+matches neither.
 
 Every call that can block takes a `context.Context` and aborts cleanly when it is
 cancelled, leaving nothing running in the background. A one-shot call (a subscribe,

@@ -149,7 +149,7 @@ pub fn cmaf(data: &[u8]) -> bool {
 }
 
 /// The codecs [`annexb`] splits, selected by the leading byte modulo their count.
-const STREAMS: &[VideoFormat] = &[VideoFormat::Avc3, VideoFormat::Hev1, VideoFormat::Av01];
+const STREAMS: &[VideoFormat] = &[VideoFormat::H264, VideoFormat::H265, VideoFormat::Av01];
 
 /// A raw byte stream of unknown frame boundaries: H.264 or H.265 Annex-B, or AV1 OBUs.
 ///
@@ -206,7 +206,9 @@ pub fn catalog(data: &[u8]) -> bool {
 		Box::new(move || consumer.poll_next(&waiter))
 	};
 
-	let mut group = track.append_group(0).expect("a fresh track takes a group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+		.expect("a fresh track takes a group");
 	let mut accepted = false;
 	for frame in data.split(|&byte| byte == 0) {
 		if group

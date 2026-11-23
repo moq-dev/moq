@@ -1,4 +1,4 @@
-//! Errors for the HLS / LL-HLS gateway.
+//! Errors for the HLS and DASH gateway.
 
 /// Which HLS sequence counter a value belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,13 +163,14 @@ pub enum Error {
 	#[error("playlist already ended (EXT-X-ENDLIST); HLS import follows live playlists only")]
 	PlaylistEnded,
 
-	/// Import refused a rendition whose timestamps went backwards, such as a reset at an
-	/// `EXT-X-DISCONTINUITY` under the same init segment. A restarted source is a new broadcast.
-	#[error("rendition {rendition} rewound its timestamps; HLS import refuses a timestamp reset: {source}")]
-	Rewind {
+	/// Import refused a rendition's media segment, such as one whose timestamps went backwards
+	/// at an `EXT-X-DISCONTINUITY` under the same init segment. No later pass imports it, so the
+	/// import ends; a restarted source is a new broadcast.
+	#[error("rendition {rendition} failed to decode: {source}")]
+	Decode {
 		/// The rendition's label.
 		rendition: String,
-		/// The rewind the importer refused.
+		/// The failure the importer reported.
 		source: moq_mux::Error,
 	},
 	/// A recording source closed without confirming its complete end.

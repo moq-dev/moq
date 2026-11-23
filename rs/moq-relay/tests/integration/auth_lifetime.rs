@@ -21,7 +21,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_net::stats;
 use moq_relay::web;
 use moq_relay::{Config, Connection, Relay, auth, cluster};
@@ -143,6 +143,7 @@ impl Script {
 				}
 				return StatusCode::NO_CONTENT.into_response();
 			}
+			_ => return StatusCode::BAD_REQUEST.into_response(),
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),
@@ -167,8 +168,8 @@ impl Script {
 	}
 }
 
-fn all() -> Patterns {
-	[Pattern::all()].into_iter().collect()
+fn all() -> Prefixes {
+	Prefixes::all()
 }
 
 /// How often [`grant`] asks to be re-checked.
@@ -302,12 +303,12 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let pub_session = kio::clock::timeout(
 		TIMEOUT,
@@ -475,12 +476,36 @@ async fn admits_and_reports_the_session() {
 	let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
 	assert_eq!(connect.node, "test-relay");
 	assert_eq!(connect.transport, moq_auth::Transport::Tcp);
+	assert_eq!(pub_session.transport(), Some(moq_tokio::Transport::Tcp));
 	assert_eq!(connect.path, "/room");
 	assert_eq!(connect.query.as_deref(), Some("jwt=token"));
 	assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
 	assert!(connect.local.is_some_and(|addr| addr.port() == port));
 	assert!(connect.tls.is_none());
 	assert!(connect.token.is_none(), "moq-lite carries no SETUP token");
+
+	drop(pub_session);
+	drop(sub_session);
+	relay.abort();
+}
+
+/// A `tls://` session reaches the auth server as `tls`, and both ends of it report `tls`, so
+/// a policy keyed on `tcp` sees only the plaintext link.
+#[tokio::test]
+async fn reports_a_tls_session_as_tls() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.tls = Some(true);
+	config.tls.generate = vec!["localhost".into()];
+	let cluster = crate::spawn_cluster(cluster::Options::default());
+	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, config).await;
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tls", port)).await;
+
+	let seen = script.seen.lock().unwrap().clone();
+	let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
+	assert_eq!(connect.transport, moq_auth::Transport::Tls);
+	assert_eq!(pub_session.transport(), Some(moq_tokio::Transport::Tls));
+	assert_eq!(sub_session.transport(), Some(moq_tokio::Transport::Tls));
 
 	drop(pub_session);
 	drop(sub_session);
@@ -749,12 +774,14 @@ async fn a_moved_tier_retags_the_live_session() {
 
 	let mut round_trip = async |payload: &'static [u8]| {
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 		let mut group = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 			.await
 			.expect("recv_group timeout")
@@ -893,12 +920,15 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let send = |index: usize, sequence: u64| {
 			let mut group = tracks[index]
 				.1
-				.append_group(tracks[index].1.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(tracks[index].1.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
 				.expect("append group");
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"media".as_ref())
 				.expect("write frame");
-			let group = group.close().expect("finish group");
+			let group = group.finish().expect("finish group");
 			assert_eq!(group.start, sequence);
 		};
 		for (index, sub) in subs.iter_mut().enumerate() {
@@ -912,7 +942,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Deafen alice's audio: everything else stays as admitted.
 		let mut narrow = grant(Duration::from_secs(3600));
-		narrow.subscribe = ["alice/video/**".parse().unwrap()].into_iter().collect();
+		narrow.subscribe.path = ["alice/video".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
 		clock.advance(CADENCE);
 
@@ -1046,7 +1076,7 @@ async fn http_routes_hold_a_lease() {
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
@@ -1346,10 +1376,10 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	assert_refused(&format!("ws://127.0.0.1:{port}/room").parse().unwrap()).await;
 	relay.abort();
 
-	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
+	// A narrow grant: the certificate publishes under `mine` and nothing else.
 	let narrow = serve(policy(moq_auth::Permissions::new(
-		"mine/**".parse::<moq_auth::Pattern>().unwrap(),
-		Patterns::new(),
+		"mine".parse::<moq_auth::Prefix>().unwrap(),
+		Prefixes::new(),
 	)))
 	.await;
 	let cluster = crate::spawn_cluster(cluster::Options::default());
@@ -1391,28 +1421,150 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 #[tokio::test]
 async fn an_mtls_peer_is_a_cluster_peer() {
 	let source = mtls_route_source(true).await;
-	assert!(
-		matches!(source, moq_net::origin::Source::Peer(_)),
-		"an mTLS peer's route counted as {source:?}"
-	);
+	assert!(source.is_some(), "an mTLS peer's route counted as entering here");
 }
 
 /// Without `--mtls-link peer`, a certificate identifies a client ingesting here.
 #[tokio::test]
 async fn an_mtls_client_ingests_here() {
-	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);
+	assert_eq!(mtls_route_source(false).await, None);
 }
 
-/// The source the relay records for a broadcast announced over a certificate
-/// session, admitted by `moq auth serve` with the peer link role when requested.
-async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
+/// `--cluster-listen` admits a certificate peer and refuses a client without one at
+/// the handshake, even where the auth server would admit it. The public listener
+/// asks nobody for a certificate, so the same peer dialing it arrives anonymous.
+#[tokio::test]
+async fn the_cluster_listener_requires_a_certificate() {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (root, client_cert, client_key) = signed_client(dir.path());
+
+	let mut policy = moq_auth::serve::Policy::default();
+	policy.public = moq_auth::Permissions::new(all(), all());
+	policy.mtls = moq_auth::Permissions::new(all(), all());
+	policy.mtls_link = Some(moq_auth::Link::Peer);
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+	let server = moq_auth::serve::Server::new(policy).unwrap();
+	tokio::spawn(async move { server.serve(listener).await });
+
+	// The cluster listener serves its own identity, apart from the public one.
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let served = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params")
+		.self_signed(&key)
+		.expect("self-signed cert");
+	let cert = dir.path().join("cluster.pem");
+	let cert_key = dir.path().join("cluster.key.pem");
+	std::fs::write(&cert, served.pem()).expect("write cert");
+	std::fs::write(
+		&cert_key,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
+
+	let mut config = Config::default();
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.listen.tls.generate = vec!["localhost".into()];
+	config.cluster.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.cluster.listen.cert = vec![cert];
+	config.cluster.listen.key = vec![cert_key];
+	config.cluster.listen.root = vec![root];
+	config.auth.url = Some(auth_url);
+	config.drain_timeout = Some(Duration::ZERO.into());
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let public = relay.quic_addr().expect("public listener");
+	let peers = relay.cluster_addr().expect("cluster listener");
+	assert_ne!(public, peers);
+	let mut announced = relay.cluster().origin.consume().routes();
+	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
+
+	let client = |cert: bool| {
+		let mut config = moq_tokio::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+		if cert {
+			config.tls.cert = Some(client_cert.clone());
+			config.tls.key = Some(client_key.clone());
+		}
+		config
+			.init(Default::default())
+			.expect("client init")
+			.with_reconnect(false)
+	};
+	let url =
+		|addr: std::net::SocketAddr| -> url::Url { format!("moql://127.0.0.1:{}/", addr.port()).parse().unwrap() };
+
+	// No certificate: the cluster listener ends the handshake, so no session exists to refuse.
+	let anonymous = kio::clock::timeout(
+		TIMEOUT,
+		client(false)
+			.with_subscriber(moq_tokio::origin::spawn())
+			.connect(url(peers))
+			.established(),
+	)
+	.await
+	.expect("connect timeout");
+	assert!(
+		anonymous.is_err(),
+		"the cluster listener admitted a client without a certificate"
+	);
+
+	// Each dial publishes one broadcast and reports where the relay saw it enter,
+	// returning what keeps it announced.
+	let mut publish = async |addr: std::net::SocketAddr, name: &str| {
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin
+			.route(name, moq_net::origin::RouteOptions::default())
+			.expect("create");
+		let session = kio::clock::timeout(
+			TIMEOUT,
+			client(true)
+				.with_publisher(origin.consume())
+				.connect(url(addr))
+				.established(),
+		)
+		.await
+		.expect("connect timeout")
+		.expect("a certificate client was refused");
+		let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
+			.await
+			.expect("timed out waiting for the announce")
+			.expect("origin closed");
+		assert_eq!(update.prefix.as_str(), name);
+		(update.route.entered_from(), (session, broadcast))
+	};
+
+	// The public listener never asks for the certificate, so the same client is
+	// admitted there anonymous: ingesting here, not a peer.
+	let (source, _public) = publish(public, "public").await;
+	assert_eq!(source, None, "the public listener read a certificate");
+	// The cluster listener verifies it: a peer, whose announce entered elsewhere.
+	let (source, _peer) = publish(peers, "peer").await;
+	assert!(source.is_some(), "the peer's route counted as entering here");
+
+	trigger.start();
+	running.await.expect("relay task").expect("relay run");
+}
+
+/// The peer the relay records a broadcast announced over a certificate session as
+/// entering from, admitted by `moq auth serve` with the peer link role when requested,
+/// or `None` when it entered here.
+async fn mtls_route_source(mtls_peer: bool) -> Option<u64> {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.mtls = moq_auth::Permissions::new(all(), all());
-	policy.mtls_link = mtls_peer.then_some(moq_auth::serve::Link::Peer);
+	policy.mtls_link = mtls_peer.then_some(moq_auth::Link::Peer);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
@@ -1452,7 +1604,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "forwarded");
 	relay.abort();
-	update.route.source()
+	update.route.entered_from()
 }
 
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
@@ -1887,7 +2039,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 #[tokio::test]
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
-		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
+		let mut initial = Grant::new(all(), "a".parse::<moq_auth::Prefix>().unwrap());
 		initial.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
@@ -1937,11 +2089,29 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap()
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
+		let mut replacement = Grant::new(all(), "b".parse::<moq_auth::Prefix>().unwrap());
 		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = subscriber.auth().add("replacement").unwrap();
 		kio::clock::timeout(TIMEOUT, token.answered()).await.unwrap().unwrap();
+		// The credential rides `token`; the query is exactly what the client dialed.
+		let attach = script
+			.seen
+			.lock()
+			.unwrap()
+			.iter()
+			.find(|request| request.event == Event::Attach)
+			.cloned()
+			.expect("the token was never attached");
+		assert_eq!(attach.query.as_deref(), Some("jwt=token"), "{scheme}");
+		assert_eq!(
+			attach.token,
+			Some(moq_auth::Token {
+				kind: moq_auth::Token::OUT_OF_BAND,
+				value: b"replacement".to_vec(),
+			}),
+			"{scheme}"
+		);
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
@@ -1949,7 +2119,9 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap();
 		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = b_track
-			.append_group(b_track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(b_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(
@@ -1957,7 +2129,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 				b"new prefix".as_ref(),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(
 			kio::clock::timeout(TIMEOUT, b_sub.recv_group())
 				.await
@@ -1978,7 +2150,9 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			ended.as_ref().err()
 		);
 		let mut group = a_track
-			.append_group(a_track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(a_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(
@@ -1986,7 +2160,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 				b"original prefix".as_ref(),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(
 			kio::clock::timeout(TIMEOUT, a_sub.recv_group())
 				.await
@@ -2006,12 +2180,12 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 	let script = Script::new(Grant::new(all(), all()));
 	let mut server = moq_tokio::listen::Config::default();
-	server.extensions.solicit = false;
+	server.decline_solicit = true;
 	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
 	let mut config = moq_tokio::connect::Config::default();
 	config.version = vec!["moq-transport-22".parse().unwrap()];
-	config.extensions.solicit = false;
+	config.decline_solicit = true;
 	let client = config.init(Default::default()).unwrap().with_reconnect(false);
 	let origin = moq_tokio::origin::spawn();
 	let publisher = client
@@ -2102,7 +2276,7 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 	for scheme in ["tcp", "ws"] {
 		for peer in [false, true] {
 			let mut grant = Grant::new(all(), all());
-			grant.peer = peer;
+			grant.link = peer.then_some(moq_auth::Link::Peer);
 			let script = Script::new(grant);
 			let auth = build_auth(script.spawn().await);
 			let mut options = cluster::Options::default();
@@ -2198,7 +2372,7 @@ async fn websocket_refusal_is_in_band() {
 /// The role seen at SETUP reaches the shared admission gate on the WebSocket path.
 #[tokio::test]
 async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
-	let script = Script::new(Grant::new(Patterns::new(), all()));
+	let script = Script::new(Grant::new(Prefixes::new(), all()));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let url = room_url("ws", port);
 	let origin = moq_tokio::origin::spawn();
@@ -2230,22 +2404,25 @@ async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
 	relay.abort();
 }
 
-/// Once a session went live, the native reconnect loop redials an in-band unauthorized
-/// refusal like any other close, rather than judging its kind.
+/// An in-band unauthorized refusal of the first session ends the native reconnect loop,
+/// as a refused dial does: it never went live, so a redial would present the same credential.
 #[tokio::test]
-async fn websocket_unauthorized_keeps_native_reconnect_going() {
+async fn websocket_unauthorized_ends_a_first_session() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	script.on_connect(Answer::Status(401));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let connection = client().with_reconnect(true).connect(room_url("ws", port));
-	script
-		.until("a second dial", |seen| {
-			seen.iter().filter(|request| request.event == Event::Connect).count() >= 2
-		})
-		.await;
-	assert!(
-		connection.poll_closed(&kio::Waiter::noop()).is_pending(),
-		"the refusal ended the loop"
-	);
+	kio::clock::timeout(TIMEOUT, connection.closed())
+		.await
+		.expect("the refusal kept the loop redialing")
+		.expect_err("the refusal ended the loop cleanly");
+	let connects = script
+		.seen
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|request| request.event == Event::Connect)
+		.count();
+	assert_eq!(connects, 1, "redialed after the refusal");
 	relay.abort();
 }

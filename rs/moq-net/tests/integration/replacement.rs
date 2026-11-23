@@ -27,9 +27,11 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes, over a new session.
@@ -52,7 +54,7 @@ async fn next_event(announced: &mut origin::Routes) -> origin::RouteEvent {
 fn write(track: &track::Producer, tag: &str) {
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), tag.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The next frame a subscription delivers, as text.

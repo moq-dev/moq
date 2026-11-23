@@ -146,6 +146,7 @@ void timestamp_roundtrip()
 {
 	auto broadcast = ok(moq::BroadcastProducer::init(), "timestamp broadcast");
 	moq::TrackInfo timed;
+	timed.max_age = std::chrono::nanoseconds::zero();
 	timed.timescale = 90000;
 	auto track = ok(broadcast->publish_track("timed", timed), "publish timed track");
 	auto consumer = ok(track->consume(std::nullopt), "consume timed track");
@@ -172,11 +173,32 @@ void timestamp_roundtrip()
 	ok(broadcast->close(), "close timestamp broadcast");
 }
 
-// Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset.
+// A refresh reads back as published, and the first subscriber of a track with no group asks
+// for one.
+void track_refresh()
+{
+	auto broadcast = ok(moq::BroadcastProducer::init(), "refresh broadcast");
+	moq::TrackInfo info;
+	info.max_age = std::chrono::nanoseconds::zero();
+	info.refresh.ratio = 0;
+	info.refresh.interval = std::chrono::milliseconds(500);
+	auto track = ok(broadcast->publish_track("refresh", info), "publish refreshed track");
+	auto demand = ok(track->demand(), "refresh demand");
+	auto consumer = ok(track->consume(std::nullopt), "consume refreshed track");
+	auto got = consumer->info();
+	CHECK(got.refresh.ratio == uint32_t(0));
+	CHECK(got.refresh.interval == std::chrono::nanoseconds(std::chrono::milliseconds(500)));
+	ok(demand->refresh().get(), "refresh");
+	// A track with no group has nothing more to send: its first is already asked for.
+	ok(consumer->refresh().get(), "subscriber refresh");
+	ok(broadcast->close(), "close refresh broadcast");
+}
+
+// Only the defaults carry moq-net's zero max delay, with no min; a bare record leaves both unset.
 void subscription_defaults()
 {
 	auto defaults = moq::subscription_defaults();
-	CHECK(defaults.delay.min == std::chrono::nanoseconds::zero());
+	CHECK(!defaults.delay.min.has_value());
 	CHECK(defaults.delay.max == std::chrono::nanoseconds::zero());
 	CHECK(!moq::Subscription{}.delay.max.has_value());
 }
@@ -186,7 +208,7 @@ void audio_roundtrip()
 {
 	auto broadcast = ok(moq::BroadcastProducer::init(), "audio broadcast");
 	auto receiver = ok(broadcast->consume(), "audio receiver");
-	auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(receiver).get(), "audio catalog consumer");
+	auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(receiver, {}).get(), "audio catalog consumer");
 	auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "audio catalog producer");
 	moq::AudioEncoderInput input{moq::AudioSampleFormat::kF32, 48000, 2};
 	moq::AudioEncoderOutput output{};
@@ -325,6 +347,7 @@ void minted_instance()
 int main()
 {
 	timestamp_roundtrip();
+	track_refresh();
 	datagram_tracks();
 	subscription_defaults();
 	audio_roundtrip();
@@ -332,7 +355,7 @@ int main()
 	auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
 	auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
 	auto timebase = ok(moq::MediaTimebase::init(timebase_owner), "timebase");
-	auto foreign = moq::MediaContainerProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, {}, timebase});
+	auto foreign = moq::MediaContainerProducer::init(timebase_other, {moq::ContainerFormat::fmp4(), {}, timebase});
 	CHECK(!foreign);
 	CHECK(std::holds_alternative<moq::Error::kCodec>(foreign.error().get_variant()));
 	ok(timebase_owner->close(), "close timebase owner");
@@ -367,6 +390,7 @@ int main()
 	CHECK(route->instance_id() && !route->instance_id()->is_minted());
 	auto broadcast = route->broadcast();
 	moq::TrackInfo info;
+	info.max_age = std::chrono::nanoseconds::zero();
 	info.timescale = 1000000;
 	auto track = ok(broadcast->publish_track("data", info), "publish_track");
 	ok(route->announce(), "announce");

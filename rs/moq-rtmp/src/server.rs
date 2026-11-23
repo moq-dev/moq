@@ -7,10 +7,11 @@
 //! `play` command. The caller inspects the app and stream key, makes an
 //! authorization decision, and either:
 //!
-//! - **[`Request::Publish`]**: [`Publish::accept`] (ingest into an origin at a
-//!   path) or [`Publish::reject`]. This is the contribution path (OBS, ffmpeg).
-//! - **[`Request::Play`]**: [`Play::accept`] (serve a broadcast from an origin
-//!   down to the player) or [`Play::reject`]. This is the egress path: a player
+//! - **[`Request::Publish`]**: [`Publish::accept`] with an [`Import`] (ingest into
+//!   an origin at a path) or [`Publish::reject`]. This is the contribution path
+//!   (OBS, ffmpeg).
+//! - **[`Request::Play`]**: [`Play::accept`] with an [`Export`] (serve a broadcast
+//!   from an origin down to the player) or [`Play::reject`]. This is the egress path: a player
 //!   (VLC, ffplay, mpv) pulls `rtmp://host/<app>/<key>` and we stream it back.
 //!
 //! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
@@ -76,7 +77,7 @@ pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// A listener's play session has no equivalent,
 /// which is why [`configure_socket`]'s keepalive is not optional.
-pub const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a play request may wait for its broadcast and initial FLV header
 /// before the server rejects it.
@@ -450,7 +451,7 @@ async fn sleep_until(at: Option<kio::clock::Instant>) {
 /// [`Server`] applies this to every socket it accepts. Call it yourself when you own
 /// the listener and hand the stream to [`accept_stream`]: the keepalive is the ONLY
 /// thing bounding a play session whose viewer vanished without a FIN while its
-/// broadcast was quiet. [`PUBLISH_IDLE_TIMEOUT`] covers the publish direction, but
+/// broadcast was quiet. A media timeout covers the publish direction, but
 /// nothing reads or writes on a silent play socket, so it would otherwise live until
 /// the process restarted, holding its origin consumer open.
 ///
@@ -586,10 +587,10 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
-	/// RTMP media into it, published as `ingest` says, until the client disconnects.
+	/// Accept the publish: announce the [`Import`]'s broadcast in its publisher and pump the
+	/// RTMP media into it, published as its ingest says, until the client disconnects.
 	///
-	/// `origin` is whatever the caller wants the media published into (e.g. a
+	/// The publisher is whatever the caller wants the media published into (e.g. a
 	/// relay's shared origin, optionally re-rooted/scoped per the authenticated
 	/// token). This future resolves when the connection ends, so callers usually
 	/// run it on its own task.
@@ -598,13 +599,12 @@ impl<S: Stream> Publish<S> {
 	/// stays up for the ingest's [linger](moq_mux::Ingest::linger), and the future resolves
 	/// after that. Dropping the future ends the linger early. A connection that drops without
 	/// unpublishing closes the broadcast at once.
-	pub async fn accept(
-		mut self,
-		origin: &origin::Producer,
-		path: impl Into<moq_net::Path>,
-		ingest: &moq_mux::Ingest,
-	) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn accept(mut self, import: Import<'_>) -> Result<()> {
+		let Import {
+			publisher: origin,
+			broadcast: path,
+			ingest,
+		} = import;
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
@@ -713,9 +713,6 @@ pub struct Play<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one; see [`with_delay`](Self::with_delay).
-	delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -745,22 +742,19 @@ impl<S: Stream> Play<S> {
 		self.peer
 	}
 
-	/// Set the FLV release delay and stalled-group budget.
-	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
-	pub fn with_delay(mut self, delay: Duration) -> Self {
-		self.delay = delay;
-		self
-	}
-
-	/// Accept the play: subscribe to the broadcast at `path` in `origin`, mux it
+	/// Accept the play: subscribe to the [`Export`]'s broadcast in its subscriber, mux it
 	/// to FLV, and stream the tags down to the player until either side ends.
 	///
 	/// Waits for the broadcast to be announced (so a player can connect slightly
 	/// before the publisher), cancelling cleanly if the viewer disconnects first.
 	/// This future resolves when playback ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(mut self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn accept(mut self, export: Export<'_>) -> Result<()> {
+		let Export {
+			subscriber: origin,
+			broadcast: path,
+			delay,
+		} = export;
 		let Ok(mut following) = origin.follow(&path, None) else {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
@@ -837,11 +831,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(
-				moq_net::track::Delay::default()
-					.with_min(self.delay)
-					.with_max(self.delay),
-			)
+			.with_delay(moq_mux::container::Delay::default().with_min(delay).with_max(delay))
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -923,6 +913,51 @@ impl<S: Stream> Play<S> {
 	}
 }
 
+/// Where and how [`Publish::accept`] publishes an RTMP publish's media.
+#[non_exhaustive]
+pub struct Import<'a> {
+	/// The producer the media is published into.
+	pub publisher: &'a origin::Producer,
+	/// The broadcast to publish, relative to the producer's root.
+	pub broadcast: moq_net::Path,
+	/// How the ingested broadcast is published.
+	pub ingest: moq_mux::Ingest,
+}
+
+impl<'a> Import<'a> {
+	/// Publish into `publisher` under `broadcast` with the default [`Ingest`](moq_mux::Ingest).
+	pub fn new(publisher: &'a origin::Producer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			publisher,
+			broadcast: broadcast.into(),
+			ingest: moq_mux::Ingest::default(),
+		}
+	}
+}
+
+/// Where and how [`Play::accept`] reads the broadcast it serves to an RTMP player.
+#[non_exhaustive]
+pub struct Export<'a> {
+	/// The consumer the broadcast is read from.
+	pub subscriber: &'a origin::Consumer,
+	/// The broadcast to serve, relative to the consumer's root.
+	pub broadcast: moq_net::Path,
+	/// The FLV release delay and stalled-group budget. Defaults to 500 ms; zero releases
+	/// available frames immediately without deadline drops.
+	pub delay: Duration,
+}
+
+impl<'a> Export<'a> {
+	/// Serve `broadcast` from `subscriber` with the default delay.
+	pub fn new(subscriber: &'a origin::Consumer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			subscriber,
+			broadcast: broadcast.into(),
+			delay: crate::DEFAULT_DELAY,
+		}
+	}
+}
+
 /// Narrow a play to what the client can decode, or refuse it.
 ///
 /// A multitrack client receives every enabled rendition, so it must play them all. A
@@ -938,10 +973,10 @@ fn play_selection(
 			.enabled()
 			.map(|(_, config)| config)
 			.find(|config| !video_playable(config))
-	} else if catalog.video.renditions.values().any(video_playable) {
+	} else if catalog.video.enabled().any(|(_, config)| video_playable(config)) {
 		None
 	} else {
-		catalog.video.ranked().next().map(|(_, config)| config)
+		catalog.video.enabled().next().map(|(_, config)| config)
 	};
 	if let Some(config) = video_refused {
 		return Err(match video_fourcc(config.codec.kind(), capabilities.multitrack) {
@@ -960,10 +995,10 @@ fn play_selection(
 			.enabled()
 			.map(|(_, config)| config)
 			.find(|config| !audio_playable(config))
-	} else if catalog.audio.renditions.values().any(audio_playable) {
+	} else if catalog.audio.enabled().any(|(_, config)| audio_playable(config)) {
 		None
 	} else {
-		catalog.audio.ranked().next().map(|(_, config)| config)
+		catalog.audio.enabled().next().map(|(_, config)| config)
 	};
 	if let Some(config) = audio_refused {
 		return Err(match audio_fourcc(&config.codec, capabilities.multitrack) {
@@ -1170,7 +1205,6 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							delay: crate::DEFAULT_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1383,11 +1417,15 @@ async fn flush_outbound<S: Stream>(stream: &mut S, work: &mut VecDeque<ServerSes
 /// `play` teardown, so the caller can abandon the play. Crucially it does *not*
 /// discard the bytes: RTMP is a single continuous chunk stream, so skipping any
 /// bytes would desynchronize the session's deserializer for everything
-/// [`play_pump`] parses afterwards. Pre-playback the client's control messages
-/// (window ack, set buffer length) need no reply, so any responses are left
-/// queued in `work` for `play_pump` to flush rather than written here. The only
-/// await is the read, so dropping this future when the broadcast arrives is
-/// cancellation-safe (no half-consumed read).
+/// [`play_pump`] parses afterwards.
+///
+/// It writes the responses the session owes before reading more, so `work` never
+/// holds more than one read's results, and a viewer flooding commands without
+/// reading the answers stalls on its own TCP window. A stop ends the wait at once,
+/// even queued behind replies; other events are dropped, since nothing before
+/// playback acts on them. Each await is a single read or
+/// write, which moves bytes only when it completes, so dropping this future when
+/// the broadcast arrives loses nothing.
 async fn feed_input<S: Stream>(
 	stream: &mut S,
 	session: &mut ServerSession,
@@ -1395,6 +1433,31 @@ async fn feed_input<S: Stream>(
 ) -> anyhow::Result<()> {
 	let mut buffer = [0u8; READ_BUFFER];
 	loop {
+		// The viewer tore down the play before media started: stop waiting, even behind a reply
+		// it will never read.
+		if work.iter().any(|result| {
+			matches!(
+				result,
+				ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. })
+			)
+		}) {
+			return Ok(());
+		}
+		match work.front_mut() {
+			Some(ServerSessionResult::OutboundResponse(packet)) if !packet.bytes.is_empty() => {
+				let n = stream.write(&packet.bytes).await?;
+				if n == 0 {
+					return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+				}
+				packet.bytes.drain(..n);
+				continue;
+			}
+			Some(_) => {
+				work.pop_front();
+				continue;
+			}
+			None => {}
+		}
 		let n = stream.read(&mut buffer).await?;
 		if n == 0 {
 			return Ok(());
@@ -1402,17 +1465,7 @@ async fn feed_input<S: Stream>(
 		let results = session
 			.handle_input(&buffer[..n])
 			.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
-		// The viewer tore down the play before media started: stop waiting.
-		let stopped = results.iter().any(|r| {
-			matches!(
-				r,
-				ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. })
-			)
-		});
 		work.extend(results);
-		if stopped {
-			return Ok(());
-		}
 	}
 }
 
@@ -1565,6 +1618,64 @@ mod tests {
 		);
 		assert_eq!(start.elapsed(), PUBLISH_IDLE_TIMEOUT);
 		publisher.abort(moq_net::Error::Cancel);
+	}
+
+	/// A viewer waiting for its broadcast that floods input owing replies, without reading
+	/// them, stalls on its own TCP window instead of growing the queue of owed replies.
+	#[tokio::test(start_paused = true)]
+	async fn a_flooding_viewer_cannot_grow_the_pre_play_queue() {
+		use crate::rml::chunk_io::ChunkSerializer;
+		use crate::rml::messages::RtmpMessage;
+
+		let (mut stream, mut viewer) = tokio::io::duplex(1024);
+		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+		// A one-byte window makes every read owe an Acknowledgement, so megabytes of input
+		// owe more replies than the 1 KiB the viewer leaves unread holds.
+		let mut serializer = ChunkSerializer::new();
+		let mut window = || {
+			let payload = RtmpMessage::WindowAcknowledgement { size: 1 }
+				.into_message_payload(RtmpTimestamp::new(0), 0)
+				.unwrap();
+			serializer.serialize(&payload, false, false).unwrap().bytes
+		};
+		let flood: Vec<u8> = (0..1_000_000).flat_map(|_| window()).collect();
+		let flooder = tokio::spawn(async move {
+			viewer.write_all(&flood).await.unwrap();
+			viewer
+		});
+
+		let mut work = VecDeque::new();
+		let fed = kio::clock::timeout(
+			Duration::from_secs(60),
+			feed_input(&mut stream, &mut session, &mut work),
+		)
+		.await;
+		assert!(fed.is_err(), "the feed ended: {fed:?}");
+		assert!(work.len() <= 1, "{} replies queued", work.len());
+		assert!(!flooder.is_finished(), "the viewer wrote its whole flood unread");
+		flooder.abort();
+	}
+
+	/// A viewer that stops before playback ends the wait even behind a reply it never reads.
+	#[tokio::test(start_paused = true)]
+	async fn a_stop_behind_an_unread_reply_ends_the_wait() {
+		let (mut stream, _viewer) = tokio::io::duplex(1);
+		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+		let (packet, _) = session.send_ping_request().unwrap();
+		let mut work = VecDeque::from([
+			ServerSessionResult::OutboundResponse(packet),
+			ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished {
+				app_name: "live".into(),
+				stream_key: "cam".into(),
+			}),
+		]);
+		kio::clock::timeout(
+			Duration::from_secs(60),
+			feed_input(&mut stream, &mut session, &mut work),
+		)
+		.await
+		.expect("the stop waited on the reply")
+		.unwrap();
 	}
 
 	#[tokio::test]
@@ -1814,7 +1925,11 @@ mod tests {
 		let mut ingest = moq_mux::Ingest::default();
 		ingest.linger = linger;
 		publish
-			.accept(&origin, moq_net::Path::from_static("live/cam0"), &ingest)
+			.accept(Import {
+				publisher: &origin,
+				broadcast: moq_net::Path::from_static("live/cam0"),
+				ingest,
+			})
 			.await
 			.unwrap();
 	}
@@ -2170,6 +2285,11 @@ mod tests {
 		)
 		.unwrap();
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
+		// The track is minted at the first keyframe, which says where the parameter sets live.
+		let keyframe = [
+			0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x65, 0x88, 0x84, 0x21, 0x00,
+		];
+		publisher.push(flv::TAG_VIDEO, 0, &keyframe).unwrap();
 
 		let consumer = origin.consume();
 		let broadcast = consumer
@@ -2227,7 +2347,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2300,7 +2420,8 @@ mod tests {
 			let Some(Request::Play(play)) = server.accept().await else {
 				panic!("expected a play request");
 			};
-			play.accept(&play_origin, moq_net::Path::from_static("live/cam0")).await
+			play.accept(Export::new(&play_origin, moq_net::Path::from_static("live/cam0")))
+				.await
 		});
 		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
 		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
@@ -2371,7 +2492,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2462,6 +2583,16 @@ mod tests {
 		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
 		assert!(play_selection(&catalog, &h264_only).is_ok());
 		assert_eq!(best(&catalog, &h264_only).as_deref(), Some("a"));
+
+		// A single-track client that decodes only a disabled rendition is refused, not
+		// accepted with no video: the selection never takes the disabled one.
+		catalog.video.renditions.get_mut("b").unwrap().enabled = true;
+		catalog.video.renditions.get_mut("a").unwrap().enabled = false;
+		let err = play_selection(&catalog, &legacy).expect_err("only disabled renditions are H.264");
+		assert!(err.contains("hvc1"), "{err}");
+		// With no enabled video at all, there is nothing to refuse.
+		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
+		assert!(play_selection(&catalog, &legacy).is_ok());
 	}
 
 	/// A single-track client gets the best audio rendition it can play, not the first by name.
@@ -2506,6 +2637,12 @@ mod tests {
 			.insert("b".to_string(), audio(AudioCodec::Ac3, 128_000));
 		let err = play_selection(&unsupported, &legacy).expect_err("no playable audio");
 		assert!(err.contains("ac-3"), "{err}");
+
+		// A disabled AAC rendition does not make the play acceptable.
+		let mut disabled = catalog.clone();
+		disabled.audio.renditions.get_mut("b").unwrap().enabled = false;
+		let err = play_selection(&disabled, &legacy).expect_err("the only AAC is disabled");
+		assert!(err.contains("Opus"), "{err}");
 
 		// An advertised enhanced codec is kept, but not a sibling codec the client never
 		// advertised, even at a higher bitrate: an AC-3 decoder can't play E-AC-3.
@@ -2649,7 +2786,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2707,7 +2844,7 @@ mod tests {
 
 		tokio::time::pause();
 		let server_task = tokio::spawn(async move {
-			play.accept(&consumer, moq_net::Path::from_static("live/missing"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/missing")))
 				.await
 				.unwrap();
 		});
@@ -2774,7 +2911,7 @@ mod tests {
 				let origin = origin.clone();
 				tokio::spawn(async move {
 					publish
-						.accept(&origin, moq_net::Path::from_static("live/cam0"), &Default::default())
+						.accept(Import::new(&origin, moq_net::Path::from_static("live/cam0")))
 						.await
 				});
 			}

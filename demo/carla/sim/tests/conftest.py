@@ -10,6 +10,21 @@ class MoqError(Exception):
     pass
 
 
+class AnnounceEvent:
+    """One announcement event; the subclass names which kind, as in moq's."""
+
+    def __init__(self, announce: SimpleNamespace) -> None:
+        self.announce = announce
+
+
+class AnnounceEventPresent(AnnounceEvent):
+    pass
+
+
+class AnnounceEventAbsent(AnnounceEvent):
+    pass
+
+
 class SnapshotProducer:
     """Records every published value; demand comes from the wrapped track."""
 
@@ -29,11 +44,12 @@ moq.Error = MoqError
 moq.Subscription = lambda **kwargs: SimpleNamespace(**kwargs)
 moq.Delay = lambda **kwargs: SimpleNamespace(**kwargs)
 moq.Order = SimpleNamespace(ASCENDING="ascending")
-moq.Compression = SimpleNamespace(DEFLATE="deflate")
-# Tests that run a truck's endpoint script it in place of this.
-moq.socket = ModuleType("moq.socket")
+moq.Compression = SimpleNamespace(deflate=lambda: "deflate")
+# The stub has no shutdown errors: every `MoqError` it raises is a failure.
+moq.is_shutdown = lambda err: False
+moq.AnnounceEventPresent = AnnounceEventPresent
+moq.AnnounceEventAbsent = AnnounceEventAbsent
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
-moq.Timestamp.unscaled = lambda key: SimpleNamespace(value=key, scale=None)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
 moq_json = ModuleType("moq.json")
@@ -54,7 +70,7 @@ class CatalogProducer:
 
 
 moq_media.CatalogProducer = CatalogProducer
-moq_media.VideoFormat = SimpleNamespace(AVC3="avc3")
+moq_media.VideoFormat = SimpleNamespace(h264=lambda: "h264")
 moq_media.VideoInit = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.VideoHint = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.Dimensions = lambda **kwargs: SimpleNamespace(**kwargs)

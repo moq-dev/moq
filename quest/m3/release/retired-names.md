@@ -20,9 +20,8 @@ doing nothing).
     [its finished format](/quest/m3/e2ee-format.md) publishes it, so it gets
     no pointer. crates.io keeps the full 0.0.25 (2026-11-11) as its newest
     until then; don't publish a stub over it.
-  - `libmoq` is the name the hand-written C API ships under at 0.22
-    ([the C crate's name](/quest/m2/libmoq-name.md)), so it gets no pointer
-    at this cut. Its pointer at `moq-c` comes when the generated package
+  - `libmoq` is the name the hand-written C API ships under at 0.22, so it
+    gets no pointer at this cut. Its pointer at `moq-c` comes when the generated package
     publishes ([c-retire](/quest/m3/release/c-retire.md)).
 - Deprecate with a message: `moq-room` and `moq-native`
   ([moq-dev/moq#8450](https://github.com/moq-dev/moq/pull/8450)),

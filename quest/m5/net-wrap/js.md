@@ -4,7 +4,7 @@
 
 `@moq/net` exports interfaces with the Rust traits' names and methods, and
 `@moq/hang`, `@moq/publish`, and `@moq/watch` accept them where they take a
-concrete broadcast, track, or group today. `@moq/crypto`'s wrappers implement
+concrete broadcast, track, or group today. `@moq/e2ee`'s wrappers implement
 them, so a browser publisher or player handles an encrypted broadcast without
 its own decryption path.
 
@@ -16,7 +16,7 @@ its own decryption path.
 - Take the interfaces only where a wrapper must pass through, as needed:
   `@moq/hang`'s catalog and container code, `@moq/publish`'s broadcast,
   and `@moq/watch`'s subscriptions.
-- `@moq/crypto`'s broadcast, track, and group wrappers adapt to `@moq/net`'s
+- `@moq/e2ee`'s broadcast, track, and group wrappers adapt to `@moq/net`'s
   method shapes, as moq-e2ee does in Rust, with its errors mapped to
   `@moq/net`'s. Like moq-e2ee, it does not compress (decided 2026-11-16,
   maintainer: the profile carries no compression): it publishes the
@@ -26,9 +26,9 @@ its own decryption path.
 - Demand and preference cross the wrapper: a publisher with no viewer
   through an encrypted track stays idle.
 - Test publish and watch round trips through a pass-through wrapper and
-  through `@moq/crypto`.
+  through `@moq/e2ee`.
 
-Public API: new `@moq/net` interfaces; `@moq/crypto` wrapper signatures change.
+Public API: new `@moq/net` interfaces; `@moq/e2ee` wrapper signatures change.
 Wire: none.
 
 ## Required

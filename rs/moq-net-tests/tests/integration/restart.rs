@@ -25,9 +25,11 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -101,7 +103,7 @@ fn write(track: &track::Producer, tag: &str) {
 	let mut group = track.append_next().unwrap();
 	let start = Timestamp::from_millis(group.start).unwrap();
 	group.write_frame(start, tag.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The next frame a subscription delivers, as text.
@@ -902,4 +904,41 @@ priority_update_tests! {
 	priority_update_lite07: "moq-lite-07-wip",
 	priority_update_ietf18: "moq-transport-18",
 	priority_update_ietf22: "moq-transport-22",
+}
+
+/// An endpoint replacing its own broadcast ends the old instance for its reader: the
+/// broadcast handed out first has closed by the time its replacement is handed out, as
+/// one a publisher ended, not one held in case its route returns.
+#[kio::test]
+async fn an_endpoint_replacing_its_broadcast_ends_the_old_one() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let endpoint = || {
+		let (producer, driver) = origin::Producer::new(origin::Config::default());
+		support::harness::spawn(driver);
+		producer
+	};
+	let publisher = endpoint();
+	let viewer = endpoint();
+	let _session = link(version, &publisher, &viewer).await;
+	let old = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let old_track = old.broadcast().create_track("video", timed()).unwrap();
+	let mut following = viewer.consume().follow("live", None).unwrap();
+	let held = following.available().await.unwrap().expect("the first instance");
+	let mut subscription = held.track("video").unwrap().subscribe(None).await.unwrap();
+	write(&old_track, "old:0");
+	assert_eq!(read(&mut subscription).await, "old:0");
+	settle().await;
+
+	let _replacement = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let next = kio::clock::timeout(Duration::from_secs(10), following.available())
+		.await
+		.expect("the takeover hung")
+		.unwrap()
+		.expect("the replacement");
+	assert!(!next.is_clone(&held));
+	assert!(held.is_closed(), "the replaced broadcast is still open");
+
+	// The subscription already on it stays.
+	write(&old_track, "old:1");
+	assert_eq!(read(&mut subscription).await, "old:1");
 }

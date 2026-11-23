@@ -35,10 +35,11 @@ const SUBSCRIBE_TRACKS: &[u8] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A client publishing one track to a server subscribed to it, plus the payloads the
@@ -97,7 +98,7 @@ async fn setup(version: Version) -> Setup {
 async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
 	let mut group = setup.track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let got = kio::clock::timeout(TIMEOUT, setup.frames.next())
 		.await
 		.expect("frame timed out")

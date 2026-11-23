@@ -31,9 +31,11 @@ const SETTLE: Duration = Duration::from_secs(1);
 const PATH: &str = "bcast";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Where the observing consumer sits relative to the publisher.
@@ -116,7 +118,7 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<String>) -> String {
 fn write_group(track: &moq_net::track::Producer, payload: &'static str) {
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload.as_bytes()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// Walk one broadcast through its whole announce lifecycle and record what the

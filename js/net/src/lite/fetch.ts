@@ -21,10 +21,6 @@ export class Fetch {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. Lite-07+. */
 	instance?: Instance.Valid;
-	/** The publisher node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
-	node: bigint;
-	/** How many leading segments of `broadcast` make up the prefix of the route it follows. Lite-07+. */
-	depth: number;
 	track: string;
 	priority: number;
 	/** Reader freshness budget in whole milliseconds. Lite-07+ only; omission leaves the publisher's max age as the only bound. */
@@ -43,8 +39,6 @@ export class Fetch {
 	constructor({
 		broadcast,
 		instance,
-		node = 0n,
-		depth = 0,
 		track,
 		priority,
 		maxDelay,
@@ -54,8 +48,6 @@ export class Fetch {
 	}: {
 		broadcast: Path.Valid;
 		instance?: Instance.Valid;
-		node?: bigint;
-		depth?: number;
 		track: string;
 		priority: number;
 		maxDelay?: number;
@@ -65,8 +57,6 @@ export class Fetch {
 	}) {
 		this.broadcast = broadcast;
 		this.instance = instance;
-		this.node = node;
-		this.depth = depth;
 		this.track = track;
 		this.priority = priority;
 		this.maxDelay = maxDelay;
@@ -78,7 +68,7 @@ export class Fetch {
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.broadcast));
 		await encodePin(w, version, this.instance);
-		await encodeNode(w, version, this.node, this.depth);
+		await encodeNode(w, version);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
 		if (hasFetchMaxDelay(version)) await Duration.encodeOptional(w, this.maxDelay);
@@ -97,14 +87,14 @@ export class Fetch {
 	static async #decode(r: Reader, version: Version): Promise<Fetch> {
 		const broadcast = Path.decode(await r.string());
 		const instance = await decodePin(r, version);
-		const { node, depth } = await decodeNode(r, version, broadcast);
+		await decodeNode(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
 		const maxDelay = hasFetchMaxDelay(version) ? await Duration.decodeOptional(r) : undefined;
 		const group = await r.u62();
 
 		if (!hasFrameBounds(version)) {
-			return new Fetch({ broadcast, instance, node, depth, track, priority, maxDelay, group });
+			return new Fetch({ broadcast, instance, track, priority, maxDelay, group });
 		}
 
 		const startFrame = await r.u53();
@@ -116,8 +106,6 @@ export class Fetch {
 		return new Fetch({
 			broadcast,
 			instance,
-			node,
-			depth,
 			track,
 			priority,
 			maxDelay,

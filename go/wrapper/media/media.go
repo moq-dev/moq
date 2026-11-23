@@ -33,14 +33,18 @@ type (
 	VideoHint = ffi.MoqVideoHint
 	// AudioFormat is a single audio codec an importer can parse.
 	AudioFormat = ffi.MoqAudioFormat
-	// VideoFormat is a single video codec an importer can parse.
+	// VideoFormat is a single video codec an importer can parse. The two H.26x pairs
+	// differ by framing, not codec: Avc1/Hvc1 are length-prefixed with an out-of-band
+	// config record, H264/H265 are a raw Annex B elementary stream with the parameter
+	// sets inline.
 	VideoFormat = ffi.MoqVideoFormat
 	// ContainerFormat is a container that publishes its own tracks.
 	ContainerFormat = ffi.MoqContainerFormat
 	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
 	VideoProperties = ffi.MoqVideoProperties
 	// Container selects how subscribed media frames are demuxed. Build one with
-	// LegacyContainer, CmafContainer, or LocContainer.
+	// LegacyContainer, CmafContainer, or LocContainer. A catalog reports ContainerUnknown
+	// for a container this version cannot name yet, which a subscription refuses.
 	Container = ffi.MoqContainer
 	// ContainerLegacy is the legacy hang container variant of Container; build one with LegacyContainer.
 	ContainerLegacy = ffi.MoqContainerLegacy
@@ -48,6 +52,8 @@ type (
 	ContainerCmaf = ffi.MoqContainerCmaf
 	// ContainerLoc is the low-overhead container variant of Container; build one with LocContainer.
 	ContainerLoc = ffi.MoqContainerLoc
+	// ContainerUnknown is a container this version of the bindings cannot name yet.
+	ContainerUnknown = ffi.MoqContainerUnknown
 	// Rendition is a catalog rendition: its ID (catalog key) and config. Build one with VideoRendition or AudioRendition.
 	Rendition = ffi.MoqRendition
 	// RenditionVideo is the video variant of Rendition; build one with VideoRendition.
@@ -62,7 +68,7 @@ type (
 // VideoInit describes a video codec, initialization bytes, and hints.
 type VideoInit struct {
 	// Format selects the video codec.
-	Format VideoFormat
+	Format *VideoFormat
 	// Data supplies codec init bytes (an avcC, an hvcC, ...); may be empty for a format that resolves in band.
 	Data []byte
 	// Label is a human-readable rendition name for a track picker.
@@ -110,7 +116,7 @@ func (t *Timebase) Close() { t.inner.Destroy() }
 // ContainerInit describes a container, its leading bytes and an optional shared timebase.
 type ContainerInit struct {
 	// Format selects the container parser.
-	Format ContainerFormat
+	Format *ContainerFormat
 	// Data supplies the leading container bytes.
 	Data []byte
 	// Timebase shares a source offset, or nil for an independent offset.
@@ -246,9 +252,16 @@ func NewContainerProducer(broadcast *moq.BroadcastProducer, init ContainerInit) 
 	return &ContainerProducer{inner: inner}, nil
 }
 
-// NewCatalogConsumer subscribes to broadcast's catalog snapshots.
-func NewCatalogConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer) (*CatalogConsumer, error) {
-	inner, err := ffi.MoqMediaCatalogConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast))
+// NewCatalogConsumer subscribes to broadcast's catalog updates, for a reader playing delay
+// behind the live edge. A zero delay reads only the newest catalog, for a reader that applies
+// each on arrival. A reader that holds each update until its media reaches the update's
+// Timestamp passes its playout delay instead, and reads in order every update it may still
+// need: one stays deliverable until it falls delay behind the live edge.
+func NewCatalogConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, delay time.Duration) (*CatalogConsumer, error) {
+	if err := bridge.NonNegative(&delay, "catalog delay"); err != nil {
+		return nil, err
+	}
+	inner, err := ffi.MoqMediaCatalogConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), delay)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +293,7 @@ func NewTrackConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, con
 // GroupConfig names a catalog rendition's group and fetch delivery options.
 type GroupConfig struct {
 	Rendition Rendition
-	Sequence  uint64
+	Start     uint64
 	Options   *moq.FetchGroupOptions
 }
 
@@ -294,7 +307,7 @@ func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config Gr
 			return nil, err
 		}
 	}
-	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Rendition: config.Rendition, Sequence: config.Sequence, Options: config.Options})
+	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Rendition: config.Rendition, Start: config.Start, Options: config.Options})
 	if err != nil {
 		return nil, err
 	}
@@ -341,49 +354,80 @@ func LocContainer() Container {
 	return ContainerLoc{}
 }
 
-// AudioFormat values: a single audio codec an importer can parse.
-const (
-	// AudioFormatAac is Advanced Audio Coding, configured by an AudioSpecificConfig.
-	AudioFormatAac = ffi.MoqAudioFormatAac
-	// AudioFormatOpus is Opus, configured by an OpusHead.
-	AudioFormatOpus = ffi.MoqAudioFormatOpus
-	// AudioFormatFlac is FLAC, configured by its STREAMINFO block.
-	AudioFormatFlac = ffi.MoqAudioFormatFlac
-	// AudioFormatMp3 is MPEG-1/2 Audio Layer III.
-	AudioFormatMp3 = ffi.MoqAudioFormatMp3
-)
+// AacAudioFormat selects Advanced Audio Coding, configured by an AudioSpecificConfig.
+func AacAudioFormat() *AudioFormat {
+	return ffi.MoqAudioFormatAac()
+}
 
-// VideoFormat values: a single video codec an importer can parse. The two H.26x pairs
-// differ by framing, not codec: Avc1/Hvc1 are length-prefixed with an out-of-band config
-// record, Avc3/Hev1 are Annex-B with the parameter sets inline.
-const (
-	// VideoFormatAvc1 is H.264 with length-prefixed NALUs and an out-of-band avcC.
-	VideoFormatAvc1 = ffi.MoqVideoFormatAvc1
-	// VideoFormatAvc3 is H.264 in Annex-B with inline SPS/PPS.
-	VideoFormatAvc3 = ffi.MoqVideoFormatAvc3
-	// VideoFormatHvc1 is H.265 with length-prefixed NALUs and an out-of-band hvcC.
-	VideoFormatHvc1 = ffi.MoqVideoFormatHvc1
-	// VideoFormatHev1 is H.265 in Annex-B with inline parameter sets.
-	VideoFormatHev1 = ffi.MoqVideoFormatHev1
-	// VideoFormatAv01 is AV1.
-	VideoFormatAv01 = ffi.MoqVideoFormatAv01
-	// VideoFormatVp8 is VP8.
-	VideoFormatVp8 = ffi.MoqVideoFormatVp8
-	// VideoFormatVp9 is VP9.
-	VideoFormatVp9 = ffi.MoqVideoFormatVp9
-)
+// OpusAudioFormat selects Opus, configured by an OpusHead.
+func OpusAudioFormat() *AudioFormat {
+	return ffi.MoqAudioFormatOpus()
+}
 
-// ContainerFormat values: a container that publishes its own tracks.
-const (
-	// ContainerFormatFmp4 is fragmented MP4 / CMAF, split into one frame per sample.
-	ContainerFormatFmp4 = ffi.MoqContainerFormatFmp4
-	// ContainerFormatMkv is Matroska / WebM.
-	ContainerFormatMkv = ffi.MoqContainerFormatMkv
-	// ContainerFormatTs is an MPEG-2 transport stream.
-	ContainerFormatTs = ffi.MoqContainerFormatTs
-	// ContainerFormatFlv is Flash Video, as used by RTMP.
-	ContainerFormatFlv = ffi.MoqContainerFormatFlv
-)
+// FlacAudioFormat selects FLAC, configured by its STREAMINFO block.
+func FlacAudioFormat() *AudioFormat {
+	return ffi.MoqAudioFormatFlac()
+}
+
+// Mp3AudioFormat selects MPEG-1/2 Audio Layer III.
+func Mp3AudioFormat() *AudioFormat {
+	return ffi.MoqAudioFormatMp3()
+}
+
+// Avc1VideoFormat selects H.264 with length-prefixed NALUs and an out-of-band avcC.
+func Avc1VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatAvc1()
+}
+
+// H264VideoFormat selects H.264 as a raw Annex B elementary stream with inline SPS/PPS.
+func H264VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatH264()
+}
+
+// Hvc1VideoFormat selects H.265 with length-prefixed NALUs and an out-of-band hvcC.
+func Hvc1VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatHvc1()
+}
+
+// H265VideoFormat selects H.265 as a raw Annex B elementary stream with inline parameter sets.
+func H265VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatH265()
+}
+
+// Av01VideoFormat selects AV1.
+func Av01VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatAv01()
+}
+
+// Vp8VideoFormat selects VP8.
+func Vp8VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatVp8()
+}
+
+// Vp9VideoFormat selects VP9.
+func Vp9VideoFormat() *VideoFormat {
+	return ffi.MoqVideoFormatVp9()
+}
+
+// Fmp4ContainerFormat selects fragmented MP4 / CMAF, split into one frame per sample.
+func Fmp4ContainerFormat() *ContainerFormat {
+	return ffi.MoqContainerFormatFmp4()
+}
+
+// MkvContainerFormat selects Matroska / WebM.
+func MkvContainerFormat() *ContainerFormat {
+	return ffi.MoqContainerFormatMkv()
+}
+
+// TsContainerFormat selects an MPEG-2 transport stream.
+func TsContainerFormat() *ContainerFormat {
+	return ffi.MoqContainerFormatTs()
+}
+
+// FlvContainerFormat selects Flash Video, as used by RTMP.
+func FlvContainerFormat() *ContainerFormat {
+	return ffi.MoqContainerFormatFlv()
+}
 
 // DecodeStart values. A decoder's zero value starts at the oldest group.
 const (
@@ -436,12 +480,21 @@ func (m *TrackProducer) Cut() error {
 	return m.inner.Cut()
 }
 
-// Seek draws a group boundary and numbers the next group sequence.
+// Seek draws a group boundary and starts the next group at start.
 //
-// Cut with an explicit sequence, for a publisher whose group numbers have to be
+// Cut with an explicit start, for a publisher whose group starts have to be
 // deterministic: two encoders aligning per GOP so a consumer can fail over between them.
-func (m *TrackProducer) Seek(sequence uint64) error {
-	return m.inner.Seek(sequence)
+func (m *TrackProducer) Seek(start uint64) error {
+	return m.inner.Seek(start)
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (m *TrackProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return m.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the media track.
@@ -475,9 +528,9 @@ func (c *ContainerProducer) Cut() error {
 	return c.inner.Cut()
 }
 
-// Seek starts a new segment and numbers its groups sequence.
-func (c *ContainerProducer) Seek(sequence uint64) error {
-	return c.inner.Seek(sequence)
+// Seek starts a new segment and starts its groups at start.
+func (c *ContainerProducer) Seek(start uint64) error {
+	return c.inner.Seek(start)
 }
 
 // Finish finishes every track this container publishes.
@@ -512,6 +565,15 @@ func (m *TrackStreamProducer) Write(payload []byte) error {
 // next keyframe in the stream.
 func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
 	return m.inner.SetEnabled(enabled)
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (m *TrackStreamProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return m.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the stream.
@@ -588,9 +650,9 @@ type GroupConsumer struct {
 	inner *ffi.MoqMediaGroupConsumer
 }
 
-// Sequence is this group's sequence number within the track.
-func (m *GroupConsumer) Sequence() uint64 {
-	return m.inner.Sequence()
+// Start is this group's start within the track.
+func (m *GroupConsumer) Start() uint64 {
+	return m.inner.Start()
 }
 
 // Next returns the next decoded frame, or (nil, nil) when the group ends.
@@ -613,7 +675,9 @@ type CatalogConsumer struct {
 	inner *ffi.MoqMediaCatalogConsumer
 }
 
-// Next returns the next catalog, or (nil, nil) when the track ends.
+// Next returns the next catalog, or (nil, nil) when the track ends. The catalog takes
+// effect at its Timestamp on the broadcast's media timeline: hold one read before the media
+// reaches it, and apply one read late, or the first one read, at once.
 func (c *CatalogConsumer) Next(ctx context.Context) (*Catalog, error) {
 	return bridge.Call(ctx, nil, c.inner.Next)
 }
@@ -630,14 +694,14 @@ func (c *CatalogConsumer) Cancel() {
 
 // CatalogSnapshot reads the first catalog snapshot and releases its subscription.
 func CatalogSnapshot(ctx context.Context, broadcast *moq.BroadcastConsumer) (*Catalog, error) {
-	consumer, err := NewCatalogConsumer(ctx, broadcast)
+	consumer, err := NewCatalogConsumer(ctx, broadcast, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer consumer.Cancel()
 	snapshot, err := consumer.Next(ctx)
 	if err == nil && snapshot == nil {
-		err = moq.ErrClosed
+		err = ffi.NewMoqErrorClosed()
 	}
 	return snapshot, err
 }

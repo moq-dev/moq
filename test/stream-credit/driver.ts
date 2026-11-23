@@ -8,8 +8,8 @@
  * Each track keeps one group open at a time, the way a live video track keeps its GOP open, so
  * the relay wants 300 streams to the tab at once. Tiers of subscriber priority decide who gets
  * them. Exits 0 when the top tier received every group whole, every subscription ended cleanly
- * soon after the publisher finished (on lite-07 with its final group whole), and the lower tiers
- * lost frames in priority order; 1 otherwise.
+ * soon after the publisher finished, the lower tiers lost frames in priority order, and every
+ * group the relay reset to make room came back whole when the tab fetched it; 1 otherwise.
  *
  * @module
  */
@@ -19,7 +19,7 @@ import { parseArgs, stripVTControlCharacters } from "node:util";
 import * as Moq from "@moq/net";
 import { build } from "vite";
 import { launch } from "../interop/clients/js/harness.ts";
-import type { Group, Plan, Report, Track } from "./src/plan.ts";
+import type { Plan, Report, Track } from "./src/plan.ts";
 
 const { values } = parseArgs({
 	options: {
@@ -65,7 +65,7 @@ const TIERS = [
 type Tier = (typeof TIERS)[number];
 
 // Groups per track, one every interval, each with a frame at its start and one halfway through,
-// so a group is open across the whole interval and a paused one has a frame left to continue.
+// so a group is open across the whole interval and one reset to make room has a frame left.
 const GROUPS = 40;
 const INTERVAL_MS = 200;
 // How long every subscription has to end once the publisher finishes. On loopback the relay
@@ -106,7 +106,11 @@ const payload = (track: Track, sequence: number, frame: number) => `${track.name
 const origin = new Moq.Origin.Producer();
 const publication = origin.route(Moq.Path.from(broadcastName));
 // No publisher age limit: each reader's budget alone decides which groups are still worth sending.
-const tracks = plan.tracks.map((track) => publication.broadcast.createTrack(track.name, { maxAge: null }));
+const tracks = plan.tracks.map((track) => {
+	const created = publication.broadcast.createTrack(track.name, { maxAge: null });
+	if (!created) throw new Error("the track already exists");
+	return created;
+});
 publication.announce();
 // Bun has no WebTransport, so this dials the WebSocket, whose qmux stream limit @moq/net raises
 // far past what 300 subscriptions need: the only cap in play is the browser's.
@@ -131,7 +135,7 @@ const server = Bun.serve({
 });
 
 const browser = await launch([], engine);
-// Every page log line, kept with the run: @moq/net logs each pause at debug level.
+// Every page log line, kept with the run.
 const pageLog = Bun.file(`${out}/console.log`).writer();
 const failures: string[] = [];
 let report: Report | undefined;
@@ -155,7 +159,7 @@ try {
 	reading.catch(() => {});
 	// Every track keeps one group open: the previous one finishes as the next one starts. The top
 	// tier starts its groups half an interval after the rest, while their streams hold every
-	// credit, so the relay must pause a lower group to make room rather than hand out credit in
+	// credit, so the relay must reset a lower group to make room rather than hand out credit in
 	// priority order as all the groups start at once.
 	const open = new Map<number, { group: Moq.Group.Producer; sequence: number }>();
 	const step = (offset: boolean, half: number) => {
@@ -170,16 +174,16 @@ try {
 					open.delete(i);
 					continue;
 				}
-				const group = track.appendGroup();
+				const group = track.appendGroup(Moq.Time.Timestamp.unscaled(BigInt(sequence)));
 				open.set(i, { group, sequence });
 				group.writeFrame({
 					payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, 0)),
-					timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+					timestamp: Moq.Time.Timestamp.unscaled(group.start),
 				});
 			} else if (current) {
 				current.group.writeFrame({
 					payload: new TextEncoder().encode(payload(plan.tracks[i], current.sequence, 1)),
-					timestamp: Moq.Time.Timestamp.unscaled(current.group.sequence),
+					timestamp: Moq.Time.Timestamp.unscaled(current.group.start),
 				});
 			}
 		}
@@ -227,7 +231,8 @@ if (report) {
 function judge(report: Report) {
 	if (report.version !== version) failures.push(`the tab negotiated ${report.version}, not ${version}`);
 	if (report.closed) failures.push(`the tab's session closed with ${report.closed}`);
-	const accounted = !/^moq-lite-0[0-6]$/.test(version);
+	// Groups that stopped early for any reason but going stale, each fetched again.
+	let fetched = 0;
 
 	// Frames read per tier, the measure of who the streams went to: a live-edge reader's group
 	// goes stale as its successor starts, so most of its groups end early by design.
@@ -240,11 +245,9 @@ function judge(report: Report) {
 
 		if (received.ended) fail(`ended with ${received.ended}`);
 		const seen = new Set<number>();
-		let last: Group | undefined;
 		for (const group of received.groups) {
 			if (seen.has(group.sequence)) fail(`group ${group.sequence} handed out twice`);
 			seen.add(group.sequence);
-			if (group.sequence === GROUPS - 1) last = group;
 			// A frame read is never wrong, only missing: each one read is the next one written.
 			const expected = [0, 1].map((frame) => payload(track, group.sequence, frame));
 			if (group.frames.some((frame, i) => frame !== expected[i]))
@@ -253,18 +256,16 @@ function judge(report: Report) {
 			// The top tier asks for every group, so none may stop early.
 			if (tier.every && (group.error || group.frames.length !== expected.length))
 				fail(`group ${group.sequence} stopped after ${group.frames.length} frames: ${group.error}`);
+			// A group the relay reset to make room is still whole upstream, so a fetch returns it.
+			if (group.fetched === undefined) continue;
+			fetched++;
+			if (JSON.stringify(group.fetched) !== JSON.stringify(expected))
+				fail(`group ${group.sequence} stopped (${group.error}) and fetched ${JSON.stringify(group.fetched)}`);
 		}
 		if (tier.every) {
 			const missing = Array.from({ length: GROUPS }, (_, i) => i).filter((i) => !seen.has(i));
 			if (missing.length) fail(`missed groups ${missing.join(",")}`);
 		}
-		// Once the publisher stops, the backlog drains: the newest group reaches every reader whole.
-		// Only lite-07 accounts for every group, so only there does a reader wait for one still
-		// queued for credit at the track's end. A lite-06 reader cannot tell a group still coming
-		// from one the relay shed, so it ends at the end it was told, and a starved track loses
-		// the final group the relay had not opened yet.
-		if ((accounted || tier.every) && (!last || last.error || last.frames.length !== 2))
-			fail(`final group ${last ? `stopped after ${last.frames.length} frames: ${last.error}` : "never arrived"}`);
 	}
 
 	const share = TIERS.map((tier) => {
@@ -281,22 +282,17 @@ function judge(report: Report) {
 	const [high, mid, low] = share;
 	if (!(low < 1)) failures.push("the low tier read every frame: the browser's stream cap never bound");
 	if (!(high >= mid && mid > low)) failures.push(`frames read did not follow priority: ${share.join(", ")}`);
+	// The relay makes room for a higher-priority group by resetting a lower one's stream, which
+	// gives that group up: the tab sees it stop early, not go stale, and fetches it.
+	log(`${fetched} groups stopped early and were fetched`);
+	if (fetched === 0) failures.push("no group stopped early: the relay never reset a stream to make room");
 
-	// The relay's own account of its scheduling, independent of what the tab read: the tab's
-	// session is the last WebTransport one negotiated on this version.
+	// The relay's own account, independent of what the tab reported: the tab's session is a
+	// WebTransport one negotiated on this version.
 	const lines = stripVTControlCharacters(readFileSync(relayLog, "utf8")).split("\n");
-	const negotiated = new RegExp(`conn\\{id=(\\d+) .*negotiated version=${version} transport=webtransport`);
-	const id = lines.flatMap((line) => negotiated.exec(line)?.[1] ?? []).at(-1);
-	if (id === undefined) {
+	const negotiated = new RegExp(`conn\\{id=\\d+ .*negotiated version=${version} transport=webtransport`);
+	if (!lines.some((line) => negotiated.test(line)))
 		failures.push(`the relay log names no WebTransport session on ${version}`);
-		return;
-	}
-	const ours = lines.filter((line) => line.includes(`conn{id=${id} `));
-	const count = (what: string) => ours.filter((line) => line.includes(what)).length;
-	const continued = count("continuing paused group");
-	log(`relay: ${continued} paused groups continued`);
-	// Lite-07's YIELDED reset pauses a group to make room, and a later stream continues it.
-	if (accounted && continued === 0) failures.push("the relay never continued a paused group");
 }
 
 if (failures.length) {

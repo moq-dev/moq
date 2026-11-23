@@ -988,7 +988,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 	let snapshot = catalog.snapshot();
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
-		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.sync.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 		refused,
 	}
@@ -1099,7 +1099,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().media.clock.expect("a clock");
+	let provisional = catalog.snapshot().sync.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
@@ -1114,7 +1114,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the Tracks element alone publishes nothing");
 
 	mkv.decode(cluster).unwrap();
-	let anchored = catalog.snapshot().media.clock.expect("a clock");
+	let anchored = catalog.snapshot().sync.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first block anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first block publishes the catalog");
@@ -1889,7 +1889,8 @@ async fn a_seek_mid_block_waits_for_the_block() {
 		}
 		groups.push((group.start, frames));
 	}
-	assert_eq!(groups, [(0, 2), (100, 1)]);
+	// The block's group ends whole past its second 20ms frame, so the seek's group starts there.
+	assert_eq!(groups, [(0, 2), (40_000, 1)]);
 }
 
 /// A WebM with one VP9 track whose `Video` element holds `children` beside its dimensions.
@@ -2145,5 +2146,109 @@ fn repeated_reinit_keeps_flat_state() {
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.video.renditions.is_empty(), "{label}");
 		assert!(snapshot.audio.renditions.is_empty(), "{label}");
+	}
+}
+
+/// An avcC or hvcC track whose first keyframe carries a parameter set in band lands as
+/// `avc3`/`hev1`; one whose keyframe doesn't stays `avc1`/`hvc1`. The keyframe decides even when it
+/// streams in a byte at a time behind an earlier audio block, and the catalog waits for it: the
+/// first one published already lists the video.
+#[tokio::test(start_paused = true)]
+async fn keyframe_decides_where_parameter_sets_live() {
+	use crate::codec::{h264, h265};
+	use bytes::Bytes;
+
+	let avcc = h264::build_avcc(
+		&[Bytes::from_static(h264::fixtures::SPS_IPB)],
+		&[Bytes::from_static(h264::fixtures::PPS)],
+	)
+	.unwrap();
+	let hvcc = h265::build_hvcc(
+		&[Bytes::from_static(h265::fixtures::VPS)],
+		&[Bytes::from_static(h265::fixtures::SPS_NVENC)],
+		&[Bytes::from_static(h265::fixtures::PPS)],
+	)
+	.unwrap();
+	let prefixed = |nals: &[&[u8]]| -> Vec<u8> {
+		nals.iter()
+			.flat_map(|nal| [&(nal.len() as u32).to_be_bytes()[..], nal].concat())
+			.collect()
+	};
+	let h264_idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+	let h265_idr: &[u8] = &[0x26, 0x01, 0xaf, 0x10];
+
+	for (codec_id, private, sps, idr) in [
+		("V_MPEG4/ISO/AVC", avcc, h264::fixtures::SPS_IPB, h264_idr),
+		("V_MPEGH/ISO/HEVC", hvcc, h265::fixtures::SPS_NVENC, h265_idr),
+	] {
+		for in_band in [false, true] {
+			let keyframe = match in_band {
+				true => prefixed(&[sps, idr]),
+				false => prefixed(&[idr]),
+			};
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![
+					track_entry_audio_opus(1, 48_000.0, 2),
+					MatroskaSpec::TrackEntry(Master::Full(vec![
+						MatroskaSpec::TrackNumber(2),
+						MatroskaSpec::TrackUID(2),
+						MatroskaSpec::TrackType(1),
+						MatroskaSpec::CodecID(codec_id.into()),
+						MatroskaSpec::CodecPrivate(private.to_vec()),
+					])),
+				])
+				.cluster(0, || {
+					vec![
+						simple_block(1, 0, true, &[0xfc, 0x00]),
+						simple_block(2, 0, true, &keyframe),
+					]
+				})
+				.segment_end()
+				.build();
+
+			for chunk in [1, data.len()] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+				let mut published = crate::catalog::hang::Consumer::<()>::new(
+					broadcast.consume().track(hang::Catalog::DEFAULT_NAME).unwrap(),
+				);
+				let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+				let waiter = kio::Waiter::noop();
+				let mut first = None;
+				for chunk in data.chunks(chunk) {
+					mkv.decode(chunk).unwrap();
+					if first.is_none()
+						&& let std::task::Poll::Ready(snapshot) = published.poll_next(&waiter)
+					{
+						first = snapshot.unwrap();
+					}
+				}
+				let first = first.expect("the keyframe publishes the catalog");
+				assert_eq!(
+					first.video.renditions.len(),
+					1,
+					"{codec_id}: the first catalog lists the video"
+				);
+				let snapshot = catalog.snapshot();
+				assert_eq!(snapshot.audio.renditions.len(), 1);
+				let config = snapshot
+					.video
+					.renditions
+					.values()
+					.next()
+					.expect("the keyframe publishes the record");
+				let detected = match &config.codec {
+					VideoCodec::H264(codec) => codec.inline,
+					VideoCodec::H265(codec) => codec.in_band,
+					other => panic!("{other:?}"),
+				};
+				assert_eq!(detected, in_band, "{codec_id} {}", config.codec);
+				assert_eq!(config.description.as_deref(), Some(private.as_ref()));
+				let _finished = mkv.finish().unwrap();
+			}
+		}
 	}
 }

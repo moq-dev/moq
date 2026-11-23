@@ -19,7 +19,9 @@ const pair = createMockTransportPair(`moqt-${input.draft}`);
 const origin = new OriginProducer();
 const publication = origin.route(Path.from("room"), { hidden: true });
 // The updates replay groups a newer one superseded, which the default zero max age would stale.
-const track = publication.broadcast.createTrack("video", { maxAge: null });
+const created = publication.broadcast.createTrack("video", { maxAge: null });
+if (!created) throw new Error("the track already exists");
+const track = created;
 publication.announce();
 const publisher = new Publisher({
 	quic: pair.server,
@@ -30,15 +32,17 @@ const publisher = new Publisher({
 const incoming = pair.client.incomingUnidirectionalStreams.getReader();
 const client = await Stream.open(pair.client, { version });
 const server = await Stream.accept(pair.server, version);
+if (!server) throw new Error("the group was already answered");
 assert(server);
 const responses: number[][] = [];
 const streams: number[][] = [];
+let next = 0n;
 function publishGroup() {
-	const group = track.appendGroup();
+	const group = track.appendGroup(Time.Timestamp.unscaled(next++));
 	for (let object = 0; object < 2; object++)
 		group.writeFrame({
-			payload: new Uint8Array([Number(group.sequence), object]),
-			timestamp: Time.Timestamp.unscaled(group.sequence),
+			payload: new Uint8Array([Number(group.start), object]),
+			timestamp: Time.Timestamp.unscaled(group.start),
 		});
 	group.finish();
 }

@@ -50,7 +50,7 @@ fn worker_config(cert: &std::path::Path, key: &std::path::Path, workers: u16) ->
 	config.listen.tls.key = vec![key.to_path_buf()];
 	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(workers).unwrap());
 	config.runtime.pin = false;
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config
 }
 
@@ -104,12 +104,12 @@ async fn workers_serve_quic_and_share_one_origin() {
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 

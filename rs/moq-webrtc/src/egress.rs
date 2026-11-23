@@ -11,7 +11,6 @@
 //! client). SDP negotiation lives in the matching modules; this file is
 //! transport-agnostic.
 
-use crate::vendor::str0m;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -98,7 +97,9 @@ pub struct EgressSource {
 	catalog: watch::Receiver<Catalog>,
 	/// Why the catalog stopped, until the session takes it.
 	catalog_end: Option<tokio::task::JoinHandle<Result<()>>>,
-	writes_tx: mpsc::Sender<WriteRequest>,
+	/// Cloned into each pump until [`Self::end`], so the writes channel closes once the
+	/// catalog ended and every pump has written what it holds.
+	writes_tx: Option<mpsc::Sender<WriteRequest>>,
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
 }
 
@@ -123,7 +124,7 @@ impl EgressSource {
 			source,
 			catalog,
 			catalog_end: Some(catalog_end),
-			writes_tx: tx,
+			writes_tx: Some(tx),
 			writes_rx: Some(rx),
 		})
 	}
@@ -140,12 +141,23 @@ impl EgressSource {
 		self.catalog_end.take().expect("EgressSource catalog_end already taken")
 	}
 
+	/// Open no more lines, as the catalog ended cleanly: the writes channel closes once every
+	/// pump has served its rendition to the end.
+	pub(crate) fn end(&mut self) {
+		self.writes_tx = None;
+	}
+
 	/// Spawn a pump task for a newly added (sendonly) media line.
 	///
 	/// `mid` and `formats` come from str0m's negotiated state, `formats` in the peer's order.
 	/// The pump serves the best enabled catalog rendition in any of them and forwards every
-	/// frame as a [`WriteRequest`] in that rendition's format.
+	/// frame as a [`WriteRequest`] in that rendition's format. A line added after
+	/// [`Self::end`] serves nothing.
 	pub fn on_track(&mut self, mid: Mid, formats: Vec<Format>) -> Result<()> {
+		let Some(tx) = &self.writes_tx else {
+			tracing::debug!(?mid, "egress track added after the catalog ended; ignored");
+			return Ok(());
+		};
 		if !formats
 			.iter()
 			.any(|format| format.codec == Codec::Opus || video_kind(format.codec).is_some())
@@ -158,7 +170,7 @@ impl EgressSource {
 			formats,
 			source: self.source.clone(),
 			catalog: self.catalog.clone(),
-			tx: self.writes_tx.clone(),
+			tx: tx.clone(),
 			playhead: None,
 		};
 		// Subscribing blocks on SUBSCRIBE_OK, so keep it inside the pump task to keep this
@@ -312,19 +324,34 @@ impl Rendition {
 
 		match &self {
 			Self::Audio(name, config) => {
-				let track = source
-					.subscribe_track(config.broadcast(), config.instance(), config.track(name))
-					.await?;
+				let track = subscribe_live(&source, config.broadcast(), config.instance(), config.track(name)).await?;
 				codec::Track::opus(track, config)
 			}
 			Self::Video(name, config) => {
-				let track = source
-					.subscribe_track(config.broadcast(), config.instance(), config.track(name))
-					.await?;
+				let track = subscribe_live(&source, config.broadcast(), config.instance(), config.track(name)).await?;
 				codec::Track::video(track, config)
 			}
 		}
 	}
+}
+
+/// How long a group may trail its successor before the publisher gives up on it. A live group
+/// finishes the instant the next starts, so a zero budget would reset each one just after its
+/// last frame went out and the transport would drop that unread tail.
+const MAX_DELAY: Duration = Duration::from_millis(100);
+
+/// Subscribe to a rendition's track with the [`MAX_DELAY`] budget, resolving its
+/// cross-broadcast reference (the catalog `broadcast` field) and `instance`.
+async fn subscribe_live(
+	source: &moq_mux::Source,
+	rel: Option<&moq_net::path::Relative>,
+	instance: Option<&moq_net::Instance>,
+	name: &str,
+) -> Result<moq_net::track::Subscriber> {
+	let broadcast = source.resolve(rel, instance).await?;
+	let delay = moq_net::track::Delay::default().with_max(MAX_DELAY);
+	let subscription = moq_net::track::Subscription::default().with_delay(delay);
+	Ok(broadcast.track(name)?.subscribe(subscription).await?)
 }
 
 /// The best [enabled](hang::catalog::Audio::enabled) Opus rendition that `source` can reach.
@@ -664,7 +691,7 @@ mod tests {
 			source,
 			catalog: watch::channel(catalog).1,
 			catalog_end: None,
-			writes_tx,
+			writes_tx: Some(writes_tx),
 			writes_rx: Some(writes_rx),
 		};
 
@@ -838,7 +865,7 @@ mod tests {
 	) -> moq_mux::container::Producer<moq_mux::catalog::hang::Container> {
 		config.container = hang::catalog::Container::Legacy;
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -894,7 +921,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, name: &str, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -962,7 +989,7 @@ mod tests {
 			config.track = Some(track.to_string());
 			config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1041,7 +1068,7 @@ mod tests {
 		assert_eq!(next(&mut writes).await, (Bytes::from_static(b"vp9-0"), 98));
 
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -1065,7 +1092,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1129,7 +1156,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1187,7 +1214,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1240,7 +1267,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, name: &str, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1267,7 +1294,7 @@ mod tests {
 		idle(&mut writes).await;
 
 		{
-			let mut modify = catalog.modify().unwrap();
+			let mut modify = catalog.modify(catalog.next_timestamp()).unwrap();
 			for config in modify.video.renditions.values_mut() {
 				config.enabled = false;
 			}
@@ -1308,7 +1335,7 @@ mod tests {
 		config.coded_height = Some(1080);
 		config.broadcast = Some(Relative::new("./missing").unwrap());
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -1318,7 +1345,7 @@ mod tests {
 		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
 
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -1349,7 +1376,7 @@ mod tests {
 		drop(writes);
 		let mut demand = low.demand();
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(Duration::from_secs(1), unwanted)

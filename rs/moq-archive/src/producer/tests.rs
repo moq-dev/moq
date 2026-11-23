@@ -49,7 +49,7 @@ fn group(track: &track::Producer, sequence: u64, frames: &[(u64, &str)]) {
 	for (pts, payload) in frames {
 		group.write_frame(ms(*pts), payload.to_string()).unwrap();
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// Let the producer catch up without moving time far.
@@ -140,11 +140,7 @@ fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, Vec<String>)>> 
 		.collect()
 }
 
-fn key(group: u64, frame: u64, pts: u64) -> String {
-	format!("{group:019}-{frame:019}-{pts:019}")
-}
-
-fn untimed(group: u64, frame: u64) -> String {
+fn key(group: u64, frame: u64) -> String {
 	format!("{group:019}-{frame:019}")
 }
 
@@ -176,7 +172,7 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	let objects = objects(&store, "video", true).await;
 	assert_eq!(
 		objects.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(2, 0, 2000), key(4, 0, 4000)]
+		[key(0, 0), key(2, 0), key(4, 0)]
 	);
 	assert_eq!(
 		contents(&objects)[0],
@@ -209,10 +205,7 @@ async fn a_late_group_is_a_gap_that_never_stalls_later_groups() {
 	// Nothing waits on 1, so every group is stored within the flush.
 	sleep(SECOND + SECOND / 2).await;
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(2, 0, 2000)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(2, 0)]);
 	assert_eq!(
 		contents(&stored)[1],
 		[(2, vec!["2000/c".to_string()]), (3, vec!["3000/d".to_string()]),]
@@ -254,7 +247,7 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let objects = objects(&store, "video", true).await;
 	assert_eq!(
 		objects.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 2, 2000), key(0, 5, 4000)]
+		[key(0, 0), key(0, 2), key(0, 5)]
 	);
 	let stored: Vec<String> = contents(&objects)
 		.into_iter()
@@ -280,7 +273,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	open.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
-	let head = untimed(0, 0);
+	let head = key(0, 0);
 	let first = get(&store, &format!("data/{head}")).await.unwrap();
 
 	open.write_frame(moq_net::Timestamp::unscaled(0), "b").unwrap();
@@ -288,13 +281,13 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	sleep(SECOND).await;
 	assert_eq!(get(&store, &format!("data/{head}")).await.unwrap(), first);
 	let stored = objects(&store, "data", false).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, untimed(0, 1)]);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, key(0, 1)]);
 	assert_eq!(
 		contents(&stored),
 		[[(0, vec!["a".to_string()])], [(0, vec!["b".to_string()])]]
 	);
 
-	open.close().unwrap();
+	open.finish().unwrap();
 	let _data = data.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
@@ -319,12 +312,12 @@ async fn an_untimed_group_splits_by_wall_clock() {
 		settle().await;
 		sleep(SECOND / 2).await;
 	}
-	open.close().unwrap();
+	open.finish().unwrap();
 	settle().await;
 	sleep(2 * SECOND).await;
 	let mut next = data.create_group(group::Info { start: 1 }).unwrap();
 	next.write_frame(moq_net::Timestamp::unscaled(1), "f").unwrap();
-	next.close().unwrap();
+	next.finish().unwrap();
 	settle().await;
 	let _data = data.finish().unwrap();
 	broadcast.close();
@@ -333,7 +326,7 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	let stored = objects(&store, "data", false).await;
 	assert_eq!(
 		stored.keys().cloned().collect::<Vec<_>>(),
-		[untimed(0, 0), untimed(0, 4), untimed(1, 0)]
+		[key(0, 0), key(0, 4), key(1, 0)]
 	);
 	let strings = |frames: &[&str]| frames.iter().map(|frame| frame.to_string()).collect::<Vec<_>>();
 	assert_eq!(
@@ -362,19 +355,19 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	sleep(SECOND / 2).await;
 	assert_eq!(
 		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0)]
+		[key(0, 0)]
 	);
 
 	// The open group continues in the next object.
 	open.write_frame(ms(100), "b").unwrap();
-	open.close().unwrap();
+	open.finish().unwrap();
 	settle().await;
 	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	assert_eq!(
 		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 1, 100)]
+		[key(0, 0), key(0, 1)]
 	);
 }
 
@@ -409,8 +402,8 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	settle().await;
 	timed_group.write_frame(ms(300), "d").unwrap();
 	untimed_group.write_frame(moq_net::Timestamp::unscaled(0), "d").unwrap();
-	timed_group.close().unwrap();
-	untimed_group.close().unwrap();
+	timed_group.finish().unwrap();
+	untimed_group.finish().unwrap();
 	settle().await;
 	let _video = video.finish().unwrap();
 	let _data = data.finish().unwrap();
@@ -418,10 +411,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	finished(task).await;
 
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 2, 200)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(0, 2)]);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
@@ -431,10 +421,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 
 	// The untimed group continues in its own object too.
 	let stored = objects(&store, "data", false).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[untimed(0, 0), untimed(0, 2)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(0, 2)]);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
@@ -467,7 +454,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	let task = spawn(&store, &broadcast, config);
 	settle().await;
 	partial.write_frame(ms(600), "d").unwrap();
-	partial.close().unwrap();
+	partial.finish().unwrap();
 	settle().await;
 	let _video = video.finish().unwrap();
 	broadcast.close();
@@ -476,7 +463,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	let stored = objects(&store, "video", true).await;
 	assert_eq!(
 		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(1, 2, 500), key(1, 3, 600)]
+		[key(0, 0), key(1, 2), key(1, 3)]
 	);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
@@ -524,18 +511,34 @@ async fn changed_properties_fail_the_resume() {
 	);
 }
 
-/// A reader still reads a version 2 `.info`, but a producer never appends to one.
+/// A prefix in another format version, such as one a main build wrote before the format shipped,
+/// is refused before anything is written to it.
 #[tokio::test(start_paused = true)]
-async fn an_older_version_fails_the_resume() {
+async fn another_version_fails_the_resume() {
 	let store = store();
 	let info = object_store::path::Path::from("rec/video/.info");
-	let v2 = br#"{"version":2,"priority":128,"timescale":1000}"#;
-	store.inner().put(&info, v2.as_ref().into()).await.unwrap();
+	let v4 = br#"{"version":4,"priority":0,"timescale":1000}"#;
+	store.inner().put(&info, v4.as_ref().into()).await.unwrap();
 	let broadcast = broadcast::Info::new().produce();
 	let _video = broadcast.create_track("video", timed()).unwrap();
 	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
-	assert!(matches!(err, Error::Version(2)), "{err}");
-	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v2[..]));
+	assert!(matches!(err, Error::Version(4)), "{err}");
+	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v4[..]));
+}
+
+/// A foreign object beside the broadcast's `.end` is refused, even when the listing puts the
+/// `.end` first.
+#[tokio::test(start_paused = true)]
+async fn a_foreign_object_beside_the_end_fails_the_resume() {
+	let store = store();
+	for key in ["rec/.end", "rec/stray"] {
+		let path = object_store::path::Path::from(key);
+		store.inner().put(&path, Vec::new().into()).await.unwrap();
+	}
+	let broadcast = broadcast::Info::new().produce();
+	let _video = broadcast.create_track("video", timed()).unwrap();
+	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
+	assert!(matches!(&err, Error::Path(path) if path.ends_with("stray")), "{err}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -552,7 +555,7 @@ async fn track_names_stay_one_segment_through_a_resume() {
 		subscribed(track).await;
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(moq_net::Timestamp::unscaled(0), "x").unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	settle().await;
 	sleep(SECOND).await;
@@ -561,7 +564,7 @@ async fn track_names_stay_one_segment_through_a_resume() {
 
 	let stored = keys(&store).await;
 	for dir in ["a%2Fb", "%2Ehidden", "end"] {
-		assert!(stored.contains(&format!("{dir}/{}", untimed(0, 0))), "{stored:?}");
+		assert!(stored.contains(&format!("{dir}/{}", key(0, 0))), "{stored:?}");
 		assert!(stored.contains(&format!("{dir}/.info")), "{stored:?}");
 	}
 
@@ -680,8 +683,8 @@ async fn markers_wait_for_the_listing_to_end() {
 	last.write_frame(ms(1000), "b").unwrap();
 	last.write_frame(ms(1100), "c").unwrap();
 	// A mid-group end: frames 0 and 1 of group 1.
-	video.finish_at(Position::new(1, 2), None).unwrap();
-	last.close().unwrap();
+	video.finish_at(Position::new(1, 2)).unwrap();
+	last.finish().unwrap();
 	settle().await;
 	sleep(SECOND).await;
 	// Ended, but a track re-added under the name would continue it.
@@ -705,14 +708,12 @@ async fn markers_wait_for_the_listing_to_end() {
 async fn an_errored_end_records_its_error() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
-	let mut video = broadcast.create_track("video", timed()).unwrap();
+	let video = broadcast.create_track("video", timed()).unwrap();
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
 	group(&video, 0, &[(0, "a")]);
 	group(&video, 1, &[(1000, "b")]);
-	video
-		.finish_at(Position::group(2), Some(moq_net::Error::App(7)))
-		.unwrap();
+	let _video = video.fail(moq_net::Error::App(7)).unwrap();
 	settle().await;
 	broadcast.close();
 	finished(task).await;

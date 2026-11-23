@@ -3,12 +3,12 @@
 use std::sync::{Arc, Mutex};
 
 use futures::future::{self, Either};
-use moq_net::track::{Fill, Position};
+use moq_net::track::{FillGroups, Position};
 use moq_net::{Timescale, Timestamp, group, track};
 use object_store::ObjectStore;
 
 use super::Shared;
-use super::index::Index;
+use super::index::{self, Index, Start};
 use crate::layout::{End, Entry, Frame, Object};
 use crate::{Error, Info, Result};
 
@@ -105,7 +105,7 @@ impl Live {
 
 	fn close(&mut self) -> Result<()> {
 		if let Some(open) = self.open.take() {
-			open.group.close()?;
+			open.group.finish()?;
 		}
 		Ok(())
 	}
@@ -124,18 +124,17 @@ impl Live {
 		self.close()?;
 		match end {
 			End::Finish(at) => {
-				self.producer.finish_at(Position::new(at.group, at.frame), None)?;
+				self.producer.finish_at(Position::new(at.group, at.frame))?;
 				// An empty group stores no object, so the replay declares it never produces what
 				// the archive holds nothing for up to the end, and the end settles over it.
-				let fin = at.group + u64::from(at.frame != 0);
+				let fin = at.group.checked_add(u64::from(at.frame != 0)).ok_or(Error::Overflow)?;
 				let from = self.next.unwrap_or(0);
 				self.producer.skip_groups(from..fin);
 			}
 			End::Error(code) => {
 				// After the newest stored sequence, keeping the history an abort would refuse.
 				let err = moq_net::StreamError::from_code(code).into();
-				self.producer
-					.finish_at(Position::group(self.next.unwrap_or(0)), Some(err))?;
+				drop(self.producer.clone().fail(err)?);
 			}
 		}
 		Ok(())
@@ -144,21 +143,60 @@ impl Live {
 
 /// Serve `fill` from the archive, a group at a time in the fill's order as its readers pick
 /// them up, until every group is answered or nobody waits on it.
-pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, mut fill: Fill) {
-	if let Some(pts) = fill.time() {
-		return look_up(&shared, &index, &fill, pts).await;
-	}
+pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, mut fill: FillGroups) {
 	while let Some(sequence) = fill.wanted_changed().await {
-		serve_group(&shared, &index, &fill, sequence).await;
+		match sequence == fill.start().group && fill.floor() < sequence {
+			true => look_up(&shared, &index, &fill, sequence).await,
+			false => serve_group(&shared, &index, &fill, sequence, sequence).await,
+		}
 	}
 }
 
-/// Answer `fill`'s lookup of `pts`, in the track's timescale, with the group containing it: the
-/// newest group starting at or before it, found among the objects whose keys say they may hold
-/// it, or the oldest stored group when every one starts after it. A group starts at its key,
-/// as the live cache resolves it. Left unanswered when the archive holds no group, or the store
-/// fails.
-async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, pts: u64) {
+/// Answer `fill`'s start at `pts`, a time in the track's timescale, with the group containing
+/// it: the newest group starting at or before it, found among the objects whose keys say they
+/// may hold it. A group starts at its key, as the live cache resolves it. Dropped when the
+/// archive holds none from the fill's floor through it, and refused, failing the reader until
+/// its ranges change, when the store fails or the group found can't be served.
+async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &FillGroups, pts: u64) {
+	loop {
+		match search(shared, index, pts).await {
+			Search::Found(sequence) if sequence >= fill.floor() => {
+				serve_group(shared, index, fill, pts, sequence).await;
+				break;
+			}
+			// The cache holds a newer group at or before it than the archive does.
+			Search::Found(_) | Search::None => {
+				fill.drop_groups(fill.floor()..pts + 1);
+				return;
+			}
+			// The index dropped what the store pruned, at least the object found gone, which no
+			// listing adds back, so the search starts over on what it retains. Each retry drops an
+			// object for good, so only a store pruning what it lists faster than a GET keeps
+			// this going, at one LIST and GET per object it writes.
+			Search::Pruned => {}
+			Search::Failed => break,
+		}
+	}
+	// Left unanswered while a reader still waits, as when the group found was pruned since.
+	if fill.is_wanted(pts) {
+		fill.refuse_groups(pts..pts + 1, moq_net::Error::Stream(moq_net::StreamError::Internal));
+	}
+}
+
+/// How a search for the group containing a time ended.
+enum Search {
+	/// At the group starting at this sequence.
+	Found(u64),
+	/// With no group starting at or before it.
+	None,
+	/// At an object the store pruned since it was listed.
+	Pruned,
+	/// With a store failure.
+	Failed,
+}
+
+/// Search the index for the group containing `pts`; see [`look_up`].
+async fn search<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, pts: u64) -> Search {
 	let (around, timed) = {
 		let index = index.lock().unwrap();
 		(index.around(pts), index.timed())
@@ -166,8 +204,9 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 	// Newest first, skipping a group whose head was pruned, which can't be served from its first
 	// frame.
 	for (start, path) in around {
-		let Some(object) = load(shared, index, start, &path, timed).await else {
-			return;
+		let object = match load(shared, index, start, &path, timed).await {
+			Ok(object) => object,
+			Err(ended) => return ended,
 		};
 		let found = object
 			.entries
@@ -178,57 +217,43 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 			.find(|(_, entry)| !entry.frames.is_empty() && entry.sequence <= pts)
 			.map(|(_, entry)| entry.sequence);
 		if let Some(sequence) = found {
-			return serve_group(shared, index, fill, sequence).await;
+			return Search::Found(sequence);
 		}
 	}
-
-	// Every group starts after it: the oldest group is where its range reaches back to, skipping
-	// one whose head was pruned, which can't be served from its first frame.
-	let mut next = index.lock().unwrap().after(None);
-	while let Some((start, path)) = next {
-		let Some(object) = load(shared, index, start, &path, timed).await else {
-			return;
-		};
-		let found = object
-			.entries
-			.iter()
-			.enumerate()
-			.find(|(position, entry)| !entry.frames.is_empty() && (*position > 0 || object.frame_start == 0))
-			.map(|(_, entry)| entry.sequence);
-		if let Some(sequence) = found {
-			return serve_group(shared, index, fill, sequence).await;
-		}
-		next = index.lock().unwrap().after(Some(start));
-	}
+	Search::None
 }
 
-/// The object a lookup searches, `None` once the store failed.
-///
-/// An abandoned lookup still finishes the read and answers nobody: a lookup owes no group, so
-/// nothing tells it when its readers stop waiting.
+/// The object a search reads, or how the search ends without it.
 async fn load<S: ObjectStore>(
 	shared: &Shared<S>,
 	index: &Mutex<Index>,
-	start: (u64, u64),
+	start: Start,
 	path: &object_store::path::Path,
 	timed: bool,
-) -> Option<Arc<Object>> {
-	match super::object(shared, path, start, timed).await {
-		Ok(object) => Some(object),
-		Err(err) => {
-			if let Error::NotFound(_) = err {
-				// Pruned since it was listed.
-				index.lock().unwrap().forget(start);
-			}
-			tracing::warn!(%path, %err, "archived object is unavailable for a time lookup");
-			None
-		}
-	}
+) -> std::result::Result<Arc<Object>, Search> {
+	let err = match super::object(shared, path, start, timed).await {
+		Ok(object) => return Ok(object),
+		// Pruned since it was listed.
+		Err(Error::NotFound(_)) => match index::pruned(shared.store.inner(), index, start).await {
+			Ok(()) => return Err(Search::Pruned),
+			Err(err) => err,
+		},
+		Err(err) => err,
+	};
+	tracing::warn!(%path, %err, "archived object is unavailable for a time lookup");
+	Err(Search::Failed)
 }
 
-/// Answer group `sequence` of `fill` from the objects holding it, drop the run of sequences
-/// around it that the archive does not hold, or refuse it for now when the store fails.
-async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, sequence: u64) {
+/// Answer `fill`'s `key` with group `sequence` from the objects holding it, drop the run of
+/// sequences around it that the archive does not hold, or refuse it for now when the store
+/// fails. The group is the key's own, or one below it containing a time start.
+async fn serve_group<S: ObjectStore>(
+	shared: &Shared<S>,
+	index: &Mutex<Index>,
+	fill: &FillGroups,
+	key: u64,
+	sequence: u64,
+) {
 	let frame = fill.frame_start(sequence);
 	let (holding, after, timed, timescale) = {
 		let index = index.lock().unwrap();
@@ -236,28 +261,28 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		(holding, after, index.timed(), index.timescale)
 	};
 	let next = after.map_or(u64::MAX, |start| start.0);
-	// A lookup owes no group, so nothing says when its readers stop waiting: it finishes the read.
-	let lookup = fill.time().is_some();
 
 	let mut objects = Vec::with_capacity(holding.len());
 	for (start, path) in &holding {
-		let load = super::object(shared, path, *start, timed);
-		let loaded = match lookup {
-			true => load.await,
-			false => {
-				let unwanted = std::pin::pin!(fill.unwanted(sequence));
-				match future::select(unwanted, std::pin::pin!(load)).await {
-					// Every reader narrowed past it: the fill moves on to the groups it still owes.
-					Either::Left(_) => return,
-					Either::Right((loaded, _)) => loaded,
+		let load = async {
+			let loaded = super::object(shared, path, *start, timed).await;
+			if let Err(Error::NotFound(_)) = loaded {
+				// Pruned since it was listed, and likely not alone.
+				if let Err(err) = index::pruned(shared.store.inner(), index, *start).await {
+					tracing::warn!(%path, %err, "archived track is unavailable to list");
 				}
 			}
+			loaded
+		};
+		let unwanted = std::pin::pin!(fill.unwanted(key));
+		let loaded = match future::select(unwanted, std::pin::pin!(load)).await {
+			// Every reader narrowed past it: the fill moves on to the groups it still owes.
+			Either::Left(_) => return,
+			Either::Right((loaded, _)) => loaded,
 		};
 		match loaded {
 			Ok(object) => objects.push(object),
 			Err(Error::NotFound(_)) => {
-				// Pruned since it was listed.
-				index.lock().unwrap().forget(*start);
 				fill.drop_groups(sequence..sequence + 1);
 				return;
 			}
@@ -265,7 +290,7 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 				// The store still lists it, so a later reader asks again.
 				tracing::warn!(%path, sequence, %err, "archived group is unavailable");
 				let err = moq_net::Error::Stream(moq_net::StreamError::Internal);
-				fill.refuse_groups(sequence..sequence + 1, err);
+				fill.refuse_groups(key..key + 1, err);
 				return;
 			}
 		}
@@ -318,10 +343,10 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		}
 	}
 
-	if !lookup && !fill.is_wanted(sequence) {
+	if !fill.is_wanted(key) {
 		return;
 	}
-	let Ok(mut producer) = fill.accept(sequence, None) else {
+	let Ok(Some(mut producer)) = fill.accept(sequence, None) else {
 		return;
 	};
 	for (index, stored) in stored {
@@ -337,7 +362,7 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 			return;
 		}
 	}
-	let _ = producer.close();
+	let _ = producer.finish();
 }
 
 /// The served properties of a track stored with `info`: no max age, since the archive's

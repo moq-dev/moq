@@ -3,6 +3,8 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
+import { defined } from "../defined.test-util.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -17,8 +19,8 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		const destination = new Producer();
 		const broadcastRoute = source.route(Path.from("compressed"), { hidden: true });
 		const broadcast = broadcastRoute.broadcast;
-		const datagrams = broadcast.createDatagrams("data");
-		const track = broadcast.createTrack("data", { compression: "deflate" });
+		const datagrams = defined(broadcast.createDatagrams("data"));
+		const track = defined(broadcast.createTrack("data", { compression: "deflate" }));
 		broadcastRoute.announce();
 		const peers: { abort(): void }[] = [];
 		async function link(publish: Producer, consume: Producer, alpn: string) {
@@ -40,20 +42,17 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		try {
 			await link(source, destination, downstream);
 			const request = destination.request(Path.from("compressed"));
-			while (request.active.peek() === undefined) await request.active.changed();
-			const active = request.active.peek();
-			if (!active) throw new Error("broadcast did not resolve");
+			const active = await request.broadcast();
 			const remote = active.track("data");
 			expect((await remote.info()).compression).toBe(downstream === ALPN_07_WIP ? "deflate" : "none");
 			const reader = remote.subscribe({ delay: { max: Duration.millis(1000) } });
-			const group = track.appendGroup();
+			const group = hooks.appendNext(track);
 			const payloads = [new Uint8Array(4096).fill(7), new Uint8Array(), new Uint8Array(4096).fill(7)];
-			for (const payload of payloads)
-				group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+			for (const payload of payloads) group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 			const received = await reader.recvGroup();
 			if (!received) throw new Error("missing group");
-			expect(received.sequence).toBe(0n);
+			expect(received.start).toBe(0n);
 			for (const payload of payloads) expect((await received.readFrame())?.payload).toEqual(payload);
 			expect(await received.readFrame()).toBeUndefined();
 			const fetched = await remote.fetchGroup(0n);

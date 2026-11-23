@@ -1,5 +1,5 @@
 import { Duration, type Instant } from "@moq/clock";
-import { max, min } from "./util/sequence.ts";
+import { max, min } from "./util/key.ts";
 import { Sorted } from "./util/sorted.ts";
 
 const compare = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -19,12 +19,12 @@ export function grace(maxDelay: Duration): Duration {
 	return maxDelay.isZero() ? GRACE : maxDelay;
 }
 
-// A run of accounted sequences `[start, end)`, and when the gap below it opened, which is
+// A run of accounted keys `[start, end)`, and when the gap below it opened, which is
 // when its missing groups became late.
 type Run = { start: bigint; end: bigint; since: Instant };
 
 /**
- * The sequences a feed has accounted for, and how long each gap between them is waited for.
+ * The keys a feed has accounted for, and how long each gap between them is waited for.
  *
  * A subscription's `Tail` and a track's record of live arrivals both keep one, so they
  * give up on a missing group by the same rule. Mirrors the Rust `Ledger`.
@@ -32,7 +32,7 @@ type Run = { start: bigint; end: bigint; since: Instant };
  * @internal
  */
 export class Ledger {
-	// Disjoint, sorted, non-adjacent runs of accounted sequences. A gap older than the grace
+	// Disjoint, sorted, non-adjacent runs of accounted keys. A gap older than the grace
 	// can no longer be waited for, so it folds into the runs around it, which bounds this by
 	// the gaps opened within the grace rather than every gap ever seen. A fold is final: a
 	// later, longer grace or a lowered floor cannot reopen it.
@@ -62,7 +62,7 @@ export class Ledger {
 		this.#next = oldest && oldest === this.#runs.first() ? this.#ages.higher(oldest) : oldest;
 	}
 
-	/** Record sequences `[start, end)` as accounted for. Gaps fold only on {@link expire}. */
+	/** Record keys `[start, end)` as accounted for. Gaps fold only on {@link expire}. */
 	account(start: bigint, end: bigint, at: Instant): void {
 		if (start >= end) return;
 
@@ -110,23 +110,17 @@ export class Ledger {
 		return this.#runs.size > 1;
 	}
 
-	/** The lowest sequence accounted for. */
+	/** The lowest key accounted for. */
 	first(): bigint | undefined {
 		return this.#runs.first()?.start;
 	}
 
-	/** The exclusive end of the run accounting for `sequence`, undefined when none does. */
-	runEnd(sequence: bigint): bigint | undefined {
-		const run = this.#runs.floor(sequence);
-		return run !== undefined && sequence < run.end ? run.end : undefined;
+	/** The exclusive end of the highest run starting at or below `key`. */
+	endBelow(key: bigint): bigint | undefined {
+		return this.#runs.floor(key)?.end;
 	}
 
-	/** The exclusive end of the highest run starting at or below `sequence`. */
-	endBelow(sequence: bigint): bigint | undefined {
-		return this.#runs.floor(sequence)?.end;
-	}
-
-	/** Whether every sequence in `[start, end)` is accounted for. */
+	/** Whether every key in `[start, end)` is accounted for. */
 	covers(start: bigint, end: bigint): boolean {
 		if (start >= end) return true;
 		// Runs merge on insert, so one run covers the span or none does.
@@ -150,34 +144,6 @@ export class Ledger {
 		}
 		if (below < end) gaps.push({ start: below, end });
 		return gaps;
-	}
-
-	/**
-	 * Take `[start, end)` back out of what is accounted for, owed again from `at`: a verdict that
-	 * accounted for it was reversed. The gap it leaves opens at `at`, so it is waited for a fresh
-	 * grace, even where it joins an older gap. Mirrors the Rust `Ledger::unaccount`.
-	 */
-	unaccount(start: bigint, end: bigint, at: Instant): void {
-		if (start >= end) return;
-		const lower = this.#runs.floor(start);
-		const overlapping: Run[] = [];
-		for (const run of this.#runs.from(lower?.start ?? start)) {
-			if (run.start >= end) break;
-			if (run.end > start) overlapping.push(run);
-		}
-		if (overlapping.length === 0) return;
-		for (const run of overlapping) {
-			this.#remove(run);
-			if (this.#last === run) this.#last = undefined;
-			if (run.start < start) {
-				this.#insert({ start: run.start, end: start, since: run.since });
-			}
-			if (end < run.end) {
-				this.#insert({ start: end, end: run.end, since: at });
-			}
-		}
-		this.#last = this.#runs.last();
-		this.demand(start, end, at);
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */

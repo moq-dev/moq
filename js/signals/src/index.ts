@@ -41,9 +41,12 @@ export interface Getter<T> {
 
 /** Write side of a signal: replace or transform the current value. */
 export interface Setter<T> {
-	/** Replaces the value. A function is stored as-is; use {@link update} to transform. */
-	set(value: T): void;
-	/** Transforms the value via a function of the previous value. */
+	/**
+	 * Replaces the value, notifying only if it changed unless `force` is passed.
+	 * A function is stored as-is; use {@link update} to transform.
+	 */
+	set(value: T, force?: true): void;
+	/** Replaces the value with `fn(prev)`, notifying only if it changed. */
 	update(fn: (prev: T) => T): void;
 }
 
@@ -59,7 +62,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	#value: T;
 
 	#subscribers: Set<Subscriber<T>> = new Set();
-	#changed: Set<Subscriber<T>> = new Set();
+	// Each registration carries its own token, so a flush fires only the registration it
+	// snapshotted and a stale dispose leaves a newer registration of the same callback alone.
+	#changed: Map<Subscriber<T>, object> = new Map();
 
 	// Microtask coalescing state
 	#pending = false;
@@ -67,6 +72,10 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	#initial: Set<Subscriber<T>> = new Set();
 	#oldValue: T | undefined;
 	#hasCapturedOldValue = false;
+	// The value each listener added after the capture saw, which may differ from #oldValue.
+	// Kept per listener set, since one callback can be both a subscriber and a waiter.
+	#seenSubscribers: Map<Subscriber<T>, T> = new Map();
+	#seenChanged: Map<Subscriber<T>, T> = new Map();
 	#forceNotify = false;
 
 	/** Marks this as a Signal across package instances. */
@@ -94,17 +103,10 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	/**
 	 * Sets the current value, notifying subscribers if it changed.
-	 * Pass `notify` true to always notify or false to never notify.
+	 * Pass `force` to notify even when the value is equal, such as to repeat a command.
 	 * A function is stored as the value; use {@link update} to transform instead.
 	 */
-	set(value: T, notify?: boolean): void {
-		// A silent write captures nothing: a listener that subscribes after it starts from the new
-		// value, so comparing a later write against the value it replaced would hide a change.
-		if (notify === false) {
-			this.#value = value;
-			return;
-		}
-
+	set(value: T, force?: true): void {
 		// Capture old value before the first set in this microtask.
 		if (!this.#hasCapturedOldValue) {
 			this.#oldValue = this.#value;
@@ -113,7 +115,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 		this.#value = value;
 
-		if (notify === true) this.#forceNotify = true;
+		if (force) this.#forceNotify = true;
 
 		// If there are no subscribers, don't queue a microtask.
 		// Drop the capture since no listener saw the old value; a flush already queued finds
@@ -122,6 +124,8 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 			this.#hasCapturedOldValue = false;
 			this.#oldValue = undefined;
 			this.#forceNotify = false;
+			this.#seenSubscribers.clear();
+			this.#seenChanged.clear();
 			return;
 		}
 
@@ -137,81 +141,98 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		const value = this.#value;
 
 		// Watchers added during this flush wait for the flush their watch() queued.
-		let initial: Set<Subscriber<T>> | undefined;
-		if (this.#initial.size > 0) {
-			initial = this.#initial;
-			this.#initial = new Set();
+		const initial = this.#initial;
+		if (initial.size > 0) this.#initial = new Set();
+
+		// Listeners that registered mid-batch and the value each saw. Only a captured write records
+		// them, and dropping the capture clears them.
+		let seenSubscribers: Map<Subscriber<T>, T> | undefined;
+		if (this.#seenSubscribers.size > 0) {
+			seenSubscribers = this.#seenSubscribers;
+			this.#seenSubscribers = new Map();
+		}
+		let seenChanged: Map<Subscriber<T>, T> | undefined;
+		if (this.#seenChanged.size > 0) {
+			seenChanged = this.#seenChanged;
+			this.#seenChanged = new Map();
 		}
 
 		// A write while nobody listened dropped the capture, so any listener since then saw the
 		// current value when it subscribed and there is no change to deliver.
+		let changed = false;
 		if (this.#hasCapturedOldValue) {
 			this.#hasCapturedOldValue = false;
-			const old = this.#oldValue;
+			changed = this.#forceNotify || !isEqual(this.#oldValue as T, value);
 			this.#oldValue = undefined;
-
-			const force = this.#forceNotify;
 			this.#forceNotify = false;
-
-			// Deliver unless the net change is zero (value returned to what it was before).
-			if (force || !isEqual(old as T, value)) {
-				const changed = this.#changed;
-				this.#changed = new Set();
-
-				for (const fn of this.#subscribers) {
-					if (this.#initial.size > 0 && this.#initial.has(fn)) continue;
-					try {
-						fn(value);
-					} catch (error) {
-						console.error("signal subscriber error", error);
-					}
-				}
-
-				for (const fn of changed) {
-					try {
-						fn(value);
-					} catch (error) {
-						console.error("signal changed error", error);
-					}
-				}
-
-				// Pending watchers are subscribers, so the loop above was their first value.
-				return;
-			}
 		}
 
-		if (!initial) return;
-		for (const fn of initial) {
-			// Disposed during this flush.
-			if (!this.#subscribers.has(fn)) continue;
+		if (!changed && !seenSubscribers && !seenChanged && initial.size === 0) return;
+
+		// Every listener gets the batch's net change. One that registered mid-batch also gets a
+		// value set back to the old one, since it saw the middle value.
+		const deliver = (fn: Subscriber<T>, seen: Map<Subscriber<T>, T> | undefined) =>
+			changed || (seen?.has(fn) === true && !isEqual(seen.get(fn) as T, value));
+
+		// Snapshotted before any callback runs, so a waiter one registers waits for the next change.
+		// The live set stays in place, so a waiter cancelled during this flush stays cancelled.
+		const waiters = changed || seenChanged ? [...this.#changed] : undefined;
+
+		for (const fn of this.#subscribers) {
+			if (this.#initial.has(fn)) continue;
+			// A pending watcher is owed its first value whether or not this flush is a change.
+			if (!initial.has(fn) && !deliver(fn, seenSubscribers)) continue;
 			try {
 				fn(value);
 			} catch (error) {
-				console.error("signal watch error", error);
+				console.error("signal subscriber error", error);
+			}
+		}
+
+		if (!waiters) return;
+		for (const [fn, token] of waiters) {
+			// Saw the final value, so it keeps waiting.
+			if (!deliver(fn, seenChanged)) continue;
+			// Cancelled, or cancelled and registered again, by a callback earlier in this flush.
+			if (this.#changed.get(fn) !== token) continue;
+			this.#changed.delete(fn);
+			try {
+				fn(value);
+			} catch (error) {
+				console.error("signal changed error", error);
 			}
 		}
 	}
 
-	/** Sets the value to the result of `fn(prev)`, notifying subscribers unless `notify` is false. */
-	update(fn: (prev: T) => T, notify = true): void {
-		const value = fn(this.#value);
-		this.set(value, notify);
+	/**
+	 * Sets the value to `fn(prev)`, notifying subscribers only if it changed, exactly like {@link set}.
+	 * Returning `prev` after changing it in place notifies nothing; use {@link mutate} for that.
+	 */
+	update(fn: (prev: T) => T): void {
+		this.set(fn(this.#value));
 	}
 
 	/**
-	 * Mutates the current value in place via `fn`, returning `fn`'s result and
-	 * notifying subscribers unless `notify` is false.
+	 * Changes the current value in place via `fn` and returns `fn`'s result.
+	 * Always notifies subscribers, since an in-place change cannot be compared.
 	 */
-	mutate<R>(fn: (value: T) => R, notify = true): R {
+	mutate<R>(fn: (value: T) => R): R {
 		const r = fn(this.#value);
-		this.set(this.#value, notify);
+		this.set(this.#value, true);
 		return r;
 	}
 
 	/** Calls `fn` every time the value changes. Returns a function to unsubscribe. */
 	subscribe(fn: Subscriber<T>): Dispose {
+		this.#see(fn, this.#subscribers, this.#seenSubscribers);
 		this.#subscribers.add(fn);
 		return () => this.#subscribers.delete(fn);
+	}
+
+	// Records what a listener added mid-batch saw, so the flush can compare against it.
+	// One already in `listeners` was there before and saw the captured old value.
+	#see(fn: Subscriber<T>, listeners: { has(fn: Subscriber<T>): boolean }, seen: Map<Subscriber<T>, T>): void {
+		if (this.#hasCapturedOldValue && !listeners.has(fn) && !seen.has(fn)) seen.set(fn, this.#value);
 	}
 
 	/** Resolves with the value the next time it changes. */
@@ -219,13 +240,23 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	/** Calls `fn` once the next time the value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T>): Dispose;
 	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
-		if (fn) {
-			this.#changed.add(fn);
-			return () => this.#changed.delete(fn);
-		}
+		if (fn) return this.#wait(fn);
 		return new Promise<T>((resolve) => {
-			this.#changed.add(resolve);
+			this.#wait(resolve);
 		});
+	}
+
+	// Registers a change waiter; adding a registered callback again keeps its registration.
+	#wait(fn: Subscriber<T>): Dispose {
+		this.#see(fn, this.#changed, this.#seenChanged);
+		let token = this.#changed.get(fn);
+		if (!token) {
+			token = {};
+			this.#changed.set(fn, token);
+		}
+		return () => {
+			if (this.#changed.get(fn) === token) this.#changed.delete(fn);
+		};
 	}
 
 	/**
@@ -867,28 +898,6 @@ export class Effect {
 		this.cleanup(() => abort.abort());
 	}
 
-	/**
-	 * Runs `fn` as a nested effect, then closes that effect after `duration` on the installed clock.
-	 *
-	 * Shares {@link run}'s handling of a task that outlived its run: the child is closed at the
-	 * next teardown, not immediately.
-	 */
-	timeout(fn: (effect: Effect) => void, duration: Duration) {
-		if (this.#dispose === undefined) {
-			console.warn("Effect.timeout called when closed, ignoring");
-			return;
-		}
-
-		const effect = new Effect(fn);
-		const abort = new AbortController();
-		void sleep(duration, { signal: abort.signal }).then(() => effect.close(), noop);
-
-		this.#dispose.push(() => {
-			abort.abort();
-			effect.close();
-		});
-	}
-
 	/** Runs `fn` on the next animation frame, unless the effect reruns or closes first. */
 	animate(fn: (now: DOMHighResTimeStamp) => void) {
 		if (this.#dispose === undefined) {
@@ -1192,9 +1201,12 @@ export class Effect {
 		return this.#abort.signal;
 	}
 
-	/** Copies `src` into `dst` and keeps `dst` in sync as `src` changes. */
+	/**
+	 * Copies `src` into `dst` and notifies `dst` each time `src` notifies, so a `src` changed in place
+	 * with {@link Signal.mutate} still reaches `dst`, which holds the same object.
+	 */
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
-		this.subscribe(src, (value) => dst.update(() => value));
+		this.subscribe(src, (value) => dst.set(value, true));
 	}
 }
 

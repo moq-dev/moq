@@ -1,8 +1,8 @@
 #![cfg(feature = "async")]
 
 //! A group the subscription's max delay gives up on before the publisher finishes it never
-//! reaches the next hop as finished. The served stream resets with `Old`, so a relay does
-//! not cache the frames it already has as the whole group.
+//! reaches the next hop as finished, so a relay does not cache the frames it already has as
+//! the whole group: the served stream resets with `Old`.
 
 use crate::support;
 use moq_net::track::Delay;
@@ -23,16 +23,20 @@ const BUDGET: Duration = Duration::from_millis(500);
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
+
+/// How a reader ended a group: the read's outcome, and the end the group was finished at.
+type Ended = (Result<Option<usize>, moq_net::Error>, Option<u64>);
 
 /// Publish an unfinished group 0 that stalls past the budget after its only frame, and
 /// return how a reader without a budget of its own ends group 0 at the downstream hop:
-/// `None` when that hop holds no copy of it, otherwise the read's outcome.
-async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
+/// `None` when that hop holds no copy of it.
+async fn round(version: &str) -> Option<Ended> {
 	let publisher = produce_origin(1);
 	let downstream = produce_origin(2);
 	let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &downstream).await;
@@ -80,7 +84,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		let mut next = track.append_next().unwrap();
 		next.write_frame(Timestamp::from_millis(millis).unwrap(), &b"edge"[..])
 			.unwrap();
-		next.close().unwrap();
+		next.finish().unwrap();
 	}
 	let tail = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
@@ -122,16 +126,22 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		}
 	};
 	stalled.abort(moq_net::Error::Cancel).unwrap();
-	Some(end)
+	Some((end, first.end()))
 }
 
 #[kio::test]
 async fn a_stalled_group_is_never_cached_downstream_as_finished() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
-		let end = round(version).await;
-		if let Some(Ok(_)) = end {
-			failures.push(format!("{version}: the downstream hop finished group 0: {end:?}"));
+		let ended = round(version).await;
+		// Lite-07 says a group is whole with its end, which a closed one never has; earlier
+		// versions can't tell a closed group from a whole one, so only an error is safe.
+		let finished = matches!(
+			(&ended, version == &"moq-lite-07-wip"),
+			(Some((_, Some(_))), _) | (Some((Ok(_), None)), false)
+		);
+		if finished {
+			failures.push(format!("{version}: the downstream hop finished group 0: {ended:?}"));
 		}
 	}
 	assert!(failures.is_empty(), "{failures:#?}");

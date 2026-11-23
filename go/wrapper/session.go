@@ -46,7 +46,9 @@ type ConnectionPhaseConnecting struct {
 	Failure error
 }
 
-// ConnectionPhaseConnected means a session is serving.
+// ConnectionPhaseConnected means a session is serving: its peer accepted the
+// credential, or on moq-lite 03/04, which never answer it, the session stayed up 1s.
+// A refused session never reaches this phase.
 type ConnectionPhaseConnected struct {
 	// Version names the live session's negotiated protocol, like "moq-lite-03".
 	Version string
@@ -222,8 +224,7 @@ type Tokens struct {
 // its own ?jwt=; each other one widens the grant over in-band AUTH. The next
 // dial presents them, and a live session with in-band AUTH presents them at
 // once, withdrawing each replaced token once its replacements are answered,
-// even when one is refused. After an authorization refusal the session redials
-// only if they changed. An empty token is refused.
+// even when one is refused. An empty token is refused.
 func (t *Tokens) Set(tokens ...string) error {
 	return t.inner.Set(append([]string(nil), tokens...))
 }

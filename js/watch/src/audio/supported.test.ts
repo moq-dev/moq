@@ -6,7 +6,7 @@ import { Source } from "./source";
 
 // Bun cannot load the blob-URL worklet import, so mock it before the decoder imports it.
 mock.module("./render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
-const { Decoder } = await import("./decoder");
+const { supported } = await import("./supported");
 
 test("renditions are probed through the libav fallback without a native AudioDecoder", async () => {
 	// The premise: Bun ships no WebCodecs, so only the fallback can report support.
@@ -21,9 +21,9 @@ test("renditions are probed through the libav fallback without a native AudioDec
 		});
 
 	// 0x1190 is the AudioSpecificConfig for AAC-LC, 48kHz, stereo.
-	expect(await Decoder.supported(config({ codec: "mp4a.40.2", description: "1190" }))).toBe(true);
-	expect(await Decoder.supported(config({ codec: "opus" }))).toBe(true);
-	expect(await Decoder.supported(config({ codec: "flac" }))).toBe(false);
+	expect(await supported(config({ codec: "mp4a.40.2", description: "1190" }))).toBe(true);
+	expect(await supported(config({ codec: "opus" }))).toBe(true);
+	expect(await supported(config({ codec: "flac" }))).toBe(false);
 });
 
 test("the decoder support probe is reused through mute and unmute", async () => {
@@ -34,13 +34,10 @@ test("the decoder support probe is reused through mute and unmute", async () => 
 		numberOfChannels: 2,
 	});
 	// Load the real libav decoder before counting its WebCodecs support queries.
-	await Decoder.supported(config);
+	await supported(config);
 	using queries = spyOn(AudioDecoder, "isConfigSupported");
 	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio: config } } });
-	const source = new Source({
-		broadcast: { out: { catalog } } as unknown as Broadcast,
-		supported: Decoder.supported,
-	});
+	const source = new Source({ broadcast: { out: { catalog } } as unknown as Broadcast });
 	try {
 		await source.out.available.changed();
 		for (const enabled of [false, true]) {

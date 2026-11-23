@@ -11,7 +11,7 @@ Treat everything a peer sends as hostile, before and after authentication:
 - **WebSocket and HTTP** on the relay's `[web]` listeners: the upgrade, the public `/announced`, `/fetch` and `/certificate.sha256` endpoints, and query strings.
 - **Authorization inputs**: the JWT (`moq-auth`), the SETUP token, the dialed path and query, and the relay's handling of grants (root, publish and subscribe pattern unions, mounts, expiry, revalidation).
 - **Media payloads**: catalogs (`hang`, `moq-msf`, JSON in `moq-json`) and containers and codecs parsed by `moq-mux` (fMP4, MPEG-TS, FLV, MKV, LOC, and the H.264, H.265, AV1, VP8, VP9, AAC, Opus and FLAC bitstream parsers). A publisher controls these bytes, and the relay or a subscriber may parse them.
-- **Ingest gateways**: RTMP (`moq-rtmp`), RTSP (`moq-rtsp`), SRT (`moq-srt`), WebRTC WHIP/WHEP with ICE/STUN (`moq-webrtc`, including the str0m and dimpl copies vendored in `rs/moq-webrtc/src/vendor`), and HLS playlists and segments (`moq-hls`).
+- **Ingest gateways**: RTMP (`moq-rtmp`), RTSP (`moq-rtsp`), SRT (`moq-srt`), WebRTC WHIP/WHEP with ICE/STUN (`moq-webrtc`, on the upstream str0m and dimpl crates), and HLS playlists and segments (`moq-hls`).
 - **Peer relays** in a cluster are authenticated but should not be able to break a node beyond what their grant allows.
 
 ## Security properties the relay must hold
@@ -25,7 +25,7 @@ The relay is deployed on the public internet as shared infrastructure: one proce
 - **Cache integrity.** The relay caches and forwards groups by broadcast, track, and group. A publisher must not be able to overwrite or inject into a broadcast it was not granted, and a subscriber must never receive one tenant's data under another tenant's name.
 - **Cluster trust.** Peer relays authenticate with tokens or mTLS and get broader rights than clients. A relay dials only configured or discovered peers, never a URL learned from an announcement. LAN discovery over mDNS (`[cluster.lan]`) is open to anyone on the network unless `secret` is set, which is documented; with `secret` set, an unkeyed host must not be able to join.
 - **Amplification and reflection.** QUIC's anti-amplification limit and address validation, and ICE in the WebRTC gateway, answer unauthenticated UDP. A response larger than the request toward a spoofed source is a finding.
-- **End-to-end encryption.** `moq-crypto` encrypts groups, datagrams, and track names so a relay cannot read them. A flaw in the construction (nonce reuse, a key or name leaking to the relay, a forgeable group) is in scope.
+- **End-to-end encryption.** `moq-e2ee`, unpublished and experimental, encrypts groups, datagrams, and track names so a relay cannot read them. A flaw in the construction (nonce reuse, a key or name leaking to the relay, a forgeable group) is in scope.
 
 ## Components that matter most / least
 
@@ -35,11 +35,11 @@ Most important, in this order:
 2. Authorization: a session publishing, subscribing, or seeing announcements outside its grant, or reaching another root (tenant) through path tricks, revalidation, mounts, or cluster links.
 3. `rs/moq-mux` and `rs/hang`: container, codec, and catalog parsing of publisher-controlled bytes.
 4. The ingest gateways: `rs/moq-rtmp`, `rs/moq-rtsp`, `rs/moq-srt`, `rs/moq-webrtc`, `rs/moq-hls`.
-5. `rs/moq-crypto`, `rs/moq-cli`, `rs/moq-json`, `rs/moq-stats`, `rs/kio`.
+5. `rs/moq-crypto`, `rs/moq-e2ee`, `rs/moq-cli`, `rs/moq-json`, `rs/moq-stats`, `rs/kio`.
 
 `unsafe` is rare and worth reading closely where it appears: `rs/moq-quic`, `rs/moq-net/src/model`, `rs/moq-net/src/util/cell.rs`, `rs/moq-net/src/transport.rs`, and `rs/moq-relay/src/uring.rs`.
 
-Out of scope: `js/` and the other language bindings (`py/`, `swift/`, `kt/`, `go/`, `dart/`, `cpp/`, `rs/moq-ffi`, `rs/moq-c`), capture and encode crates that read local devices (`moq-video`, `moq-v4l`, `moq-nvenc`, `moq-audio`, `moq-transcode`, `moq-gst`, `moq-boy`), `demo/`, `bench/`, `test/`, `infra/`, `doc/`, `drafts/`, and CI configuration. A flaw that lies wholly inside a dependency (quinn, rustls, aws-lc, tokio, hyper) belongs upstream unless our use of it makes it reachable.
+Out of scope: `js/` and the other language bindings (`py/`, `swift/`, `kt/`, `go/`, `dart/`, `cpp/`, `rs/moq-ffi`, `rs/libmoq`), capture and encode crates that read local devices (`moq-video`, `moq-v4l`, `moq-nvenc`, `moq-audio`, `moq-transcode`, `moq-gst`, `moq-boy`), `demo/`, `bench/`, `test/`, `infra/`, `doc/`, `drafts/`, and CI configuration. A flaw that lies wholly inside a dependency (quinn, rustls, aws-lc, tokio, hyper) belongs upstream unless our use of it makes it reachable.
 
 ## How to exercise it
 

@@ -11,7 +11,9 @@ use rangemap::{RangeMap, RangeSet};
 
 use super::{Establish, SubStream, Tail, TrackServe};
 use crate::{
-	Error, StreamError, group, lite,
+	Error, StreamError,
+	coding::Recv,
+	group, lite,
 	track::{self, Delay, Order, Position, Subscription},
 };
 
@@ -44,7 +46,7 @@ impl FillAsk {
 	}
 
 	/// Count `fill`'s preferences in.
-	fn add(&mut self, fill: &track::Fill) {
+	fn add(&mut self, fill: &track::FillGroups) {
 		self.priority = self.priority.max(fill.priority());
 		self.max_delay = match (self.max_delay, fill.max_delay()) {
 			(Some(ours), Some(theirs)) => Some(ours.max(theirs)),
@@ -55,10 +57,10 @@ impl FillAsk {
 		}
 	}
 
-	/// The bounded ranges the groups take on the wire, each ending before a group's first
+	/// The bounded ranges `groups` take on the wire, each ending before a group's first
 	/// frame, as `wire_ranges` ends an absolute one.
-	pub fn wire(&self) -> impl Iterator<Item = lite::Range> + '_ {
-		self.groups.iter().map(|groups| lite::Range {
+	pub fn wire(groups: &RangeSet<u64>) -> impl Iterator<Item = lite::Range> + '_ {
+		groups.iter().map(|groups| lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 			end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
 		})
@@ -100,7 +102,7 @@ impl FillAsk {
 /// stream still arriving would reset it.
 #[derive(Default)]
 pub(super) struct RangeFills {
-	held: Vec<track::Fill>,
+	held: Vec<track::FillGroups>,
 	/// What the upstream subscription asks for the fills now.
 	pub ask: FillAsk,
 	/// Asked groups no fill owes any more whose stream is still being read.
@@ -128,7 +130,7 @@ impl RangeFills {
 		self.held.is_empty() && self.ask.is_empty() && self.recoveries.is_empty()
 	}
 
-	pub fn push(&mut self, fill: track::Fill) {
+	pub fn push(&mut self, fill: track::FillGroups) {
 		self.held.push(fill);
 	}
 
@@ -253,6 +255,20 @@ impl RangeFills {
 		read: bool,
 		waiter: &kio::Waiter,
 	) -> Result<bool, Error> {
+		// What the copy records skipped is never produced, such as the starts inside a whole
+		// group's span, which its GROUP_END names rather than a SUBSCRIBE_SKIP: a fill owing one
+		// is answered as a SUBSCRIBE_SKIP answers it, rather than asked or recovered again.
+		let mut skipped = Vec::new();
+		for fill in &self.held {
+			if let Some(run) = fill.next_run() {
+				skipped.extend(serving.skipped(run).iter().cloned());
+			}
+		}
+		for groups in skipped {
+			for gap in self.refused.gaps(&groups).collect::<Vec<_>>() {
+				self.refused.insert(gap, Refusal::dropped(StreamError::NotFound));
+			}
+		}
 		// The groups the subscription already accounted for, which it never sends again, are
 		// recovered on their own, once.
 		if let Some(accounted) = accounted {
@@ -416,8 +432,8 @@ impl RangeFills {
 		}
 		self.reading.retain(|key, _| draining.contains(key));
 		self.draining = draining;
-		// A run being recovered leaves the subscription, even out of a run kept whole: any later
-		// update reopens its stale drop there, and the publisher would serve it on both.
+		// A run being recovered leaves the subscription, even out of a run kept whole: the
+		// subscription dropped it for good, so naming it there again only costs the publisher.
 		for run in self.recovering.iter() {
 			groups.remove(run.clone());
 		}
@@ -431,14 +447,22 @@ impl RangeFills {
 		if ask == self.ask {
 			return Ok(false);
 		}
-		self.retire_skipped(&ask.groups);
 		self.ask = ask;
 		Ok(true)
 	}
 
-	/// Asking for `asked` from now on retires the range of each run not asked whole any more,
-	/// and what its start skipped with it.
-	fn retire_skipped(&mut self, asked: &RangeSet<u64>) {
+	/// The groups the ask leaves out on purpose: refused, or recovered on their own.
+	pub fn avoid(&self) -> RangeSet<u64> {
+		let mut avoid = self.recovering.clone();
+		for (groups, _) in self.refused.iter() {
+			avoid.insert(groups.clone());
+		}
+		avoid
+	}
+
+	/// Asking for `asked` from now on, the runs the subscription carries, retires the range
+	/// of each run not asked whole any more, and what its start skipped with it.
+	pub fn retire_skipped(&mut self, asked: &RangeSet<u64>) {
 		let retired: Vec<_> = self
 			.skipped
 			.iter()
@@ -477,7 +501,7 @@ impl Refusal {
 
 	/// Answer `groups` of `fill`: a lost group is named dropped, as a FETCH's miss is, and
 	/// anything else is refused for now, recorded nowhere.
-	fn answer(&self, fill: &track::Fill, groups: Range<u64>) {
+	fn answer(&self, fill: &track::FillGroups, groups: Range<u64>) {
 		match &self.err {
 			StreamError::NotFound if self.lost => fill.drop_groups(groups),
 			StreamError::NotFound => fill.refuse_groups(groups, Error::NotFound),
@@ -619,12 +643,7 @@ impl Recovery {
 					if let Poll::Ready(Err(err)) = active.stream.writer.poll_flush(waiter) {
 						tracing::debug!(%err, "recovery subscribe write failed");
 					}
-					let res = ready!(
-						active
-							.stream
-							.reader
-							.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
-					);
+					let res = ready!(active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter));
 					let now = self.serve.subscriber.runtime.now();
 					let version = self.serve.subscriber.version;
 					let groups = self.groups.clone();
@@ -641,7 +660,7 @@ impl Recovery {
 					};
 					match res {
 						// One start, for its one range.
-						Ok(Some(lite::SubscribeResponse::Start(start)))
+						Recv::Message(lite::SubscribeResponse::Start(start))
 							if active.started.is_none() && start.starts.len() == 1 =>
 						{
 							// Below its start the publisher delivers nothing.
@@ -652,49 +671,46 @@ impl Recovery {
 							);
 							active.started = Some(start.starts[0]);
 						}
-						Ok(Some(lite::SubscribeResponse::Drop(dropped))) => {
+						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
 							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
 						}
 						// Never produced, such as the keys between two sparse group starts: the copy
 						// records the skip, as the subscription itself does, and a fill owing one
 						// is answered rather than asked again.
-						Ok(Some(lite::SubscribeResponse::Skip(skipped))) => {
+						Recv::Message(lite::SubscribeResponse::Skip(skipped)) => {
 							if !skipped.groups.is_empty() {
 								self.serving.skip_received(skipped.groups.clone());
 								given_up(skipped.groups, Refusal::dropped(StreamError::NotFound));
 							}
 						}
 						// Nothing at or past the track's end will be produced.
-						Ok(Some(lite::SubscribeResponse::Finish(finish))) if active.end.is_none() => {
+						Recv::Message(lite::SubscribeResponse::Finish(finish)) if active.end.is_none() => {
 							given_up(
 								finish.group.max(groups.start)..groups.end,
 								Refusal::dropped(StreamError::NotFound),
 							);
 							active.end = Some(finish);
 						}
-						Ok(Some(lite::SubscribeResponse::Ok(_))) => {}
+						Recv::Message(lite::SubscribeResponse::Ok(_)) => {}
 						// A second START or FINISH, or a STARTED for a range no update added.
-						Ok(Some(msg)) => {
+						Recv::Message(msg) => {
 							tracing::warn!(?msg, "unexpected recovery subscribe response");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
 						// The publisher FINs in reply to ours, or once it finished the track.
-						Ok(None) if *finished || active.end.is_some() => self.end(StreamError::NotFound),
+						Recv::Ended if *finished || active.end.is_some() => self.end(StreamError::NotFound),
 
-						Ok(None) => {
+						Recv::Ended => {
 							tracing::warn!("recovery subscribe ended without SUBSCRIBE_FINISH");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
-						Err(err) => {
-							// Malformed bytes are a violation, as on the subscription itself; a
-							// reset gives up what is left with its reason.
-							let err = match err {
-								Error::Decode(crate::DecodeError::Short) => err,
-								err => crate::auth::protocol_error(err),
-							};
-							if matches!(err, Error::ProtocolViolation) {
-								return Poll::Ready(Err(err));
-							}
+						// Malformed bytes are a violation, as on the subscription itself.
+						Recv::Malformed(err) => {
+							tracing::warn!(%err, "malformed recovery subscribe response");
+							return Poll::Ready(Err(Error::ProtocolViolation));
+						}
+						// A reset, or a FIN inside a message, gives up what is left with its reason.
+						Recv::Reset(err) => {
 							tracing::debug!(%err, "recovery subscribe ended");
 							self.end(StreamError::from(&err));
 						}
@@ -801,7 +817,7 @@ mod tests {
 
 	/// A track whose cache evicted groups 0..3, with a reader of them whose fill is the next
 	/// request.
-	fn missed() -> (track::Producer, track::Requests, track::Ordered, track::Fill) {
+	fn missed() -> (track::Producer, track::Requests, track::Ordered, track::FillGroups) {
 		let producer = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"test",
@@ -815,7 +831,7 @@ mod tests {
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		// From group 0, which a time start names whatever is held, so the reader asks the
 		// missing groups straight away rather than looking up where its start falls.
@@ -827,7 +843,7 @@ mod tests {
 	}
 
 	/// A reader of groups 0..3, and the fill it asks for.
-	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::Fill) {
+	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::FillGroups) {
 		let waiter = kio::Waiter::noop();
 		let mut reader = producer
 			.subscribe(
@@ -860,11 +876,11 @@ mod tests {
 		// The lowered start asks for them again, and they arrive.
 		let (mut reader, fill) = ask(&producer, &requests);
 		for key in 0..3 {
-			let mut group = fill.accept(key, None).unwrap();
+			let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		for key in 0..3 {
 			let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {

@@ -1,7 +1,7 @@
-import type { Time, Timed } from "@moq/net";
+import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { MAX_FRAME_BYTES } from "../limits.ts";
-import { frameTime, openGroup, startsPast } from "../time.ts";
+import { frameTime, startsPast } from "../time.ts";
 
 import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
@@ -20,11 +20,12 @@ export interface Finished {}
  * the encoder emits a snapshot. When something else already owns the track, use the {@link Encoder}
  * directly.
  *
- * A group of deltas runs until a joiner wants a fresh one: once the deltas outweigh the track's
- * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the producer
- * restates the value there at the newest timestamp written. On a scale-less track that timestamp
- * names the group, so while it is the newest group's own key the refresh waits for a later update,
- * since two groups never share a key. Set the ratio when creating the track, or joins never ask.
+ * A group of deltas runs until a reader asks for a fresh one, judged by the track's `refresh` (a
+ * join once the deltas outweigh its ratio times the snapshot, or a subscriber's `refresh()`, each
+ * waiting out its interval), and the producer restates the value there at the newest timestamp
+ * written. On a scale-less track that timestamp names the group, so while it is the newest group's
+ * own key the refresh waits for a later update, since two groups never share a key. Set `refresh`
+ * when creating the track, or readers never ask.
  *
  * Set `compression` on that track's info too: JSON is small and repetitive, and moq-net compresses each
  * delta against the snapshot earlier in its group.
@@ -40,7 +41,7 @@ export class Producer<T> {
 	// is closed the moment it's written and never held open.
 	#deltas: boolean;
 
-	// The sequence of the newest group written, which a joiner's wanted group has to pass.
+	// The sequence of the newest group written; nothing is restated before one.
 	#largest?: bigint;
 	// The newest timestamp written, which a refresh restates the value at. An update may carry an
 	// older timestamp than its group's first frame, and a new group may not start before that one.
@@ -58,13 +59,13 @@ export class Producer<T> {
 		this.#deltas = config.deltas !== false;
 
 		// With deltas off every group holds one frame, so no join ever asks for a fresh one.
-		if (this.#deltas) this.#unwatch = this.#track.demand().wanted.subscribe((wanted) => this.#refresh(wanted));
+		if (this.#deltas) this.#unwatch = this.#track.demand().refresh.subscribe((asked) => this.#refresh(asked));
 	}
 
-	// Restate the value in a new group once a joiner wants one past the largest written.
-	#refresh(wanted: bigint | undefined): void {
+	// Restate the value in a new group once a reader asks for one past the largest written.
+	#refresh(asked: boolean): void {
 		this.#deferred = false;
-		if (wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
+		if (!asked || this.#largest === undefined) return;
 		// Two groups never share a key, so a scale-less refresh at the newest group's own key waits for
 		// a later write. Checked before encoding, since a snapshot dropped unwritten resets the encoder.
 		const at = this.#at;
@@ -115,7 +116,7 @@ export class Producer<T> {
 	 * is {@link Time.Timestamp.unscaled} at a group key instead: a snapshot opens its group there,
 	 * which must pass every group the track holds, and a delta carries the open group's key.
 	 */
-	update({ value, at }: Timed<T>): void {
+	update(value: T, at: Time.Timestamp): void {
 		const frame = this.#encoder.update(value);
 		if (!frame) return;
 
@@ -126,7 +127,7 @@ export class Producer<T> {
 		frame.commit();
 		if (this.#at === undefined || this.#at.isBefore(at)) this.#at = at;
 		// A deferred refresh waits for a key past the open group's, which this may be.
-		if (this.#deferred) this.#refresh(this.#track.demand().wanted.peek());
+		if (this.#deferred) this.#refresh(this.#track.demand().refresh.peek());
 	}
 
 	#write(encoded: Encoded, at: Time.Timestamp): void {
@@ -139,8 +140,8 @@ export class Producer<T> {
 		if (encoded.keyframe) {
 			// Opened before the previous group finishes, so a key at or before the newest group's is
 			// refused with the previous group still open.
-			const group = openGroup(this.#track, at);
-			this.#largest = group.sequence;
+			const group = this.#track.appendGroup(at);
+			this.#largest = group.start;
 
 			// The previous group is complete; no more frames will be appended to it.
 			this.#group?.finish();
@@ -196,15 +197,17 @@ export class Producer<T> {
 	 */
 	mutate(fn: (value: T) => void, at: Time.Timestamp): void {
 		// Start from the last-published value, falling back to the configured initial value. We
-		// don't invent an empty object: mutating with nothing to start from is a usage error.
-		const base = this.#encoder.value ?? this.#initial;
+		// don't invent an empty object: mutating with nothing to start from is a usage error. A
+		// published JSON null is a value, so only `undefined` means nothing was published.
+		const published = this.#encoder.value;
+		const base = published !== undefined ? published : this.#initial;
 		if (base === undefined) {
 			throw new Error("mutate() requires a prior update() or `initial` in the config");
 		}
 
 		const value = structuredClone(base) as T;
 		fn(value);
-		this.update({ value, at });
+		this.update(value, at);
 	}
 
 	/** Finish the track, closing any open group, and return it as {@link Finished}. */

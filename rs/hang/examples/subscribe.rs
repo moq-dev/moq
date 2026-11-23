@@ -63,19 +63,6 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 					old.abort();
 				}
 			}
-			moq_net::announce::Event::Offline(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast offline");
-				if let Some(old) = playing.take() {
-					old.abort();
-				}
-			}
-			// The follow resumes on its own once the path is reachable again.
-			moq_net::announce::Event::Unavailable(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast unreachable");
-			}
-			moq_net::announce::Event::Available(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast reachable again");
-			}
 		}
 	}
 	anyhow::bail!("origin closed")
@@ -123,7 +110,8 @@ async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 		"subscribing to video track"
 	);
 
-	// Subscribe to the video track.
+	// Subscribe to the video track. No min delay, since this plays nothing out: a missing group is
+	// waited for the whole latency budget.
 	let latency = Duration::from_millis(500);
 	let track_consumer = broadcast
 		.track(hang::catalog::Reference::track(config, name))?

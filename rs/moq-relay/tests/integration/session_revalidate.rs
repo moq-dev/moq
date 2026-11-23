@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_relay::session::{Filter, List, Nudged};
 use moq_relay::{Connection, auth, cluster, internal, web};
 
@@ -106,6 +106,7 @@ impl Script {
 			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
 			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
+			_ => return StatusCode::BAD_REQUEST.into_response(),
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),
@@ -122,8 +123,8 @@ impl Script {
 	}
 }
 
-fn all() -> Patterns {
-	[Pattern::all()].into_iter().collect()
+fn all() -> Prefixes {
+	Prefixes::all()
 }
 
 /// A grant that lasts an hour and would not re-check on its own during a test.

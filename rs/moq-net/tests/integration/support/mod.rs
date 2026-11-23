@@ -2,6 +2,7 @@
 
 pub mod harness;
 pub mod mock;
+pub mod schedule;
 
 use std::ops::{Bound, RangeBounds};
 
@@ -18,8 +19,21 @@ pub trait AppendNext {
 
 impl AppendNext for track::Producer {
 	fn append_next(&self) -> moq_net::Result<group::Producer> {
-		self.append_group(self.largest().map_or(0, |largest| largest.group + 1))
+		let key = self.largest().map_or(0, |largest| largest.group + 1);
+		let start = match self.info().timescale {
+			Some(scale) => Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch)?,
+			None => Timestamp::unscaled(key),
+		};
+		self.append_group(start)
 	}
+}
+
+/// The uni streams a session of `version` keeps open toward each side for its whole
+/// life, which a stream credit must cover besides the groups: draft 22's SETUP stream,
+/// and lite-07's Announce Stream.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn held_uni_streams(version: moq_net::Version) -> usize {
+	usize::from(!version.is_lite() || version.to_string() == "moq-lite-07-wip")
 }
 
 /// A frame time for tests whose frames carry no time of their own.
@@ -36,38 +50,40 @@ impl AtStart for group::Producer {
 }
 
 /// The groups from the one containing `keys`' start through the one containing its end, as
-/// time anchors: on a track whose groups start at consecutive keys, the groups with those keys.
+/// times: on a track whose groups start at consecutive keys, the groups with those keys.
 ///
-/// An omitted start is [`track::Range::oldest`]'s. `..0` holds nothing, so it panics.
+/// An omitted start is no start, which [`track::Delay::min`] places. `..0` holds nothing, so it
+/// panics.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub fn keys(keys: impl RangeBounds<u64>) -> track::Range {
 	let start = match keys.start_bound() {
-		Bound::Included(&start) => track::Anchor::Time(start),
-		Bound::Excluded(&start) => track::Anchor::Time(start + 1),
-		Bound::Unbounded => track::Range::oldest().start,
+		Bound::Included(&start) => Some(start),
+		Bound::Excluded(&start) => Some(start + 1),
+		Bound::Unbounded => None,
 	};
 	let end = match keys.end_bound() {
-		Bound::Included(&end) => Some(track::Anchor::Time(end)),
-		Bound::Excluded(&end) => Some(track::Anchor::Time(end.checked_sub(1).expect("an empty range"))),
+		Bound::Included(&end) => Some(end),
+		Bound::Excluded(&end) => Some(end.checked_sub(1).expect("an empty range")),
 		Bound::Unbounded => None,
+	};
+	let start = match start {
+		Some(start) => track::Start::Time(start),
+		None => track::Start::Oldest,
 	};
 	track::Range { start, end }
 }
 
-/// Wait until anyone wants the track, returning the group they want.
+/// Wait until anyone wants the track.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
-pub async fn wanted(mut demand: track::Demand) -> moq_net::Result<u64> {
-	loop {
-		if let Some(wanted) = demand.wanted_changed().await? {
-			return Ok(wanted);
-		}
-	}
+pub async fn wanted(mut demand: track::Demand) -> moq_net::Result<()> {
+	while !demand.wanted_changed().await? {}
+	Ok(())
 }
 
 /// Wait until nobody wants the track.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub async fn unwanted(mut demand: track::Demand) -> moq_net::Result<()> {
-	while demand.wanted_changed().await?.is_some() {}
+	while demand.wanted_changed().await? {}
 	Ok(())
 }
 

@@ -17,7 +17,7 @@ impl Bridge {
 		channel_count: u32,
 	) -> Result<Self> {
 		let config = moq_mux::codec::opus::Config::new(sample_rate, channel_count);
-		let track = broadcast.unique_track(".opus", catalog.track_info(hang::catalog::PRIORITY.audio))?;
+		let track = broadcast.unique_track(".opus", catalog.track_info(hang::catalog::PRIORITY.audio));
 		let import = moq_mux::codec::opus::Import::new(track, catalog.reserve(), config.into())?;
 		Ok(Self { import })
 	}
@@ -33,8 +33,13 @@ impl codec::Bridge for Bridge {
 		Ok(())
 	}
 
-	fn finish(&mut self) -> Result<()> {
-		Ok(self.import.finish()?)
+	fn discontinuity(&mut self) -> Result<()> {
+		self.import.discontinuity()?;
+		Ok(())
+	}
+
+	fn finish(self: Box<Self>) -> Result<codec::Finished> {
+		Ok(Box::new(self.import.finish()?))
 	}
 
 	fn abort(self: Box<Self>, err: moq_net::Error) {

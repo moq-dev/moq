@@ -5,7 +5,6 @@ use std::task::{Poll, ready};
 
 use kio::clock::Instant;
 use moq_net::Timestamp;
-use moq_net::track::Delay;
 
 use super::{Container, Frame, Read, TimestampRewind, time};
 
@@ -52,47 +51,35 @@ pub(crate) enum Item {
 /// Decode a moq-lite track into a stream of media [`Frame`]s in age-bounded
 /// presentation order.
 ///
-/// `Consumer` wraps a [`moq_net::track::Subscriber`] and a [`Container`]
-/// format implementation, typically
-/// [`catalog::hang::Container`](crate::catalog::hang::Container). Yields
-/// decoded frames via [`poll_read`](Self::poll_read).
+/// `Consumer` reads a [`moq_net::track::Subscriber`] through its
+/// [`Ordered`](moq_net::track::Ordered) reader and decodes it with a [`Container`] format
+/// implementation, typically [`catalog::hang::Container`](crate::catalog::hang::Container).
+/// Yields decoded frames via [`poll_read`](Self::poll_read).
 ///
 /// ## Ordering & age skipping
 ///
-/// Groups can arrive on the wire out of order. The consumer always reads frames *within*
-/// a group in arrival order, but across groups it advances by start, skipping
-/// a stalled or missing group once everything it could still present (bounded by where
-/// the next group begins) falls a full budget behind the newest content, the same reach
-/// [`Delay::max`] measures. With the default max delay of zero,
-/// the consumer skips aggressively: any group that has a newer alternative is dropped.
-/// With a non-zero max delay, slow groups are tolerated up to that budget before being
-/// skipped. Starts are timestamps, so keys lie between any two groups: a run the publisher
-/// declared skipped ([`skip_groups`](moq_net::track::Producer::skip_groups), which appending
-/// does) holds no group, and the consumer steps over it at once. Any other run may hold a
-/// missing group, which gets the same tolerance: there is no way to tell a stream that lost the
-/// delivery race from one the cache evicted, and a reader starved of CPU may take the missing
-/// group in the same burst as the ones past it. Its wait, [`set_wait`](Self::set_wait) or the
-/// max delay, also expires that much monotonic time after the first group past it arrived, so a
-/// marker behind a hole is delivered even when the track is paused, and the holes a stalled
-/// source left behind expire together rather than one wait each.
+/// Groups can arrive on the wire out of order. The [`Ordered`](moq_net::track::Ordered) reader
+/// hands them out by start and decides every missing one: it waits for a group the track still
+/// owes until everything it could still present (bounded by where the next group begins) falls
+/// [`Delay::max`] behind the newest content, and reports what it gives up as a gap. With the
+/// default max delay of zero it gives up at once: any group that has a newer alternative is
+/// dropped. [`Delay::min`] only sets where the reader starts. A run the publisher declared
+/// skipped ([`skip_groups`](moq_net::track::Producer::skip_groups), which appending does) holds no
+/// group, and the consumer steps over it at once, as it does over keys the subscription's ranges
+/// leave out.
 ///
-/// Delivery starts at the floor the
-/// [`Subscription::ranges`](moq_net::track::Subscription::ranges) name, raised to where the
-/// publisher reports its feed starts ([`poll_start`](moq_net::track::Subscriber::poll_start)) once
-/// that resolves, and waits for that group under the budget. The publisher resolves a relative
-/// start against a newest group that may hold no frame yet, which a floor resolved here misses.
-/// A group that arrives below the start is never delivered: groups arrive newest first, so a
-/// cursor taken from the first arrival would drop the older groups the publisher serves. Without
-/// either it starts at the lowest group that arrived, waiting for one covering the live edge less
-/// [`Delay::min`] plus any [`Playout::warmup`]. Both default to zero, so it waits
-/// for nothing. Until the first item, the start also moves past each group whose first frame
-/// trails the newest content by more than the max delay plus the warmup, as `@moq/hang`'s
-/// consumer measures, unless that group covers the live edge less the min delay and the warmup:
-/// a backlog that landed whole would otherwise play from its oldest group, since nothing
-/// blocks, and stay that far behind. From there
-/// the same budget is the one rule that catches the consumer up to the live edge, and
-/// history the publisher no longer serves expires like any other gap, since its reach
-/// sits a full budget behind the newest content.
+/// Within a group the consumer reads frames in arrival order. A group already handed out that
+/// stalls behind newer ones is skipped by the same budget, measured from where the next group
+/// begins.
+///
+/// Delivery starts at the first group the ordered reader hands out: the publisher resolved a
+/// live join [`Delay::min`] plus any [`Playout::warmup`] behind the live edge, and the ordered
+/// reader waits for the groups below it that the feed owes. Until the first item, the start also
+/// moves past each group whose first frame trails the newest content by more than the max delay
+/// plus the warmup, as `@moq/hang`'s consumer measures, unless that group covers the live edge
+/// less the min delay and the warmup: a backlog that landed whole would otherwise play from its
+/// oldest group, since nothing blocks, and stay that far behind. From there the same budget is
+/// the one rule that catches the consumer up to the live edge.
 ///
 /// A stalled group is also skipped early, regardless of the max delay budget, once it has
 /// presented up to where the next group begins. CMAF frames carry a per-sample duration,
@@ -100,16 +87,22 @@ pub(crate) enum Item {
 /// group's first timestamp has nothing left worth waiting for. Containers without a
 /// duration report zero, which disables this check and falls back to the max delay budget.
 ///
-/// Put the initial [`Delay`] on the [`moq_net::track::Subscription`] before
-/// subscribing. [`new`](Self::new) inherits it, reading an unstated [`Delay::min`] as zero, and
+/// Put the initial [`Delay`] on the [`moq_net::track::Subscription`] with
+/// [`Delay::subscription`] before subscribing. [`new`](Self::new) inherits it, taking the min
+/// from the furthest live join among its ranges and reading none as zero, and
 /// [`set_delay`](Self::set_delay) changes the whole [`Delay`] while reading. To build one at a
 /// delay the subscription does not carry, or with a catalog `warmup`, use a [`Playout`].
 ///
 /// ## Gaps and ends
 ///
 /// [`poll_read`](Self::poll_read) yields [`Read::Gap`] wherever media after an item already read
-/// will never arrive: a latency skip, an evicted current group, or a hole the publisher did not
-/// declare skipped whose boundary is not contiguous within 1 ms. Whatever is lost before the first item is no
+/// will never arrive: a latency skip, an evicted current group, or keys between two groups the
+/// publisher did not declare skipped whose boundary is not contiguous within 1 ms. The later group
+/// continues the earlier when any of its frames presents by where the earlier ended, so an open
+/// GOP's leading pictures count, and its first frame waits until one shows it, at most as many frames
+/// as the track has reordered. Frames without a duration end one picture past the highest: the
+/// largest step between the group's latest presentation times. A local track
+/// owes nothing, so there a discontinuous run is a gap the moment the group past it lands. Whatever is lost before the first item is no
 /// gap, since nothing was read before it. A marker group (no decodable frames: one empty
 /// payload, or on a data track one object with no bytes) is the publisher declaring a stop,
 /// read as [`Read::End`]; nothing is missing. A data track's marker carries no timestamp, so
@@ -158,27 +151,18 @@ pub struct Consumer<F: Container> {
 	// How the cursor chooses its first group.
 	startup: Startup,
 
-	// How far behind the live edge an unfloored start reaches, before the warmup: see `Delay::min`.
-	min_delay: std::time::Duration,
+	// How far behind the live edge the reader plays, before the warmup: see `Delay::min`. The start
+	// skip keeps the group covering the live edge less it, reading `None` as zero.
+	min_delay: Option<std::time::Duration>,
 
-	// How much further than the min delay an unfloored start reaches: see `Playout`.
+	// How much further than the min delay the start reaches: see `Playout`.
 	warmup: std::time::Duration,
 
-	// The point an unfloored start reached back to, the live edge less the reach, once it chose.
-	target: Option<std::time::Duration>,
-
-	// Where the warming ends: the warmup past the first frame delivered, or past the start's target
-	// when that is later. `None` before the first frame.
+	// Where the warming ends: the warmup past the first frame delivered. `None` before it.
 	warmed: Option<std::time::Duration>,
 
 	// How far we may drift from the live edge before skipping a group.
 	max_delay: std::time::Duration,
-
-	// How long a missing group is waited for, capped at the max delay; `None` waits the max delay.
-	wait: Option<std::time::Duration>,
-
-	// Wakes the reader once the hole at the cursor, or the start's wait, expires.
-	hole_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
 
 	// The furthest presentation point delivered so far: max(timestamp + duration), endpoints
 	// included. `None` until the first item, so a loss before it is no gap.
@@ -188,17 +172,26 @@ pub struct Consumer<F: Container> {
 	// backwards, so a later group with a frame below this is malformed.
 	start: Option<(u64, Timestamp)>,
 
-	// The start of the group the cursor most recently left. B-frames, open-GOP pictures, and a
-	// keyframe overlapping the previous group's last frame may dip below that group's content,
-	// but a frame below its start is a rewind.
+	// The start of the group the cursor most recently left. A frame below it is a rewind. Every
+	// frame also presents after that group's content, which a reader assumes rather than checks.
 	floor: Option<Timestamp>,
 
 	// Presentation end of the group we most recently advanced past, for the 1 ms
 	// contiguity check on a delivered hole.
 	presented_end: Option<std::time::Duration>,
 
+	// How the groups read so far run, for judging an unproven step.
+	cadence: Cadence,
+
+	// The cursor's group's frames read so far.
+	pictures: Pictures,
+
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	gap: bool,
+
+	// The cursor stepped over keys nothing declared skipped, so whether they held media is judged
+	// once the group it landed on shows where it starts: its first frame is held until then.
+	unproven: bool,
 
 	// The item a gap was returned ahead of.
 	next: Option<Item>,
@@ -223,22 +216,22 @@ pub struct Consumer<F: Container> {
 /// Whether a [`Consumer`] still reads its subscription.
 enum Reader<E> {
 	/// Receiving groups.
-	Reading(moq_net::track::Subscriber),
+	Reading(moq_net::track::Ordered),
 	/// The track failed, so no group can arrive. The error is returned once the groups already here
 	/// drain.
-	Failed(moq_net::track::Subscriber, E),
+	Failed(moq_net::track::Ordered, E),
 	/// An error ended the reader, which reads as finished from then on. The subscription is
 	/// released, and the publisher's demand with it.
 	Ended,
+	/// The track's own failure ended the reader once its groups drained, as [`Self::Ended`] does.
+	Lost,
 }
 
 /// How a [`Consumer`]'s cursor chooses its first group.
 #[derive(Clone, Copy)]
 enum Startup {
-	/// The floor once resolved, raised to the publisher's resolved start, or else the first
-	/// arrivals. `anchor` is when the newest group had landed as the first one arrived, once such a
-	/// start waits for its reach.
-	Earliest { anchor: Option<Instant> },
+	/// The first group the ordered reader hands out.
+	Earliest,
 	/// The newest group, discarding what arrived below it.
 	Newest,
 	/// The cursor is on its first group or past it.
@@ -298,6 +291,68 @@ fn pts_contiguous(end: Option<std::time::Duration>, next_start: std::time::Durat
 	end.is_some_and(|end| next_start <= end.saturating_add(CONTIGUITY_TOLERANCE))
 }
 
+/// The deepest reordering a codec allows, in pictures: H.264 and HEVC hold at most 16 frames, so 32
+/// fields. A reader measures a track's reordering and its last picture's duration within this many of
+/// a group's latest presentation times.
+const REORDER_MAX: usize = 32;
+
+/// How the groups read so far run, for judging a step over keys nothing declared skipped.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Cadence {
+	/// One picture, for a group whose frames carry no duration: its highest timestamp is where its
+	/// last picture starts, not ends. The largest step between its latest presentation times, so a
+	/// field/frame mix allows a frame. Zero once a group's end was exact.
+	slack: std::time::Duration,
+	/// The most frames that decoded ahead of a frame they present after, in any group read: an open
+	/// GOP's leading pictures decode after the keyframe, so its lowest picture comes within that many.
+	depth: usize,
+}
+
+/// Where the groups a reader read through ended, so a later reader of the track continues there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Reached {
+	end: Option<std::time::Duration>,
+	cadence: Cadence,
+}
+
+/// The cursor's group's frames read so far.
+#[derive(Default)]
+struct Pictures {
+	/// The group's latest presentation times, ascending, at most [`REORDER_MAX`].
+	latest: Vec<std::time::Duration>,
+}
+
+impl Pictures {
+	/// Note a frame presenting `at`, returning how many frames read before it present after it.
+	fn read(&mut self, at: std::time::Duration) -> usize {
+		let below = self.latest.partition_point(|&t| t <= at);
+		let after = self.latest.len() - below;
+		match self.latest.len() < REORDER_MAX {
+			true => self.latest.insert(below, at),
+			// Full: the earliest leaves, unless this frame presents before every time kept.
+			false if below > 0 => {
+				self.latest.remove(0);
+				self.latest.insert(below - 1, at);
+			}
+			false => {}
+		}
+		after
+	}
+
+	/// The largest step between the latest presentation times read, zero for fewer than two.
+	fn step(&self) -> std::time::Duration {
+		(self.latest.windows(2))
+			.map(|pair| pair[1] - pair[0])
+			.max()
+			.unwrap_or_default()
+	}
+
+	/// The highest presentation time read.
+	fn highest(&self) -> Option<std::time::Duration> {
+		self.latest.last().copied()
+	}
+}
+
 /// A gap from the delivered `edge` to `resume`, in the resume's scale. Refused for an unscaled
 /// `resume`, which has no time to resume at.
 fn gap(edge: std::time::Duration, resume: Timestamp) -> Result<Item, moq_net::Error> {
@@ -315,29 +370,131 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Result<Item, moq_net::Er
 	Ok(Item::Gap { timestamp, duration })
 }
 
+/// How far behind the live edge a media reader plays: where it starts, and how late it may fall.
+///
+/// The default states no minimum and a zero maximum, which reaches back as far as the max allows
+/// and skips a superseded group at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Delay {
+	/// The playout delay held behind the live edge, or `None` when the reader did not state one.
+	///
+	/// Stated, zero included, each subscription range starting at
+	/// [`Start::Oldest`](moq_net::track::Start::Oldest) joins live this far behind the live edge
+	/// instead ([`Start::Live`](moq_net::track::Start::Live)), so a player's buffer arrives full;
+	/// a range with a time start keeps it. A reader also keeps the group covering the live edge
+	/// less this as it starts, reading an unstated one as zero. A missing group is given up by
+	/// [`Self::max`] alone, whatever the minimum.
+	pub min: Option<std::time::Duration>,
+	/// How long a superseded group stays worth delivering, or `None` for as long as the publisher
+	/// keeps it: the subscription's [`moq_net::track::Delay::max`].
+	pub max: Option<std::time::Duration>,
+}
+
+impl Default for Delay {
+	fn default() -> Self {
+		Self {
+			min: None,
+			max: Some(std::time::Duration::ZERO),
+		}
+	}
+}
+
+impl Delay {
+	/// Set [`Self::min`], returning `self` for chaining.
+	pub fn with_min(mut self, min: impl Into<Option<std::time::Duration>>) -> Self {
+		self.min = min.into();
+		self
+	}
+
+	/// Set [`Self::max`], returning `self` for chaining.
+	pub fn with_max(mut self, max: impl Into<Option<std::time::Duration>>) -> Self {
+		self.max = max.into();
+		self
+	}
+
+	/// `subscription` at this delay: [`Self::max`] as its budget, and each range starting at the
+	/// oldest group joining live [`Self::min`] behind the live edge when it is stated.
+	pub fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
+		use moq_net::track::{Range, Start};
+		// A time start, or a live join of the caller's own, is kept.
+		let ranges: Vec<Range> = subscription
+			.ranges
+			.iter()
+			.map(|range| match (range.start, self.min) {
+				(Start::Oldest, Some(min)) => Range {
+					start: Start::Live(min),
+					..*range
+				},
+				_ => *range,
+			})
+			.collect();
+		subscription
+			.with_delay(moq_net::track::Delay::default().with_max(self.max))
+			.with_ranges(ranges)
+	}
+
+	/// [`Self::subscription`] as an update to `current`, the subscription it replaces: a range
+	/// starting at the oldest group that `current` already asks with the same end keeps the
+	/// start it was subscribed with, so changing [`Self::min`] places only the ranges it adds.
+	/// A live join that already resolved stays where it started, as
+	/// [`Consumer::set_delay`] leaves it.
+	pub fn update(
+		&self,
+		current: &moq_net::track::Subscription,
+		subscription: moq_net::track::Subscription,
+	) -> moq_net::track::Subscription {
+		use moq_net::track::Start;
+		let starts: Vec<_> = subscription
+			.ranges
+			.iter()
+			.map(|range| (range.start, range.end))
+			.collect();
+		let mut updated = self.subscription(subscription);
+		for (range, (start, end)) in updated.ranges.iter_mut().zip(starts) {
+			if start != Start::Oldest {
+				continue;
+			}
+			// For a caller whose own ranges start at the oldest group or a time, as the bindings'
+			// do, a live or oldest start in `current` is one a delay placed.
+			let held = current
+				.ranges
+				.iter()
+				.find(|held| held.end == end && matches!(held.start, Start::Oldest | Start::Live(_)));
+			if let Some(held) = held {
+				range.start = held.start;
+			}
+		}
+		updated
+	}
+}
+
+/// The playout delay `subscription` states: the furthest back any of its ranges joins live, or
+/// `None` when none does.
+fn stated(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
+	subscription
+		.ranges
+		.iter()
+		.filter_map(|range| match range.start {
+			moq_net::track::Start::Live(min) => Some(min),
+			_ => None,
+		})
+		.max()
+}
+
 /// A [`Consumer`]'s [`Delay`] and the catalog rendition's warmup, applied together.
 ///
 /// The warmup is how much media a decoder needs before its output is clean, such as an Opus
-/// decoder or an intra-refresh video decoder: pass the catalog rendition's
-/// `warmup`. Subscribe with [`subscription`](Self::subscription), then build the consumer with
-/// [`consumer`](Self::consumer).
+/// decoder's pre-roll: pass the catalog audio rendition's `warmup`. Subscribe with
+/// [`subscription`](Self::subscription), then build the consumer with [`consumer`](Self::consumer).
 ///
-/// The subscription carries the max delay plus the warmup, since the publisher and the transport
-/// skip what falls outside that budget, while the consumer skips at the max delay alone.
+/// The subscription carries the min and max delay plus the warmup: the publisher starts a live
+/// join that far back, and it and the transport skip what falls outside that budget, while the
+/// consumer skips at the max delay alone.
 ///
-/// Where delivery would start wherever the publisher does, it starts no later than the group
-/// covering the live edge less [`Delay::min`] and the warmup: one that starts at or before that
-/// point. Both default to zero, which the newest group covers, so the start waits for nothing.
-/// Otherwise groups can arrive newest first, so when none that arrived covers that point the
-/// start waits for an earlier one, until one covers it, the subscription's ranges hold none
-/// earlier, the track finishes, the max buffer fills, or the newest group's arrival is that whole
-/// reach ago. The wall clock bounds a quiet or paused track, which never ages out in media time.
-/// The start is then the lowest group that arrived, and the max delay skips from there. Until the
-/// reader is the warmup past both its first frame and that point, the skip also tolerates the
-/// warmup, so the media leading up to the start is not dropped as stale.
-///
-/// A subscription that names a start, or a publisher that reports where its feed starts, already
-/// waits for it, and a live start takes the newest group.
+/// A live join starts at the group covering the live edge less [`Delay::min`] and the warmup,
+/// which the publisher resolves, and the ordered reader waits for the groups from there. Until the
+/// reader is the warmup past its first frame, the skip also tolerates the warmup, so the media
+/// leading up to the start is not dropped as stale.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Playout {
 	/// The delay the consumer plays at, and skips past.
@@ -350,22 +507,34 @@ pub struct Playout {
 /// so a publisher cannot hold a reader's media without bound. Mirrored by `@moq/hang`'s `DELAY_MAX`.
 pub const DELAY_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The delay a subscription carries for a reader starting `warmup` further back than `delay`:
+/// both bounds widened, so a live join reaches back far enough and the budget keeps what it reaches.
+fn warmed(delay: Delay, warmup: std::time::Duration) -> Delay {
+	Delay {
+		// An unstated minimum already reaches back as far as the max delay allows, further than
+		// any live join, so it stays unstated.
+		min: delay.min.map(|min| min.saturating_add(warmup)),
+		max: delay.max.map(|max| max.saturating_add(warmup)),
+	}
+}
+
 impl Playout {
 	/// Play at `delay`, starting `warmup` further back.
 	pub fn new(delay: Delay, warmup: std::time::Duration) -> Self {
 		Self { delay, warmup }
 	}
 
-	/// `subscription` with this playout's delay, its max widened by the warmup.
+	/// `subscription` with this playout's delay, both bounds widened by the warmup: see
+	/// [`Delay::subscription`].
 	pub fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
-		subscription.with_delay(self.subscribed())
+		self.subscribed().subscription(subscription)
 	}
 
 	/// Decode `track` as `format` at this playout.
 	///
 	/// Subscribe `track` with [`subscription`](Self::subscription): the publisher may already
-	/// have skipped what a narrower one left out. A track subscribed otherwise has its subscription
-	/// set to that delay here, widened or narrowed.
+	/// have skipped what a narrower one left out, and the live join starts where it was
+	/// subscribed. A track subscribed otherwise has its max delay set here, widened or narrowed.
 	pub fn consumer<F: Container>(&self, track: moq_net::track::Subscriber, format: F) -> Consumer<F> {
 		let mut consumer = Consumer::new(track, format);
 		consumer.warmup = self.reach();
@@ -375,8 +544,7 @@ impl Playout {
 
 	/// The delay the subscription carries.
 	fn subscribed(&self) -> Delay {
-		self.delay
-			.with_max(self.delay.max.map(|max| max.saturating_add(self.reach())))
+		warmed(self.delay, self.reach())
 	}
 
 	/// The warmup, capped at [`DELAY_MAX`].
@@ -394,14 +562,8 @@ impl<F: Container> Consumer<F> {
 	/// publisher preserves the same replay window.
 	pub fn new(track: moq_net::track::Subscriber, format: F) -> Self {
 		let subscription = track.subscription();
-		// Delivery starts at the subscription floor raised to the publisher's resolved start,
-		// once that resolves, since a floor resolved here may count below a frameless newest
-		// group the publisher counted; without either it starts at the first arrivals (see
-		// poll_read). Either way the age budget is the one rule that catches the cursor up to the live
-		// edge from there. The budget is clamped to the track's max age, since a group
-		// the publisher already marks stale can't be waited for and would otherwise
-		// stall the catch-up by the excess.
-		let start = track.floor();
+		// The budget is clamped to the track's max age, since a group the publisher already marks
+		// stale can't be waited for and would otherwise stall the catch-up by the excess.
 		let max_delay = subscription
 			.delay
 			.max
@@ -409,27 +571,27 @@ impl<F: Container> Consumer<F> {
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
 			name: track.name().into(),
-			reader: Reader::Reading(track),
+			reader: Reader::Reading(track.ordered()),
 			format,
-			current: start.unwrap_or(0),
+			current: 0,
 			pending: VecDeque::new(),
 			received: None,
 			collect_at: 1,
 			memory: Memory::new(DEFAULT_MAX_BUFFER),
 			gated: false,
-			startup: Startup::Earliest { anchor: None },
-			min_delay: subscription.delay.min.unwrap_or_default(),
+			startup: Startup::Earliest,
+			min_delay: stated(&subscription),
 			warmup: std::time::Duration::ZERO,
-			target: None,
 			warmed: None,
 			max_delay,
-			wait: None,
-			hole_timer: None,
 			edge: None,
 			start: None,
 			floor: None,
 			presented_end: None,
+			cadence: Cadence::default(),
+			pictures: Pictures::default(),
 			gap: false,
+			unproven: false,
 			next: None,
 			group: 0,
 			arrived: None,
@@ -441,14 +603,18 @@ impl<F: Container> Consumer<F> {
 
 	/// Continue groups an earlier reader of this track read up to `reached`: the first group
 	/// starting there reads as continuing them rather than past a hole.
-	pub(crate) fn continuing(mut self, reached: Option<std::time::Duration>) -> Self {
-		self.presented_end = reached;
+	pub(crate) fn continuing(mut self, reached: Reached) -> Self {
+		self.presented_end = reached.end;
+		self.cadence = reached.cadence;
 		self
 	}
 
 	/// Where the groups read through ended, for [`Self::continuing`].
-	pub(crate) fn reached(&self) -> Option<std::time::Duration> {
-		self.presented_end
+	pub(crate) fn reached(&self) -> Reached {
+		Reached {
+			end: self.presented_end,
+			cadence: self.cadence,
+		}
 	}
 
 	/// Start at the newest group, the live edge, rather than the floor or the oldest group the
@@ -476,8 +642,9 @@ impl<F: Container> Consumer<F> {
 	/// Backlog is a group at or below the publisher's largest when the subscription began, so it
 	/// was produced before. Its frames were never read, so a caller timing
 	/// [`arrival`](Self::arrival)s learns when a join's backlog finished arriving even when the
-	/// reader skipped it: one that arrived below the cursor, or below the start, or that a skip
-	/// passed over.
+	/// reader skipped it: one the ordered reader gave up as stale or late (see
+	/// [`Item::Gap`](moq_net::track::Item::Gap)'s `landed`), or one a skip here passed over. A gap
+	/// reaching past the join counts for none of it, since its landing may be a later group's.
 	pub fn backlog(&self) -> Option<Instant> {
 		self.backlog
 	}
@@ -557,18 +724,25 @@ impl<F: Container> Consumer<F> {
 		Poll::Ready(Ok(Some(item)))
 	}
 
+	/// Whether the error that ended the reader was its track's own failure, rather than its media.
+	pub(crate) fn lost(&self) -> bool {
+		matches!(self.reader, Reader::Lost)
+	}
+
 	/// Read media or a clean group boundary without waiting for a successor group.
 	pub(crate) fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
 		// An error ended the reader, which reads as finished from then on: a decode error has
 		// already consumed the frame it came from, so reading on would skip it.
-		if let Reader::Ended = self.reader {
+		if let Reader::Ended | Reader::Lost = self.reader {
 			return Poll::Ready(Ok(None));
 		}
 		let event = ready!(self.poll_event_inner(waiter));
 		if event.is_err() {
 			// Nothing more is read, so release the subscription and the groups it holds rather
 			// than pin the publisher's demand and cache for as long as the caller keeps this.
-			self.reader = Reader::Ended;
+			if !matches!(self.reader, Reader::Lost) {
+				self.reader = Reader::Ended;
+			}
 			self.pending.clear();
 		}
 		Poll::Ready(event)
@@ -585,90 +759,51 @@ impl<F: Container> Consumer<F> {
 	}
 
 	fn poll_event_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
-		// Where the publisher stood as the subscription began, read as soon as its answer resolves
-		// the start: groups landing later raise the largest past it. A start decided first, or a
-		// largest not yet in range, takes the first one that is.
-		if self.joined.is_none()
-			&& (matches!(self.startup, Startup::Started) || self.subscriber().poll_start(waiter).is_ready())
-		{
+		// Where the publisher stood as the subscription began, read as soon as its answer reports a
+		// largest, before a group the reader waits on lets later ones raise it. A largest not yet in
+		// range takes the first one that is.
+		if self.joined.is_none() {
 			self.join(waiter);
 		}
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter).is_ready();
 
-		// The floor is raised to where the publisher says its feed starts: it serves nothing
-		// below, and resolved a relative start against its own latest group, which may hold no
-		// frame yet and so count neither in the largest it reports nor in a floor resolved here. Waiting below would be waiting for a
-		// group that won't come. Without a reported start the first arrivals stand in for it
-		// below, since timestamps can't reveal it: a gap below the served window looks like
-		// in-flight groups until the budget expires, or forever on a quiet track. Skipping
-		// stays the budget's job.
-		if let Startup::Earliest { .. } = self.startup {
-			let floor = self.subscriber().floor();
-			let served = match self.subscriber().poll_start(waiter) {
-				Poll::Ready(served) => served,
-				// A finished track resolves no start any more.
-				Poll::Pending if finished => None,
-				Poll::Pending => return Poll::Pending,
-			};
-			let start = match (floor, served) {
-				(Some(floor), Some(served)) => Some(floor.max(served)),
-				(floor, served) => floor.or(served),
-			};
-			if let Some(start) = start {
-				self.join(waiter);
-				let (joined, backlog) = (self.joined, &mut self.backlog);
-				self.pending.retain(|group| {
-					let keep = group.start >= start;
-					if !keep {
-						Self::skip(joined, backlog, group);
-					}
-					keep
+		match self.startup {
+			// The ordered reader already waited for the groups below its first that the feed owes.
+			Startup::Earliest => {
+				if let Some(front) = self.pending.front() {
+					self.current = front.start;
+					self.join(waiter);
+					self.startup = Startup::Started;
+				}
+			}
+			Startup::Newest => {
+				// NOTE: poll_min_timestamp buffers at least one frame per group and registers the
+				// waiter on the ones still empty. Any wire frame counts, so a paused track whose only
+				// group is a marker still reads its end. The oldest buffers past a full max buffer, so
+				// a start is always found.
+				let any_frame = self.pending.iter_mut().enumerate().any(|(i, group)| {
+					let _ = group.poll_min_timestamp(waiter, &self.format, i == 0);
+					!group.is_empty()
 				});
-				self.current = start;
-				self.startup = Startup::Started;
+				if any_frame {
+					// A live reader takes the newest group, though its frames may still be on their
+					// way, and discards the older ones the budget also delivers. The publisher's
+					// largest names it before its stream lands.
+					self.poll_largest(waiter);
+					let back = self.pending.back().expect("a group has a frame").start;
+					let start = back.max(self.largest.unwrap_or(back));
+					self.join(waiter);
+					// Nothing has been read, so discarding what lies below the start is no gap.
+					self.discard(|group| group.start < start)?;
+					self.current = start;
+					self.startup = Startup::Started;
+				}
 			}
-		}
-		if !matches!(self.startup, Startup::Started) {
-			// NOTE: poll_min_timestamp buffers at least one frame per group and
-			// registers the waiter on the ones still empty. Any wire frame counts, so a
-			// paused track whose only group is a marker still reads its end. The oldest
-			// buffers past a full max buffer, so a start is always found.
-			let any_frame = self.pending.iter_mut().enumerate().any(|(i, group)| {
-				let _ = group.poll_min_timestamp(waiter, &self.format, i == 0);
-				!group.is_empty()
-			});
-			if any_frame {
-				// A live reader takes the newest group, though its frames may still be on their
-				// way, and discards the older ones the budget also delivers. The publisher's
-				// largest names it before its stream lands: the backlog's oldest group can arrive
-				// first, and starting there loses the groups after it once the live edge moves a
-				// budget past them.
-				let start = match matches!(self.startup, Startup::Newest) {
-					true => {
-						self.poll_largest(waiter);
-						let back = self.pending.back().expect("a group has a frame").start;
-						back.max(self.largest.unwrap_or(back))
-					}
-					// The start may still wait for a group earlier than any that arrived.
-					false => match self.reach_start(waiter, finished) {
-						Some(start) => start,
-						None => return Poll::Pending,
-					},
-				};
-				self.join(waiter);
-				// Nothing has been read, so discarding what lies below the start is no gap.
-				self.discard(|group| group.start < start)?;
-				self.current = start;
-				self.startup = Startup::Started;
-			}
+			Startup::Started => {}
 		}
 
 		loop {
-			if self.pending.front().is_none_or(|group| group.start <= self.current) {
-				self.hole_timer = None;
-			}
-
 			// Until the first item, a backlog that landed whole starts within the budget: nothing
 			// blocks, so the skip below would play it from its oldest group and stay that far behind
 			// for good. The start moves past each group whose first frame trails the newest content
@@ -678,9 +813,30 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 
+			// Keys stepped over below the cursor's group lost media unless the group continues where
+			// the content read so far ended, which may take frames after its first to show: an open
+			// GOP's leading pictures decode after its keyframe but present before it. The group holds
+			// its first frame until it shows, so a gap is still read ahead of it.
+			let mut held = false;
+			if self.unproven
+				&& let Some(group) = self.pending.front_mut()
+				&& group.start <= self.current
+			{
+				// Before the first item nothing was read to lose, so there is nothing to wait for.
+				let bound = self.edge.and(self.presented_end).map(|end| end + self.cadence.slack);
+				match group.poll_continues(waiter, &self.format, bound, self.cadence.depth) {
+					Poll::Ready(Some(true)) => self.unproven = false,
+					Poll::Ready(Some(false)) => self.lose(),
+					// An endpoint, the group's end, or its failure comes first and is judged as it is read.
+					Poll::Ready(None) => {}
+					Poll::Pending => held = true,
+				}
+			}
+
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
-			if let Some(group) = self.pending.front_mut()
+			if !held
+				&& let Some(group) = self.pending.front_mut()
 				&& group.start <= self.current
 			{
 				match group.poll_read(waiter, &self.format) {
@@ -695,10 +851,11 @@ impl<F: Container> Consumer<F> {
 						}
 						if self.start.is_none_or(|(start, _)| start != seq) {
 							self.start = Some((seq, ts));
+							self.pictures.latest.clear();
 						}
-						// A group covering the target began before it, so the reader warms until the target too.
-						self.warmed
-							.get_or_insert_with(|| first.max(self.target.unwrap_or(first)).saturating_add(self.warmup));
+						let reordered = self.pictures.read(first);
+						self.cadence.depth = self.cadence.depth.max(reordered);
+						self.warmed.get_or_insert_with(|| first.saturating_add(self.warmup));
 						let end = first + frame.duration.and_then(time).unwrap_or_default();
 						self.advance(end);
 						self.group = seq;
@@ -706,7 +863,12 @@ impl<F: Container> Consumer<F> {
 					}
 					Poll::Ready(Ok(Some(Event::FrameEnd { end, opens }))) => {
 						self.group = group.group.start;
-						self.advance(time(end).ok_or(moq_net::Error::TimestampMismatch)?);
+						let at = time(end).ok_or(moq_net::Error::TimestampMismatch)?;
+						let bound = self.presented_end.map(|end| end + self.cadence.slack);
+						if std::mem::take(&mut self.unproven) && !pts_contiguous(bound, at) {
+							self.lose();
+						}
+						self.advance(at);
 						return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens })));
 					}
 					Poll::Ready(Ok(Some(event))) => return Poll::Ready(Ok(Some(event))),
@@ -759,6 +921,10 @@ impl<F: Container> Consumer<F> {
 								.and_then(|micros| Timestamp::from_micros(micros).ok())
 								.ok_or(moq_net::Error::Decode(moq_net::DecodeError::BoundsExceeded))?;
 							self.group = group.group.start;
+							// It has no timestamp to prove the keys stepped over below it held nothing.
+							if std::mem::take(&mut self.unproven) {
+								self.lose();
+							}
 							return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens: true })));
 						}
 						// A group its producer finished whole presents up to its end, which can pass
@@ -771,6 +937,16 @@ impl<F: Container> Consumer<F> {
 							.and_then(time);
 						if let Some(end) = group.max_end.max(whole) {
 							self.presented_end = Some(end);
+							// Frames it carried say where its last picture ends: exactly when a duration
+							// or its end reaches past them, otherwise one picture past the highest.
+							if self.start.is_some_and(|(seq, _)| seq == group.group.start) {
+								let step = self.pictures.step();
+								if self.pictures.highest().is_some_and(|highest| end > highest) {
+									self.cadence.slack = std::time::Duration::ZERO;
+								} else if !step.is_zero() {
+									self.cadence.slack = step;
+								}
+							}
 						}
 						self.pending.pop_front();
 						self.current += 1;
@@ -780,22 +956,31 @@ impl<F: Container> Consumer<F> {
 				}
 			}
 
-			// Step to the next group at once when nothing lies between: every group ends this
-			// way, so it comes before the scans below, which walk every pending group.
+			// The ordered reader hands out a group only once it resolved every key below it: a
+			// declared skip, one the ranges leave out, or one it gave up on. So the cursor steps to
+			// the next group at once, past one aborted before anything of it was read.
 			if let Some(front) = self.pending.front_mut()
 				&& front.start > self.current
-				&& !front.reapable(waiter)
-				&& self.poll_continues(waiter).0
 			{
-				self.current = self.pending.front().unwrap().start;
+				if front.reapable(waiter) {
+					self.discard_front(1)?;
+					continue;
+				}
+				let next = front.start;
+				// Keys the publisher declared skipped hold no group. Any other run lost media unless
+				// the group past it continues the timeline, which its first frame shows.
+				if !self.is_skipped(self.current..next) {
+					self.unproven = true;
+				}
+				self.current = next;
 				self.note_group_edge();
 				continue;
 			}
 
-			// Reap later aborts only when delivery blocks. An aborted group beyond a
-			// sequence gap must not park the reader forever. Buffered frames and faults
-			// stay in delivery order; the current group has its eviction path above.
-			// Live groups register the waiter here so a later abort wakes the reader.
+			// Reap later aborts only when delivery blocks. An aborted group past the current one
+			// must not hold its buffer. Buffered frames and faults stay in delivery order; the
+			// current group has its eviction path above. Live groups register the waiter here so a
+			// later abort wakes the reader.
 			let current = self.current;
 			self.discard(|group| group.start > current && group.reapable(waiter))?;
 
@@ -805,8 +990,9 @@ impl<F: Container> Consumer<F> {
 			{
 				let polled = current.poll_min_timestamp(waiter, &self.format, true);
 				// A frame that landed since the read above is delivered, not judged: its end can
-				// reach the next group, and skipping there would throw it away as lost.
-				if current.ready() {
+				// reach the next group, and skipping there would throw it away as lost. A held frame
+				// waits on frames still to come instead.
+				if current.ready() && !held {
 					continue;
 				}
 				match polled {
@@ -821,80 +1007,6 @@ impl<F: Container> Consumer<F> {
 			// content past the cursor.
 			let next_group = self.poll_next_group(waiter);
 			let max_timestamp = self.poll_newest(waiter);
-
-			// Walk the cursor over missing keys below the first arrived group.
-			// Groups race on independent QUIC streams (newer ones at higher priority),
-			// so a buffered higher key proves nothing: the missing one may be
-			// merely late, and there is no way to tell that from an eviction. The wait,
-			// in wall time since a later group arrived, is the gate. Media buffered past
-			// the hole proves it stale only past the max delay, not the shorter wait: a
-			// reader starved of CPU takes in a burst of groups at once, and the missing
-			// one may land in the same burst. A finished track closes
-			// the gap outright, since no new group can arrive. That proof covers only
-			// keys that never arrived: finishing the track ends new groups, not
-			// the frames still flowing on ones already open, so arrived groups are
-			// settled below by their own FIN, abort, or the budget. Keys the
-			// subscriber's own ranges exclude never arrive either, so a gap between two
-			// ranges closes at once.
-			if let Some(front) = self.pending.front()
-				&& front.start > self.current
-			{
-				let sequence = front.start;
-				// Late since a group past it arrived, not since the cursor got here: once the edge
-				// stops moving, a backlog with every other group missing would otherwise drain one
-				// budget per hole, which reads downstream as a source far slower than real time.
-				let since = front.late;
-				let wait = self.wait.map_or(self.max_delay, |wait| wait.min(self.max_delay));
-				let elapsed = since.elapsed() >= wait;
-				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
-				let excluded = match &self.reader {
-					Reader::Reading(track) | Reader::Failed(track, _) => {
-						track.next_in_range(self.current).is_none_or(|next| next >= sequence)
-					}
-					Reader::Ended => false,
-				};
-				// The groups past the hole already fill the max buffer, so it can hold none of what
-				// would arrive into it.
-				let full = self.memory.full();
-				let (continues, first) = self.poll_continues(waiter);
-				// A run nothing will fill, such as one dropped over a wire that can't say it was
-				// skipped, still waits for the group past it to show where it starts: stepping
-				// before that frame lands would call a contiguous timeline a loss.
-				let excluded = excluded && first.is_ready();
-				if finished || elapsed || aged || excluded || full || continues {
-					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
-					let front = self.pending.front_mut().unwrap();
-					let empty = front.is_empty() && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
-					let front = self.pending.front().unwrap();
-					let next_start = front.min_timestamp.and_then(time).or(front.max_end);
-					// A data marker has no timestamp to prove continuity across the hole.
-					if !empty && !continues && next_start.is_none_or(|start| !pts_contiguous(self.presented_end, start))
-					{
-						self.lose();
-					}
-					tracing::debug!(
-						old = self.current,
-						new = sequence,
-						finished,
-						elapsed,
-						aged,
-						excluded,
-						full,
-						continues,
-						"skipping missing groups"
-					);
-					self.current = sequence;
-					self.note_group_edge();
-					continue;
-				}
-				if let Some(wake) = since.checked_add(wait) {
-					let timer = self
-						.hole_timer
-						.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
-					timer.as_mut().reset(wake);
-					let _ = waiter.poll_future(timer.as_mut());
-				}
-			}
 
 			// The current group is blocking. Everything it could still present ends
 			// where the next group begins, so skip once that reach falls a full budget
@@ -914,6 +1026,10 @@ impl<F: Container> Consumer<F> {
 			});
 			let target = match should_skip {
 				true => next_group.map(|(i, start)| (i, Some(start))),
+				// Looking at the later groups can fill the max buffer while the cursor's group holds its
+				// first frame, which it then judges by what it holds and reads, as any group holding a
+				// frame does rather than be skipped. One still holding nothing is skipped below.
+				false if held && self.memory.full() && self.pending.front().is_some_and(GroupBuffer::ready) => continue,
 				// Once the later groups fill the max buffer, no more of them can be held while it waits,
 				// so move on to the next group even with nothing of it read yet: it reads as the
 				// cursor's group, and each such skip refunds what the group left behind held.
@@ -932,7 +1048,7 @@ impl<F: Container> Consumer<F> {
 
 			if finished && self.pending.is_empty() {
 				if let Reader::Failed(..) = self.reader
-					&& let Reader::Failed(_, err) = std::mem::replace(&mut self.reader, Reader::Ended)
+					&& let Reader::Failed(_, err) = std::mem::replace(&mut self.reader, Reader::Lost)
 				{
 					// The caller only gets the bare error, with nothing to say which track died.
 					tracing::warn!(track = &*self.name, error = ?err, "track failed; ending the reader");
@@ -983,7 +1099,11 @@ impl<F: Container> Consumer<F> {
 				break;
 			}
 			// The group the start reaches back to is kept: the next one begins past that point.
-			let reach = self.min_delay.min(self.max_delay).saturating_add(self.warmup);
+			let reach = self
+				.min_delay
+				.unwrap_or_default()
+				.min(self.max_delay)
+				.saturating_add(self.warmup);
 			if !reach.is_zero() && next_start > newest.saturating_sub(reach) {
 				break;
 			}
@@ -1057,83 +1177,24 @@ impl<F: Container> Consumer<F> {
 		Ok(())
 	}
 
-	// Where an unfloored start begins, the lowest group that arrived, or `None` while it waits for
-	// one covering the reach (see `Playout`), registering the waiter on whatever would end the wait.
-	fn reach_start(&mut self, waiter: &kio::Waiter, finished: bool) -> Option<u64> {
-		let lowest = self.pending.front().expect("a group has a frame").start;
-		// The publisher serves nothing older than the max delay, so a min delay past it reaches no
-		// further.
-		let reach = self.min_delay.min(self.max_delay).saturating_add(self.warmup);
-		// The newest group covers a zero reach.
-		if reach.is_zero() {
-			return Some(lowest);
-		}
-
-		// The live edge, the newest content, read once looking ahead has decoded it.
-		let mut edge = None;
-		for group in self.pending.iter_mut().rev() {
-			if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format) {
-				edge = time(ts);
-				break;
-			}
-		}
-		// Untimed content, such as a marker, has no edge to reach back from.
-		let Some(edge) = edge else {
-			return Some(lowest);
-		};
-		let target = edge.saturating_sub(reach);
-		self.target = Some(target);
-		let covered = self
-			.pending
-			.iter()
-			.any(|group| group.min_timestamp.and_then(time).is_some_and(|start| start <= target));
-		if covered {
-			return Some(lowest);
-		}
-
-		// Nothing earlier can arrive or be held. Looking ahead may have filled the max buffer,
-		// which then registers no waiter on more frames.
-		let floor = self.subscriber().next_in_range(0);
-		if finished || self.memory.full() || floor.is_none_or(|floor| lowest <= floor) {
-			return Some(lowest);
-		}
-
-		// Wall time: the newest group landed a whole reach ago.
-		let landed = self.pending.back().expect("a group has a frame").group.arrived();
-		let arrived = match &mut self.startup {
-			Startup::Earliest { anchor } => *anchor.get_or_insert(landed),
-			Startup::Newest | Startup::Started => landed,
-		};
-		if arrived.elapsed() >= reach {
-			return Some(lowest);
-		}
-		if let Some(wake) = arrived.checked_add(reach) {
-			let timer = self
-				.hole_timer
-				.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
-			timer.as_mut().reset(wake);
-			let _ = waiter.poll_future(timer.as_mut());
-		}
-		None
-	}
-
-	// The reader has not yet read past the start's target and the warmup past its first frame.
+	// The reader has not yet read the warmup past its first frame.
 	fn warming(&self) -> bool {
 		self.warmed
 			.is_none_or(|warmed| self.edge.is_none_or(|edge| edge < warmed))
 	}
 
 	// The subscription, which only an error ending the reader drops.
-	fn subscriber(&mut self) -> &mut moq_net::track::Subscriber {
+	fn subscriber(&mut self) -> &mut moq_net::track::Ordered {
 		match &mut self.reader {
 			Reader::Reading(track) | Reader::Failed(track, _) => track,
-			Reader::Ended => unreachable!("read only until an error ends the reader"),
+			Reader::Ended | Reader::Lost => unreachable!("read only until an error ends the reader"),
 		}
 	}
 
 	// Media this reader will never deliver: the next item is preceded by a gap.
 	fn lose(&mut self) {
 		self.gap = true;
+		self.unproven = false;
 	}
 
 	fn advance(&mut self, end: std::time::Duration) {
@@ -1142,23 +1203,7 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
-	// Whether the cursor may step to the first pending group past it without waiting or losing
-	// anything, and that group's first-timestamp poll. Group starts are timestamps, so the key
-	// past the cursor is rarely the next group's. The publisher declares the starts it never
-	// produced, so a run it skipped holds no group to wait for or lose. Nor does one ending at a
-	// group whose first frame, or a marker's bound, continues where the content read so far ended.
-	fn poll_continues(&mut self, waiter: &kio::Waiter) -> (bool, Poll<Option<Timestamp>>) {
-		let next = self.pending.front().expect("a group past the cursor").start;
-		let skipped = self.is_skipped(self.current..next);
-		let front = self.pending.front_mut().unwrap();
-		let first = front.poll_min_timestamp(waiter, &self.format, false);
-		let start = front.min_timestamp.and_then(time).or(front.max_end);
-		let continues = skipped || start.is_some_and(|start| pts_contiguous(self.presented_end, start));
-		(continues, first)
-	}
-
 	fn note_group_edge(&mut self) {
-		self.hole_timer = None;
 		if let Some((_, ts)) = self.start {
 			self.floor = Some(ts);
 		}
@@ -1166,7 +1211,7 @@ impl<F: Container> Consumer<F> {
 
 	/// Receive group handles and wait for the track and every received group to finish.
 	pub(crate) fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if let Reader::Ended = self.reader {
+		if let Reader::Ended | Reader::Lost = self.reader {
 			return Poll::Ready(());
 		}
 		ready!(self.poll_read_finish(waiter));
@@ -1195,13 +1240,12 @@ impl<F: Container> Consumer<F> {
 			return Poll::Ready(());
 		}
 		loop {
-			// Past the max buffer, later groups wait in the transport's cache. A missing group at the
-			// cursor then expires like one past the budget: see the hole below.
+			// Past the max buffer, later groups wait in the transport's cache.
 			if self.pull_gated() {
 				self.gated = true;
 				return Poll::Pending;
 			}
-			let next = match ready!(self.subscriber().poll_recv_group(waiter)) {
+			let next = match ready!(self.subscriber().poll_next_item(waiter)) {
 				Ok(next) => next,
 				Err(err) => {
 					if let Reader::Reading(track) = std::mem::replace(&mut self.reader, Reader::Ended) {
@@ -1210,34 +1254,34 @@ impl<F: Container> Consumer<F> {
 					return Poll::Ready(());
 				}
 			};
+			// Any item shows the subscription answered, so the publisher's largest now says where it
+			// stood as it began.
+			self.join(waiter);
 
-			let Some(group) = next else {
+			let group = match next {
+				Some(moq_net::track::Item::Group(group)) => group,
+				// What the ordered reader gave up was never read, so it is backlog when produced before
+				// the subscription. Its landing is the latest group's, so a gap reaching past the join
+				// may report one produced since, and folds nothing.
+				Some(moq_net::track::Item::Gap { range, landed, .. }) => {
+					if self.joined.is_some_and(|joined| range.end.saturating_sub(1) <= joined) {
+						self.backlog = self.backlog.max(landed);
+					}
+					continue;
+				}
 				// Track is finished.
-				return Poll::Ready(());
+				None => return Poll::Ready(()),
 			};
 
-			let mut reader = GroupBuffer::new(group, self.memory.clone());
-			let sequence = reader.group.start;
-
-			if sequence < self.current {
-				tracing::debug!(old = ?sequence, current = ?self.current, "skipping old group");
+			let reader = GroupBuffer::new(group, self.memory.clone());
+			// Groups come in key order, so only a live start, which jumped to the newest, leaves any
+			// below the cursor.
+			if reader.start < self.current {
+				tracing::debug!(old = ?reader.start, current = ?self.current, "skipping old group");
 				Self::skip(self.joined, &mut self.backlog, &reader);
 				continue;
 			}
-
-			let idx = self.pending.partition_point(|g| g.group.start < reader.group.start);
-			// Each group is late from the earliest arrival among it and the groups past it. A drained
-			// backlog comes in sequence order, not arrival order, so an arrival can lower those below it.
-			if let Some(next) = self.pending.get(idx) {
-				reader.late = reader.late.min(next.late);
-			}
-			for below in self.pending.range_mut(..idx).rev() {
-				if below.late <= reader.late {
-					break;
-				}
-				below.late = reader.late;
-			}
-			self.pending.insert(idx, reader);
+			self.pending.push_back(reader);
 			self.collect_pending(waiter);
 		}
 	}
@@ -1280,10 +1324,11 @@ impl<F: Container> Consumer<F> {
 	// from a group that raced it, and at the latest as the start is decided, before anything is
 	// dropped against it.
 	fn join(&mut self, waiter: &kio::Waiter) {
-		self.poll_largest(waiter);
-		if self.joined.is_none() {
-			self.joined = self.largest;
+		if self.joined.is_some() {
+			return;
 		}
+		self.poll_largest(waiter);
+		self.joined = self.largest;
 	}
 
 	// Drop the pending groups `pick` selects without delivering them. A drop must not hide what
@@ -1347,52 +1392,62 @@ impl<F: Container> Consumer<F> {
 	}
 
 	/// Whether the publisher declared every group start in `groups` skipped, so no group lies
-	/// there; see [`moq_net::track::Subscriber::is_skipped`]. A group with nothing possible
+	/// there; see [`moq_net::track::Ordered::is_skipped`]. A group with nothing possible
 	/// below it is its track's first. False once an error ended the reader.
 	pub fn is_skipped(&self, groups: std::ops::Range<u64>) -> bool {
 		match &self.reader {
 			Reader::Reading(track) | Reader::Failed(track, _) => track.is_skipped(groups),
-			Reader::Ended => false,
+			Reader::Ended | Reader::Lost => false,
 		}
 	}
 
 	/// Set the [`Delay`], mid-stream or before the first read.
 	///
 	/// [`Delay::max`] is clamped to the track's max age like [`new`](Self::new). The
-	/// subscription keeps the requested delay verbatim, its max plus any
-	/// [`Playout::warmup`]. An unstated [`Delay::min`] reads as zero here, and moves
-	/// only a start still to come. A min past the max starts at the max, since the publisher serves
-	/// nothing older.
+	/// subscription keeps the requested max verbatim, plus any [`Playout::warmup`]; its ranges
+	/// keep the live join they were subscribed with (see [`Delay::subscription`]). A
+	/// [`Delay::min`] moves where this reader keeps a start still to come, reading an unstated one
+	/// as zero. A min past the max starts at the max, since the publisher serves nothing older. A
+	/// missing group is given up by the subscription's max alone.
 	pub fn set_delay(&mut self, delay: Delay) {
+		self.set_skip(delay);
 		// An ended reader has no subscription left to tune.
 		let (Reader::Reading(track) | Reader::Failed(track, _)) = &mut self.reader else {
 			return;
 		};
-		self.min_delay = delay.min.unwrap_or_default();
-		self.max_delay = delay
-			.max
-			.unwrap_or(std::time::Duration::MAX)
-			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		// The transport enforces the same budget on the subscription itself, so a
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here. It keeps the
 		// warmup too, as [`Playout::subscription`] does.
-		let delay = delay.with_max(delay.max.map(|max| max.saturating_add(self.warmup)));
-		if track.subscription().delay != delay {
-			let subscription = track.subscription().with_delay(delay);
+		// Only the budget: a replaced range resolves again, so the ranges keep the join they
+		// were subscribed with.
+		let max = warmed(delay, self.warmup).max;
+		let current = track.subscription();
+		let subscription = current
+			.clone()
+			.with_delay(moq_net::track::Delay::default().with_max(max));
+		if subscription != current {
 			let _ = track.update(subscription);
 		}
 	}
 
-	/// Wait at most `wait` of monotonic time, after the first group past a missing one arrives,
-	/// before skipping past it (default: the max delay). Content age skips it once that group
-	/// begins the max delay behind the newest content, whatever the wait.
-	///
-	/// It never exceeds [`Delay::max`]. Groups that did arrive still play until they age past the
-	/// max delay, so a player can wait on holes for its playout delay alone while still receiving
-	/// the late media it catches up on.
-	pub fn set_wait(&mut self, wait: std::time::Duration) {
-		self.wait = Some(wait);
+	/// Skip at `delay`, clamped like [`set_delay`](Self::set_delay), leaving the subscription's
+	/// delay as it is. A delay past the subscription's skips nothing later, since the transport
+	/// drops a group first.
+	pub(crate) fn skipping_at(mut self, delay: Delay) -> Self {
+		self.set_skip(delay);
+		self
+	}
+
+	// Wait and skip at `delay`, its max clamped to the track's max age.
+	fn set_skip(&mut self, delay: Delay) {
+		if let Reader::Reading(track) | Reader::Failed(track, _) = &self.reader {
+			self.min_delay = delay.min;
+			self.max_delay = delay
+				.max
+				.unwrap_or(std::time::Duration::MAX)
+				.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
+		}
 	}
 
 	/// Cap the bytes of decoded frames held ahead of the reader, counting the wire payload they share
@@ -1424,10 +1479,6 @@ enum Failure<E> {
 /// timestamp parsing, and min/max timestamp tracking for age decisions.
 struct GroupBuffer<F: Container> {
 	group: moq_net::group::Consumer,
-
-	// From then on, any sequence missing below this group is late: the earliest arrival among it
-	// and the groups past it, kept on insert so a hole reads it without scanning the backlog.
-	late: kio::clock::Instant,
 
 	// The current frame index within the group.
 	index: usize,
@@ -1475,8 +1526,6 @@ enum Content {
 impl<F: Container> GroupBuffer<F> {
 	fn new(group: moq_net::group::Consumer, memory: Memory) -> Self {
 		let mut this = Self {
-			// When the group landed, not when it was pulled: a full max buffer delays pulls.
-			late: group.arrived(),
 			group,
 			index: 0,
 			content: Content::Empty,
@@ -1515,6 +1564,44 @@ impl<F: Container> GroupBuffer<F> {
 			}
 			if !ready!(self.buffer_once(waiter, format)?) {
 				return Poll::Ready(Ok(None));
+			}
+		}
+	}
+
+	/// Whether this group, landed on past keys nothing declared skipped, continues the content read
+	/// before it: a frame of it presents by `bound`, within one millisecond. Its lowest picture
+	/// decodes within `depth` frames of its first, so it looks no further, nor past its end, its
+	/// failure, or a full max buffer. `None` while it holds no frame, when an endpoint, its end, or a
+	/// failure comes first.
+	fn poll_continues(
+		&mut self,
+		waiter: &kio::Waiter,
+		format: &F,
+		bound: Option<std::time::Duration>,
+		depth: usize,
+	) -> Poll<Option<bool>> {
+		// Nothing proves a step with nowhere to continue from, so the first frame decides.
+		let depth = if bound.is_some() { depth } else { 0 };
+		loop {
+			if self.buffered.is_empty() && self.ready() {
+				return Poll::Ready(None);
+			}
+			let continues = (self.buffered.iter().take(depth + 1))
+				.any(|(frame, ..)| time(frame.timestamp).is_some_and(|at| pts_contiguous(bound, at)));
+			if continues {
+				return Poll::Ready(Some(true));
+			}
+			if self.buffered.len() > depth {
+				return Poll::Ready(Some(false));
+			}
+			// A group holding nothing buffers past a full max buffer, as the cursor's does. One holding
+			// a frame judges by what it holds, since only reading frames frees the buffer.
+			let lead = self.buffered.is_empty();
+			if !lead && self.memory.full() {
+				return Poll::Ready(Some(false));
+			}
+			if !ready!(self.look_once(waiter, format, !lead)) {
+				return Poll::Ready((!self.buffered.is_empty()).then_some(false));
 			}
 		}
 	}
@@ -1701,9 +1788,9 @@ impl<F: Container> GroupBuffer<F> {
 	}
 
 	/// True if this group holds nothing to deliver and never will: aborted with nothing
-	/// buffered and no fault to report.
+	/// buffered, no endpoint decoded, and no fault to report.
 	fn reapable(&mut self, waiter: &kio::Waiter) -> bool {
-		self.buffered.is_empty() && self.fault.is_none() && self.poll_aborted(waiter)
+		self.buffered.is_empty() && self.markers.is_empty() && self.fault.is_none() && self.poll_aborted(waiter)
 	}
 
 	fn note_end(&mut self, end: std::time::Duration) {
@@ -1740,7 +1827,7 @@ impl<F: Container> Drop for GroupBuffer<F> {
 const MARKER_COST: usize = std::mem::size_of::<(usize, Timestamp)>();
 
 /// What a buffered frame holds against the max buffer: its payload and its own entry.
-fn frame_cost(frame: &Frame) -> usize {
+pub(crate) fn frame_cost(frame: &Frame) -> usize {
 	std::mem::size_of::<(Frame, Instant, usize)>() + frame.payload.len()
 }
 
@@ -1759,15 +1846,87 @@ mod tests {
 	use crate::catalog::hang::Container;
 
 	/// The subscription a consumer still reads.
-	fn subscribed<F: ContainerTrait>(consumer: &Consumer<F>) -> &moq_net::track::Subscriber {
+	fn subscribed<F: ContainerTrait>(consumer: &Consumer<F>) -> &moq_net::track::Ordered {
 		match &consumer.reader {
 			Reader::Reading(track) | Reader::Failed(track, _) => track,
-			Reader::Ended => panic!("the reader ended"),
+			Reader::Ended | Reader::Lost => panic!("the reader ended"),
 		}
 	}
 	use std::time::Duration;
 
 	use bytes::Bytes;
+
+	/// A track published at one origin and read from another over a lite-07 session: a received
+	/// copy, whose ordered reader waits for a group the feed still owes, as a player's does. A
+	/// locally produced track owes nothing, so a hole there is stepped over at once.
+	struct Received {
+		track: moq_net::track::Producer,
+		remote: moq_net::broadcast::Consumer,
+		_route: moq_net::origin::Route,
+		_link: crate::container::test_util::Link,
+	}
+
+	impl Received {
+		async fn new() -> Self {
+			Self::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await
+		}
+
+		async fn with_info(info: moq_net::track::Info) -> Self {
+			use crate::container::test_util::{Link, origin};
+
+			let (publisher, subscriber) = (origin(1), origin(2));
+			let link = Link::new(&publisher, &subscriber).await;
+			let route = publisher
+				.route("room", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = route.broadcast().create_track("data", info).unwrap();
+			route.announce().unwrap();
+			let remote = subscriber
+				.consume()
+				.follow("room", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
+			Self {
+				track,
+				remote,
+				_route: route,
+				_link: link,
+			}
+		}
+
+		/// Subscribe to the copy at `delay`.
+		async fn subscribe(&self, delay: Delay) -> moq_net::track::Subscriber {
+			self.subscribe_with(delay.subscription(moq_net::track::Subscription::default()))
+				.await
+		}
+
+		async fn subscribe_with(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscriber {
+			self.remote
+				.track("data")
+				.unwrap()
+				.subscribe(subscription)
+				.await
+				.unwrap()
+		}
+
+		/// A reader of the copy at `delay`.
+		async fn reader(&self, delay: Delay) -> Consumer<Container> {
+			Consumer::new(
+				self.subscribe(delay).await,
+				Container::Legacy(crate::container::Kind::Data),
+			)
+		}
+	}
+
+	/// Let the session carry what was written to the copy, without moving the clock.
+	async fn carried() {
+		for _ in 0..64 {
+			tokio::task::yield_now().await;
+		}
+	}
 
 	/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
 	/// age, so the test's delay budget alone decides which superseded groups are read.
@@ -1843,6 +2002,25 @@ mod tests {
 			.unwrap();
 	}
 
+	/// Append a finished group keyed by its first frame's time, as a container producer keys
+	/// them, so a live join measures it in the track's timescale and the publisher says no group
+	/// starts between it and the last (Container::Legacy(crate::container::Kind::Data) format).
+	fn append_timed(track: &mut moq_net::track::Producer, timestamps: &[Timestamp]) {
+		let mut group = track.append_group(timestamps[0]).unwrap();
+		for &timestamp in timestamps {
+			let frame = Frame {
+				timestamp,
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy(crate::container::Kind::Data)
+				.write(&mut group, &[frame])
+				.unwrap();
+		}
+		group.finish().unwrap();
+	}
+
 	/// Write a finished group with explicit sequence and timestamps (Container::Legacy(crate::container::Kind::Data) format).
 	fn write_group(track: &mut moq_net::track::Producer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
@@ -1857,7 +2035,7 @@ mod tests {
 				.write(&mut group, &[frame])
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 
 	/// Drain all available frames with a per-read timeout.
@@ -1911,7 +2089,8 @@ mod tests {
 		});
 		control
 			.update(
-				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30))),
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
 			)
 			.unwrap();
 		consumer
@@ -1923,7 +2102,8 @@ mod tests {
 	async fn read_single_group() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -1952,7 +2132,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 
 	/// Every item until the track ends: a frame as its timestamp in µs, a gap as its start and
@@ -1973,13 +2153,51 @@ mod tests {
 		items
 	}
 
+	/// An endpoint looked ahead in the next group is delivered though that group then aborts: it is
+	/// decoded, so only a group holding nothing at all is reaped.
+	#[kio::test]
+	async fn a_looked_ahead_endpoint_outlives_its_groups_abort() {
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let mut consumer = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
+		let mut head = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		Container::Legacy(crate::container::Kind::Audio)
+			.write(
+				&mut head,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		assert!(matches!(
+			consumer.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
+		let mut next = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
+		write_marker(&mut next, ts(20_000));
+		// Group 0 is still open, so the read blocks and looks ahead into group 1.
+		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());
+		next.abort(moq_net::Error::Cancel).unwrap();
+		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());
+		head.finish().unwrap();
+		let _track = track.finish().unwrap();
+		assert_eq!(items(&mut consumer).await, ["end 20000"]);
+	}
+
 	/// Joining a paused track, whose only served group is a marker, reads the end without
 	/// waiting for media to resume.
 	#[tokio::test(start_paused = true)]
 	async fn a_join_on_a_marker_group_reads_its_end() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
 		write_marker_group(&mut track, 16, ts(1_000_000));
@@ -2001,9 +2219,9 @@ mod tests {
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(hour);
 		let track = track_producer("data", info);
 		let subscription = moq_net::track::Subscription::default()
-			.with_delay(Delay::default().with_max(hour))
+			.with_delay(moq_net::track::Delay::default().with_max(hour))
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(0),
+				start: moq_net::track::Start::Time(0),
 				end: None,
 			}]);
 		let mut reader = Consumer::new(
@@ -2034,9 +2252,9 @@ mod tests {
 	async fn a_hole_before_a_terminal_data_marker_is_a_gap() {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = moq_net::track::Subscription::default()
-			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(0),
+				start: moq_net::track::Start::Time(0),
 				end: None,
 			}]);
 		let mut reader = Consumer::new(
@@ -2046,24 +2264,25 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0), ts(10_000)]);
 		let mut group = track.create_group(moq_net::group::Info { start: 20_000 }).unwrap();
 		group.write_frame(ts(20_000), Bytes::new()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut reader).await, ["0", "10000", "gap 10000+0", "end 10000"]);
 	}
 
+	/// A missing group before a marker on a paused track is given up by the max delay's wall clock,
+	/// since no newer media will age it out, and wakes the reader when it is.
 	#[tokio::test(start_paused = true)]
 	async fn a_sequence_hole_before_a_paused_data_marker_expires() {
 		for budget in [Duration::ZERO, Duration::from_millis(100)] {
-			let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
-			let subscriber =
-				track.subscribe(moq_net::track::Subscription::default().with_delay(Delay::default().with_max(budget)));
-			let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-			write_group(&mut track, 0, &[ts(10_000)]);
+			let mut copy = Received::new().await;
+			let mut reader = copy.reader(Delay::default().with_min(None).with_max(budget)).await;
+			write_group(&mut copy.track, 0, &[ts(10_000)]);
 			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
-			let mut marker = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
+			let mut marker = copy.track.create_group(moq_net::group::Info { start: 2 }).unwrap();
 			marker.write_frame(ts(20_000), Bytes::new()).unwrap();
-			marker.close().unwrap();
+			marker.finish().unwrap();
+			carried().await;
 
 			if !budget.is_zero() {
 				assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
@@ -2078,37 +2297,45 @@ mod tests {
 				assert_eq!(
 					before.elapsed(),
 					Duration::from_millis(1),
-					"the hole timer wakes the reader"
+					"the budget wakes the reader"
 				);
 			} else {
-				assert!(matches!(
-					reader.poll_read(&kio::Waiter::noop()),
-					Poll::Ready(Ok(Some(Read::Gap { .. })))
-				));
+				let read = kio::clock::timeout(Duration::ZERO, reader.read())
+					.await
+					.unwrap()
+					.unwrap();
+				assert!(matches!(read, Some(Read::Gap { .. })));
 			}
 			assert!(
 				matches!(reader.poll_read(&kio::Waiter::noop()), Poll::Ready(Ok(Some(Read::End { group: 2, end }))) if end == ts(10_000))
 			);
-			let _track = track.finish().unwrap();
+			let _track = copy.track.finish().unwrap();
 		}
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn a_filled_sequence_hole_gives_the_next_hole_a_fresh_budget() {
-		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
-		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(100))),
-		);
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut copy.track, 0, &[ts(0)]);
+		carried().await;
 		assert!(matches!(
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 0, .. })
 		));
-		write_group(&mut track, 2, &[ts(20_000)]);
+		write_group(&mut copy.track, 2, &[ts(20_000)]);
+		carried().await;
 		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 		tokio::time::advance(Duration::from_millis(50)).await;
-		write_group(&mut track, 1, &[ts(10_000)]);
+		carried().await;
+		write_group(&mut copy.track, 1, &[ts(10_000)]);
+		carried().await;
 		assert!(matches!(
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 1, .. })
@@ -2117,19 +2344,22 @@ mod tests {
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 2, .. })
 		));
-		let mut marker = track.create_group(moq_net::group::Info { start: 4 }).unwrap();
+		let mut marker = copy.track.create_group(moq_net::group::Info { start: 4 }).unwrap();
 		marker.write_frame(ts(30_000), Bytes::new()).unwrap();
-		marker.close().unwrap();
+		marker.finish().unwrap();
+		carried().await;
 		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 		tokio::time::advance(Duration::from_millis(99)).await;
+		carried().await;
 		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 		tokio::time::advance(Duration::from_millis(1)).await;
+		carried().await;
 		assert!(matches!(
 			reader.poll_read(&kio::Waiter::noop()),
 			Poll::Ready(Ok(Some(Read::Gap { .. })))
 		));
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::End { group: 4, .. })));
-		let _track = track.finish().unwrap();
+		let _track = copy.track.finish().unwrap();
 	}
 
 	/// The arrival is when a frame landed, not when it was read, and a break keeps the last one.
@@ -2137,7 +2367,8 @@ mod tests {
 	async fn arrival_is_when_the_frame_landed() {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
 		);
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 		assert_eq!(reader.arrival(), None, "nothing read yet");
@@ -2162,7 +2393,7 @@ mod tests {
 
 		let mut marker = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
 		marker.write_frame(ts(66_000), Bytes::new()).unwrap();
-		marker.close().unwrap();
+		marker.finish().unwrap();
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::End { group: 2, .. })));
 		assert_eq!(reader.arrival(), Some(second), "an end carries no arrival of its own");
 	}
@@ -2174,10 +2405,15 @@ mod tests {
 	async fn a_backlog_group_below_the_cursor_reports_when_it_landed() {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
-		reader.set_wait(Duration::from_millis(50));
+		reader.set_delay(
+			Delay::default()
+				.with_min(Duration::from_millis(50))
+				.with_max(Duration::from_secs(10)),
+		);
 
 		// The publisher stood at group 5 as the subscription began.
 		write_group(&mut track, 5, &[ts(100_000)]);
@@ -2236,7 +2472,8 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(30)).await;
 		write_group(&mut track, 4, &[ts(20_000)]);
 		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
 		);
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio)).live();
 		assert!(matches!(
@@ -2244,6 +2481,116 @@ mod tests {
 			Some(Read::Frame { group: 4, .. })
 		));
 		assert_eq!(reader.backlog(), Some(landed));
+	}
+
+	/// A join's backlog the ordered reader gives up as stale, never handing it to this reader, still
+	/// reports when it landed: its gap carries the landing.
+	#[kio::test]
+	async fn a_stale_backlog_the_ordered_reader_gives_up_reports_when_it_landed() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let landed = kio::clock::now();
+		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut track, 1, &[ts(20_000)]);
+		kio::clock::sim::advance(Duration::from_millis(100)).await;
+		write_group(&mut track, 2, &[ts(40_000)]);
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(50))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 1, .. })
+		));
+		assert_eq!(reader.backlog(), Some(landed), "group 0 went stale unread");
+	}
+
+	/// A gap's landing is when the latest group it gives up landed, so only a gap wholly at or below
+	/// the join is backlog: one reaching past it may report a group produced after the subscription.
+	#[tokio::test(start_paused = true)]
+	async fn a_gap_reaching_past_the_join_folds_no_backlog() {
+		let budget = Duration::from_secs(2);
+		for (joined, backlog) in [(151, false), (152, true)] {
+			let mut copy = Received::new().await;
+			let mut reader = copy
+				.reader(Delay::default().with_min(Duration::from_millis(100)).with_max(budget))
+				.await;
+			write_group(&mut copy.track, 150, &[ts(0)]);
+			carried().await;
+			assert!(matches!(
+				reader.read().await.unwrap(),
+				Some(Read::Frame { group: 150, .. })
+			));
+			// Where the publisher stood as the subscription began.
+			reader.joined = Some(joined);
+			write_group(&mut copy.track, 151, &[ts(20_000)]);
+			tokio::time::advance(Duration::from_millis(10)).await;
+			let landed = kio::clock::now();
+			write_group(&mut copy.track, 152, &[ts(40_000)]);
+			write_group(&mut copy.track, 153, &[ts(60_000)]);
+			carried().await;
+			// Groups 151 and 152 wait unread until their successors landed a budget ago, so both are
+			// given up as one stale gap, landing when 152 did.
+			tokio::time::advance(budget + Duration::from_millis(1)).await;
+			write_group(&mut copy.track, 154, &[ts(80_000)]);
+			carried().await;
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Gap { .. })));
+			assert!(matches!(
+				reader.read().await.unwrap(),
+				Some(Read::Frame { group: 153, .. })
+			));
+			assert_eq!(reader.backlog(), backlog.then_some(landed), "joined at {joined}");
+		}
+	}
+
+	/// The join's boundary is where the publisher stood as it answered, though the groups it owes
+	/// are held up while the publisher moves on: the first item the ordered reader hands out comes
+	/// after the largest has passed it.
+	#[tokio::test(start_paused = true)]
+	async fn the_join_is_the_answer_though_the_first_group_is_held() {
+		use crate::container::test_util::{Link, origin};
+
+		let (publisher, subscriber) = (origin(1), origin(2));
+		// SETUP and the Announce Stream take the first two uni streams, so every group waits.
+		let link = Link::held(&publisher, &subscriber, 2).await;
+		let route = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut track = route
+			.broadcast()
+			.create_track("data", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		route.announce().unwrap();
+		let remote = subscriber
+			.consume()
+			.follow("room", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		write_group(&mut track, 0, &[ts(0)]);
+		let subscription = remote
+			.track("data")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
+			.await
+			.unwrap();
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
+		carried().await;
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		write_group(&mut track, 1, &[ts(20_000)]);
+		write_group(&mut track, 2, &[ts(40_000)]);
+		link.open();
+		carried().await;
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
+		assert_eq!(reader.joined, Some(0));
 	}
 
 	/// The join's boundary is where the publisher stood as it answered, not the newer largest by the
@@ -2254,7 +2601,8 @@ mod tests {
 		let landed = kio::clock::now();
 		let mut open = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
 		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
 		);
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio)).live();
 		// Group 3 holds no frame yet, so the start waits, though the publisher answered.
@@ -2277,7 +2625,7 @@ mod tests {
 		Container::Legacy(crate::container::Kind::Audio)
 			.write(&mut open, &[frame])
 			.unwrap();
-		open.close().unwrap();
+		open.finish().unwrap();
 		assert!(matches!(
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 5, .. })
@@ -2286,24 +2634,32 @@ mod tests {
 	}
 
 	/// The holes a source left behind when it stopped expire together, a budget after the groups
-	/// past them arrived, rather than one budget each as the cursor reaches them.
+	/// past them arrived, rather than one budget each as the cursor reaches them. The groups that
+	/// waited behind them that long are a budget late too, superseded that long ago, so only the
+	/// newest is read.
 	#[tokio::test(start_paused = true)]
 	async fn holes_behind_a_stalled_source_share_one_budget() {
 		let budget = Duration::from_millis(100);
-		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
-		let subscriber =
-			track.subscribe(moq_net::track::Subscription::default().with_delay(Delay::default().with_max(budget)));
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(budget)),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut copy.track, 0, &[ts(0)]);
+		carried().await;
 		assert!(matches!(
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 0, .. })
 		));
 		for sequence in [2, 4, 6] {
-			write_group(&mut track, sequence, &[ts(sequence * 10_000)]);
+			write_group(&mut copy.track, sequence, &[ts(sequence * 10_000)]);
+			carried().await;
 		}
 		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 		tokio::time::advance(budget).await;
+		carried().await;
 		let mut read = Vec::new();
 		while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
 			read.push(match item {
@@ -2312,28 +2668,82 @@ mod tests {
 				Read::End { .. } => "end".to_string(),
 			});
 		}
-		assert_eq!(read, ["gap", "frame 2", "gap", "frame 4", "gap", "frame 6"]);
+		assert_eq!(read, ["gap", "frame 6"]);
 	}
 
-	/// A burst of later groups spanning past the wait doesn't age out a missing group that lands in
-	/// the same burst: a reader starved of CPU takes in every stream at once.
+	/// A missing group is waited for the max delay, whatever the min delay: the min only sets
+	/// where the reader starts.
 	#[tokio::test(start_paused = true)]
-	async fn a_burst_past_the_wait_does_not_age_out_a_hole() {
-		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
-		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
-		);
+	async fn a_hole_is_waited_for_the_max_delay_whatever_the_min() {
+		let max = Duration::from_secs(1);
+		for min in [
+			Some(Duration::ZERO),
+			Some(Duration::from_millis(100)),
+			Some(Duration::from_secs(5)),
+			None,
+		] {
+			let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
+			let subscriber = copy
+				.subscribe_with(
+					Delay::default()
+						.with_min(min)
+						.with_max(max)
+						.subscription(moq_net::track::Subscription::default()),
+				)
+				.await;
+			let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+			write_group(&mut copy.track, 0, &[ts(0)]);
+			carried().await;
+			assert!(matches!(
+				reader.read().await.unwrap(),
+				Some(Read::Frame { group: 0, .. })
+			));
+			// Group 1 never arrives, and group 2 starts right after it, so only the wall clock ends it.
+			write_group(&mut copy.track, 2, &[ts(40_000)]);
+			carried().await;
+			let since = kio::clock::now();
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Gap { .. })));
+			assert_eq!(since.elapsed(), max, "min {min:?}");
+		}
+	}
+
+	/// A burst of later groups spanning past the min delay doesn't age out a missing group that
+	/// lands in the same burst, even once the min delay has passed: a reader starved of CPU takes in
+	/// every stream at once, and only the max delay gives a hole up.
+	#[tokio::test(start_paused = true)]
+	async fn a_burst_past_the_min_delay_does_not_age_out_a_hole() {
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-		reader.set_wait(Duration::from_millis(100));
-		write_group(&mut track, 0, &[ts(0)]);
+		reader.set_delay(
+			Delay::default()
+				.with_min(Duration::from_millis(100))
+				.with_max(Duration::from_secs(1)),
+		);
+		write_group(&mut copy.track, 0, &[ts(0)]);
+		carried().await;
 		assert!(matches!(
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 0, .. })
 		));
-		write_group(&mut track, 2, &[ts(40_000), ts(200_000)]);
-		write_group(&mut track, 3, &[ts(300_000)]);
+		write_group(&mut copy.track, 2, &[ts(40_000), ts(200_000)]);
+		carried().await;
+		write_group(&mut copy.track, 3, &[ts(300_000)]);
+		carried().await;
 		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
-		write_group(&mut track, 1, &[ts(20_000)]);
+		tokio::time::advance(Duration::from_millis(100)).await;
+		carried().await;
+		assert!(
+			reader.poll_read(&kio::Waiter::noop()).is_pending(),
+			"the min delay gives nothing up"
+		);
+		write_group(&mut copy.track, 1, &[ts(20_000)]);
+		carried().await;
 		let mut read = Vec::new();
 		while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
 			read.push(match item {
@@ -2345,26 +2755,34 @@ mod tests {
 		assert_eq!(read, ["frame 1", "frame 2", "frame 2", "frame 3"]);
 	}
 
-	/// A group that arrives late below an earlier one inherits that earlier arrival: the holes
-	/// around it were already observable then.
+	/// A group that arrives late below an earlier one is late from that earlier arrival, as are the
+	/// holes around it, so they all expire a budget after it.
 	#[tokio::test(start_paused = true)]
 	async fn a_hole_is_late_from_the_earliest_arrival_past_it() {
 		let budget = Duration::from_millis(100);
-		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
-		let subscriber =
-			track.subscribe(moq_net::track::Subscription::default().with_delay(Delay::default().with_max(budget)));
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(budget)),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut copy.track, 0, &[ts(0)]);
+		carried().await;
 		assert!(matches!(
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 0, .. })
 		));
-		write_group(&mut track, 4, &[ts(40_000)]);
+		write_group(&mut copy.track, 4, &[ts(40_000)]);
+		carried().await;
 		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 		tokio::time::advance(budget / 2).await;
-		write_group(&mut track, 2, &[ts(20_000)]);
+		carried().await;
+		write_group(&mut copy.track, 2, &[ts(20_000)]);
+		carried().await;
 		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 		tokio::time::advance(budget / 2).await;
+		carried().await;
 		let mut read = Vec::new();
 		while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
 			read.push(match item {
@@ -2373,19 +2791,31 @@ mod tests {
 				Read::End { .. } => "end".to_string(),
 			});
 		}
-		assert_eq!(read, ["gap", "frame 2", "gap", "frame 4"]);
+		assert_eq!(read, ["gap", "frame 4"]);
 	}
 
-	/// A player waits on a hole for its playout delay, while groups that did arrive play until the
-	/// max delay.
+	/// A player waits on a hole for the max delay, as it does on a group that did arrive, whatever
+	/// its playout delay.
 	#[tokio::test(start_paused = true)]
-	async fn a_hole_is_waited_for_the_wait_while_an_arrived_group_plays_up_to_the_max_delay() {
-		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
-		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
-		);
+	async fn a_hole_and_an_arrived_group_both_wait_up_to_the_max_delay() {
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
+		// From group 0, which the playout delay set below doesn't move.
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)))
+					.with_ranges([moq_net::track::Range {
+						start: moq_net::track::Start::Time(0),
+						end: None,
+					}]),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-		reader.set_wait(Duration::from_millis(100));
+		reader.set_delay(
+			Delay::default()
+				.with_min(Duration::from_millis(100))
+				.with_max(Duration::from_secs(1)),
+		);
 		let drain = |reader: &mut Consumer<Container>| {
 			let mut read = Vec::new();
 			while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
@@ -2399,7 +2829,7 @@ mod tests {
 		};
 
 		// A stalled group 500 ms behind the newest content is still within the max delay.
-		let mut stalled = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut stalled = copy.track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		let frame = Frame {
 			timestamp: ts(0),
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
@@ -2409,30 +2839,91 @@ mod tests {
 		Container::Legacy(crate::container::Kind::Data)
 			.write(&mut stalled, &[frame])
 			.unwrap();
-		write_group(&mut track, 1, &[ts(500_000)]);
+		write_group(&mut copy.track, 1, &[ts(500_000)]);
+		carried().await;
 		tokio::time::advance(Duration::from_millis(500)).await;
+		carried().await;
 		assert_eq!(drain(&mut reader), ["frame 0"]);
-		stalled.close().unwrap();
+		stalled.finish().unwrap();
+		carried().await;
 		assert_eq!(drain(&mut reader), ["frame 1"]);
 
-		// A missing group expires the wait after the first group past it arrived.
-		write_group(&mut track, 3, &[ts(520_000)]);
-		tokio::time::advance(Duration::from_millis(99)).await;
+		// A missing group is given up the max delay after the first group past it arrived, not the
+		// min delay.
+		write_group(&mut copy.track, 3, &[ts(520_000)]);
+		carried().await;
+		tokio::time::advance(Duration::from_millis(999)).await;
+		carried().await;
 		assert!(drain(&mut reader).is_empty());
 		tokio::time::advance(Duration::from_millis(1)).await;
+		carried().await;
 		assert_eq!(drain(&mut reader), ["gap", "frame 3"]);
 
-		// Content buffered past the wait doesn't skip it early: a burst may still carry the group.
-		write_group(&mut track, 5, &[ts(700_000)]);
-		write_group(&mut track, 6, &[ts(800_000)]);
-		assert!(drain(&mut reader).is_empty());
+		// Content buffered past the hole doesn't skip it early: a burst may still carry the group.
+		write_group(&mut copy.track, 5, &[ts(700_000)]);
+		carried().await;
+		write_group(&mut copy.track, 6, &[ts(800_000)]);
+		carried().await;
 		tokio::time::advance(Duration::from_millis(100)).await;
-		assert_eq!(drain(&mut reader), ["gap", "frame 5", "frame 6"]);
+		carried().await;
+		assert!(drain(&mut reader).is_empty());
+		write_group(&mut copy.track, 4, &[ts(600_000)]);
+		carried().await;
+		assert_eq!(drain(&mut reader), ["frame 4", "frame 5", "frame 6"]);
 
 		// It skips at once when the newest content is already the max delay past the group after it.
-		write_group(&mut track, 8, &[ts(900_000)]);
-		write_group(&mut track, 9, &[ts(1_900_000)]);
+		write_group(&mut copy.track, 8, &[ts(900_000)]);
+		carried().await;
+		write_group(&mut copy.track, 9, &[ts(1_900_000)]);
+		carried().await;
 		assert_eq!(drain(&mut reader), ["gap", "frame 8", "frame 9"]);
+	}
+
+	/// Everything `reader` hands over now, polled with `waiter`.
+	fn drain_with(reader: &mut Consumer<Container>, waiter: &kio::Waiter) -> Vec<String> {
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(item))) = reader.poll_read(waiter) {
+			read.push(match item {
+				Read::Frame { group, .. } => format!("frame {group}"),
+				Read::Gap { .. } => "gap".to_string(),
+				Read::End { .. } => "end".to_string(),
+			});
+		}
+		read
+	}
+
+	/// The browser's resume: a reader that delivered a tail before a pause, then a replayed backlog
+	/// arriving newest first behind a hole. Nothing gives a hole up before the max delay, so the
+	/// reader waits for the backlog's oldest group, which lands last, and plays the replay whole.
+	#[tokio::test(start_paused = true)]
+	async fn a_backlog_replayed_newest_first_plays_whole_within_the_max_delay() {
+		let mut copy = Received::new().await;
+		let mut reader = copy
+			.reader(
+				Delay::default()
+					.with_min(Duration::from_millis(500))
+					.with_max(Duration::from_secs(2)),
+			)
+			.await;
+		let waiter = kio::Waiter::noop();
+		// The tail before the pause, a group per 100 ms of media and of wall time.
+		for sequence in 0..5 {
+			write_group(&mut copy.track, sequence, &[ts(sequence * 100_000)]);
+			carried().await;
+			assert_eq!(drain_with(&mut reader, &waiter), [format!("frame {sequence}")]);
+			tokio::time::advance(Duration::from_millis(100)).await;
+		}
+		// Paused until 1.4 s, when the publisher replays groups 14 down to 5, one every 50 ms.
+		tokio::time::advance(Duration::from_millis(900)).await;
+		let mut read = Vec::new();
+		for sequence in (5..15).rev() {
+			write_group(&mut copy.track, sequence, &[ts(sequence * 100_000)]);
+			carried().await;
+			read.extend(drain_with(&mut reader, &waiter));
+			tokio::time::advance(Duration::from_millis(50)).await;
+		}
+		let expected: Vec<String> = (5..15).map(|sequence| format!("frame {sequence}")).collect();
+		assert_eq!(read, expected);
 	}
 
 	/// A malformed data marker group found while looking ahead fails the reader, rather than
@@ -2441,9 +2932,9 @@ mod tests {
 	async fn a_malformed_marker_passed_by_a_skip_fails_the_reader() {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = moq_net::track::Subscription::default()
-			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(0),
+				start: moq_net::track::Start::Time(0),
 				end: None,
 			}]);
 		let mut reader = Consumer::new(
@@ -2467,7 +2958,7 @@ mod tests {
 		}
 		.write_to(&mut group)
 		.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		write_group(&mut track, 2, &[ts(1_000_000)]);
 
 		let read = loop {
@@ -2504,9 +2995,9 @@ mod tests {
 			for marker_first in [true, false] {
 				let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 				let subscription = moq_net::track::Subscription::default()
-					.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
 					.with_ranges([moq_net::track::Range {
-						start: moq_net::track::Anchor::Time(0),
+						start: moq_net::track::Start::Time(0),
 						end: None,
 					}]);
 				let mut reader = Consumer::new(
@@ -2530,7 +3021,7 @@ mod tests {
 						.unwrap(),
 					}
 				}
-				group.close().unwrap();
+				group.finish().unwrap();
 				let _track = track.finish().unwrap();
 
 				let error = loop {
@@ -2572,7 +3063,8 @@ mod tests {
 	async fn gaps_mark_holes_while_a_marker_reads_as_an_end() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
 		write_group(&mut track, 0, &[ts(0), ts(10_000)]);
@@ -2604,7 +3096,8 @@ mod tests {
 	async fn only_an_undeclared_run_between_groups_is_a_gap() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
 		write_group(&mut track, 0, &[ts(0), ts(10_000)]);
@@ -2633,7 +3126,8 @@ mod tests {
 	async fn codec_durations_bridge_undeclared_runs_between_audio_groups() {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		let mut reader = Consumer::new(subscription, Container::try_from(&config).unwrap());
@@ -2650,17 +3144,259 @@ mod tests {
 				.unwrap()
 				.write(&mut group, &[packet])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut reader).await, ["0", "20000", "gap 40000+20000", "60000"]);
+	}
+
+	/// MP2 codes 1152 samples per frame, so its groups bridge as Opus's do.
+	#[tokio::test(start_paused = true)]
+	async fn mp2_durations_bridge_undeclared_runs_between_audio_groups() {
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Mp2, 48_000, 2);
+		let mut reader = Consumer::new(subscription, Container::try_from(&config).unwrap());
+		// Two 24 ms frames per group. The group starting at 96 ms never arrives.
+		for start in [0, 48_000, 144_000] {
+			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
+			for at in [start, start + 24_000] {
+				let packet = Frame {
+					timestamp: ts(at),
+					payload: Bytes::from_static(&[0xFF, 0xFD]),
+					keyframe: at == start,
+					duration: None,
+				};
+				Container::try_from(&config)
+					.unwrap()
+					.write(&mut group, &[packet])
+					.unwrap();
+			}
+			group.finish().unwrap();
+		}
+		let _track = track.finish().unwrap();
+		assert_eq!(
+			items(&mut reader).await,
+			["0", "24000", "48000", "72000", "gap 96000+48000", "144000", "168000"]
+		);
+	}
+
+	/// Legacy video groups, each keyed by its first frame's timestamp as a moq-lite-06 hop delivers
+	/// them with nothing declared between them: the frames of each, in decode order, with no duration.
+	async fn legacy_video(groups: &[&[u64]]) -> Vec<String> {
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let wire = Container::Legacy(crate::container::Kind::Video);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
+		for pictures in groups {
+			let start = pictures[0];
+			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
+			for &micros in *pictures {
+				let frame = Frame {
+					timestamp: ts(micros),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: micros == start,
+					duration: None,
+				};
+				wire.write(&mut group, &[frame]).unwrap();
+			}
+			group.finish().unwrap();
+		}
+		let _track = track.finish().unwrap();
+		items(&mut reader).await
+	}
+
+	/// The second group is an open GOP: its leading pictures present between the first group's last
+	/// picture and its keyframe, so the two groups meet and nothing is lost.
+	#[tokio::test(start_paused = true)]
+	async fn an_open_gop_that_continues_the_previous_video_group_is_no_gap() {
+		assert_eq!(
+			legacy_video(&[&[0, 120_000, 40_000, 80_000], &[280_000, 160_000, 200_000, 240_000]]).await,
+			["0", "120000", "40000", "80000", "280000", "160000", "200000", "240000"]
+		);
+	}
+
+	/// A closed GOP with B-frames starts one picture past the previous group's highest timestamp,
+	/// which is where its last picture starts rather than ends.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_gop_one_picture_past_the_previous_video_group_is_no_gap() {
+		assert_eq!(
+			legacy_video(&[&[0, 120_000, 40_000, 80_000], &[160_000, 280_000, 200_000, 240_000]]).await,
+			["0", "120000", "40000", "80000", "160000", "280000", "200000", "240000"]
+		);
+	}
+
+	/// Field-coded open GOPs: the keyframe's second field decodes ahead of the leading pictures, so
+	/// the lowest one comes third, within how far the first group reordered. A 40 ms frame among the
+	/// second group's 20 ms fields allows its last picture to be one too.
+	#[tokio::test(start_paused = true)]
+	async fn field_coded_open_gops_that_continue_each_other_are_no_gap() {
+		let groups: &[&[u64]] = &[
+			&[0, 20_000, 120_000, 140_000, 40_000, 60_000, 80_000, 100_000],
+			&[240_000, 260_000, 160_000, 180_000, 220_000],
+			&[380_000, 400_000, 300_000, 320_000, 340_000, 360_000],
+		];
+		let read = legacy_video(groups).await;
+		assert!(!read.iter().any(|item| item.starts_with("gap")), "{read:?}");
+		assert_eq!(read.len(), 19);
+	}
+
+	/// A lost group is still a gap, read ahead of the next group's keyframe, though its leading pictures
+	/// would have presented nearer: the keyframe waits for them.
+	#[tokio::test(start_paused = true)]
+	async fn an_open_gop_past_a_lost_video_group_is_a_gap_before_its_keyframe() {
+		assert_eq!(
+			legacy_video(&[
+				&[0, 120_000, 40_000, 80_000],
+				&[280_000, 160_000, 200_000, 240_000],
+				// The group at 560 ms never arrives.
+				&[840_000, 720_000, 760_000, 800_000],
+			])
+			.await,
+			[
+				"0",
+				"120000",
+				"40000",
+				"80000",
+				"280000",
+				"160000",
+				"200000",
+				"240000",
+				"gap 280000+560000",
+				"840000",
+				"720000",
+				"760000",
+				"800000"
+			]
+		);
+	}
+
+	/// The keyframe of an open GOP is held only until a frame shows the group continues, so it reads
+	/// while the rest of its group is still to come.
+	#[tokio::test(start_paused = true)]
+	async fn an_open_gops_keyframe_reads_once_a_leading_picture_lands() {
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let wire = Container::Legacy(crate::container::Kind::Video);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
+		let frame = |micros: u64, keyframe| Frame {
+			timestamp: ts(micros),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		let mut first = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		for (micros, keyframe) in [(0, true), (120_000, false), (40_000, false), (80_000, false)] {
+			wire.write(&mut first, &[frame(micros, keyframe)]).unwrap();
+		}
+		first.finish().unwrap();
+		for _ in 0..4 {
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		}
+		let mut open = track.create_group(moq_net::group::Info { start: 280_000 }).unwrap();
+		wire.write(&mut open, &[frame(280_000, true)]).unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(
+			reader.poll_read(&waiter).is_pending(),
+			"the keyframe waits for the next frame"
+		);
+		wire.write(&mut open, &[frame(160_000, false)]).unwrap();
+		let Some(Read::Frame { frame: keyframe, .. }) = reader.read().await.unwrap() else {
+			panic!("the keyframe reads, with no gap ahead of it");
+		};
+		assert_eq!(keyframe.timestamp, ts(280_000));
+		let Some(Read::Frame { frame: leading, .. }) = reader.read().await.unwrap() else {
+			panic!("the leading picture reads");
+		};
+		assert_eq!(leading.timestamp, ts(160_000));
+		drop(open);
+	}
+
+	/// A held keyframe is judged by what its group holds once the max buffer fills, and read behind a
+	/// gap rather than dropped with the group: the pressure skip moves past only a group holding nothing.
+	#[tokio::test(start_paused = true)]
+	async fn a_held_keyframe_is_read_once_the_max_buffer_fills() {
+		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let wire = Container::Legacy(crate::container::Kind::Video);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
+		let frame = |micros: u64, keyframe| Frame {
+			timestamp: ts(micros),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		let mut first = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		for (micros, keyframe) in [(0, true), (120_000, false), (40_000, false), (80_000, false)] {
+			wire.write(&mut first, &[frame(micros, keyframe)]).unwrap();
+		}
+		first.finish().unwrap();
+		for _ in 0..4 {
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		}
+		// The open GOP's keyframe waits for a frame to show whether it continues the first group.
+		let mut open = track.create_group(moq_net::group::Info { start: 280_000 }).unwrap();
+		wire.write(&mut open, &[frame(280_000, true)]).unwrap();
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		// A later group's first frame, decoded while the keyframe waits, fills the max buffer before
+		// that frame lands. Its handle alone leaves room.
+		reader.set_max_buffer(reader.buffered_bytes() + std::mem::size_of::<GroupBuffer<Container>>() + 1);
+		write_group(&mut track, 560_000, &[ts(560_000)]);
+		let Some(Read::Gap { timestamp, duration }) = reader.read().await.unwrap() else {
+			panic!("the step reads as a gap, judged by the keyframe alone");
+		};
+		assert_eq!((timestamp, duration), (ts(120_000), ts(160_000)));
+		let Some(Read::Frame { frame: keyframe, .. }) = reader.read().await.unwrap() else {
+			panic!("the held keyframe reads rather than drop with its group");
+		};
+		assert_eq!(keyframe.timestamp, ts(280_000));
+		drop(open);
+	}
+
+	/// A group the cursor stepped onto that holds nothing yet is skipped once the later groups fill the
+	/// max buffer, as before it held anything to judge.
+	#[tokio::test(start_paused = true)]
+	async fn an_empty_unproven_group_is_skipped_once_the_max_buffer_fills() {
+		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
+		write_group(&mut track, 0, &[ts(0), ts(40_000)]);
+		for _ in 0..2 {
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		}
+		let open = track.create_group(moq_net::group::Info { start: 280_000 }).unwrap();
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		reader.set_max_buffer(reader.buffered_bytes() + std::mem::size_of::<GroupBuffer<Container>>() + 1);
+		write_group(&mut track, 560_000, &[ts(560_000)]);
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::Gap { .. })));
+		let Some(Read::Frame { frame, .. }) = reader.read().await.unwrap() else {
+			panic!("the later group reads");
+		};
+		assert_eq!(frame.timestamp, ts(560_000));
+		drop(open);
 	}
 
 	#[kio::test]
 	async fn a_latency_skip_is_a_gap() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
 		reader.max_delay = Duration::ZERO;
@@ -2688,7 +3424,8 @@ mod tests {
 	async fn a_trailing_duration_marker_is_not_an_end() {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		let wire = Container::Legacy(crate::container::Kind::Video);
@@ -2708,7 +3445,7 @@ mod tests {
 				],
 			)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut reader).await, ["0", "33000"]);
@@ -2719,7 +3456,8 @@ mod tests {
 	async fn an_audio_terminal_reads_its_end_before_the_final_packets() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
@@ -2736,7 +3474,7 @@ mod tests {
 				&[frame(50_000, Bytes::new()), frame(40_000, Bytes::from_static(&[1]))],
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut reader).await, ["0", "20000", "end 50000", "40000"]);
 	}
@@ -2745,7 +3483,8 @@ mod tests {
 	async fn a_marker_group_declares_an_end() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(2))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Audio));
 
@@ -2762,7 +3501,8 @@ mod tests {
 	async fn only_a_marker_declares_an_end() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(2))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Audio));
 
@@ -2783,7 +3523,8 @@ mod tests {
 	async fn empty_groups_mean_nothing() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(2))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Audio));
 
@@ -2791,7 +3532,7 @@ mod tests {
 		track
 			.create_group(moq_net::group::Info { start: 1 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		write_group(&mut track, 2, &[ts(1_000)]);
 		let _track = track.finish().unwrap();
@@ -2808,7 +3549,8 @@ mod tests {
 		let _empty = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 
 		let mut subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let edge = match subscriber.poll_largest(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Some(edge)) => edge,
@@ -2828,7 +3570,8 @@ mod tests {
 	async fn latency_skip_reports_a_gap() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(2))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Audio));
 		// Keep transport filtering out of this test so it isolates the mux skip logic.
@@ -2858,7 +3601,8 @@ mod tests {
 	async fn read_multiple_frames_single_group() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -2878,7 +3622,8 @@ mod tests {
 	async fn read_multiple_groups_within_latency() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -2899,7 +3644,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(100))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -2929,7 +3675,7 @@ mod tests {
 		// Finish group 0 after consumer has had time to accumulate pending groups
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -2973,7 +3719,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -3014,7 +3760,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -3070,7 +3816,7 @@ mod tests {
 		assert_eq!(read(&mut consumer), None, "cut group 0 short");
 		write(&mut group0, ts(1_000_000));
 		assert_eq!(read(&mut consumer), Some(ts(1_000_000)));
-		group0.close().unwrap();
+		group0.finish().unwrap();
 		assert_eq!(read(&mut consumer), Some(ts(2_500_000)));
 
 		// Once the reach falls a full budget behind, the stalled group is skipped.
@@ -3079,8 +3825,8 @@ mod tests {
 		write(&mut group2, ts(7_000_000));
 		assert_eq!(read(&mut consumer), Some(ts(3_000_000)));
 		assert_eq!(read(&mut consumer), Some(ts(5_000_000)));
-		group1.close().unwrap();
-		group2.close().unwrap();
+		group1.finish().unwrap();
+		group2.finish().unwrap();
 	}
 
 	/// A backlog that lands whole before the first read starts at the first group whose first
@@ -3111,7 +3857,7 @@ mod tests {
 				)
 				.unwrap();
 			if !open {
-				last.close().unwrap();
+				last.finish().unwrap();
 			}
 
 			let mut read = Vec::new();
@@ -3168,7 +3914,7 @@ mod tests {
 				)
 				.unwrap();
 		}
-		fifth.close().unwrap();
+		fifth.finish().unwrap();
 		drain(&mut consumer);
 
 		let expected: Vec<_> = frames(3).into_iter().chain(frames(4)).chain([ts(5_000_000)]).collect();
@@ -3218,30 +3964,6 @@ mod tests {
 		);
 	}
 
-	/// A keyframe one frame below the previous group's last frame, but above its start, is an
-	/// overlap rather than a rewind.
-	#[kio::test]
-	async fn a_keyframe_overlapping_the_previous_group_is_accepted() {
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
-		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
-		// Read the first group before the second arrives: a blocked group that the next one
-		// already covers is skipped for latency, which is not what this checks.
-		for expected in [0, 33_000, 66_000] {
-			assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(expected));
-		}
-		write_group(&mut track, 1, &[ts(50_000), ts(83_000)]);
-		let _track = track.finish().unwrap();
-		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(
-			frames
-				.iter()
-				.map(|f| f.timestamp.as_micros().unwrap())
-				.collect::<Vec<_>>(),
-			vec![50_000, 83_000]
-		);
-	}
-
 	#[kio::test]
 	async fn open_gop_leading_pictures_above_the_previous_group_are_accepted() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -3269,7 +3991,8 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut consumer = Consumer::new(
 			track.subscribe(
-				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))),
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(2))),
 			),
 			Container::Legacy(crate::container::Kind::Audio),
 		);
@@ -3284,17 +4007,20 @@ mod tests {
 	/// one after it, and is waited for like any hole rather than skipped as too old.
 	#[tokio::test(start_paused = true)]
 	async fn the_head_after_a_declared_end_is_waited_for() {
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
 		let mut consumer = Consumer::new(
-			track.subscribe(
-				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30))),
-			),
+			copy.subscribe_with(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+			)
+			.await,
 			Container::Legacy(crate::container::Kind::Audio),
 		);
 		consumer.max_delay = Duration::from_millis(300);
-		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut copy.track, 0, &[ts(0)]);
+		carried().await;
 		// The end, then the stopped encoder's final packet, as `moq_audio`'s producer writes them.
-		let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
+		let mut group = copy.track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		let frame = |timestamp, payload| Frame {
 			timestamp,
 			payload,
@@ -3310,18 +4036,22 @@ mod tests {
 				],
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
+		carried().await;
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 		assert!(matches!(
 			consumer.read().await.unwrap(),
 			Some(Read::End { group: 1, .. })
 		));
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(40_000));
-		write_group(&mut track, 3, &[ts(60_060_000)]);
+		write_group(&mut copy.track, 3, &[ts(60_060_000)]);
+		carried().await;
 		tokio::time::advance(Duration::from_millis(299)).await;
+		carried().await;
 		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());
-		write_group(&mut track, 2, &[ts(60_000_000)]);
-		let _track = track.finish().unwrap();
+		write_group(&mut copy.track, 2, &[ts(60_000_000)]);
+		carried().await;
+		let _track = copy.track.finish().unwrap();
 		assert_eq!(items(&mut consumer).await, ["60000000", "60060000"]);
 	}
 
@@ -3364,7 +4094,7 @@ mod tests {
 
 		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Gap { .. })));
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(10_000));
-		group0.close().unwrap();
+		group0.finish().unwrap();
 	}
 
 	#[kio::test]
@@ -3411,7 +4141,8 @@ mod tests {
 	async fn empty_payload_is_skipped() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Video));
 
@@ -3430,7 +4161,7 @@ mod tests {
 			.write(&mut group, &[media(ts(33_000))])
 			.unwrap();
 		write_marker(&mut group, ts(50_000)); // the group's end
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -3443,7 +4174,8 @@ mod tests {
 	async fn leading_marker_preserves_the_first_media_keyframe() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Video));
 
@@ -3460,7 +4192,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let frame = consumer.read_frame().await.unwrap().unwrap();
@@ -3475,7 +4207,8 @@ mod tests {
 	async fn consecutive_markers_do_not_stall() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Video));
 
@@ -3494,7 +4227,7 @@ mod tests {
 		for i in 1..5u64 {
 			write_marker(&mut group, ts(i * 1_000));
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		write_group(&mut track, 1, &[ts(100_000)]);
 		let _track = track.finish().unwrap();
 
@@ -3508,7 +4241,8 @@ mod tests {
 	async fn loc_empty_payload_is_skipped() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Loc(crate::container::Kind::Video));
 
@@ -3533,7 +4267,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -3548,7 +4282,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3571,7 +4306,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(10)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -3586,7 +4321,8 @@ mod tests {
 	async fn adjacent_group_flushed_immediately() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3607,7 +4343,8 @@ mod tests {
 		tokio::time::pause();
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3627,7 +4364,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3657,7 +4395,8 @@ mod tests {
 	async fn gap_in_group_sequence_recovery() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(100))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3677,7 +4416,8 @@ mod tests {
 	async fn gap_at_start_of_sequence() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(80))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(80))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3710,7 +4450,8 @@ mod tests {
 			.track("video")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))),
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(2))),
 			)
 			.await
 			.unwrap();
@@ -3740,7 +4481,7 @@ mod tests {
 			let mut track = source.broadcast().create_track("video", info.clone()).unwrap();
 			source.announce().unwrap();
 			let mut demand = track.demand();
-			while demand.wanted_changed().await.unwrap().is_none() {}
+			while !demand.wanted_changed().await.unwrap() {}
 			if sequence == 1 {
 				assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 			}
@@ -3787,7 +4528,8 @@ mod tests {
 	async fn evicted_group_with_gap_skips_to_live() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(100))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3842,7 +4584,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(100))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3877,15 +4620,20 @@ mod tests {
 	#[tokio::test]
 	async fn gap_keeps_late_arriving_group_within_max_delay() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
-		);
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
+		let consumer_track = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
+			)
+			.await;
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 2's stream beats group 1's, which hasn't arrived at all yet.
-		write_group(&mut track, 0, &[ts(0)]);
-		write_group(&mut track, 2, &[ts(200_000)]);
+		write_group(&mut copy.track, 0, &[ts(0)]);
+		carried().await;
+		write_group(&mut copy.track, 2, &[ts(200_000)]);
+		carried().await;
 
 		let first = consumer.read_frame().await.unwrap().expect("group 0 frame");
 		assert_eq!(first.timestamp, ts(0));
@@ -3900,8 +4648,9 @@ mod tests {
 		);
 
 		// Group 1's stream opens moments later, well within the 500ms budget.
-		write_group(&mut track, 1, &[ts(100_000)]);
-		let _track = track.finish().unwrap();
+		write_group(&mut copy.track, 1, &[ts(100_000)]);
+		carried().await;
+		let _track = copy.track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
@@ -3915,7 +4664,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -3942,7 +4692,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		group0.close().unwrap();
+		group0.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -3970,28 +4720,36 @@ mod tests {
 		playout.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data))
 	}
 
-	/// The live edge's stream wins the race, yet the start waits for a group covering the reach.
-	#[tokio::test]
+	/// A reader of `copy` that starts `min` plus `warmup` behind the live edge and skips at `max`.
+	async fn reach_reader(copy: &Received, min: Duration, max: Duration, warmup: Duration) -> Consumer<Container> {
+		let playout = Playout::new(
+			Delay {
+				min: Some(min),
+				max: Some(max),
+			},
+			warmup,
+		);
+		let subscriber = copy
+			.subscribe_with(playout.subscription(moq_net::track::Subscription::default()))
+			.await;
+		playout.consumer(subscriber, Container::Legacy(crate::container::Kind::Data))
+	}
+
+	/// The publisher sends the live edge first, newest first, yet the reader starts at the earlier
+	/// group its join owes, which the ordered reader waits for.
+	#[tokio::test(start_paused = true)]
 	async fn the_start_waits_for_an_earlier_group_when_the_live_edge_arrives_first() {
-		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = reach_consumer(
-			&mut track,
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
+		append_timed(&mut copy.track, &[ts(4_800_000)]);
+		append_timed(&mut copy.track, &[ts(5_000_000)]);
+		let mut consumer = reach_reader(
+			&copy,
 			Duration::from_millis(500),
 			Duration::from_millis(500),
 			Duration::ZERO,
-		);
-
-		write_group(&mut track, 5, &[ts(5_000_000)]);
-		assert!(
-			kio::clock::timeout(Duration::from_millis(50), consumer.read())
-				.await
-				.is_err(),
-			"an earlier group within the budget must be waited for"
-		);
-
-		write_group(&mut track, 4, &[ts(4_800_000)]);
-		let _track = track.finish().unwrap();
+		)
+		.await;
+		let _track = copy.track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
@@ -4026,33 +4784,36 @@ mod tests {
 		);
 	}
 
-	/// The warmup reaches past the min delay for the start, waiting for the group covering the live
-	/// edge less both.
-	#[tokio::test]
+	/// The warmup reaches a live join further back, even one at the live edge, while an unstated
+	/// min delay stays unstated: it reaches back from the oldest group already.
+	#[test]
+	fn the_warmup_widens_only_a_stated_min() {
+		let warmup = Duration::from_millis(300);
+		let unstated = Delay::default().with_min(None);
+		assert_eq!(warmed(unstated, warmup).min, None);
+		assert_eq!(warmed(unstated, Duration::ZERO).min, None);
+		assert_eq!(warmed(unstated.with_min(Duration::ZERO), warmup).min, Some(warmup));
+	}
+
+	/// The warmup reaches past the min delay for the start: the subscription widens the max by it,
+	/// so the publisher serves the group covering the live edge less both.
+	#[tokio::test(start_paused = true)]
 	async fn the_warmup_reaches_further_back_for_the_start() {
-		tokio::time::pause();
 		for (warmup, expected) in [
 			(Duration::ZERO, vec![4_700_000, 5_000_000]),
 			(Duration::from_millis(300), vec![4_400_000, 4_700_000, 5_000_000]),
 		] {
-			let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-			let mut consumer = reach_consumer(
-				&mut track,
-				Duration::from_millis(200),
-				Duration::from_millis(200),
-				warmup,
-			);
+			let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
+			// Group 4 covers the min delay alone, but not the warmup too.
+			append_timed(&mut copy.track, &[ts(4_400_000)]);
+			append_timed(&mut copy.track, &[ts(4_700_000)]);
+			append_timed(&mut copy.track, &[ts(5_000_000)]);
+			let mut consumer =
+				reach_reader(&copy, Duration::from_millis(200), Duration::from_millis(200), warmup).await;
+			let _track = copy.track.finish().unwrap();
 
-			// Newest first: group 4 covers the min delay alone, but not the warmup too.
-			write_group(&mut track, 5, &[ts(5_000_000)]);
-			write_group(&mut track, 4, &[ts(4_700_000)]);
-			let first = kio::clock::timeout(Duration::from_millis(50), consumer.read_frame()).await;
-			write_group(&mut track, 3, &[ts(4_400_000)]);
-			let _track = track.finish().unwrap();
-
-			let frames = first.ok().map(|frame| frame.unwrap().unwrap());
-			let frames = frames.into_iter().chain(read_all(&mut consumer).await.unwrap());
-			let micros: Vec<u128> = frames.map(|f| f.timestamp.as_micros().unwrap()).collect();
+			let frames = read_all(&mut consumer).await.unwrap();
+			let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 			assert_eq!(micros, expected, "warmup {warmup:?}");
 		}
 	}
@@ -4092,9 +4853,9 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut consumer = reach_consumer(&mut track, Duration::ZERO, Duration::ZERO, Duration::from_millis(80));
 
-		write_group(&mut track, 5, &[ts(5_000_000)]);
+		write_group(&mut track, 5_000_000, &[ts(5_000_000)]);
 		// Group 4 covers the 4.92s target, and its first frame is read before the rest of it lands.
-		let mut covering = track.create_group(moq_net::group::Info { start: 4 }).unwrap();
+		let mut covering = track.create_group(moq_net::group::Info { start: 4_900_000 }).unwrap();
 		let write = |group: &mut moq_net::group::Producer, micros| {
 			let frame = Frame {
 				timestamp: ts(micros),
@@ -4121,7 +4882,7 @@ mod tests {
 		);
 
 		write(&mut covering, 4_950_000);
-		covering.close().unwrap();
+		covering.finish().unwrap();
 		let _track = track.finish().unwrap();
 		let micros: Vec<u128> = read_all(&mut consumer)
 			.await
@@ -4146,9 +4907,9 @@ mod tests {
 			Duration::from_millis(300),
 		);
 
-		write_group(&mut track, 5, &[ts(5_000_000)]);
+		write_group(&mut track, 5_000_000, &[ts(5_000_000)]);
 		// Group 4 begins 600ms before the newest content, past the 500ms reach, yet covers its 4.5s target.
-		write_group(&mut track, 4, &[ts(4_400_000), ts(4_600_000), ts(4_900_000)]);
+		write_group(&mut track, 4_400_000, &[ts(4_400_000), ts(4_600_000), ts(4_900_000)]);
 		let frame = kio::clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("group 4 covers the reach")
@@ -4173,28 +4934,22 @@ mod tests {
 		assert_eq!(consumer.max_delay, Duration::from_secs(1));
 	}
 
-	/// A quiet track with no earlier group starts once its first group arrived a whole reach ago.
-	#[tokio::test]
-	async fn a_quiet_track_starts_within_one_reach() {
-		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = reach_consumer(
-			&mut track,
+	/// A quiet copy whose publisher holds nothing earlier starts at once: the ordered reader knows
+	/// no earlier group is owed, so nothing waits a reach for one.
+	#[tokio::test(start_paused = true)]
+	async fn a_quiet_track_starts_at_once_when_nothing_earlier_is_owed() {
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
+		append_timed(&mut copy.track, &[ts(5_000_000)]);
+		let mut consumer = reach_reader(
+			&copy,
 			Duration::from_millis(200),
 			Duration::from_millis(200),
 			Duration::from_millis(300),
-		);
-
-		write_group(&mut track, 5, &[ts(5_000_000)]);
-		assert!(
-			kio::clock::timeout(Duration::from_millis(450), consumer.read())
-				.await
-				.is_err(),
-			"the wait lasts while an earlier group could still cover the reach"
-		);
-		let frame = kio::clock::timeout(Duration::from_millis(100), consumer.read_frame())
+		)
+		.await;
+		let frame = kio::clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
-			.expect("the wait ends a reach after the first group arrived")
+			.expect("nothing earlier is owed")
 			.unwrap()
 			.unwrap();
 		assert_eq!(frame.timestamp, ts(5_000_000));
@@ -4251,7 +5006,7 @@ mod tests {
 		let consumer_track = track
 			.subscribe(
 				moq_net::track::Subscription::default()
-					.with_delay(Delay::default().with_max(Duration::from_millis(500))),
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 			)
 			.with_range(5..);
 		let mut consumer = Playout::new(
@@ -4263,7 +5018,7 @@ mod tests {
 		)
 		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		assert!(
-			matches!(consumer.startup, Startup::Earliest { .. }),
+			matches!(consumer.startup, Startup::Earliest),
 			"a local range names no start, so the start still reaches back"
 		);
 
@@ -4294,36 +5049,30 @@ mod tests {
 	}
 
 	/// A min delay past the max delay reaches back only the max delay, since the publisher serves
-	/// nothing older: a quiet track starts once its first group arrived the max delay ago.
-	#[tokio::test]
+	/// nothing older.
+	#[tokio::test(start_paused = true)]
 	async fn a_min_delay_past_the_max_delay_reaches_the_max_delay() {
-		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = reach_consumer(
-			&mut track,
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
+		append_timed(&mut copy.track, &[ts(4_400_000)]);
+		append_timed(&mut copy.track, &[ts(4_700_000)]);
+		append_timed(&mut copy.track, &[ts(5_000_000)]);
+		let mut consumer = reach_reader(
+			&copy,
 			Duration::from_secs(2),
 			Duration::from_millis(200),
 			Duration::ZERO,
-		);
-
-		write_group(&mut track, 5, &[ts(5_000_000)]);
-		assert!(
-			kio::clock::timeout(Duration::from_millis(150), consumer.read())
-				.await
-				.is_err(),
-			"the wait lasts the max delay"
-		);
-		let frame = kio::clock::timeout(Duration::from_millis(100), consumer.read_frame())
-			.await
-			.expect("the wait ends at the max delay, not the min delay")
-			.unwrap()
-			.unwrap();
-		assert_eq!(frame.timestamp, ts(5_000_000));
+		)
+		.await;
+		let _track = copy.track.finish().unwrap();
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
+		assert_eq!(micros, vec![4_700_000, 5_000_000], "group 3 is past the max delay");
 	}
 
-	/// The subscription carries the min delay as is and the max delay plus the warmup.
+	/// The subscription carries the min and max delay, each plus the warmup, so a live join
+	/// reaches back far enough to warm the decoder before its first played frame.
 	#[tokio::test]
-	async fn the_subscription_carries_the_min_delay_and_the_warmed_max_delay() {
+	async fn the_subscription_carries_the_warmed_min_and_max_delay() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = reach_consumer(
 			&mut track,
@@ -4332,13 +5081,18 @@ mod tests {
 			Duration::from_millis(300),
 		);
 		let subscription = subscribed(&consumer).subscription();
-		assert_eq!(subscription.delay.min, Some(Duration::from_secs(2)));
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live(
+				Duration::from_millis(2_300)
+			))]
+		);
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 	}
 
-	/// A track subscribed without the warmup is widened by the playout, and its consumer still
-	/// starts the warmup further back.
+	/// A track subscribed without the warmup has its max widened by the playout, keeping the live
+	/// join it resolved, and its consumer still starts the warmup further back.
 	#[tokio::test]
 	async fn the_playout_widens_a_narrow_subscription() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -4346,11 +5100,16 @@ mod tests {
 			min: Some(Duration::from_millis(100)),
 			max: Some(Duration::from_millis(200)),
 		};
-		let consumer_track = track.subscribe(moq_net::track::Subscription::default().with_delay(delay));
+		let consumer_track = track.subscribe(delay.subscription(moq_net::track::Subscription::default()));
 		let consumer = Playout::new(delay, Duration::from_millis(300))
 			.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		let subscription = subscribed(&consumer).subscription();
-		assert_eq!(subscription.delay.min, Some(Duration::from_millis(100)));
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live(
+				Duration::from_millis(100)
+			))]
+		);
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 		assert_eq!(consumer.warmup, Duration::from_millis(300));
@@ -4373,36 +5132,31 @@ mod tests {
 		assert_eq!(consumer.warmup, DELAY_MAX);
 	}
 
-	/// An unlimited max delay keeps the subscription unlimited, and the min delay still sets the
-	/// start's reach.
-	#[tokio::test]
-	async fn an_unlimited_max_delay_still_reaches_the_min_delay() {
-		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track =
-			track.subscribe(moq_net::track::Subscription::default().with_delay(Delay::default().with_max(None)));
-		let mut consumer = Playout::new(
+	/// An unlimited max delay keeps the subscription unlimited and skips nothing: a reader from a
+	/// time start, which the min delay doesn't place, reads all of the history the copy holds, even
+	/// past the min delay's reach.
+	#[tokio::test(start_paused = true)]
+	async fn an_unlimited_max_delay_reads_all_history() {
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
+		append_timed(&mut copy.track, &[ts(3_000_000)]);
+		append_timed(&mut copy.track, &[ts(4_500_000)]);
+		append_timed(&mut copy.track, &[ts(5_000_000)]);
+		let playout = Playout::new(
 			Delay {
 				min: Some(Duration::from_millis(500)),
 				max: None,
 			},
 			Duration::ZERO,
-		)
-		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
-		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
-
-		write_group(&mut track, 5, &[ts(5_000_000)]);
-		assert!(
-			kio::clock::timeout(Duration::from_millis(50), consumer.read())
-				.await
-				.is_err(),
-			"an earlier group within the min delay must be waited for"
 		);
-		write_group(&mut track, 4, &[ts(4_500_000)]);
-		let _track = track.finish().unwrap();
+		let from_zero = moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
+		let subscriber = copy.subscribe_with(playout.subscription(from_zero)).await;
+		let mut consumer = playout.consumer(subscriber, Container::Legacy(crate::container::Kind::Data));
+		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
+		let _track = copy.track.finish().unwrap();
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
-		assert_eq!(micros, vec![4_500_000, 5_000_000]);
+		assert_eq!(micros, vec![3_000_000, 4_500_000, 5_000_000]);
 	}
 
 	/// A subscription without a max delay reaches back for history, so it starts at once.
@@ -4473,7 +5227,7 @@ mod tests {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(b"FAIL"))
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		// The first frame decodes; the malformed second frame must surface as an error.
@@ -4520,14 +5274,14 @@ mod tests {
 	async fn a_decode_error_at_the_head_of_a_group_ends_the_reader() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
 
 		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		write_failing(&mut group, None);
 		write_failing(&mut group, Some(0));
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let read = read_past_frames(&mut consumer).await;
@@ -4547,7 +5301,7 @@ mod tests {
 		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		write_failing(&mut group, None);
 		write_failing(&mut group, Some(0));
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let event = kio::wait(|waiter| consumer.poll_event(waiter)).await;
@@ -4562,20 +5316,20 @@ mod tests {
 	async fn an_error_releases_the_subscription_and_its_groups() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
 
 		let mut malformed = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		write_failing(&mut malformed, None);
 		let malformed_demand = malformed.demand();
-		let _malformed = malformed.close().unwrap();
+		let _malformed = malformed.finish().unwrap();
 		let mut later = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_failing(&mut later, Some(10_000));
 
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
-		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
+		assert!(!track.demand().wanted(), "the ended reader still subscribes");
 		assert!(!malformed_demand.wanted(), "the ended reader still holds its group");
 		assert!(!later.demand().wanted(), "the ended reader still holds a later group");
 	}
@@ -4586,8 +5340,8 @@ mod tests {
 	async fn a_decode_error_mid_group_found_by_lookahead_ends_the_reader() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
 
 		// The current group stays open, so the reader looks ahead into the next one.
@@ -4597,7 +5351,7 @@ mod tests {
 		write_failing(&mut group, Some(10_000));
 		write_failing(&mut group, None);
 		write_failing(&mut group, Some(20_000));
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let first = consumer.read_frame().await.unwrap().unwrap();
 		assert_eq!(first.timestamp, ts(0));
@@ -4608,7 +5362,7 @@ mod tests {
 				.is_err()
 		);
 
-		slow.close().unwrap();
+		slow.finish().unwrap();
 		let frame = consumer.read_frame().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp, ts(10_000));
 		let read = kio::clock::timeout(Duration::from_millis(50), consumer.read()).await;
@@ -4624,8 +5378,8 @@ mod tests {
 	async fn a_decode_error_in_a_later_group_waits_for_current_frames() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
 
 		let mut current = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
@@ -4637,13 +5391,13 @@ mod tests {
 
 		let mut later = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_failing(&mut later, None);
-		later.close().unwrap();
+		later.finish().unwrap();
 		for expected in [10_000, 20_000] {
 			let frame = consumer.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.timestamp, ts(expected));
 		}
 
-		current.close().unwrap();
+		current.finish().unwrap();
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 	}
@@ -4654,8 +5408,8 @@ mod tests {
 	async fn a_decode_error_comes_before_a_later_rewind() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
 
 		let mut current = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
@@ -4666,12 +5420,12 @@ mod tests {
 		let mut malformed = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_failing(&mut malformed, Some(110_000));
 		malformed.write_frame(ts(110_000), Bytes::from_static(b"FAIL")).unwrap();
-		malformed.close().unwrap();
+		malformed.finish().unwrap();
 		// The transport only checks a group's first frame, so the rewind is its second.
 		let mut rewound = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
 		write_failing(&mut rewound, Some(150_000));
 		write_failing(&mut rewound, Some(50_000));
-		rewound.close().unwrap();
+		rewound.finish().unwrap();
 		// The reader looks ahead into both while it waits on the open group.
 		assert!(
 			kio::clock::timeout(Duration::from_millis(50), consumer.read())
@@ -4679,7 +5433,7 @@ mod tests {
 				.is_err()
 		);
 
-		current.close().unwrap();
+		current.finish().unwrap();
 		let _track = track.finish().unwrap();
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
@@ -4691,16 +5445,16 @@ mod tests {
 	async fn a_startup_discard_returns_a_malformed_group() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode).live();
 
 		let mut old = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		write_failing(&mut old, None);
-		old.close().unwrap();
+		old.finish().unwrap();
 		let mut newest = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_failing(&mut newest, Some(10_000));
-		newest.close().unwrap();
+		newest.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let read = read_past_frames(&mut consumer).await;
@@ -4713,8 +5467,8 @@ mod tests {
 	async fn an_aborted_later_group_keeps_its_fault_in_delivery_order() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
 
 		let mut current = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
@@ -4736,7 +5490,7 @@ mod tests {
 		let frame = consumer.read_frame().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp, ts(10_000));
 
-		current.close().unwrap();
+		current.finish().unwrap();
 		let _track = track.finish().unwrap();
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
@@ -4748,8 +5502,8 @@ mod tests {
 	async fn a_decode_error_before_a_reset_tail_ends_the_reader() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
 
 		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
@@ -4774,7 +5528,7 @@ mod tests {
 		write_failing(&mut group, Some(0));
 		write_failing(&mut group, None);
 		write_failing(&mut group, Some(10_000));
-		let group = group.close().unwrap();
+		let group = group.finish().unwrap();
 
 		// Finding the start buffers one frame; the read behind it already holds the rest.
 		let mut buffer = GroupBuffer::<FailingDecode>::new(group.consume(), Memory::new(DEFAULT_MAX_BUFFER));
@@ -4798,7 +5552,8 @@ mod tests {
 	async fn frame_payload_preserved() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -4816,7 +5571,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -4838,7 +5593,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -4862,7 +5618,7 @@ mod tests {
 			// Write group 2: recv_group fires, drops current buffer_until for group 1
 			write_group(&mut track, 2, &[ts(200_000)]);
 			kio::clock::sleep(Duration::from_millis(20)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 			let _track = track.finish().unwrap();
 		});
 
@@ -4886,7 +5642,8 @@ mod tests {
 	async fn large_timestamps() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(3700))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3700))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -4904,7 +5661,8 @@ mod tests {
 	async fn set_delay_changes_behavior() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -4927,7 +5685,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(110))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(110))),
 		);
 		// max delay must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
 		// to avoid the age skip and test B-frame timestamp tracking.
@@ -4953,7 +5712,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = kio::clock::timeout(Duration::from_secs(2), async {
@@ -4981,7 +5740,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(100))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5014,7 +5774,7 @@ mod tests {
 					}],
 				)
 				.unwrap();
-			group7.close().unwrap();
+			group7.finish().unwrap();
 			let _track = track.finish().unwrap();
 		});
 
@@ -5039,7 +5799,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5073,7 +5834,8 @@ mod tests {
 		tokio::time::pause();
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5105,7 +5867,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5134,7 +5897,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		group0.close().unwrap();
+		group0.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
@@ -5148,15 +5911,15 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscription = moq_net::track::Subscription::default()
-			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([
 				moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(0),
-					end: Some(moq_net::track::Anchor::Time(0)),
+					start: moq_net::track::Start::Time(0),
+					end: Some(0),
 				},
 				moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(10),
-					end: Some(moq_net::track::Anchor::Time(10)),
+					start: moq_net::track::Start::Time(10),
+					end: Some(10),
 				},
 			]);
 		let mut consumer = Consumer::new(
@@ -5179,23 +5942,21 @@ mod tests {
 		assert_eq!(micros, vec![0, 1_000_000]);
 	}
 
-	/// A relative start names its floor once resolved: delivery starts that many groups
-	/// back from the latest, rather than at whichever group arrives first.
+	/// A live join names its floor once resolved: delivery starts at the group containing the
+	/// live edge minus its lag, rather than at whichever group arrives first.
 	#[tokio::test]
-	async fn startup_at_a_relative_start() {
+	async fn startup_at_a_live_join() {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		for sequence in 5..=9 {
-			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+			write_group(&mut track, sequence * 100_000, &[ts(sequence * 100_000)]);
 		}
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
-			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Relative(2),
-				end: None,
-			}]);
+		let subscription = Delay::default()
+			.with_min(Duration::from_millis(200))
+			.with_max(Duration::from_secs(10))
+			.subscription(moq_net::track::Subscription::default());
 		let consumer_track = track.subscribe(subscription);
-		assert_eq!(consumer_track.floor(), Some(7));
+		assert_eq!(consumer_track.floor(), Some(700_000));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		let _track = track.finish().unwrap();
 
@@ -5204,103 +5965,70 @@ mod tests {
 		assert_eq!(micros, vec![700_000, 800_000, 900_000]);
 	}
 
-	/// Groups arrive newest first, so the head of what the publisher serves lands after the
-	/// live edge: the cursor starts where the publisher says its feed starts, rather than at
-	/// the first arrival, and a group that arrives below it is never delivered, with no gap.
-	#[tokio::test]
+	/// The reader starts where the publisher resolved the join, though the newest group lands first.
+	#[tokio::test(start_paused = true)]
 	async fn startup_at_the_publishers_start_over_a_newer_first_arrival() {
-		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		track.start_at(8).unwrap();
-		let mut consumer = Consumer::new(
-			track.subscribe(
-				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
-			),
-			Container::Legacy(crate::container::Kind::Data),
-		);
-
-		write_group(&mut track, 10, &[ts(1_000_000)]);
-		assert!(
-			kio::clock::timeout(Duration::from_millis(50), consumer.read())
-				.await
-				.is_err(),
-			"the publisher's start is still on its way"
-		);
-		for sequence in [7, 8, 9] {
-			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
+		for sequence in [7, 8, 9, 10] {
+			append_timed(&mut copy.track, &[ts(sequence * 100_000)]);
 		}
-		let _track = track.finish().unwrap();
+		let subscriber = copy
+			.subscribe_with(
+				Delay::default()
+					.with_min(Duration::from_millis(200))
+					.with_max(Duration::from_secs(10))
+					.subscription(moq_net::track::Subscription::default()),
+			)
+			.await;
+		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		let _track = copy.track.finish().unwrap();
 
 		assert_eq!(items(&mut consumer).await, ["800000", "900000", "1000000"]);
 	}
 
-	/// A relative start still waiting on the feed takes the start the publisher resolved for it
-	/// when that is later: the publisher counts back from a newest group that may hold no frame
-	/// yet, which neither the largest it reports nor this copy counts, so a floor counted here
-	/// would wait on a group that never comes.
-	#[tokio::test]
-	async fn a_waiting_relative_start_takes_the_publishers_resolved_start() {
-		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		track.start_at(5).unwrap();
-		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(Delay::default().with_max(Duration::from_secs(10)))
-				.with_ranges([moq_net::track::Range::live()]),
-		);
-		assert_eq!(
-			consumer_track.floor(),
-			None,
-			"the relative start waits on a first group"
-		);
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
-
-		write_group(&mut track, 4, &[ts(400_000)]);
-		write_group(&mut track, 5, &[ts(500_000)]);
-		let _track = track.finish().unwrap();
-
-		assert_eq!(items(&mut consumer).await, ["500000"]);
-	}
-
-	/// A relative floor already resolved here still rises to the start the publisher resolved,
-	/// which counts a newest group that held no frame yet, rather than wait on a group below it
-	/// that never comes.
-	#[tokio::test]
-	async fn a_resolved_relative_floor_rises_to_the_publishers_start() {
-		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+	/// A live join takes the start the publisher resolved for it: the publisher starts at a
+	/// newest group that may hold no frame yet, which neither the largest it reports nor this copy
+	/// counts, so the reader waits for no group below it.
+	#[tokio::test(start_paused = true)]
+	async fn a_waiting_live_join_takes_the_publishers_resolved_start() {
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
 		for sequence in 0..5 {
-			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+			write_group(&mut copy.track, sequence * 100_000, &[ts(sequence * 100_000)]);
 		}
-		track.start_at(5).unwrap();
-		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(Delay::default().with_max(Duration::from_secs(10)))
-				.with_ranges([moq_net::track::Range::live()]),
-		);
-		assert_eq!(
-			consumer_track.floor(),
-			Some(4),
-			"resolved here from the newest group with a frame"
-		);
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
-
-		write_group(&mut track, 5, &[ts(500_000)]);
-		let read = kio::clock::timeout(Duration::from_millis(50), consumer.read())
-			.await
-			.expect("group 5 reads without waiting on group 4")
+		let mut newest = copy
+			.track
+			.create_group(moq_net::group::Info { start: 500_000 })
 			.unwrap();
-		assert!(
-			matches!(read, Some(crate::container::Read::Frame { group: 5, .. })),
-			"{read:?}"
-		);
+		let subscriber = copy
+			.subscribe_with(
+				Delay::default()
+					.with_min(Duration::ZERO)
+					.with_max(Duration::from_secs(10))
+					.subscription(moq_net::track::Subscription::default()),
+			)
+			.await;
+		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+
+		let frame = Frame {
+			timestamp: ts(500_000),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: false,
+			duration: None,
+		};
+		Container::Legacy(crate::container::Kind::Data)
+			.write(&mut newest, &[frame])
+			.unwrap();
+		newest.finish().unwrap();
+		let _track = copy.track.finish().unwrap();
+		assert_eq!(items(&mut consumer).await, ["500000"]);
 	}
 
 	#[kio::test]
 	async fn startup_single_group_mid_stream() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5319,7 +6047,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5340,7 +6069,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(50))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(50))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5365,7 +6095,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(20)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -5378,7 +6108,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(100))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5401,7 +6132,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(20)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -5443,7 +6174,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(50)).await;
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
@@ -5476,7 +6207,8 @@ mod tests {
 	async fn group_error_skips_to_next() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5498,7 +6230,8 @@ mod tests {
 	async fn finished_group_aborted_mid_read_drains_then_continues() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5514,7 +6247,7 @@ mod tests {
 				.write(&mut group0, &[frame])
 				.unwrap();
 		}
-		let group0 = group0.close().unwrap();
+		let group0 = group0.finish().unwrap();
 		write_group(&mut track, 1, &[ts(30_000)]);
 		let _track = track.finish().unwrap();
 
@@ -5537,7 +6270,8 @@ mod tests {
 	async fn oversized_group_skips_to_next() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5566,7 +6300,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5597,12 +6332,13 @@ mod tests {
 	async fn empty_group_advances() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let group0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
-		group0.close().unwrap();
+		group0.finish().unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
 		let _track = track.finish().unwrap();
@@ -5619,7 +6355,8 @@ mod tests {
 
 		let track = track_producer("video", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
@@ -5636,7 +6373,7 @@ mod tests {
 				.write(&mut group, &[frame])
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut frames = Vec::new();
@@ -5665,7 +6402,8 @@ mod tests {
 		// timestamps; leave the track untimed so model-layer validation matches.
 		let track = track_producer("test", timed());
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		// The max delay dwarfs the gap, so only duration coverage can trigger the skip.
 		let mut consumer = Consumer::new(consumer_track, DurationWire);
@@ -5677,7 +6415,7 @@ mod tests {
 		// Group 1: finished, starts exactly where group 0's frame ends.
 		let mut group1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
-		group1.close().unwrap();
+		group1.finish().unwrap();
 
 		let _track = track.finish().unwrap();
 
@@ -5698,16 +6436,17 @@ mod tests {
 		let track = track_producer("test", timed());
 		let mut consumer = Consumer::new(
 			track.subscribe(
-				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 			),
 			DurationWire,
 		);
 		let mut group0 = track.create_group(moq_net::group::Info { start: 1_000_000 }).unwrap();
 		write_duration_frame(&mut group0, ts(0), ts(33_000));
-		group0.close().unwrap();
+		group0.finish().unwrap();
 		let mut group1 = track.create_group(moq_net::group::Info { start: 1_090_000 }).unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
-		group1.close().unwrap();
+		group1.finish().unwrap();
 		let _track = track.finish().unwrap();
 		let frames = continuous_frames(&mut consumer).await;
 		assert_eq!(frames.len(), 2);
@@ -5722,7 +6461,8 @@ mod tests {
 		// DurationWire is untimed at the moq_net frame layer.
 		let track = track_producer("test", timed());
 		let consumer_track = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut consumer = Consumer::new(consumer_track, DurationWire);
 
@@ -5733,7 +6473,7 @@ mod tests {
 		// Group 1: finished at 33ms.
 		let mut group1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
-		group1.close().unwrap();
+		group1.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		// A second frame lands on group 0 and finishes it after the consumer has
@@ -5741,7 +6481,7 @@ mod tests {
 		let finisher = tokio::spawn(async move {
 			kio::clock::sleep(Duration::from_millis(20)).await;
 			write_duration_frame(&mut group0, ts(20_000), ts(10_000));
-			group0.close().unwrap();
+			group0.finish().unwrap();
 		});
 
 		let frames = kio::clock::timeout(Duration::from_secs(2), async {
@@ -5765,7 +6505,7 @@ mod tests {
 	async fn live_duration_marker_follows_an_immediately_delivered_frame() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Video));
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(Timestamp::from_micros(0).unwrap()).unwrap();
 		Container::Legacy(crate::container::Kind::Video)
 			.write(
 				&mut group,
@@ -5876,7 +6616,8 @@ mod tests {
 		const MAX_BUFFER: usize = 8192;
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(100))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
 		);
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 		consumer.set_max_buffer(MAX_BUFFER);
@@ -5901,7 +6642,8 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
 		);
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Video));
 		consumer.set_max_buffer(MAX_BUFFER);
@@ -5922,7 +6664,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		markers.close().unwrap();
+		markers.finish().unwrap();
 
 		// The markers fill the max buffer behind the stalled group, which moves the cursor on to them,
 		// and the media past them still plays.
@@ -5965,7 +6707,8 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
 		);
 		let mut consumer = Consumer::new(subscriber, Container::Loc(crate::container::Kind::Data));
 
@@ -5985,7 +6728,7 @@ mod tests {
 			wire.push(0xAD);
 			padded.write_frame(ts(timestamp as u64), wire).unwrap();
 		}
-		padded.close().unwrap();
+		padded.finish().unwrap();
 
 		let mut reads = Vec::new();
 		while let Poll::Ready(read) = consumer.poll_read(&waiter) {
@@ -6052,7 +6795,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		later.close().unwrap();
+		later.finish().unwrap();
 		(stalled, between)
 	}
 
@@ -6092,7 +6835,7 @@ mod tests {
 		let (_stalled, mut between) = fill_behind_a_stalled_group(&mut track, &mut consumer, &waiter);
 
 		between.write_frame(ts(10_000), Bytes::new()).unwrap();
-		between.close().unwrap();
+		between.finish().unwrap();
 		let mut reads = Vec::new();
 		while let Poll::Ready(read) = consumer.poll_read(&waiter) {
 			reads.push(match read.unwrap() {
@@ -6126,11 +6869,11 @@ mod tests {
 					}],
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut marker = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
 		marker.write_frame(ts(20_000), Bytes::new()).unwrap();
-		marker.close().unwrap();
+		marker.finish().unwrap();
 
 		// The reader gets to the track only after the hole before group 3 has expired.
 		tokio::time::advance(2 * max_delay).await;
@@ -6155,7 +6898,7 @@ mod tests {
 		let marker = |track: &mut moq_net::track::Producer, sequence: u64| {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			group.write_frame(ts(sequence * 10_000), Bytes::new()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		write_group(&mut track, 0, &[ts(0)]);
 		marker(&mut track, 5);
@@ -6240,7 +6983,7 @@ mod tests {
 		let mut consumer = Consumer::new(
 			track.subscribe(
 				moq_net::track::Subscription::default()
-					.with_delay(Delay::default().with_max(Duration::from_millis(500))),
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(500))),
 			),
 			Container::Legacy(crate::container::Kind::Data),
 		);
@@ -6263,7 +7006,7 @@ mod tests {
 			consumer.pending.iter().all(|group| group.is_empty()),
 			"receipt must not decode payload"
 		);
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(consumer.poll_received(&kio::Waiter::noop()).is_ready());
 		let mut frames = Vec::new();
 		while let Some(frame) = consumer.read_frame().await.unwrap() {

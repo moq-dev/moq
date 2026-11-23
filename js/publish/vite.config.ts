@@ -1,7 +1,7 @@
+import { libav } from "@moq/common/vite-plugin-libav";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import { resolve } from "path";
 import { defineConfig } from "vite";
-import { libav } from "../common/vite-plugin-libav.ts";
-import { worklet } from "../common/vite-plugin-worklet.ts";
 import { lazyMedia } from "./bundle.ts";
 
 export default defineConfig({
@@ -18,9 +18,10 @@ export default defineConfig({
 			formats: ["es"],
 		},
 		rollupOptions: {
-			// Keep every @moq workspace dep (and its subpaths, e.g. @moq/signals/dom)
-			// external so consumers dedupe against their own copy instead of bundling ours.
-			external: (id) => id.startsWith("@moq/"),
+			// Keep every published @moq dep (and its subpaths, e.g. @moq/signals/dom) external
+			// so consumers dedupe against their own copy instead of bundling ours. The private
+			// @moq/ui is never published, so it is bundled.
+			external: (id) => id.startsWith("@moq/") && id !== "@moq/ui",
 		},
 		sourcemap: true,
 		target: "esnext",

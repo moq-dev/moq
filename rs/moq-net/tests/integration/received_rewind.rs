@@ -25,10 +25,11 @@ fn millis(ms: u64) -> moq_net::Timestamp {
 const BUDGET: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A group starting at `key` milliseconds.
@@ -36,7 +37,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 	let timestamp = millis(key);
 	group.write_frame(timestamp, &b"x"[..]).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The groups at one second then at zero of a millisecond track, into a relay over

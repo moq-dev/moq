@@ -19,9 +19,11 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn lite07() -> Version {
@@ -73,7 +75,7 @@ impl Worker {
 				let tag = format!("{name}{}", served.borrow().len());
 				let mut group = track.append_next().unwrap();
 				group.write_frame(group.at_start(), tag.into_bytes()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
 			}
@@ -84,6 +86,15 @@ impl Worker {
 	/// How many outputs the worker was asked for.
 	pub(super) fn served(&self) -> usize {
 		self.outputs.borrow().len()
+	}
+
+	/// Write the next group of the latest output.
+	pub(super) fn write(&self) {
+		let outputs = self.outputs.borrow();
+		let (_, track) = outputs.last().expect("an output");
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"next".to_vec()).unwrap();
+		group.finish().unwrap();
 	}
 
 	/// End the latest output, as a worker does when the job stops.

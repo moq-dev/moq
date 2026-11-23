@@ -45,9 +45,10 @@ fn info(payload: &Bytes) -> frame::Info {
 fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = pool.clone();
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// Write `payload` once `group`'s fastest reader leaves room, or return `false` once no
@@ -55,7 +56,7 @@ fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 /// archive has nothing newer yet, so only wait for that.
 async fn write_paced(
 	group: &mut group::Producer,
-	fill: &track::Fill,
+	fill: &track::FillGroups,
 	demand: &mut group::Demand,
 	payload: Option<Bytes>,
 ) -> bool {
@@ -85,14 +86,14 @@ fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU6
 	drop(kio::clock::sim::spawn(async move {
 		while let Ok(fill) = requests.requested_fill().await {
 			let start = fill.start();
-			let mut group = fill.accept(start.group, None).expect("accept");
+			let mut group = fill.accept(start.group, None).expect("accept").expect("a fresh group");
 			let mut demand = group.demand();
 			let (written, ended) = (written.clone(), ended.clone());
 			drop(kio::clock::sim::spawn(async move {
 				for index in start.frame as u32.. {
 					let payload = (index < FRAMES).then(|| numbered(index));
 					if payload.is_none() && finish {
-						group.close().expect("finish");
+						group.finish().expect("finish");
 						break;
 					}
 					if !write_paced(&mut group, &fill, &mut demand, payload).await {
@@ -170,7 +171,7 @@ async fn moq_transport_relays_a_cold_finished_group() {
 			.write_frame(moq_net::Timestamp::unscaled(group.start), numbered(index))
 			.unwrap();
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut options = MockConnectOptions::new(version_parsed);
 	options.server_publish = Some(publisher.consume());
@@ -271,7 +272,7 @@ async fn chain(version: &str, replay: Replay) {
 	}
 
 	if replay == Replay::Finished {
-		live.close().unwrap();
+		live.finish().unwrap();
 		assert!(
 			next_end(&mut reader, version).await,
 			"{version}: the live reader sees the end"

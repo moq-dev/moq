@@ -17,15 +17,70 @@ so it only needs to stay green.
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
-  so the pass now runs the datagram step; the `replacement` case is
-  quarantined by default until its child quest restores it. Decided 2026-11-09 (maintainer, AFK, accepting the
+  so the pass now runs the datagram step; the `replacement` case runs by
+  default on both engines and every wire. Decided 2026-11-09 (maintainer, AFK, accepting the
   recommendation): close this quest on a pass, which the maintainer set with
   those cases skipped; the pass that closes it runs all but `replacement`.
-  Release remeasure now updates stale planned-break pins after publication
-  and requests landing through the main merge queue. Check its run and PR
-  when a scheduled run reports stale pins.
+  Release remeasure measures stale planned-break pins after publication and
+  opens the pin PR on its `release-remeasure` branch.
 
 ## Plan
+
+Found 2026-11-19 by the Nightly triage of run
+[44562804083](https://github.com/moq-dev/moq/actions/runs/44562804083):
+`Media (firefox player)` fails the `replacement` case on `moq-lite-07-wip`
+(`FAIL live replacement plays: waiting for the new run's picture and
+synchronized tone within 1039ms ... "audioStalled":true,"rms":0`). It was the
+first night the case ran on Firefox, since on 2026-11-17 and 2026-11-18 the
+job failed earlier on "after resume", which
+[moq-dev/moq#9141](https://github.com/moq-dev/moq/pull/9141) fixed. This
+epic owns the replacement case's history.
+
+Decided 2026-11-20 (maintainer, /quest-plan), from the triage of Nightly run
+[44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952) and
+scheduled Interop: two children,
+the replacement join (that stall, which also reproduces on Chromium
+`moq-transport-22`; [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293)
+joins live and lifts the quarantine, leaving Chromium's moq-transport audio
+stall, which [moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300)
+fixed: a relay could serve a group before the skip its header passed over,
+so the group went out without its Prior Group ID Gap)
+and the moq-transport JS joining FETCH, which the relay refused when the join's Largest
+Object was a group's END_OF_GROUP status (fixed in
+[moq-dev/moq#9291](https://github.com/moq-dev/moq/pull/9291)).
+The intermittent `go -> js` silent audio went to
+test flakes (fixed by the Go tone's start-anchored pacing), and the datagram
+cells are [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)'s.
+
+Scheduled runs 2026-11-15 to 2026-11-21 (every one red) failed three causes, none a flake:
+
+- Harness regressions: `open-gop.browser.ts` since
+  [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) made the player join
+  live. [moq-dev/moq#9306](https://github.com/moq-dev/moq/pull/9306) fixed the fixture
+  (merged 2026-11-22).
+- Interop (moq-transport): `datagram rust -> js-native-node` and `-bun` on moq-transport-18
+  fail every run, since [moq-dev/moq#8918](https://github.com/moq-dev/moq/pull/8918) gave
+  every JS datagram a timestamp. [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)
+  fixed the assertion (merged 2026-11-22).
+- Interop (full matrix and moq-transport): `js -> js`, `js -> js-native-*`, and `go -> js`
+  timed out waiting for the catalog on moq-transport 18, 20, and 22, one to three cells per
+  pass, so a fresh retry always hid it. Root cause: a relay holding a group with its
+  END_OF_GROUP reports Largest at that status, which is no frame (and keeps doing so). The
+  next subscriber's head fill, cut one past that Largest, ran off the end of the group, so
+  the relay reset it NotFound, and the subscriber dropped the catalog group as headless.
+  Fixed in this quest's PR: a fill cut past the terminal object completes at it. A relay
+  copy resubscribing hit the same status as MalformedTrack in `judge`, which now compares
+  its answer with the last data object. It first showed in the 2026-11-15 run; the culprit
+  PR is not pinned, since bisecting a race that fails 0 to 2 of 6 cells locally found no
+  clean split.
+
+The 2026-11-22 scheduled run
+[45041226494](https://github.com/moq-dev/moq/actions/runs/45041226494), at 040a566d40 with
+both of those merged and before the catalog fix, passed the matrix and failed two other
+steps. `Relay fills`: `relay_fill::relay_fill_range_table` took over 30 s on the runner and
+failed with `publish error ... remote error: 1`; it passes here in 22 s on the same code, so
+the cause is not found. `Media output and lifecycle`: the chromium `replacement` case, which
+stays with the epic's replacement child.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
@@ -223,9 +278,15 @@ Scheduled runs
   `skipping missing groups` on the audio track before the stall, so the audio
   stalls past the 1039 ms bound after the route falls back. Reproduced
   at 1 of 8 and 2 of 12 loaded local runs (the audio ring still stalled 600 ms after the first
-  audio group of the returned incumbent); not root-caused. Decided 2026-11-15 (AFK, recommendation, for review):
-  `replacement` is quarantined by default on every engine again, and the child
-  [replacement audio](/quest/m0/interop-green/replacement-audio.md) root-causes and restores it.
+  audio group of the returned incumbent). Decided 2026-11-15 (AFK, recommendation, for review):
+  `replacement` is quarantined by default on every engine again, and a child quest root-caused
+  and restored it. Its first PR found the stall: the decode gate released the backlog behind the
+  clock one window per worklet report. Its second restored the case on Chromium, and
+  [moq-dev/moq#9023](https://github.com/moq-dev/moq/pull/9023) on Firefox: the player decodes the
+  audio an incumbent replays behind the clock only to warm the codec. Off Chromium the moq-transport-22 row stays quarantined, since that
+  wire states no delay to cut the replay at. [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293)
+  lifted that: the player joins live, and a relay serving a moq-transport live SUBSCRIBE asks its
+  route for a live join with no min delay.
 
 Public API: none. Wire: none.
 

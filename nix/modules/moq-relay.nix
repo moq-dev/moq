@@ -7,15 +7,17 @@
 let
   cfg = config.services.moq-relay;
   authKey = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
-  # A prefix becomes the subtree pattern the relay and the auth server grant.
-  publicPattern =
-    if cfg.auth.publicPath == null || cfg.auth.publicPath == "" then
-      "**"
-    else
-      "${cfg.auth.publicPath}/**";
+  # The prefix the relay and the auth server grant; the empty prefix is everything.
+  publicPrefix = if cfg.auth.publicPath == null then "" else cfg.auth.publicPath;
   authUrl = "http://127.0.0.1:${toString cfg.auth.port}/";
 in
 {
+  imports = [
+    (lib.mkRemovedOptionModule [ "services" "moq-relay" "cluster" "rootUrl" ]
+      "Use services.moq-relay.cluster.connect, a list of full peer URLs such as [ \"https://peer.example.com:4443\" ]."
+    )
+  ];
+
   options.services.moq-relay = {
     enable = lib.mkEnableOption "moq-relay";
 
@@ -102,12 +104,12 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         example = "anon";
-        description = "Path prefix anonymous sessions may publish and subscribe under (`anon` grants `anon/**`)";
+        description = "Path prefix anonymous sessions may publish and subscribe under (`anon` grants `anon` and everything beneath it; empty grants everything)";
       };
     };
 
     cluster = {
-      rootUrl = lib.mkOption {
+      connect = lib.mkOption {
         type = lib.types.nullOr (lib.types.nonEmptyListOf lib.types.str);
         default = null;
         example = [
@@ -141,7 +143,7 @@ in
         default = null;
         example = "/run/secrets/moq-cluster.pem";
         description = ''
-          Client certificate chain (PEM) this node presents when it dials `rootUrl`, issued
+          Client certificate chain (PEM) this node presents when it dials `connect`, issued
           by the peers' `ca`. Reloaded when it changes. Needs `keyFile`.
         '';
       };
@@ -159,7 +161,7 @@ in
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = ''
-          A JWT this node presents when it dials `rootUrl`, for peers whose auth server
+          A JWT this node presents when it dials `connect`, for peers whose auth server
           verifies tokens instead of certificates. Re-read on every dial. Prefer `certFile`.
         '';
       };
@@ -229,12 +231,12 @@ in
     warnings =
       lib.optional
         (
-          cfg.cluster.rootUrl != null
+          cfg.cluster.connect != null
           && cfg.cluster.certFile == null
           && cfg.cluster.tokenFile == null
-          && lib.any (url: builtins.match ".*[?&]jwt=[^&#].*" url == null) (lib.toList cfg.cluster.rootUrl)
+          && lib.any (url: builtins.match ".*[?&]jwt=[^&#].*" url == null) (lib.toList cfg.cluster.connect)
         )
-        "services.moq-relay: this relay dials cluster.rootUrl with no credential, so its peer refuses it or admits it only as an anonymous client; set cluster.certFile and cluster.keyFile (or cluster.tokenFile). The module no longer signs a cluster token.";
+        "services.moq-relay: this relay dials cluster.connect with no credential, so its peer refuses it or admits it only as an anonymous client; set cluster.certFile and cluster.keyFile (or cluster.tokenFile). The module no longer signs a cluster token.";
 
     # Create user and group
     users.users.${cfg.user} = {
@@ -254,6 +256,9 @@ in
       after = [ "network.target" ];
       before = [ "moq-relay.service" ];
       requiredBy = [ "moq-relay.service" ];
+      # A stop would propagate to the relay and cut its sessions. A restart propagates as a
+      # restart, which keeps them only when `handoff` is on; otherwise it is a cold restart.
+      stopIfChanged = false;
 
       preStart = ''
         ${lib.optionalString (cfg.auth.keyFile == null) ''
@@ -274,10 +279,10 @@ in
             "${pkgs.moq-cli}/bin/moq auth serve"
             "--listen 127.0.0.1:${toString cfg.auth.port}"
             "--key ${authKey}"
-            "--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer"
+            "--mtls-publish '' --mtls-subscribe '' --mtls-link peer"
           ]
           ++ lib.optionals (cfg.auth.publicPath != null) [
-            "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"
+            "--public-publish '${publicPrefix}' --public-subscribe '${publicPrefix}'"
           ]
         );
         Restart = "on-failure";
@@ -371,11 +376,11 @@ in
         MOQ_AUTH_URL = authUrl;
       }
       // lib.optionalAttrs (!cfg.auth.enable) {
-        MOQ_AUTH_PUBLIC = publicPattern;
+        MOQ_AUTH_PUBLIC = publicPrefix;
       }
-      // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
+      // lib.optionalAttrs (cfg.cluster.connect != null) {
         # Cluster configuration
-        MOQ_CLUSTER_CONNECT = lib.concatStringsSep "," cfg.cluster.rootUrl;
+        MOQ_CLUSTER_CONNECT = lib.concatStringsSep "," cfg.cluster.connect;
       }
       // lib.optionalAttrs (cfg.cluster.ca != [ ]) {
         MOQ_LISTEN_TLS_ROOT = lib.concatMapStringsSep "," toString cfg.cluster.ca;

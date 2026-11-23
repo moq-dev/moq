@@ -117,7 +117,7 @@ public enum Media {
     public typealias Rendition = MoqRendition
     /// A catalog rendition and live delivery options.
     public typealias TrackConfig = MoqMediaTrackConfig
-    /// A catalog rendition's group sequence and fetch delivery options.
+    /// A catalog rendition's group start and fetch delivery options.
     public typealias GroupConfig = MoqMediaGroupConfig
 
     /// Updates a catalog without keeping its broadcast open.
@@ -145,16 +145,26 @@ public enum Media {
     }
 
     /// Read side of a broadcast's catalog. Iterating yields catalog updates as the
-    /// set of tracks changes.
+    /// set of tracks changes. Each takes effect at its `timestamp` on the media timeline:
+    /// hold one read before the media reaches it, and apply one read late, or the first
+    /// one read, at once.
     public final class CatalogConsumer: AsyncSequence, Sendable {
         /// The catalog update emitted by this sequence.
         public typealias Element = Catalog
 
         let ffi: MoqMediaCatalogConsumer
 
-        /// Subscribe to this broadcast's catalog snapshots.
-        public static func subscribe(broadcast: BroadcastConsumer) async throws -> CatalogConsumer {
-            CatalogConsumer(try await MoqMediaCatalogConsumer.subscribe(broadcast: broadcast.ffi))
+        /// Subscribe to this broadcast's catalog updates, for a reader playing `delay` seconds
+        /// behind the live edge. A zero `delay` reads only the newest catalog, for a reader that
+        /// applies each on arrival. A reader that holds each update until its media reaches the
+        /// update's `timestamp` passes its playout delay instead, and reads in order every update
+        /// it may still need: one stays deliverable until it falls `delay` behind the live edge.
+        public static func subscribe(
+            broadcast: BroadcastConsumer,
+            delay: TimeInterval = 0
+        ) async throws -> CatalogConsumer {
+            try checkDuration(delay, "delay")
+            return CatalogConsumer(try await MoqMediaCatalogConsumer.subscribe(broadcast: broadcast.ffi, delay: delay))
         }
         init(_ ffi: MoqMediaCatalogConsumer) {
             self.ffi = ffi
@@ -187,7 +197,9 @@ public enum Media {
 
         /// Subscribe to a catalog rendition and decode its container, following its broadcast and track.
         public static func subscribe(broadcast: BroadcastConsumer, config: TrackConfig) async throws -> TrackConsumer {
-            TrackConsumer(try await MoqMediaTrackConsumer.subscribe(broadcast: broadcast.ffi, config: config))
+            try checkRendition(config.rendition)
+            try checkSubscription(config.subscription)
+            return TrackConsumer(try await MoqMediaTrackConsumer.subscribe(broadcast: broadcast.ffi, config: config))
         }
         init(_ ffi: MoqMediaTrackConsumer) {
             self.ffi = ffi
@@ -221,7 +233,9 @@ public enum Media {
 
         /// Fetch and decode exactly one group of a catalog rendition, following its broadcast and track.
         public static func fetch(broadcast: BroadcastConsumer, config: GroupConfig) async throws -> GroupConsumer {
-            GroupConsumer(try await MoqMediaGroupConsumer.fetch(broadcast: broadcast.ffi, config: config))
+            try checkRendition(config.rendition)
+            try checkFetch(config.options)
+            return GroupConsumer(try await MoqMediaGroupConsumer.fetch(broadcast: broadcast.ffi, config: config))
         }
         init(_ ffi: MoqMediaGroupConsumer) {
             self.ffi = ffi
@@ -237,9 +251,9 @@ public enum Media {
             self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))
         }
 
-        /// The sequence number of this group within the track.
-        public var sequence: UInt64 {
-            ffi.sequence()
+        /// The start of this group within the track.
+        public var start: UInt64 {
+            ffi.start()
         }
 
         /// The next frame, or `nil` once the group ends.
@@ -317,12 +331,21 @@ public enum Media {
             try ffi.cut()
         }
 
-        /// Draw a group boundary and number the next group `sequence`.
+        /// Draw a group boundary and start the next group at `start`.
         ///
-        /// ``cut()`` with an explicit sequence, for a publisher whose group numbers have to be
+        /// ``cut()`` with an explicit start, for a publisher whose group starts have to be
         /// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
-        public func seek(_ sequence: UInt64) throws {
-            try ffi.seek(sequence: sequence)
+        public func seek(_ start: UInt64) throws {
+            try ffi.seek(start: start)
+        }
+
+        /// Abort the track with an application error code, but only while nobody wants it: call it
+        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
+        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
+        /// that came and went, and waits on.
+        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finish the track and finalize encoding.
@@ -359,9 +382,9 @@ public enum Media {
             try ffi.cut()
         }
 
-        /// Start a new segment and number its groups `sequence`.
-        public func seek(_ sequence: UInt64) throws {
-            try ffi.seek(sequence: sequence)
+        /// Start a new segment and start its groups at `start`.
+        public func seek(_ start: UInt64) throws {
+            try ffi.seek(start: start)
         }
 
         /// Finish every track this container publishes.
@@ -404,6 +427,15 @@ public enum Media {
         /// keyframe in the stream.
         public func setEnabled(_ enabled: Bool) throws {
             try ffi.setEnabled(enabled: enabled)
+        }
+
+        /// Abort the track with an application error code, but only while nobody wants it: call it
+        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
+        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
+        /// that came and went, and waits on.
+        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finalize the track, publishing the last access unit still waiting for a

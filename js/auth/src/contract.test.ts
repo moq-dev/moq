@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { encodeGrant, GrantSchema, RefusalSchema, RequestSchema, TokenSchema } from "./contract.ts";
+import { type Grant, GrantSchema, RefusalSchema, RequestSchema, TokenSchema } from "./contract.ts";
 
 // The fixtures below are what the Rust `moq_auth::Request` and `Grant` serialize to,
 // so a server written against these schemas reads what a relay sends.
@@ -19,6 +19,7 @@ test("a connect request parses with every field", () => {
 		query: "jwt=abc",
 		role: "publisher",
 		implementation: "moq-net-js/0.4.2",
+		relay: "moq-relay/0.22.0",
 		tls: {
 			name: "edge0",
 			fingerprint: "ab".repeat(32),
@@ -31,6 +32,11 @@ test("a connect request parses with every field", () => {
 	expect(request.tls?.name).toBe("edge0");
 	expect(request.tls?.chain?.[1]).toBe("cd".repeat(32));
 	expect(request.implementation).toBe("moq-net-js/0.4.2");
+	expect(request.relay).toBe("moq-relay/0.22.0");
+});
+
+test("an event the server does not know is refused, not guessed", () => {
+	expect(() => RequestSchema.parse({ id: "1", event: "future", node: "n", transport: "quic", path: "/" })).toThrow();
 });
 
 test("an end request carries its facts beside the rest", () => {
@@ -130,41 +136,61 @@ test("malformed transport values are refused", () => {
 
 test("a grant round trips and is validated", () => {
 	const grant = GrantSchema.parse({
-		publish: ["alice/**"],
-		subscribe: ["**"],
+		publish: ["alice"],
+		subscribe: [""],
 		root: "pid/room",
 		expires: 4102444800,
 		revalidate: 60,
 		tier: "websocket",
 		label: "project/key/123",
 	});
+	// TEMPORARY MIGRATION (see `readPrefix` in wire.ts): spelled as a relay before 0.22 reads it,
+	// which parses back to itself.
 	expect(grant.publish).toEqual(["alice/**"]);
+	expect(grant.subscribe).toEqual(["**"]);
+	expect(GrantSchema.parse(grant)).toEqual(grant);
 
 	expect(() => GrantSchema.parse({})).toThrow(/name something/);
-	expect(() => GrantSchema.parse({ publish: ["**"], revalidate: 60 })).toThrow(/must expire/);
-	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800, revalidate: 0 })).toThrow();
+	expect(() => GrantSchema.parse({ publish: [""], revalidate: 60 })).toThrow(/must expire/);
+	expect(() => GrantSchema.parse({ publish: [""], expires: 4102444800, revalidate: 0 })).toThrow();
 	// The Rust side reads whole seconds; a fraction would be refused there.
-	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800, revalidate: 0.5 })).toThrow();
-	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800.5 })).toThrow();
+	expect(() => GrantSchema.parse({ publish: [""], expires: 4102444800, revalidate: 0.5 })).toThrow();
+	expect(() => GrantSchema.parse({ publish: [""], expires: 4102444800.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
-	expect(() => GrantSchema.parse({ publish: ["**"], label: "project/*" })).toThrow(/invalid path/);
+	expect(() => GrantSchema.parse({ publish: [""], label: "project/*" })).toThrow(/invalid path/);
 });
 
-test("a capped grant answers with its cap nested in the role", () => {
-	const grant = GrantSchema.parse({ publish: { path: ["alice/**"], rate: 8_000_000 }, subscribe: ["**"] });
-	expect(grant).toMatchObject({ publish: ["alice/**"], publish_rate: 8_000_000, subscribe: ["**"] });
-	expect(encodeGrant(grant)).toEqual({ publish: { path: ["alice/**"], rate: 8_000_000 }, subscribe: ["**"] });
+test("a capped grant is typed as the relay reads it", () => {
+	// Typed, so a server cannot put the cap anywhere the relay would skip it.
+	const grant: Grant = { publish: { path: ["alice"], rate: 8_000_000 }, subscribe: [""] };
+	expect(GrantSchema.parse(JSON.parse(JSON.stringify(grant)))).toEqual({
+		publish: { path: ["alice/**"], rate: 8_000_000 },
+		subscribe: ["**"],
+	});
 	// A cap alone names nothing.
-	expect(() => encodeGrant({ publish_rate: 8000 })).toThrow(/name something/);
+	expect(() => GrantSchema.parse({ publish: { path: [], rate: 8000 } })).toThrow(/name something/);
+});
+
+test("a grant with a field the relay does not know is refused", () => {
+	for (const extra of [{ publish_rate: 8000 }, { upstream: true }, { future: {} }, { link: "downstream" }]) {
+		expect(GrantSchema.safeParse({ publish: [""], ...extra }).success).toBe(false);
+	}
+});
+
+test("peer is a temporary alias that must agree with link", () => {
+	for (const link of [{ peer: true }, { link: "peer" }, { link: "upstream", peer: true }, { peer: false }]) {
+		expect(GrantSchema.safeParse({ publish: [""], ...link }).success).toBe(true);
+	}
+	expect(() => GrantSchema.parse({ publish: [""], link: "upstream", peer: false })).toThrow(/not a peer/);
 });
 
 test("a tier a metrics label would escape is refused", () => {
 	for (const tier of ['a"b', "a\\b", "a\nb", "/edge", "a//b"]) {
-		expect(() => GrantSchema.parse({ publish: ["**"], tier })).toThrow(/invalid tier/);
+		expect(() => GrantSchema.parse({ publish: [""], tier })).toThrow(/invalid tier/);
 		expect(RefusalSchema.safeParse({ reason: "expired", tier }).success).toBe(false);
 	}
 	for (const tier of ["", "region/sjc", "a.b_c-D"]) {
-		expect(GrantSchema.parse({ publish: ["**"], tier }).tier).toBe(tier);
+		expect(GrantSchema.parse({ publish: [""], tier }).tier).toBe(tier);
 	}
 });
 

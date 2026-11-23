@@ -20,8 +20,8 @@ const MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT = 0x06n;
 const MSG_PARAM_MAX_CACHE_DURATION = 0x04n;
 const MSG_PARAM_EXPIRES = 0x08n;
 const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
-export const MSG_PARAM_FORWARD = 0x10n;
-export const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
+const MSG_PARAM_FORWARD = 0x10n;
+const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
 /// INCLUDE_PROPERTIES, draft-22's opt-out from Track Properties.
 const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
@@ -29,7 +29,6 @@ const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
 const MSG_PARAM_ROUTE_COST = 0x40b58n;
 /// HIDDEN, from the MoQ Hidden extension. See `hidden.ts`.
 const MSG_PARAM_HIDDEN = 0x40b5en;
-const MSG_PARAM_MAX_AGE = 0x915c6n;
 
 // Bytes parameter IDs (odd)
 /// AUTHORIZATION TOKEN. Decoded, but grants nothing: the session's grant is what authorizes a request.
@@ -97,7 +96,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 			);
 		case "subscribe":
 			return (
-				id === MSG_PARAM_MAX_AGE ||
 				objectTimeout ||
 				auth ||
 				id === MSG_PARAM_MAX_CACHE_DURATION ||
@@ -116,7 +114,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 		case "subscribe-update":
 		case "request-update":
 			return (
-				id === MSG_PARAM_MAX_AGE ||
 				objectTimeout ||
 				auth ||
 				subgroupTimeout ||
@@ -186,7 +183,6 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_EXPIRES:
 		case MSG_PARAM_ROUTE_COST:
 		case MSG_PARAM_HIDDEN:
-		case MSG_PARAM_MAX_AGE:
 		case MSG_PARAM_ACTIVE_COUNT:
 			return "varint";
 		case MSG_PARAM_PUBLISHER_PRIORITY:
@@ -280,46 +276,6 @@ export class Parameters {
 
 	set forward(v: boolean) {
 		this.vars.set(MSG_PARAM_FORWARD, v ? 1n : 0n);
-	}
-
-	get publisherPriority(): number | undefined {
-		const v = this.vars.get(MSG_PARAM_PUBLISHER_PRIORITY);
-		return v !== undefined ? Number(v) : undefined;
-	}
-
-	set publisherPriority(v: number) {
-		this.vars.set(MSG_PARAM_PUBLISHER_PRIORITY, BigInt(v));
-	}
-
-	get expires(): bigint | undefined {
-		return this.vars.get(MSG_PARAM_EXPIRES);
-	}
-
-	set expires(v: bigint) {
-		this.vars.set(MSG_PARAM_EXPIRES, v);
-	}
-
-	get maxCacheDuration(): bigint | undefined {
-		return this.vars.get(MSG_PARAM_MAX_CACHE_DURATION);
-	}
-
-	set maxCacheDuration(v: bigint) {
-		this.vars.set(MSG_PARAM_MAX_CACHE_DURATION, v);
-	}
-
-	/** Subscriber max age in milliseconds (MoQ Timestamp). */
-	get maxAge(): number | undefined {
-		const value = this.vars.get(MSG_PARAM_MAX_AGE);
-		if (value === undefined) return undefined;
-		if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError("max age exceeds safe milliseconds");
-		return Number(value);
-	}
-	set maxAge(value: number | undefined) {
-		if (value === undefined) this.vars.delete(MSG_PARAM_MAX_AGE);
-		else {
-			if (!Number.isSafeInteger(value) || value < 0) throw new RangeError("invalid max age");
-			this.vars.set(MSG_PARAM_MAX_AGE, BigInt(value));
-		}
 	}
 
 	/** HIDDEN (MoQ Hidden): also advertise hidden namespaces. Absent and 0 both mean no. */

@@ -69,10 +69,15 @@ pub trait Transport {
 	}
 }
 
+/// The size of each read buffer: one default record with its size field, or one draft-00
+/// frame. Records are sliced out of it, and the session counts every slice as pinning a whole
+/// buffer of this size. A larger record gets a buffer of its own size.
+pub(crate) const READ_BUFFER: usize = crate::MAX_FRAME_SIZE;
+
 mod stream;
 pub use stream::Stream;
 pub(crate) use stream::build as build_stream_session;
 
 mod websocket;
-// Public for `Driver<WsTransport<_>>`, though callers never need to name it.
-pub(crate) use websocket::WsTransport;
+// Named only in `Driver<WsTransport<_>>`, so a caller can hold or wrap a WebSocket driver.
+pub use websocket::WsTransport;

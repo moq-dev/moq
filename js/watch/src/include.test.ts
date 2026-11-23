@@ -8,7 +8,9 @@ import { key } from "../../json/src/key.test-util.ts";
 import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
+import { defined } from "./defined.test-util.ts";
 import { Source } from "./video/source";
+import { stubSupport } from "./webcodecs.test-util";
 
 function publish(origin: Origin.Producer, path: string, instance?: Instance.Valid) {
 	const publication = origin.route(Path.from(path), { instance: instance && { id: instance, epoch: 0n } });
@@ -32,21 +34,23 @@ async function quietly<T>(fn: () => Promise<T>): Promise<T> {
 // Resolves once nobody subscribes to the track.
 async function unwanted(track: Track.Producer): Promise<void> {
 	const { wanted } = track.demand();
-	while (wanted.peek() !== undefined) await wanted.changed();
+	while (wanted.peek()) await wanted.changed();
 }
 
 const video = (codec: string) => ({ codec, container: { kind: "legacy" as const } });
 
 it("reads a listed include's catalog but no media, keeping its rendition IDs its own", async () => {
+	using _decoder = stubSupport({ video: () => true });
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
 	const include = publish(origin, "room/extra.hang");
-	const includeCatalog = include.createTrack(Catalog.TRACK);
+	const includeCatalog = defined(include.createTrack(Catalog.TRACK));
 	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track: includeCatalog, deltas: false });
-	parent
-		.createTrack("video")
-		.writeFrame({ payload: new TextEncoder().encode("source frames"), timestamp: Time.Timestamp.unscaled(0n) });
-	const includeVideo = include.createTrack("video");
+	defined(parent.createTrack("video")).writeFrame({
+		payload: new TextEncoder().encode("source frames"),
+		timestamp: Time.Timestamp.unscaled(0n),
+	});
+	const includeVideo = defined(include.createTrack("video"));
 	includeVideo.writeFrame({
 		payload: new TextEncoder().encode("include frames"),
 		timestamp: Time.Timestamp.unscaled(0n),
@@ -65,12 +69,12 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 	});
 	const selection = new Effect();
 	try {
-		catalog.update({ value: { video: { renditions: { video: video("vp8") } } }, at: key() });
+		catalog.update({ video: { renditions: { video: video("vp8") } } }, key());
 		await settle();
 		expect(source.out.catalog.peek()?.include).toEqual(root.include);
 		// The root selects every include it lists: it reads the catalog, but subscribes no media.
-		expect(includeCatalog.demand().wanted.peek()).toBeDefined();
-		expect(includeVideo.demand().wanted.peek()).toBeUndefined();
+		expect(includeCatalog.demand().wanted.peek()).toBe(true);
+		expect(includeVideo.demand().wanted.peek()).toBe(false);
 		// Listed under its include's ID, so it never shadows the root's own "video".
 		expect(source.out.catalog.peek()?.video?.renditions).toEqual({
 			video: video("avc1.42001f"),
@@ -81,7 +85,7 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 		await settle();
 		expect(child.out.catalog.peek()?.video?.renditions.video?.codec).toBe("vp8");
 
-		const media = new Source({ broadcast: child, target: { name: "video" }, supported: async () => true });
+		const media = new Source({ broadcast: child, target: { name: "video" } });
 		selection.cleanup(() => media.close());
 		await settle();
 		expect(media.out.track.peek()).toBe("video");
@@ -105,7 +109,7 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 		// Dropping the selection releases the media; closing the root releases the catalog.
 		selection.close();
 		await unwanted(includeVideo);
-		expect(includeCatalog.demand().wanted.peek()).toBeDefined();
+		expect(includeCatalog.demand().wanted.peek()).toBe(true);
 		source.close();
 		await unwanted(includeCatalog);
 	} finally {
@@ -156,7 +160,7 @@ it("reads an unavailable include as offline without touching the parent", async 
 
 it("reports an include outside the origin's scope as an error, leaving the parent live", async () => {
 	const origin = new Origin.Producer();
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["room"]));
 	publish(scoped, "room/main.hang");
 	const parent = new Broadcast({
 		origin: scoped,
@@ -182,7 +186,7 @@ it("reports an include outside the origin's scope as an error, leaving the paren
 it("tracks the include entry without reopening it on unrelated catalog updates", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const firstCatalog = publish(origin, "room/first.hang").createTrack(Catalog.TRACK);
+	const firstCatalog = defined(publish(origin, "room/first.hang").createTrack(Catalog.TRACK));
 	publish(origin, "room/second.hang");
 	const catalog = new Signal(Catalog.RootSchema.parse({ include: { extra: { broadcast: "./first.hang" } } }));
 	const parent = new Broadcast({
@@ -200,11 +204,11 @@ it("tracks the include entry without reopening it on unrelated catalog updates",
 		expect(active?.path).toBe(Path.from("room/first.hang"));
 
 		// An update that leaves the entry alone keeps the same request.
-		expect(firstCatalog.demand().wanted.peek()).toBeDefined();
+		expect(firstCatalog.demand().wanted.peek()).toBe(true);
 		let withdrawals = 0;
 		owner.cleanup(
 			firstCatalog.demand().wanted.subscribe((wanted) => {
-				if (wanted === undefined) withdrawals += 1;
+				if (!wanted) withdrawals += 1;
 			}),
 		);
 		catalog.set(
@@ -313,7 +317,7 @@ it("never reads an include of another instance, but reads a minted one", async (
 	publish(origin, "room/main.hang");
 	const served = Instance.random();
 	const proven = publish(origin, "room/proven.hang", served);
-	const track = proven.createTrack(Catalog.TRACK);
+	const track = defined(proven.createTrack(Catalog.TRACK));
 	// A route over a wire that carries no instance has one its session minted.
 	publish(origin, "room/plain.hang", Mint.fresh());
 	const named = Instance.random();
@@ -340,7 +344,7 @@ it("never reads an include of another instance, but reads a minted one", async (
 		expect(refused.out.active.peek()).toBeUndefined();
 		expect(refused.out.error.peek()).toBeUndefined();
 		expect(track.closed.peek()).toBeUndefined();
-		expect(track.demand().wanted.peek()).toBeUndefined();
+		expect(track.demand().wanted.peek()).toBe(false);
 		// A minted instance cannot prove the stream, so the named instance cannot refuse it.
 		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
 
@@ -359,7 +363,7 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 	const origin = new Origin.Producer();
 	const [served, other] = [Instance.random(), Instance.random()];
 	publish(origin, "room/main.hang", served);
-	const extraCatalog = publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK);
+	const extraCatalog = defined(publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK));
 	const entries = (instance?: Instance.Valid) =>
 		Catalog.RootSchema.parse({
 			include: {
@@ -391,11 +395,11 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 		expect(empty.in.name.peek()).toBe(Path.from("room/main.hang"));
 		expect(empty.in.enabled.peek()).toBe(true);
 
-		expect(extraCatalog.demand().wanted.peek()).toBeDefined();
+		expect(extraCatalog.demand().wanted.peek()).toBe(true);
 		let withdrawals = 0;
 		owner.cleanup(
 			extraCatalog.demand().wanted.subscribe((wanted) => {
-				if (wanted === undefined) withdrawals += 1;
+				if (!wanted) withdrawals += 1;
 			}),
 		);
 
@@ -419,26 +423,27 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 });
 
 it("offers every include's renditions to selection, subscribing only the selected one", async () => {
+	using _decoder = stubSupport({ video: () => true });
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
-	const parentHd = parent.createTrack("hd");
+	const parentHd = defined(parent.createTrack("hd"));
 	const served = Instance.random();
 	const ladder = publish(origin, "room/ladder.hang", served);
-	const ladderTrack = ladder.createTrack(Catalog.TRACK);
+	const ladderTrack = defined(ladder.createTrack(Catalog.TRACK));
 	const ladderCatalog = new Json.Snapshot.Producer<Catalog.Root>({ track: ladderTrack, deltas: false });
 	const rung = (name: string) => {
-		const track = ladder.createTrack(name);
+		const track = defined(ladder.createTrack(name));
 		track.writeFrame({ payload: new TextEncoder().encode(name), timestamp: key() });
 		return track;
 	};
 	const [high, low, ladderHd] = [rung("720p"), rung("360p"), rung("hd")];
-	const remote = publish(origin, "room/remote.hang").createTrack("remote");
-	const nested = publish(origin, "room/nested.hang").createTrack(Catalog.TRACK);
+	const remote = defined(publish(origin, "room/remote.hang").createTrack("remote"));
+	const nested = defined(publish(origin, "room/nested.hang").createTrack(Catalog.TRACK));
 
 	const sized = (width: number, height: number, bitrate: number): Catalog.VideoConfig =>
 		Catalog.VideoConfigSchema.parse({ ...video("avc1.42001f"), codedWidth: width, codedHeight: height, bitrate });
-	ladderCatalog.update({
-		value: Catalog.RootSchema.parse({
+	ladderCatalog.update(
+		Catalog.RootSchema.parse({
 			video: {
 				renditions: {
 					"720p": sized(1280, 720, 2_000_000),
@@ -461,8 +466,8 @@ it("offers every include's renditions to selection, subscribing only the selecte
 			// An include's own include needs a selection of its own, so it is never expanded.
 			include: { nested: { broadcast: "./nested.hang" } },
 		}),
-		at: key(),
-	});
+		key(),
+	);
 
 	const root = (own: Record<string, Catalog.VideoConfig>) =>
 		Catalog.RootSchema.parse({
@@ -472,7 +477,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	const catalog = new Signal(root({ hd: sized(1920, 1080, 5_000_000) }));
 	const broadcast = new Broadcast({ origin, name: Path.from("room/main.hang"), catalogFormat: "manual", catalog });
 	const rate = new Signal<number | undefined>(1_000_000);
-	const source = new Source({ broadcast, supported: async () => true, rate });
+	const source = new Source({ broadcast, rate });
 	const selection = new Effect();
 	try {
 		await settle();
@@ -490,10 +495,9 @@ it("offers every include's renditions to selection, subscribing only the selecte
 			"ladder/alt": { ...sized(426, 240, 300_000), ...ref, track: "alt" },
 		});
 		expect(Object.keys(broadcast.out.catalog.peek()?.audio?.renditions ?? {})).toEqual(["ladder/aac"]);
-		expect(nested.demand().wanted.peek()).toBeUndefined();
+		expect(nested.demand().wanted.peek()).toBe(false);
 		// Listing a rendition subscribes none of its media.
-		for (const track of [parentHd, high, low, ladderHd, remote])
-			expect(track.demand().wanted.peek()).toBeUndefined();
+		for (const track of [parentHd, high, low, ladderHd, remote]) expect(track.demand().wanted.peek()).toBe(false);
 
 		// One selection spans the root and its include, and the config says where the media lives.
 		expect(source.out.track.peek()).toBe("ladder/360p");
@@ -514,7 +518,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 			.ordered();
 		try {
 			expect(await frames?.readString()).toBe("720p");
-			for (const track of [parentHd, low, ladderHd, remote]) expect(track.demand().wanted.peek()).toBeUndefined();
+			for (const track of [parentHd, low, ladderHd, remote]) expect(track.demand().wanted.peek()).toBe(false);
 		} finally {
 			frames?.close();
 		}
@@ -545,10 +549,10 @@ it("dedupes an include's rendition only against a usable one", async () => {
 	const serve = (instance: Instance.Valid) => {
 		const broadcast = publish(origin, "room/extra.hang", instance);
 		const catalog = new Json.Snapshot.Producer<Catalog.Root>({
-			track: broadcast.createTrack(Catalog.TRACK),
+			track: defined(broadcast.createTrack(Catalog.TRACK)),
 			deltas: false,
 		});
-		catalog.update({ value: Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }), at: key() });
+		catalog.update(Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }), key());
 		return broadcast;
 	};
 	const old = serve(oldInstance);
@@ -585,12 +589,10 @@ it("takes a missing section's display settings from the include whose renditions
 	publish(origin, "room/main.hang");
 	const serve = (path: string, value: Catalog.Root) => {
 		const broadcast = publish(origin, path);
-		new Json.Snapshot.Producer<Catalog.Root>({ track: broadcast.createTrack(Catalog.TRACK), deltas: false }).update(
-			{
-				value,
-				at: key(),
-			},
-		);
+		new Json.Snapshot.Producer<Catalog.Root>({
+			track: defined(broadcast.createTrack(Catalog.TRACK)),
+			deltas: false,
+		}).update(value, key());
 		return broadcast;
 	};
 	// The first include's only rendition reads a broadcast nobody announced, so none of it is listed.

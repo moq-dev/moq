@@ -65,9 +65,11 @@ from moq_ffi import (
 from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
+from moq_ffi import (
+    MoqVideoSurface as VideoSurface,
+)
 
 from ._records import (
-    Anchor,
     Backoff,
     ClientTls,
     ConnectionStats,
@@ -80,15 +82,12 @@ from ._records import (
     Subscription,
     Timestamp,
     TrackInfo,
+    TrackRefresh,
     VideoDecodedFrame,
-    VideoSurface,
-    VideoSurfacePixelBuffer,
-    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
 __all__ = [
-    "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
@@ -117,14 +116,13 @@ __all__ = [
     "Subscription",
     "Timestamp",
     "TrackInfo",
+    "TrackRefresh",
     "VideoCodec",
     "VideoEncoderInput",
     "VideoEncoderKind",
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoSurface",
-    "VideoSurfacePixelBuffer",
-    "VideoSurfaceUnknown",
     "VideoPixelFormat",
     "WebSocketConfig",
 ]

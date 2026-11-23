@@ -1,6 +1,6 @@
 //! Consuming an ordered log from a track: a [`Decoder`] plus the track it reads from.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use serde::de::DeserializeOwned;
 
@@ -24,25 +24,34 @@ use crate::Result;
 /// finish.
 pub struct Consumer<T> {
 	track: moq_net::track::Subscriber,
-	group: Option<moq_net::group::Consumer>,
-	/// Whether the log's one group has been taken, so a second is a rolled log rather than the first.
-	taken: bool,
-	/// Sticky once a second group is seen: the records it displaced are gone, so every later read
-	/// fails too rather than reporting the rest of the log as a whole one.
-	rolled: bool,
+	log: Log,
 	decoder: Decoder<T>,
+}
+
+/// Where a [`Consumer`] is in the log's one group.
+enum Log {
+	/// Waiting for the group.
+	Waiting,
+	/// Reading the group.
+	Reading(moq_net::group::Consumer),
+	/// The group is exhausted, so only the track's end remains, and any group is a second one.
+	Drained,
+	/// A second group was seen. Sticky: the records it displaced are gone, so every later read
+	/// fails too rather than reporting the rest of the log as a whole one.
+	Rolled,
 }
 
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
+	/// Takes a subscriber where [`snapshot::Consumer::new`](crate::snapshot::Consumer::new) takes the
+	/// track: every record matters here, so the caller picks the subscription's delay budget and
+	/// priority, while a snapshot only wants the newest value and subscribes itself at a zero delay.
 	/// A [compressed](moq_net::track::Info::compression) track reads the same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
 			track,
-			group: None,
-			taken: false,
-			rolled: false,
+			log: Log::Waiting,
 			decoder: Decoder::new(config),
 		}
 	}
@@ -51,25 +60,21 @@ impl<T: DeserializeOwned> Consumer<T> {
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		loop {
-			if self.rolled {
-				return Poll::Ready(Err(crate::Error::Rolled));
-			}
-
-			let Some(group) = &mut self.group else {
+			let group = match &mut self.log {
+				Log::Rolled => return Poll::Ready(Err(crate::Error::Rolled)),
+				Log::Reading(group) => group,
 				// Arrival order rather than sequence order, because there is only ever one group to
 				// take and a second one has to be seen whatever its sequence. The monotonic
 				// `poll_next_group` would drop a late lower sequence, which is the very loss this
 				// has to report.
-				match self.track.poll_recv_group(waiter)? {
-					Poll::Ready(Some(_)) if self.taken => self.rolled = true,
-					Poll::Ready(Some(group)) => {
-						self.taken = true;
-						self.group = Some(group);
-					}
-					Poll::Ready(None) => return Poll::Ready(Ok(None)),
-					Poll::Pending => return Poll::Pending,
+				Log::Waiting | Log::Drained => {
+					self.log = match (ready!(self.track.poll_recv_group(waiter)?), &self.log) {
+						(None, _) => return Poll::Ready(Ok(None)),
+						(Some(group), Log::Waiting) => Log::Reading(group),
+						(Some(_), _) => Log::Rolled,
+					};
+					continue;
 				}
-				continue;
 			};
 
 			match group.poll_read_frame(waiter)? {
@@ -79,17 +84,15 @@ impl<T: DeserializeOwned> Consumer<T> {
 						at: frame.timestamp,
 					})));
 				}
-				Poll::Ready(None) => {
-					// The log's one group is exhausted. Keep polling the track so a clean end still
-					// reports the log as complete, and so a second group is caught as `Rolled`.
-					self.group = None;
-				}
+				// The log's one group is exhausted. Keep polling the track so a clean end still
+				// reports the log as complete, and so a second group is caught as `Rolled`.
+				Poll::Ready(None) => self.log = Log::Drained,
 				// Nothing more in the group yet, so ask the track before parking on it. A publisher
 				// that opens a second group and leaves the first open would otherwise hold this read
 				// open forever, on a log that already lost the records the second one displaced.
 				// Both polls register, so either source wakes this read.
 				Poll::Pending => match self.track.poll_recv_group(waiter)? {
-					Poll::Ready(Some(_)) => self.rolled = true,
+					Poll::Ready(Some(_)) => self.log = Log::Rolled,
 					// A finished track does not truncate the group in hand; its frames may still arrive.
 					Poll::Ready(None) | Poll::Pending => return Poll::Pending,
 				},
@@ -124,10 +127,10 @@ mod timestamps {
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
 				producer
-					.append(crate::Timed {
-						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
+					.append(
+						&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
 						at,
-					})
+					)
 					.unwrap();
 			}
 			let _finished = producer.finish().unwrap();

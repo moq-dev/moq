@@ -7,7 +7,7 @@
 //! | | RTP-in (ingest into MoQ) | RTP-out (egress from MoQ) |
 //! |---|---|---|
 //! | HTTP server | [`Server::publish_router`] (WHIP server) | [`Server::subscribe_router`] (WHEP server) |
-//! | HTTP client | [`Client::subscribe`] (WHEP client) | [`Client::publish`] (WHIP client) |
+//! | HTTP client | [`Client::pull`] (WHEP client) | [`Client::publish`] (WHIP client) |
 //!
 //! The two HTTP-client paths and the two HTTP-server paths share a single
 //! internal session driver and the same per-codec adapters; the per-direction
@@ -59,8 +59,6 @@ mod ice;
 mod ingest;
 mod sdp;
 mod session;
-// str0m, dimpl, and `is`, vendored and trimmed; see the module docs.
-mod vendor;
 
 pub use client::Client;
 pub use error::*;
@@ -72,14 +70,9 @@ mod tests {
 
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		loop {
-			return match announced.next().await? {
-				moq_net::announce::Event::Present(route) => Some((route, true)),
-				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => {
-					Some((route, false))
-				}
-				moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
-			};
+		match announced.next().await? {
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) => Some((route, false)),
 		}
 	}
 
@@ -123,15 +116,6 @@ mod tests {
 			.await
 			.expect("subscribe to output Opus track");
 		Track::opus(track, config).expect("output Opus container")
-	}
-
-	async fn next_payload(track: &mut Track) -> Vec<u8> {
-		let frame = kio::clock::timeout(TIMEOUT, track.next())
-			.await
-			.expect("output Opus packet timed out")
-			.expect("read output Opus packet")
-			.expect("output Opus track ended");
-		frame.payload.to_vec()
 	}
 
 	fn push(bridge: &mut dyn Bridge, timestamp_us: u64, payload: &'static [u8]) {
@@ -185,18 +169,17 @@ mod tests {
 		drop(route);
 	}
 
-	/// A WHEP viewer stays on the instance its session resolved: a publisher taking over the
-	/// path never reaches it, so the session never resets its timestamps or codec state, and it
-	/// fails once that instance's route dies.
-	#[tokio::test]
-	async fn a_whep_viewer_stays_on_its_instance_until_the_route_dies() {
-		let origin = moq_tokio::origin::spawn();
-		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
-		push(&mut *old, 20_000, OPUS_PACKET);
+	/// A WHEP endpoint for `source` on `origin`, with each accepted session's task.
+	type Sessions = tokio::sync::mpsc::Receiver<tokio::task::JoinHandle<crate::Result<()>>>;
 
-		let server = Server::new(server::Config::default());
+	/// Serve WHEP plays of `source` from `origin`, returning the endpoint's URL, its HTTP task,
+	/// and the task running each session it accepts.
+	async fn serve_whep(origin: &moq_net::origin::Producer) -> (url::Url, tokio::task::JoinHandle<()>, Sessions) {
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
+			.await
+			.unwrap();
 		let whep_origin = origin.consume();
-		let (sessions_tx, mut sessions) = tokio::sync::mpsc::channel(1);
+		let (sessions_tx, sessions) = tokio::sync::mpsc::channel(1);
 		let app = Router::new().route(
 			"/whep/source",
 			axum::routing::post(move |offer: String| {
@@ -217,27 +200,196 @@ mod tests {
 			}),
 		);
 		let (address, http) = serve(app).await;
+		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
+		(url, http, sessions)
+	}
 
+	/// A WHEP viewer pulling `url` into a fresh broadcast: its task, and its first Opus rendition.
+	async fn view(url: url::Url) -> (tokio::task::JoinHandle<crate::Result<()>>, Track) {
 		let output_origin = moq_tokio::origin::spawn();
 		let output = output_origin
 			.route("output", moq_net::origin::RouteOptions::hidden())
 			.expect("create output broadcast");
 		let output_consumer = output.broadcast().consume();
 		let client = Client::new(client::Config::default()).unwrap();
-		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
-		let fill = output.broadcast().clone();
-		let viewer = tokio::spawn(async move { client.subscribe(url, fill, Default::default()).await });
+		let mut fill = output.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut fill, Default::default()).unwrap();
+		let viewer = tokio::spawn(async move {
+			let _output = output;
+			client.pull(url, &fill, &catalog).await
+		});
+		(viewer, opus_output(&output_consumer).await)
+	}
+
+	/// A bare str0m WHEP viewer of `url`, an audio line alone: the task driving it, which ends
+	/// with the server's close, and each payload it receives, until the channel closes with that
+	/// task. Unlike [`Client::pull`], which aborts its output when the session ends, it keeps
+	/// everything that arrived.
+	async fn raw_view(
+		url: url::Url,
+	) -> (
+		tokio::task::JoinHandle<()>,
+		tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+	) {
+		let udp = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		raw_view_on(url, udp).await
+	}
+
+	/// [`raw_view`] from `udp`.
+	async fn raw_view_on(
+		url: url::Url,
+		udp: std::sync::Arc<tokio::net::UdpSocket>,
+	) -> (
+		tokio::task::JoinHandle<()>,
+		tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+	) {
+		use str0m::media::{Direction, MediaKind};
+
+		let local = udp.local_addr().unwrap();
+		let socket = crate::ice::Socket::new(udp.clone(), vec![local], crate::ice::reader(udp)).unwrap();
+		let mut rtc = crate::session::rtc_config()
+			.unwrap()
+			.build(kio::clock::now().into_std());
+		for addr in socket.locals() {
+			rtc.add_local_candidate(str0m::Candidate::host(*addr, "udp").unwrap());
+		}
+		let mut api = rtc.sdp_api();
+		api.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
+		let (offer, pending) = api.apply().unwrap();
+		let client = Client::new(client::Config::default()).unwrap();
+		let answer = (client.http().post(url))
+			.header(reqwest::header::CONTENT_TYPE, "application/sdp")
+			.body(offer.to_sdp_string())
+			.send()
+			.await
+			.unwrap()
+			.text()
+			.await
+			.unwrap();
+		let answer = str0m::change::SdpAnswer::from_sdp_string(&answer).unwrap();
+		rtc.sdp_api().accept_answer(pending, answer).unwrap();
+		let mut agent = crate::ice::Agent::new(rtc, socket).unwrap();
+
+		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+		let task = tokio::spawn(async move {
+			loop {
+				match agent.next().await {
+					Ok(str0m::Event::MediaData(data)) => tx.send(data.data.to_vec()).unwrap(),
+					Ok(_) => {}
+					Err(crate::ice::Error::Closed) => return,
+					Err(err) => panic!("the viewer failed: {err:?}"),
+				}
+			}
+		});
+		(task, rx)
+	}
+
+	/// The next payload `viewer` receives, or `None` once the server closed.
+	async fn received(viewer: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Option<Vec<u8>> {
+		kio::clock::timeout(TIMEOUT, viewer.recv())
+			.await
+			.expect("the viewer neither received nor closed")
+	}
+
+	/// What a test watches play: a raw WHEP viewer's payloads, or a track's.
+	trait Viewer {
+		/// The next payload, or `None` once the viewer closed.
+		async fn played(&mut self) -> Option<Vec<u8>>;
+	}
+
+	impl Viewer for tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+		async fn played(&mut self) -> Option<Vec<u8>> {
+			received(self).await
+		}
+	}
+
+	impl Viewer for Track {
+		async fn played(&mut self) -> Option<Vec<u8>> {
+			let frame = kio::clock::timeout(TIMEOUT, self.next())
+				.await
+				.expect("output Opus packet timed out")
+				.expect("read output Opus packet")?;
+			Some(frame.payload.to_vec())
+		}
+	}
+
+	/// A source that keeps sending while a test waits on its viewer, as a live one does.
+	/// Each packet's group ends whole where the packet does, so a paused source's last one
+	/// ages out before a session that connects past its delay budget reads it, which a loaded
+	/// host does to the first packet as readily as a later one.
+	struct Live<'a> {
+		bridge: &'a mut dyn Bridge,
+		/// The next packet's timestamp.
+		at: Duration,
+		/// What it last sent live, which may still be in flight after its viewer played it.
+		sent: Option<&'static [u8]>,
+	}
+
+	impl<'a> Live<'a> {
+		/// How far apart it sends packets, in both media time and wall time.
+		const STEP: Duration = Duration::from_millis(20);
+
+		fn new(bridge: &'a mut dyn Bridge) -> Self {
+			Self {
+				bridge,
+				at: Self::STEP,
+				sent: None,
+			}
+		}
+
+		/// Send `payload` once.
+		fn push(&mut self, payload: &'static [u8]) {
+			push(self.bridge, self.at.as_micros() as u64, payload);
+			self.at += Self::STEP;
+		}
+
+		/// Send `payload` every [`Self::STEP`] until `viewer` plays something other than an earlier
+		/// live payload, and return that. Repeating the last payload skips nothing.
+		async fn play(&mut self, payload: &'static [u8], viewer: &mut impl Viewer) -> Vec<u8> {
+			let stale = self.sent.replace(payload).filter(|sent| *sent != payload);
+			let read = fresh(viewer, stale);
+			tokio::pin!(read);
+			loop {
+				self.push(payload);
+				tokio::select! {
+					played = &mut read => return played.expect("the viewer was closed"),
+					_ = kio::clock::sleep(Self::STEP) => {}
+				}
+			}
+		}
+	}
+
+	/// The next payload `viewer` plays other than `stale`, or `None` once it closed.
+	async fn fresh(viewer: &mut impl Viewer, stale: Option<&[u8]>) -> Option<Vec<u8>> {
+		loop {
+			let played = viewer.played().await?;
+			if Some(played.as_slice()) != stale {
+				return Some(played);
+			}
+		}
+	}
+
+	/// A WHEP viewer stays on the instance its session resolved: a publisher taking over the
+	/// path never reaches it, so the session never resets its timestamps or codec state, and it
+	/// fails once that instance's route dies.
+	#[tokio::test]
+	async fn a_whep_viewer_stays_on_its_instance_until_the_route_dies() {
+		let origin = moq_tokio::origin::spawn();
+		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let mut live = Live::new(&mut *old);
+		live.push(OPUS_PACKET);
+
+		let (url, http, mut sessions) = serve_whep(&origin).await;
+		let (viewer, mut played) = view(url).await;
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
 			.unwrap();
-		let mut played = opus_output(&output_consumer).await;
-		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
+		assert_eq!(live.play(OPUS_PACKET, &mut played).await, OPUS_PACKET);
 
 		let _new = take_over(&origin).await;
-		push(&mut *old, 40_000, OLD_PACKET);
 		assert_eq!(
-			next_payload(&mut played).await,
+			live.play(OLD_PACKET, &mut played).await,
 			OLD_PACKET,
 			"the viewer left its instance"
 		);
@@ -252,15 +404,124 @@ mod tests {
 		http.abort();
 	}
 
+	/// A broadcast that ends cleanly ends its WHEP sessions once they have sent what they hold,
+	/// closing the peer connection so the viewer learns to reconnect rather than freeze.
+	#[tokio::test]
+	async fn a_whep_viewer_ends_with_its_broadcast() {
+		let origin = moq_tokio::origin::spawn();
+		let (_route, mut bridge, mut catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let mut live = Live::new(&mut *bridge);
+		live.push(OPUS_PACKET);
+
+		let (url, http, mut sessions) = serve_whep(&origin).await;
+		let (task, mut viewer) = raw_view(url).await;
+		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
+			.await
+			.expect("WHEP negotiation timed out")
+			.unwrap();
+		assert_eq!(live.play(OPUS_PACKET, &mut viewer).await, OPUS_PACKET);
+
+		// The publisher's final packet, then its clean end, as an RTMP `deleteStream` does.
+		live.push(NEW_PACKET);
+		let _finished = bridge.finish().unwrap();
+		catalog.finish().unwrap();
+		assert_eq!(
+			fresh(&mut viewer, Some(OPUS_PACKET)).await.as_deref(),
+			Some(NEW_PACKET),
+			"the final packet was lost"
+		);
+		assert_eq!(
+			fresh(&mut viewer, Some(OPUS_PACKET)).await,
+			None,
+			"the viewer was not closed"
+		);
+		// The channel also closes if the viewer panicked, so only its task tells a clean close.
+		kio::clock::timeout(TIMEOUT, task)
+			.await
+			.expect("the viewer outlived its channel")
+			.expect("the viewer failed");
+		kio::clock::timeout(TIMEOUT, session)
+			.await
+			.expect("the session outlived its broadcast")
+			.unwrap()
+			.expect("the session ended cleanly");
+		http.abort();
+	}
+
+	/// A viewer joining once the catalog ended, while a track still sends, plays that track to
+	/// its end before its session closes.
+	#[tokio::test]
+	async fn a_whep_viewer_joining_after_the_catalog_ends_plays_the_rest() {
+		let origin = moq_tokio::origin::spawn();
+		let (_route, mut bridge, mut catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let mut live = Live::new(&mut *bridge);
+		live.push(OPUS_PACKET);
+		catalog.finish().unwrap();
+
+		let (url, http, mut sessions) = serve_whep(&origin).await;
+		let (task, mut viewer) = raw_view(url).await;
+		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
+			.await
+			.expect("WHEP negotiation timed out")
+			.unwrap();
+		// The line subscribed at a group it found, so it plays the track.
+		assert_eq!(live.play(OPUS_PACKET, &mut viewer).await, OPUS_PACKET);
+		live.push(NEW_PACKET);
+		let _finished = bridge.finish().unwrap();
+		assert_eq!(fresh(&mut viewer, Some(OPUS_PACKET)).await.as_deref(), Some(NEW_PACKET));
+		assert_eq!(
+			fresh(&mut viewer, Some(OPUS_PACKET)).await,
+			None,
+			"the viewer was not closed"
+		);
+		// The channel also closes if the viewer panicked, so only its task tells a clean close.
+		kio::clock::timeout(TIMEOUT, task)
+			.await
+			.expect("the viewer outlived its channel")
+			.expect("the viewer failed");
+		kio::clock::timeout(TIMEOUT, session)
+			.await
+			.expect("the session outlived its broadcast")
+			.unwrap()
+			.expect("the session ended cleanly");
+		http.abort();
+	}
+
+	/// A viewer re-offering from the address its abandoned session still holds plays on its
+	/// new session: the new session's ICE confirms the path, so the address moves to it.
+	#[tokio::test]
+	async fn a_reoffer_from_the_same_address_plays() {
+		let origin = moq_tokio::origin::spawn();
+		let (_route, mut bridge, _catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let mut live = Live::new(&mut *bridge);
+
+		let (url, http, mut sessions) = serve_whep(&origin).await;
+		let udp = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		let (old, mut viewer) = raw_view_on(url.clone(), udp.clone()).await;
+		let _old_session = sessions.recv().await.unwrap();
+		assert_eq!(live.play(NEW_PACKET, &mut viewer).await, NEW_PACKET);
+
+		// The peer drops its connection without a word, then offers again from the same address.
+		old.abort();
+		let _ = old.await;
+		let (_new, mut viewer) = raw_view_on(url, udp).await;
+		let _new_session = sessions.recv().await.unwrap();
+		assert_eq!(live.play(NEW_PACKET, &mut viewer).await, NEW_PACKET);
+		http.abort();
+	}
+
 	/// A WHIP push stays on the instance it resolved the same way, and
 	/// [`Client::publish`] fails once that instance's route dies.
 	#[tokio::test]
 	async fn a_whip_push_stays_on_its_instance_until_the_route_dies() {
 		let origin = moq_tokio::origin::spawn();
 		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
-		push(&mut *old, 20_000, OPUS_PACKET);
+		let mut live = Live::new(&mut *old);
+		live.push(OPUS_PACKET);
 
-		let server = Server::new(server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
+			.await
+			.unwrap();
 		let ingest_origin = moq_tokio::origin::spawn();
 		let whip_origin = ingest_origin.clone();
 		let app = Router::new().route(
@@ -298,12 +559,11 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let mut played = opus_output(&ingested).await;
-		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
+		assert_eq!(live.play(OPUS_PACKET, &mut played).await, OPUS_PACKET);
 
 		let _new = take_over(&origin).await;
-		push(&mut *old, 40_000, OLD_PACKET);
 		assert_eq!(
-			next_payload(&mut played).await,
+			live.play(OLD_PACKET, &mut played).await,
 			OLD_PACKET,
 			"the push left its instance"
 		);
@@ -325,7 +585,9 @@ mod tests {
 		tokio::task::JoinHandle<()>,
 		tokio::sync::mpsc::Receiver<tokio::task::JoinHandle<crate::Result<()>>>,
 	) {
-		let server = Server::new(server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
+			.await
+			.unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let (sessions_tx, sessions) = tokio::sync::mpsc::channel(1);
 		let app = Router::new().route(
@@ -336,7 +598,7 @@ mod tests {
 				async move {
 					let mut request =
 						server::whip::Request::new(&origin, moq_net::Path::from_static("ingested"), &offer);
-					request.rate = Some(rate);
+					request.ingest.rate = Some(rate);
 					let response = server::whip::accept(&server, request).await.unwrap();
 					let answer = response.answer.clone();
 					sessions.send(tokio::spawn(response.run())).await.unwrap();
@@ -403,7 +665,7 @@ mod tests {
 		logged("bps=900000").await;
 		// Lifting the cap lifts the publisher's ceiling rather than leaving the last one.
 		rate.set(None);
-		logged(&format!("bps={}", crate::vendor::str0m::bwe::Bitrate::MAX.as_u64())).await;
+		logged(&format!("bps={}", str0m::bwe::Bitrate::MAX.as_u64())).await;
 		assert!(!session.is_finished(), "a publisher under the cap was closed");
 		assert!(!pushed.is_finished(), "a publisher under the cap stopped");
 		session.abort();
@@ -451,14 +713,8 @@ mod tests {
 				.expect("create source catalog");
 		let mut opus = crate::codec::opus::Bridge::new(source.broadcast().clone(), catalog, 48_000, 2)
 			.expect("create Opus bridge");
-		Bridge::push(
-			&mut opus,
-			Frame {
-				timestamp_us: 20_000,
-				payload: Bytes::from_static(OPUS_PACKET),
-			},
-		)
-		.expect("publish source packet");
+		let mut live = Live::new(&mut opus);
+		live.push(OPUS_PACKET);
 		let (announcement, announcement_active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 			.await
 			.expect("source announcement timed out")
@@ -468,7 +724,9 @@ mod tests {
 		drop(announcements);
 
 		let server_origin = moq_tokio::origin::spawn();
-		let server = Server::new(server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
+			.await
+			.unwrap();
 		let (sources_tx, mut sources_rx) = tokio::sync::mpsc::channel(2);
 		let whip_server = server.clone();
 		let whip_origin = server_origin.clone();
@@ -548,15 +806,16 @@ mod tests {
 		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=canary-7f3e")
 			.parse()
 			.expect("WHEP URL");
-		let fill = output.broadcast().clone();
-		let whep_client = tokio::spawn(async move { client.subscribe(whep, fill, Default::default()).await });
+		let mut fill = output.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut fill, Default::default()).unwrap();
+		let whep_client = tokio::spawn(async move { client.pull(whep, &fill, &catalog).await });
 		let (whep_id, whep_task) = kio::clock::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHEP negotiation timed out")
 			.unwrap();
 
-		let mut opus = opus_output(&output_consumer).await;
-		assert_eq!(next_payload(&mut opus).await, OPUS_PACKET);
+		let mut played = opus_output(&output_consumer).await;
+		assert_eq!(live.play(OPUS_PACKET, &mut played).await, OPUS_PACKET);
 
 		assert!(logs_contain("whip client connected"));
 		assert!(logs_contain("whep client connected"));

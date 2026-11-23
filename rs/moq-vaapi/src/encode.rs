@@ -8,7 +8,7 @@
 //! Thin VA-API H.264 and H.265 encoder built on the vendored libva binding.
 //!
 //! For H.264 it reuses the backend-agnostic bitstream layer
-//! ([`crate::codec::h264`]) from discord/cros-codecs (BSD-3-Clause) for
+//! (`codec::h264`) from discord/cros-codecs (BSD-3-Clause) for
 //! SPS/PPS/slice synthesis, and drives libva directly for surface upload +
 //! slice submission, rather than vendoring cros-codecs's generic multi-backend
 //! encoder framework. The per-frame VA buffer population is ported from
@@ -46,14 +46,15 @@ use crate::dmabuf::DmaBuf;
 use crate::vpp::Processor;
 use crate::{
 	BufferType, Color, Config as VaConfig, Context, Display, EncCodedBuffer, EncMiscParameter,
-	EncMiscParameterFrameRate, EncMiscParameterRateControl, EncPackedHeaderParameter, EncPackedHeaderType,
-	EncPictureParameter, EncPictureParameterBufferH264, EncSequenceParameter, EncSequenceParameterBufferH264,
-	EncSliceParameter, EncSliceParameterBufferH264, H264EncFrameCropOffsets, H264EncPicFields, H264EncSeqFields,
-	H264VuiFields, Image, MappedCodedBuffer, Picture, PictureH264, RcFlags, Surface, SurfaceMemoryDescriptor,
-	UsageHint, VAConfigAttrib, VAConfigAttribType, VAEntrypoint, VAProfile, VA_ATTRIB_NOT_SUPPORTED,
-	VA_ENC_PACKED_HEADER_PICTURE, VA_ENC_PACKED_HEADER_SEQUENCE, VA_ENC_PACKED_HEADER_SLICE, VA_FOURCC_ARGB,
-	VA_FOURCC_BGRA, VA_FOURCC_BGRX, VA_FOURCC_NV12, VA_FOURCC_RGBA, VA_FOURCC_RGBX, VA_FOURCC_XRGB, VA_INVALID_ID,
-	VA_PICTURE_H264_INVALID, VA_PICTURE_H264_SHORT_TERM_REFERENCE, VA_RC_CBR, VA_RT_FORMAT_YUV420,
+	EncMiscParameterFrameRate, EncMiscParameterHRD, EncMiscParameterRateControl, EncPackedHeaderParameter,
+	EncPackedHeaderType, EncPictureParameter, EncPictureParameterBufferH264, EncSequenceParameter,
+	EncSequenceParameterBufferH264, EncSliceParameter, EncSliceParameterBufferH264, H264EncFrameCropOffsets,
+	H264EncPicFields, H264EncSeqFields, H264VuiFields, Image, MappedCodedBuffer, Picture, PictureH264, RcFlags,
+	Surface, SurfaceMemoryDescriptor, UsageHint, VAConfigAttrib, VAConfigAttribType, VAEntrypoint, VAProfile,
+	VA_ATTRIB_NOT_SUPPORTED, VA_ENC_PACKED_HEADER_PICTURE, VA_ENC_PACKED_HEADER_SEQUENCE, VA_ENC_PACKED_HEADER_SLICE,
+	VA_FOURCC_ARGB, VA_FOURCC_BGRA, VA_FOURCC_BGRX, VA_FOURCC_NV12, VA_FOURCC_RGBA, VA_FOURCC_RGBX, VA_FOURCC_XRGB,
+	VA_INVALID_ID, VA_PICTURE_H264_INVALID, VA_PICTURE_H264_SHORT_TERM_REFERENCE, VA_RC_CBR, VA_RC_VBR,
+	VA_RT_FORMAT_YUV420,
 };
 
 mod h265;
@@ -61,7 +62,7 @@ mod h265;
 /// Whether a frame is used as a reference, and for how long.
 /// (Vendored from discord/cros-codecs, BSD-3-Clause; used by the slice synthesizer.)
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum IsReference {
+pub(crate) enum IsReference {
 	No,
 	ShortTerm,
 	LongTerm,
@@ -69,13 +70,25 @@ pub enum IsReference {
 
 /// Quantizer bounds for the rate controller.
 ///
-/// The floor keeps an IDR on easy content from taking a large share of the
-/// rate. The ceiling is the codecs' own: iHD and radeonsi both honor it, so a
-/// lower one sets a smallest picture, and a stream asked for less overshoots
-/// its rate several times over. A lower ceiling does steady iHD's H.264 IDRs,
-/// but under congestion missing the rate costs more than that.
-const MIN_QP: u8 = 18;
+/// The floor is the quality: the rate controller holds the stream to
+/// [`Config::bitrate`], and a calm scene the floor already codes cleanly spends
+/// less instead of buying a finer quantizer than anyone can see. 24 is the
+/// coarsest that kept a 720p30 talking head at VMAF 95, the usual mark for
+/// transparent, on both iHD (Arrow Lake: 95.8 at 2.9 Mbit/s under a 4 Mbit/s
+/// cap, H.265 95.7 at 1.6 under 2.8) and radeonsi (RX 9070: 95.4 at 1.7, H.265
+/// 95.4 at 1.5). It also keeps an IDR on easy content from taking a large share
+/// of the rate. The ceiling is the codecs' own: iHD and radeonsi both honor it,
+/// so a lower one sets a smallest picture, and a stream asked for less
+/// overshoots its rate several times over. A lower ceiling does steady iHD's
+/// H.264 IDRs, but under congestion missing the rate costs more than that.
+const MIN_QP: u8 = 24;
 const MAX_QP: u8 = 51;
+/// The HRD buffer, in frames of the bitrate, sent with every picture. The
+/// driver's own default is a second of the rate, which let a second of high
+/// motion run half again over the bitrate on radeonsi. It is also what a still
+/// scene banks: the first busy frames after one spend all of it, so that second
+/// runs this many frames over the bitrate.
+pub const HRD_FRAMES: u32 = 3;
 /// Window over which libva's rate controller targets the configured bitrate.
 ///
 /// This matches cros-codecs. The old `framerate * 1000` value confused frames
@@ -92,7 +105,8 @@ pub struct Config {
 	pub width: u32,
 	pub height: u32,
 	pub framerate: u32,
-	/// Target bitrate in bits per second (CBR).
+	/// The bitrate in bits per second the stream is held to. A calm scene
+	/// spends less; see [`RateControl`].
 	pub bitrate: u32,
 	/// Keyframe interval in frames.
 	pub gop: u32,
@@ -121,6 +135,46 @@ impl Config {
 			gop,
 			device: None,
 			color: Color::infer(height),
+		}
+	}
+}
+
+/// The rate control mode that holds a stream to [`Config::bitrate`], picked at
+/// open for the driver.
+///
+/// Either way the bitrate is the ceiling the driver's rate controller aims to
+/// hold the stream under, through the [`HRD_FRAMES`] buffer, and the quantizer
+/// floor is its quality, so a calm scene falls below the bitrate. It is a
+/// target, not a guarantee: a busy second can still overshoot it by a few
+/// percent (iHD's H.264 peaked at 4.36 Mbit/s in one second under 4 Mbit/s). Neither driver's
+/// `VA_RC_QVBR` gets there: on iHD it held a high-motion clip to 59% of the
+/// bitrate whatever the quality factor, and on radeonsi it scored 93.3 VMAF at
+/// the full bitrate where CBR and the floor scored 95.4 at 43% of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateControl {
+	/// `VA_RC_VBR` with the bitrate as both target and peak, for iHD, whose CBR
+	/// ignores the floor and spends the bitrate on a still picture.
+	Variable,
+	/// `VA_RC_CBR` without filler, for every other driver. radeonsi honors the
+	/// floor and the HRD here, where its VBR let a high-motion second run half
+	/// again over the bitrate.
+	Constant,
+}
+
+impl RateControl {
+	/// The mode for the driver named `vendor` (`vaQueryVendorString`), whose
+	/// `VAConfigAttribRateControl` reads `offered`.
+	fn pick(vendor: &str, offered: u32) -> Self {
+		match vendor.starts_with("Intel iHD driver") && offered & VA_RC_VBR != 0 {
+			true => Self::Variable,
+			false => Self::Constant,
+		}
+	}
+
+	fn va(self) -> u32 {
+		match self {
+			Self::Variable => VA_RC_VBR,
+			Self::Constant => VA_RC_CBR,
 		}
 	}
 }
@@ -206,6 +260,7 @@ pub struct Encoder {
 	/// Set by a bitrate change, and cleared by the next frame, which asks the
 	/// driver to restart its rate controller at the new target.
 	reset_rate_control: bool,
+	rate_control: RateControl,
 
 	// Drop order: encode resources before the display they belong to.
 	coded: EncCodedBuffer,
@@ -238,6 +293,15 @@ impl Encoder {
 		};
 
 		let entrypoint = encode_entrypoint(&display, codec)?;
+		let rate_control = RateControl::pick(
+			&display.query_vendor_string().unwrap_or_default(),
+			config_attribute(
+				&display,
+				codec,
+				entrypoint,
+				VAConfigAttribType::VAConfigAttribRateControl,
+			),
+		);
 		let mut attrs = vec![
 			VAConfigAttrib {
 				type_: VAConfigAttribType::VAConfigAttribRTFormat,
@@ -245,7 +309,7 @@ impl Encoder {
 			},
 			VAConfigAttrib {
 				type_: VAConfigAttribType::VAConfigAttribRateControl,
-				value: VA_RC_CBR,
+				value: rate_control.va(),
 			},
 		];
 		// The parameter sets go out as packed headers, so the VUI (color, frame
@@ -309,12 +373,13 @@ impl Encoder {
 		let recon = vec![make_surface(&display, size)?, make_surface(&display, size)?];
 
 		tracing::info!(
-			"opened VA-API {codec:?} encoder on {:?}: {}x{} @ {}fps, {} bps, low power: {}",
+			"opened VA-API {codec:?} encoder on {:?}: {}x{} @ {}fps, {} bps, {:?} rate control, low power: {}",
 			device,
 			config.width,
 			config.height,
 			config.framerate,
 			config.bitrate,
+			rate_control,
 			entrypoint == VAEntrypoint::VAEntrypointEncSliceLP,
 		);
 		config.device = Some(device);
@@ -328,6 +393,7 @@ impl Encoder {
 			idrs: 0,
 			processor: None,
 			reset_rate_control: false,
+			rate_control,
 			coded,
 			coded_size,
 			context,
@@ -416,7 +482,7 @@ impl Encoder {
 		result
 	}
 
-	/// Changes the target bitrate, in bits per second, from the next frame on.
+	/// Changes [`Config::bitrate`], in bits per second, from the next frame on.
 	///
 	/// The rate control parameters go out with every frame, so this neither
 	/// forces an IDR nor rebuilds the session; the next frame also asks the
@@ -449,6 +515,11 @@ impl Encoder {
 		}
 		self.config.bitrate = bitrate;
 		Ok(())
+	}
+
+	/// Returns how the bitrate is spent, picked at open from what the driver offers.
+	pub fn rate_control(&self) -> RateControl {
+		self.rate_control
 	}
 
 	/// Returns the configuration in effect, including a bitrate changed since opening and the render node picked when none was named.
@@ -511,20 +582,26 @@ impl Encoder {
 		let bits_per_second = self.config.bitrate;
 		let rc = EncMiscParameterRateControl::new(
 			bits_per_second,
-			100,                    // target_percentage (CBR)
+			100,                    // target_percentage: VBR's target is its peak
 			RATE_CONTROL_WINDOW_MS, // window_size (ms)
 			u32::from((MIN_QP + MAX_QP) / 2),
 			MIN_QP as u32,
 			0, // basic_unit_size
 			// Do not let rate control drop a frame to meet the bitrate. A live
 			// encoder has already admitted this frame into the media timeline.
-			RcFlags::new(u32::from(self.reset_rate_control), 1, 0, 0, 0, 0, 0, 0, 0),
+			// Nor pad a cheap one up to it: filler bits carry no picture.
+			RcFlags::new(u32::from(self.reset_rate_control), 1, 1, 0, 0, 0, 0, 0, 0),
 			0, // icq_quality_factor
 			MAX_QP as u32,
 			0, // quality_factor
 			0, // target_frame_size
 		);
 		picture.add_buffer(self.create(BufferType::EncMiscParameter(EncMiscParameter::RateControl(rc)))?);
+		// After the rate control parameters, which radeonsi reads as resetting the buffer.
+		let hrd = hrd_size(bits_per_second, self.config.framerate);
+		picture.add_buffer(self.create(BufferType::EncMiscParameter(EncMiscParameter::HRD(
+			EncMiscParameterHRD::new(hrd, hrd),
+		)))?);
 
 		let framerate = EncMiscParameterFrameRate::new(self.config.framerate, 0);
 		picture.add_buffer(self.create(BufferType::EncMiscParameter(EncMiscParameter::FrameRate(framerate)))?);
@@ -603,10 +680,22 @@ fn pick_entrypoint(offered: &[VAEntrypoint::Type]) -> Option<VAEntrypoint::Type>
 ///
 /// Zero when it takes none, or when asking fails.
 fn packed_headers(display: &Display, codec: Codec, entrypoint: VAEntrypoint::Type) -> u32 {
-	let mut attrs = [VAConfigAttrib {
-		type_: VAConfigAttribType::VAConfigAttribEncPackedHeaders,
-		value: 0,
-	}];
+	config_attribute(
+		display,
+		codec,
+		entrypoint,
+		VAConfigAttribType::VAConfigAttribEncPackedHeaders,
+	)
+}
+
+/// Returns the bits of attribute `type_` the driver offers for encoding `codec`, or none when it does not say.
+fn config_attribute(
+	display: &Display,
+	codec: Codec,
+	entrypoint: VAEntrypoint::Type,
+	type_: VAConfigAttribType::Type,
+) -> u32 {
+	let mut attrs = [VAConfigAttrib { type_, value: 0 }];
 	if display
 		.get_config_attributes(profile(codec), entrypoint, &mut attrs)
 		.is_err()
@@ -644,6 +733,11 @@ fn level(width: u32, height: u32, framerate: u32) -> Level {
 		.find(|&(_, max_rate, max_frame)| frame <= max_frame && rate <= max_rate)
 		.map(|(level, _, _)| level)
 		.unwrap_or(Level::L6_2)
+}
+
+/// Returns the HRD buffer in bits for `bitrate`: [`HRD_FRAMES`] frames of it.
+fn hrd_size(bitrate: u32, framerate: u32) -> u32 {
+	(u64::from(bitrate) * u64::from(HRD_FRAMES) / u64::from(framerate.max(1))).min(u64::from(u32::MAX)) as u32
 }
 
 /// Returns the coded buffer size in bytes for `bitrate`: two seconds of it, and at least 1.5 MB.

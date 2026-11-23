@@ -2,6 +2,12 @@
 //!
 //! The fallback when no hardware encoder is available. Emits Annex-B with
 //! in-band SPS/PPS, ready for `moq_mux::codec::h264::Import` in avc3 mode.
+//!
+//! openh264 has no constant-quality mode: `RC_QUALITY_MODE` targets the
+//! bitrate the same way `RC_BITRATE_MODE` does, and coded the test clips within
+//! 1% of it. Its rate control does honor a quantizer floor, so the target is the
+//! cap and [`MIN_QP`] is the quality: a scene that needs more bits than the cap
+//! gets a coarser quantizer, and one the floor already codes cleanly spends less.
 
 use std::collections::VecDeque;
 
@@ -9,7 +15,7 @@ use bytes::Bytes;
 use openh264::OpenH264API;
 use openh264::encoder::{
 	BitRate, ColorPrimaries, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod,
-	MatrixCoefficients, RateControlMode, TransferCharacteristics, UsageType, VuiConfig,
+	MatrixCoefficients, QpRange, RateControlMode, TransferCharacteristics, UsageType, VuiConfig,
 };
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
@@ -22,6 +28,13 @@ use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "openh264";
+
+/// The finest quantizer the rate control may pick, which is what caps quality
+/// and lets a calm scene fall below the bitrate: the coarsest that kept a
+/// 720p30 talking head at VMAF 95, the usual mark for transparent. At a 4 Mbit/s
+/// cap it scored 95.1 at 2.5 Mbit/s, against 95.7 at the full 4 Mbit/s with no
+/// floor; 23 spent 2.0 Mbit/s for 94.7.
+const MIN_QP: u8 = 22;
 
 pub(crate) struct Openh264 {
 	encoder: Encoder,
@@ -71,10 +84,14 @@ impl Openh264 {
 		// codes the same stream as Medium, only slower. So Quality gets Medium and
 		// reports itself as Balanced.
 		let (complexity, applied) = match config.preset {
-			Preset::LowLatency => (Complexity::Low, Applied::new(Preset::LowLatency, "low complexity")),
-			Preset::Balanced | Preset::Quality => {
-				(Complexity::Medium, Applied::new(Preset::Balanced, "medium complexity"))
-			}
+			Preset::LowLatency => (
+				Complexity::Low,
+				Applied::new(Preset::LowLatency, format!("low complexity, QP {MIN_QP} floor")),
+			),
+			Preset::Balanced | Preset::Quality => (
+				Complexity::Medium,
+				Applied::new(Preset::Balanced, format!("medium complexity, QP {MIN_QP} floor")),
+			),
 		};
 		let cfg = EncoderConfig::new()
 			.bitrate(BitRate::from_bps(
@@ -82,6 +99,7 @@ impl Openh264 {
 			))
 			.max_frame_rate(FrameRate::from_hz(config.framerate.as_f64() as f32))
 			.rate_control_mode(RateControlMode::Bitrate)
+			.qp(QpRange::new(MIN_QP, 51))
 			// Real-time camera: prioritize latency over compression.
 			.usage_type(UsageType::CameraVideoRealTime)
 			.intra_frame_period(IntraFramePeriod::from_num_frames(interval))
@@ -330,6 +348,31 @@ mod tests {
 		enc.encode_all(&gray(), false).unwrap();
 
 		assert_eq!(enc.read_bitrate(), (opened / 4) as i64, "the deferred rate resurrected");
+	}
+
+	/// A calm scene spends well under a generous cap, held there by the quantizer
+	/// floor rather than the rate (without it, the same scene spent 1.05 Mbit/s);
+	/// a busy one is held to a tight cap on average. Its single seconds overshoot
+	/// by a fifth or more, the floor or not: openh264 holds a rate by skipping
+	/// frames, in bursts. One opening keyframe, so the seconds measured are rate
+	/// control's alone.
+	#[test]
+	fn quality_under_a_cap() {
+		use super::super::test_util::{Scene, spend};
+
+		let at = |bps: u64| Config {
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(bps)),
+			join: std::time::Duration::from_secs(10),
+			..config()
+		};
+		let calm = spend(&at(4_000_000), Scene::Calm, None).unwrap();
+		assert!(calm.mean < 800_000, "a calm scene filled the cap: {calm:?}");
+
+		let busy = spend(&at(500_000), Scene::Busy, None).unwrap();
+		assert!(
+			(400_000..520_000).contains(&busy.mean),
+			"a busy scene missed the cap: {busy:?}"
+		);
 	}
 
 	/// The SPS states the color space, so a decoder never falls back to guessing

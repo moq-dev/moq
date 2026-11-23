@@ -79,6 +79,9 @@ pub struct Request {
 	request: proto::ConnectRequest,
 	send: driver_send::Stream,
 	recv: driver_recv::Stream,
+	/// What `recv` delivered past the CONNECT headers, such as a pipelined capsule, which
+	/// the capsule reader starts from.
+	rest: BytesMut,
 	/// The peer's control and QPACK streams, held open for the session's
 	/// life: closing them reads as tearing the H3 connection down.
 	held: [Option<driver_recv::Stream>; 3],
@@ -218,7 +221,7 @@ impl Request {
 		// which arrives first: QUIC creates lower-numbered streams
 		// implicitly, and the accept queue is in id order.
 		let (send, mut recv) = conn.accept_bi().await?;
-		let request = read_connect(&mut recv).await?;
+		let (request, rest) = read_connect(&mut recv).await?;
 
 		Ok(Self {
 			guard: Guard::new(conn.clone()),
@@ -226,6 +229,7 @@ impl Request {
 			request,
 			send,
 			recv,
+			rest,
 			held,
 			control,
 			early,
@@ -424,6 +428,7 @@ impl Session {
 			request,
 			send,
 			recv,
+			rest,
 			held,
 			control,
 			early,
@@ -476,7 +481,7 @@ impl Session {
 		let capsules = web.clone();
 		let capsule_conn = conn.clone();
 		conn.owner()
-			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
+			.spawn(async move { read_capsules(capsules, capsule_conn, recv, rest).await });
 
 		Self {
 			handles: Handles::new(&conn, Some(&web)),
@@ -774,31 +779,6 @@ impl moq_net::transport::poll::Session for Session {
 		quic.receive_window = limits.receive_window;
 		Self::set_limits(self, quic).map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
 	}
-	/// The connection's exporter on raw QUIC; on WebTransport, this session's own.
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		match &self.web {
-			None => self.conn.export_keying_material(label, context),
-			Some(web) => self.conn.export_keying_material(
-				WEBTRANSPORT_EXPORTER,
-				&webtransport_exporter_context(web.session_id, label, context)?,
-			),
-		}
-	}
-}
-
-/// The TLS exporter label WebTransport derives each session's exporter under.
-const WEBTRANSPORT_EXPORTER: &[u8] = b"EXPORTER-WebTransport";
-
-/// The TLS exporter context for WebTransport session `id`'s exporter (draft-ietf-webtrans-http3
-/// section 4.8), or `None` when `label` or `context` exceeds 255 bytes.
-fn webtransport_exporter_context(id: u64, label: &[u8], context: &[u8]) -> Option<Vec<u8>> {
-	let mut exporter = Vec::with_capacity(10 + label.len() + context.len());
-	exporter.extend_from_slice(&id.to_be_bytes());
-	exporter.push(u8::try_from(label.len()).ok()?);
-	exporter.extend_from_slice(label);
-	exporter.push(u8::try_from(context.len()).ok()?);
-	exporter.extend_from_slice(context);
-	Some(exporter)
 }
 
 /// Close the session: in web mode with a `CloseWebTransportSession` capsule
@@ -1229,15 +1209,13 @@ async fn read_settings(recv: &mut driver_recv::Stream) -> Result<proto::Settings
 	}
 }
 
-/// Read the CONNECT request off the first bidirectional stream.
-async fn read_connect(recv: &mut driver_recv::Stream) -> Result<proto::ConnectRequest, Error> {
+/// Read the CONNECT request off the first bidirectional stream, with whatever
+/// arrived after it.
+async fn read_connect(recv: &mut driver_recv::Stream) -> Result<(proto::ConnectRequest, BytesMut), Error> {
 	let mut buf = BytesMut::new();
 	loop {
-		let mut peek: &[u8] = &buf;
-		match proto::ConnectRequest::decode(&mut peek) {
-			Ok(request) => return Ok(request),
-			Err(proto::ConnectError::UnexpectedEnd) => {}
-			Err(err) => return Err(HandshakeError::Connect(err).into()),
+		if let Some(request) = take_connect(&mut buf)? {
+			return Ok((request, buf));
 		}
 		if !read_some(recv, &mut buf).await? {
 			return Err(HandshakeError::UnexpectedEnd.into());
@@ -1245,13 +1223,31 @@ async fn read_connect(recv: &mut driver_recv::Stream) -> Result<proto::ConnectRe
 	}
 }
 
+/// Split a whole CONNECT request off the front of `buf`, or `None` until one has arrived.
+fn take_connect(buf: &mut BytesMut) -> Result<Option<proto::ConnectRequest>, Error> {
+	let mut peek: &[u8] = buf;
+	match proto::ConnectRequest::decode(&mut peek) {
+		Ok(request) => {
+			let consumed = buf.len() - peek.len();
+			buf.advance(consumed);
+			Ok(Some(request))
+		}
+		Err(proto::ConnectError::UnexpectedEnd) => Ok(None),
+		Err(err) => Err(HandshakeError::Connect(err).into()),
+	}
+}
+
 // ── Session close capsules ──────────────────────────────────────────
 
 /// Read the CONNECT stream until it ends, surfacing the peer's
 /// `CloseWebTransportSession` capsule (carried in HTTP/3 DATA frames) as the
-/// session's error, then close the connection.
-async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: driver_recv::Stream) {
-	let mut capsules = Capsules::default();
+/// session's error, then close the connection. `frames` holds what arrived
+/// with the CONNECT headers.
+async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: driver_recv::Stream, frames: BytesMut) {
+	let mut capsules = Capsules {
+		frames,
+		body: BytesMut::new(),
+	};
 	let capsule = loop {
 		match capsules.take() {
 			Ok(Some(proto::Capsule::CloseWebTransportSession { code, reason })) => {
@@ -1400,6 +1396,39 @@ mod tests {
 		for secret in ["SECRET", "hunter2", "jwt="] {
 			assert!(!debug.contains(secret), "{secret} leaked: {debug}");
 		}
+	}
+
+	/// A capsule pipelined in the same read as the CONNECT headers still reaches the
+	/// capsule reader, framing intact.
+	#[test]
+	fn bytes_after_connect_reach_the_capsule_reader() {
+		let url = url::Url::parse("https://relay.example/anon").unwrap();
+		let mut buf = BytesMut::new();
+		proto::ConnectRequest::new(url).encode(&mut buf).expect("encode");
+		let headers = buf.len();
+		buf.extend_from_slice(&frame(FRAME_DATA, &close_capsule(9, "pipelined")));
+
+		let mut partial = BytesMut::from(&buf[..headers - 1]);
+		assert!(
+			take_connect(&mut partial).expect("parse").is_none(),
+			"the headers are cut short"
+		);
+
+		let request = take_connect(&mut buf).expect("parse").expect("whole headers");
+		assert_eq!(request.url.path(), "/anon");
+
+		let mut capsules = Capsules {
+			frames: buf,
+			body: BytesMut::new(),
+		};
+		let capsule = capsules.take().expect("parse").expect("the pipelined capsule");
+		assert_eq!(
+			capsule,
+			proto::Capsule::CloseWebTransportSession {
+				code: 9,
+				reason: "pipelined".to_string()
+			}
+		);
 	}
 
 	/// Wrap `payload` in an HTTP/3 frame of type `typ`.

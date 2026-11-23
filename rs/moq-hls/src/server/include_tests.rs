@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hang::catalog::{AudioCodec, AudioConfig, Include, Join, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Include, VideoCodec, VideoConfig};
 use moq_mux::catalog::hang::Catalog;
 use moq_net::{Instance, Timestamp, track};
 use tower::ServiceExt;
@@ -18,7 +18,7 @@ struct Published {
 
 fn catalog() -> Catalog {
 	let mut catalog = Catalog::default();
-	catalog.media.join = Join::new(Duration::from_secs(2));
+	catalog.sync.interval = Some(Duration::from_secs(2));
 	let mut video = VideoConfig::new(VideoCodec::VP8);
 	video.coded_width = Some(320);
 	video.coded_height = Some(240);
@@ -42,7 +42,7 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, 
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 		.unwrap();
 	let mut catalog = moq_json::snapshot::Producer::new(track, Default::default());
-	catalog.update(moq_json::Timed::new(value, Timestamp::ZERO)).unwrap();
+	catalog.update(value, Timestamp::ZERO).unwrap();
 	let video = publication
 		.create_track("same", hang::container::track_info(1))
 		.unwrap();
@@ -73,7 +73,7 @@ fn frames(track: &track::Producer, first: u64) {
 		}
 		.write_to(&mut group)
 		.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 }
 
@@ -165,10 +165,7 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	let video = value.video.renditions.get_mut("same").unwrap();
 	video.track = Some("next".into());
 	video.coded_width = Some(640);
-	include
-		.catalog
-		.update(moq_json::Timed::new(&value, Timestamp::ZERO))
-		.unwrap();
+	include.catalog.update(&value, Timestamp::ZERO).unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
 	// The new response lists the predecessor's retained rows while waiting for its
 	// last pending segment. Its body keeps the replacement requested past that idle window.
@@ -181,11 +178,11 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	tokio::time::advance(Duration::from_secs(21)).await;
 	let mut demand = next.demand();
 	kio::clock::timeout(Duration::from_secs(1), async {
-		while demand.wanted_changed().await.unwrap().is_none() {}
+		while !demand.wanted_changed().await.unwrap() {}
 	})
 	.await
 	.expect("the requested replacement must start after the idle predecessor releases");
-	assert_eq!(include.video.demand().wanted(), None);
+	assert!(!include.video.demand().wanted());
 	frames(&next, 3);
 	drop(held);
 }
@@ -238,7 +235,7 @@ async fn a_failed_parent_catalog_stops_its_includes() {
 	assert!(!request(&server, "/room/live/master.m3u8").await.1.contains("include/"));
 	let mut catalog = include.catalog.demand();
 	kio::clock::timeout(Duration::from_secs(1), async {
-		while catalog.wanted_changed().await.unwrap().is_some() {}
+		while catalog.wanted_changed().await.unwrap() {}
 	})
 	.await
 	.expect("the include catalog is released");
@@ -262,10 +259,10 @@ async fn idle_release_waits_out_the_playlist_window() {
 	// Three target durations (12 s) would forget rows the 16 s window still lists.
 	tokio::time::advance(Duration::from_secs(13)).await;
 	settle().await;
-	assert!(include.video.demand().wanted().is_some());
+	assert!(include.video.demand().wanted());
 	tokio::time::advance(Duration::from_secs(8)).await;
 	settle().await;
-	assert_eq!(include.video.demand().wanted(), None);
+	assert!(!include.video.demand().wanted());
 }
 
 #[tokio::test(start_paused = true)]
@@ -291,10 +288,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	let video = value.video.renditions.get_mut("same").unwrap();
 	video.track = Some("next".into());
 	video.coded_width = Some(640);
-	include
-		.catalog
-		.update(moq_json::Timed::new(&value, Timestamp::ZERO))
-		.unwrap();
+	include.catalog.update(&value, Timestamp::ZERO).unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
 	let _video = include.video.finish().unwrap();
 	let held = server
@@ -452,21 +446,21 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 	assert!(listed.contains(&format!("@{root}/video/same/media.m3u8?jwt=viewer")));
 	assert!(listed.contains(&format!("{prefix}/video/same/@{child}/media.m3u8?jwt=viewer")));
 	assert!(listed.contains("NAME=\"rung/a/sound\""));
-	assert_eq!(include.video.demand().wanted(), None);
-	assert_eq!(include.audio.demand().wanted(), None);
-	assert!(include.catalog.demand().wanted().is_some());
+	assert!(!include.video.demand().wanted());
+	assert!(!include.audio.demand().wanted());
+	assert!(include.catalog.demand().wanted());
 
 	let uri = format!("/room/live/{prefix}/video/same/@{child}/media.m3u8");
 	let mut pending = Box::pin(request(&server, &uri));
 	assert!(futures::poll!(pending.as_mut()).is_pending());
 	let mut demand = include.video.demand();
-	while demand.wanted_changed().await.unwrap().is_none() {}
-	assert_eq!(include.audio.demand().wanted(), None);
+	while !demand.wanted_changed().await.unwrap() {}
+	assert!(!include.audio.demand().wanted());
 	// The idle window is 20 s (the 16 s playlist window plus TARGETDURATION 4), and this first
 	// encode is slower than all of it.
 	tokio::time::advance(Duration::from_secs(21)).await;
 	assert!(futures::poll!(pending.as_mut()).is_pending());
-	assert!(include.video.demand().wanted().is_some());
+	assert!(include.video.demand().wanted());
 	frames(&include.video, 0);
 	let (status, playlist) = pending.await;
 	assert_eq!(status, StatusCode::OK, "{playlist}");
@@ -480,29 +474,26 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 		.unwrap();
 	assert_eq!(held.status(), StatusCode::OK);
 	tokio::time::advance(Duration::from_secs(21)).await;
-	assert!(
-		include.video.demand().wanted().is_some(),
-		"a slow body still holds demand"
-	);
+	assert!(include.video.demand().wanted(), "a slow body still holds demand");
 	drop(held);
 	// The reload window starts at completion, and another request renews it.
 	tokio::time::advance(Duration::from_secs(19)).await;
-	assert!(include.video.demand().wanted().is_some());
+	assert!(include.video.demand().wanted());
 	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
 	tokio::time::advance(Duration::from_secs(19)).await;
-	assert!(include.video.demand().wanted().is_some());
+	assert!(include.video.demand().wanted());
 	tokio::time::advance(Duration::from_secs(2)).await;
-	while demand.wanted_changed().await.unwrap().is_some() {}
-	assert_eq!(include.audio.demand().wanted(), None);
+	while demand.wanted_changed().await.unwrap() {}
+	assert!(!include.audio.demand().wanted());
 	// A later request creates fresh demand and indexes later segments on the same grid.
 	let mut resumed = Box::pin(request(&server, &uri));
 	assert!(futures::poll!(resumed.as_mut()).is_pending());
-	while demand.wanted_changed().await.unwrap().is_none() {}
+	while !demand.wanted_changed().await.unwrap() {}
 	frames(&include.video, 3);
 	let (status, playlist) = resumed.await;
 	assert_eq!(status, StatusCode::OK);
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:3"), "{playlist}");
-	assert_eq!(include.audio.demand().wanted(), None);
+	assert!(!include.audio.demand().wanted());
 	// Neither the DASH manifest nor the recorder cursor expands the include.
 	assert!(!request(&server, "/room/live/manifest.mpd").await.1.contains("include"));
 	let broadcaster = server.broadcaster("room/live").await.unwrap();
@@ -512,7 +503,7 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 	}
 	assert!(futures::poll!(Box::pin(recorder.next()).as_mut()).is_pending());
 	drop((broadcaster, server));
-	while demand.wanted_changed().await.unwrap().is_some() {}
+	while demand.wanted_changed().await.unwrap() {}
 }
 
 #[tokio::test(start_paused = true)]
@@ -535,7 +526,7 @@ async fn late_instances_replace_unpinned_entries_and_do_not_replace_pins() {
 	let old_uri = format!("include/rung%2Fa/video/same/@{first}");
 	let listed = master(&server, &old_uri, true).await;
 	assert!(listed.contains(&format!("include/pinned/video/same/@{first}")));
-	assert_eq!(old.video.demand().wanted(), None);
+	assert!(!old.video.demand().wanted());
 	old.route.withdraw();
 	master(&server, "include/", false).await;
 	old.route.announce().unwrap();
@@ -544,7 +535,7 @@ async fn late_instances_replace_unpinned_entries_and_do_not_replace_pins() {
 	let listed = master(&server, &format!("include/rung%2Fa/video/same/@{second}"), true).await;
 	assert!(!listed.contains("include/pinned/"));
 	assert!(!listed.contains(&old_uri));
-	assert_eq!(new.video.demand().wanted(), None);
+	assert!(!new.video.demand().wanted());
 	assert_eq!(
 		request(&server, &format!("/room/live/@{root}/{old_uri}/media.m3u8"))
 			.await
@@ -566,12 +557,12 @@ async fn includes_take_the_roots_grid_and_denied_ones_are_not_advertised() {
 	let child = Instance::random();
 	// The include declares its own interval, which HLS ignores for the root's.
 	let mut value = catalog();
-	value.media.join = Join::new(Duration::from_secs(1));
+	value.sync.interval = Some(Duration::from_secs(1));
 	let include = publish(&origin, "room/ladder", &child, &value);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	master(&server, "include/", true).await;
-	let patterns = ["room/live".parse::<moq_net::Pattern>().unwrap()].into_iter().collect();
-	let denied = Server::new(origin.consume().scope("", &patterns).unwrap(), Default::default()).unwrap();
+	let prefixes = moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap());
+	let denied = Server::new(origin.consume().scope("", &prefixes).unwrap(), Default::default()).unwrap();
 	master(&denied, "include/", false).await;
 	for resource in ["media.m3u8", "init.abcd.mp4", "seg/abcd.0.m4s"] {
 		assert_eq!(
@@ -584,13 +575,13 @@ async fn includes_take_the_roots_grid_and_denied_ones_are_not_advertised() {
 			StatusCode::FORBIDDEN
 		);
 	}
-	assert_eq!(include.video.demand().wanted(), None);
+	assert!(!include.video.demand().wanted());
 	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	let mut pending = Box::pin(request(&server, &uri));
 	assert!(futures::poll!(pending.as_mut()).is_pending());
 	let mut demand = include.video.demand();
 	kio::clock::timeout(Duration::from_secs(10), async {
-		while demand.wanted_changed().await.unwrap().is_none() {}
+		while !demand.wanted_changed().await.unwrap() {}
 	})
 	.await
 	.expect("the request never demanded the include's media");

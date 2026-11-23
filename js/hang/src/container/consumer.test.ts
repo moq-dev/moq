@@ -42,7 +42,7 @@ function encodeLocFrame(timestamp: number, payload: Uint8Array): Uint8Array {
 /** Write each group of `[timestamp, payload]` LOC frames to `track`, then close it. */
 function writeLoc(track: Track.Producer, groups: [number, number[]][][]) {
 	for (const frames of groups) {
-		const group = track.appendGroup();
+		const group = track.appendGroup(Time.Timestamp.fromMicros(frames[0][0]));
 		for (const [timestamp, payload] of frames) {
 			group.writeFrame({
 				payload: encodeLocFrame(timestamp, new Uint8Array(payload)),
@@ -107,6 +107,19 @@ async function poll<T>(read: Promise<T>): Promise<T | "pending"> {
 function replay(track: Track.Producer): Track.Subscriber {
 	return track.subscribe({ delay: { max: Duration.millis(30_000) } });
 }
+// A subscription from group `from` on whose missing groups an unserved fill owes, as a session's
+// feed would, so its ordered read waits `max` for each hole before giving it up.
+function owed(track: Track.Producer, max: number, from: bigint): Track.Subscriber {
+	track.requests();
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(max) } });
+	subscriber.withRange({ start: { included: from } });
+	return subscriber;
+}
+// A track at hang's microsecond timescale, as `trackInfo` pins it: the Legacy producer opens each
+// keyframe's group at its timestamp. No publisher max age, so a reader reaches superseded groups.
+function micro(name: string): Track.Producer {
+	return new Track.Producer(name).accept({ timescale: Time.Timescale.MICRO, maxAge: null });
+}
 
 // --- LegacyFormat ---
 
@@ -156,7 +169,7 @@ test("LegacyFormat decodes no frame from a data track's empty object and throws 
 });
 
 test("Legacy Producer refuses a group below the previous group start", () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(33_000), false);
@@ -167,7 +180,7 @@ test("Legacy Producer refuses a group below the previous group start", () => {
 });
 
 test("Legacy Producer accepts B-frames within a group", () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(66_000), false);
@@ -176,7 +189,7 @@ test("Legacy Producer accepts B-frames within a group", () => {
 });
 
 test("Legacy Producer accepts open-GOP leading pictures above the previous group", () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(33_000), false);
@@ -185,8 +198,51 @@ test("Legacy Producer accepts open-GOP leading pictures above the previous group
 	producer.finish();
 });
 
+test("Legacy Producer continues a group at a keyframe overlapping it, and drops a leading picture before it with those after it", async () => {
+	const track = micro("test");
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	for (const [timestamp, keyframe] of [
+		[100_000, true],
+		[166_000, false],
+		[133_000, false],
+		// A splice dipping below the newest frame continues the group.
+		[150_000, true],
+		[183_000, false],
+		// Past the newest frame: a new group, whose leading picture at 183_000 presents with the last,
+		// and whose later leading picture at 190_000 may reference it. 233_000 never does.
+		[200_000, true],
+		[183_000, false],
+		[190_000, false],
+		[233_000, false],
+	] as const) {
+		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), keyframe);
+	}
+	producer.finish();
+	const groups = (await readGroups(subscriber, 200_000n)).map(([, frames]) =>
+		frames.filter(([, size]) => size > 0).map(([timestamp]) => timestamp),
+	);
+	expect(groups).toEqual([
+		[100_000, 166_000, 133_000, 150_000, 183_000],
+		[200_000, 233_000],
+	]);
+});
+
+test("Legacy Producer drops a keyframe overlapping a closed group", () => {
+	const track = micro("test");
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), Duration.micros(100_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(166_000), false);
+	producer.discontinuity(Duration.micros(200_000));
+	const largest = track.largest()?.group;
+	producer.encode(new Uint8Array([1]), Duration.micros(150_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(183_000), false);
+	expect(track.largest()?.group).toBe(largest);
+	producer.finish();
+});
+
 test("Legacy Producer writes a duration marker at the next keyframe", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([0xde, 0xad]), Duration.micros(0), true);
@@ -211,7 +267,7 @@ test("Legacy Producer writes a duration marker at the next keyframe", async () =
 });
 
 test("Legacy Producer omits a reordered group's presentation endpoint marker", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 120_000, 40_000, 80_000].entries()) {
@@ -237,7 +293,7 @@ test("Legacy Producer omits a reordered group's presentation endpoint marker", a
 });
 
 test("Legacy Producer estimates the tail from the current cadence", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 16_000, 32_000, 65_000, 98_000].entries()) {
@@ -257,7 +313,7 @@ test("Legacy Producer estimates the tail from the current cadence", async () => 
 });
 
 test("Legacy Producer rejects a backwards discontinuity without closing the group", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
@@ -276,7 +332,7 @@ test("Legacy Producer rejects a backwards discontinuity without closing the grou
 });
 
 test("Legacy Producer keeps the cadence after rejecting a backwards discontinuity", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
@@ -294,7 +350,7 @@ test("Legacy Producer keeps the cadence after rejecting a backwards discontinuit
 });
 
 test("Legacy Producer refuses a keyframe that rewinds the timeline", () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
 	producer.encode(new Uint8Array([2]), Duration.micros(30_000), false);
@@ -317,13 +373,13 @@ async function readGroups(subscriber: Track.Subscriber, last: bigint) {
 			const [timestamp, payload] = Varint.decode(frame.payload);
 			frames.push([timestamp, payload.byteLength]);
 		}
-		groups.push([group.sequence, frames]);
-		if (group.sequence === last) return groups;
+		groups.push([group.start, frames]);
+		if (group.start === last) return groups;
 	}
 }
 
 test("Legacy Producer discontinuity marks the break with one empty frame at the live edge", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("audio"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
@@ -333,23 +389,26 @@ test("Legacy Producer discontinuity marks the break with one empty frame at the 
 	producer.encode(new Uint8Array([1]), Duration.micros(5_000_000), true);
 	producer.finish();
 
-	expect(await readGroups(subscriber, 3n)).toEqual([
+	// The marker can't start below the newest frame, so it starts just past the newest group.
+	expect(await readGroups(subscriber, 5_000_000n)).toEqual([
 		[0n, [[0, 1]]],
-		[1n, [[20_000, 1]]],
-		[2n, [[20_000, 0]]],
-		[3n, [[5_000_000, 1]]],
+		[20_000n, [[20_000, 1]]],
+		[20_001n, [[20_001, 0]]],
+		[5_000_000n, [[5_000_000, 1]]],
 	]);
 });
 
 test("Legacy Producer discontinuity marks the break at the caller's end", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.discontinuity(Duration.micros(33_000));
 	producer.finish();
 
-	expect(await readGroups(subscriber, 1n)).toEqual([
+	// The marker never starts below a frame of the group it ends, here its end marker, so it starts
+	// at the caller's end, where that group ends whole.
+	expect(await readGroups(subscriber, 33_000n)).toEqual([
 		[
 			0n,
 			[
@@ -357,12 +416,12 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 				[33_000, 0],
 			],
 		],
-		[1n, [[33_000, 0]]],
+		[33_000n, [[33_000, 0]]],
 	]);
 });
 
 test("Legacy Producer discontinuity writes no end estimated from the cadence", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 33_000, 66_000].entries()) {
@@ -373,7 +432,7 @@ test("Legacy Producer discontinuity writes no end estimated from the cadence", a
 	producer.encode(new Uint8Array([1]), Duration.micros(80_000), true);
 	producer.finish();
 
-	expect(await readGroups(subscriber, 2n)).toEqual([
+	expect(await readGroups(subscriber, 80_000n)).toEqual([
 		[
 			0n,
 			[
@@ -382,21 +441,21 @@ test("Legacy Producer discontinuity writes no end estimated from the cadence", a
 				[66_000, 1],
 			],
 		],
-		[1n, [[66_000, 0]]],
-		[2n, [[80_000, 1]]],
+		[66_000n, [[66_000, 0]]],
+		[80_000n, [[80_000, 1]]],
 	]);
 });
 
 test("Legacy Producer discontinuity marks nothing before any frame", async () => {
-	const empty = new Track.Producer("empty");
+	const empty = micro("empty");
 	new LegacyProducer(empty, new LegacyFormat("video")).discontinuity();
-	expect(empty.appendGroup().sequence).toBe(0n);
+	expect(empty.largest()).toBeUndefined();
 });
 
 // An empty payload is data on a data track, so its marker is an object with no bytes, which reads
 // as an end where the reader got to rather than as a gap.
 test("Legacy Producer discontinuity on a data track reads as an end at the edge", async () => {
-	const track = new Track.Producer("data");
+	const track = micro("data");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("data"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
@@ -421,13 +480,13 @@ test("Legacy Producer discontinuity on a data track reads as an end at the edge"
 // a break or dropped in silence.
 test("Consumer refuses a data marker that shares its group", async () => {
 	for (const second of [new Uint8Array(), encodeLegacyFrame(10_000, new Uint8Array([1]))]) {
-		const track = new Track.Producer("data");
+		const track = micro("data");
 		const consumer = new Consumer(replay(track), {
 			format: new LegacyFormat("data"),
 			delay: { max: Duration.millis(500) },
 		});
 		try {
-			const group = track.appendGroup();
+			const group = track.appendGroup(Time.Timestamp.fromMicros(0));
 			group.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) });
 			group.writeFrame({ payload: second, timestamp: Time.Timestamp.fromMicros(10_000) });
 			group.finish();
@@ -444,7 +503,7 @@ test("Consumer refuses a data marker that shares its group", async () => {
 });
 
 test("Legacy Producer discontinuity keeps pre-pause media from reading as live", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(33_000), false);
@@ -453,7 +512,7 @@ test("Legacy Producer discontinuity keeps pre-pause media from reading as live",
 	producer.finish();
 
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(1_000) } });
-	expect((await readGroups(subscriber, 2n)).map(([sequence]) => sequence)).toEqual([1n, 2n]);
+	expect((await readGroups(subscriber, 5_000_000n)).map(([start]) => start)).toEqual([33_000n, 5_000_000n]);
 });
 
 test("LegacyFormat throws on truncated input", () => {
@@ -694,12 +753,12 @@ for (const [where, payloads] of [
 
 		const g0 = track.createGroup(0n);
 		for (const byte of payloads)
-			g0.writeFrame({ payload: new Uint8Array([byte]), timestamp: Time.Timestamp.now() });
+			g0.writeFrame({ payload: new Uint8Array([byte]), timestamp: Time.Timestamp.fromMicros(0) });
 		g0.finish();
 
 		// A later group that decodes cleanly is never reached.
 		const g1 = track.createGroup(1n);
-		g1.writeFrame({ payload: new Uint8Array([0x04]), timestamp: Time.Timestamp.now() });
+		g1.writeFrame({ payload: new Uint8Array([0x04]), timestamp: Time.Timestamp.fromMicros(1) });
 		g1.finish();
 		track.finish();
 		track.close();
@@ -717,6 +776,43 @@ for (const [where, payloads] of [
 		consumer.close();
 	});
 }
+
+// A step onto a group whose first payload failed to decode raises the error rather than waiting for a
+// timestamp that frame will never give, while the group's other frames are still unread.
+test("Consumer raises a decode error at the head of an open group past a hole", async () => {
+	const failingFormat: ContainerFormat = {
+		decode(frame: Uint8Array): Frame[] {
+			if (frame[0] === 0xff) throw new Error("malformed");
+			return [{ payload: frame, timestamp: Duration.micros(frame[0]), keyframe: false }];
+		},
+	};
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: failingFormat, delay: { max: Duration.millis(500) } });
+
+	const g0 = track.createGroup(0n);
+	g0.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.fromMicros(1) });
+	g0.finish();
+	expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
+
+	// A sparse key the live local track never declared the keys below skipped, left open.
+	const g10 = track.createGroup(10n);
+	g10.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.fromMicros(2) });
+	g10.writeFrame({ payload: new Uint8Array([0x03]), timestamp: Time.Timestamp.fromMicros(3) });
+
+	let settled = "hung";
+	consumer.next().then(
+		() => {
+			settled = "read";
+		},
+		(err: Error) => {
+			settled = err.message;
+		},
+	);
+	await clock.advance(Duration.millis(100));
+	expect(settled).toBe("malformed");
+	consumer.close();
+	track.close();
+});
 
 // Errors come in delivery order, so a decode error waits behind the items ahead of it, a gap included.
 test("Consumer delivers everything ahead of a decode error", async () => {
@@ -757,7 +853,10 @@ test("Consumer keeps the first of several decode errors", async () => {
 
 	for (const sequence of [0n, 1n]) {
 		const group = track.createGroup(sequence);
-		group.writeFrame({ payload: new Uint8Array([Number(sequence)]), timestamp: Time.Timestamp.now() });
+		group.writeFrame({
+			payload: new Uint8Array([Number(sequence)]),
+			timestamp: Time.Timestamp.fromMicros(Number(sequence)),
+		});
 		group.finish();
 	}
 	track.finish();
@@ -787,10 +886,10 @@ test("Consumer releases its open groups when an error ends it", async () => {
 	const consumer = new Consumer(replay(track), { format: failingFormat, delay: { max: Duration.millis(500) } });
 
 	const malformed = track.createGroup(0n);
-	malformed.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.now() });
+	malformed.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.fromMicros(0) });
 	malformed.finish();
 	const later = track.createGroup(1n);
-	later.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
+	later.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.fromMicros(1) });
 	await open;
 	expect(later.demand().wanted.peek()).toBe(true);
 
@@ -928,8 +1027,8 @@ test("Consumer measures arrivals as they land", async () => {
 
 test("Consumer does not relax its measurement across a declared silence", async () => {
 	// Two identical paths, except that one publisher declares its silence and the other just stops.
-	const declared = new Track.Producer("declared");
-	const undeclared = new Track.Producer("undeclared");
+	const declared = micro("declared");
+	const undeclared = micro("undeclared");
 	const options = { format: new LegacyFormat("audio"), delay: { max: Duration.millis(5000) } };
 	const quiet = new Consumer(declared.subscribe(), options);
 	const lapsed = new Consumer(undeclared.subscribe(), options);
@@ -1134,7 +1233,7 @@ test("Consumer reads a leading marker as an end and keeps the first media keyfra
 });
 
 test("Consumer reads an empty LOC payload as the frame's duration", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	writeLoc(track, [
 		[
 			[0, [0xde, 0xad]],
@@ -1156,7 +1255,7 @@ test("Consumer reads an empty LOC payload as the frame's duration", async () => 
 });
 
 test("Consumer passes over LOC duration markers", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	writeLoc(track, [
 		[
 			[0, [0xde, 0xad]],
@@ -1187,7 +1286,7 @@ test("Consumer passes over LOC duration markers", async () => {
 
 test("Consumer preserves empty Legacy and LOC data frames", async () => {
 	for (const kind of ["legacy", "loc"]) {
-		const track = new Track.Producer("data");
+		const track = micro("data");
 		if (kind === "legacy") {
 			const producer = new LegacyProducer(track, new LegacyFormat("data"));
 			producer.encode(new Uint8Array(), Duration.micros(0), true);
@@ -1214,9 +1313,10 @@ async function nextFrame(consumer: Consumer) {
 	}
 }
 
-// The track refuses a transport timestamp that rewinds, so these rewind only the container's
-// own timestamps, under wall-clock transport stamps that rise in write order.
-const wallClock = () => Time.Timestamp.now();
+// The track refuses a group whose first transport timestamp doesn't pass the one before, so these
+// rewind only the container's own timestamps, under transport stamps that rise in write order.
+let wall = 0;
+const wallClock = () => Time.Timestamp.fromMicros(++wall);
 
 test("Consumer aborts a group below the previous group start", async () => {
 	const track = new Track.Producer("test");
@@ -1666,11 +1766,11 @@ test("Consumer duration-skips a stalled group once it is covered", async () => {
 
 	// Group.Producer 0: one frame at ts=0 lasting 33ms, never closed (stalled).
 	const g0 = track.createGroup(0n);
-	g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Time.Timestamp.fromMicros(0) });
 
 	// Group.Producer 1: closed, starts exactly where group 0's frame ends.
 	const g1 = track.createGroup(1n);
-	g1.writeFrame({ payload: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
+	g1.writeFrame({ payload: new Uint8Array([33]), timestamp: Time.Timestamp.fromMicros(33_000) });
 	g1.finish();
 
 	track.finish();
@@ -1703,15 +1803,15 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	// Group.Producer 0 stays open and later receives a second frame; nothing covers the gap,
 	// so that late frame must survive rather than being skipped.
 	const g0 = track.createGroup(0n);
-	g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Time.Timestamp.fromMicros(0) });
 
 	const g1 = track.createGroup(1n);
-	g1.writeFrame({ payload: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
+	g1.writeFrame({ payload: new Uint8Array([33]), timestamp: Time.Timestamp.fromMicros(33_000) });
 	g1.finish();
 
 	// Let the consumer settle on group 0, then extend it before closing.
 	await flush();
-	g0.writeFrame({ payload: new Uint8Array([20]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([20]), timestamp: Time.Timestamp.fromMicros(20_000) });
 	g0.finish();
 	track.finish();
 	track.close();
@@ -1768,9 +1868,9 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (Legac
 // Delivery resumes only once the missing, timeline-continuous group arrives.
 test("Consumer waits on a PTS gap instead of skipping to a later buffered group (Legacy)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(replay(track), {
+	const consumer = new Consumer(owed(track, 10_000, 1_000_000n), {
 		format: timedLegacy,
-		delay: { max: Duration.millis(10_000) },
+		delay: { min: null, max: Duration.millis(10_000) },
 	});
 
 	// Group A (seq 1_000_000): content ends at 33_333µs.
@@ -1786,7 +1886,10 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 	const pending = consumer.next();
 
 	// Group C (seq 1_090_000) starts at 90_000 ticks (1_000_000µs) -- far past A.end (33_333µs), a real
-	// gap. An intermediate group may still be in transit, so C must NOT be delivered yet.
+	// gap. An intermediate group may still be in transit, so C must NOT be delivered yet. Appending
+	// B and C declared the starts between the groups skipped, so B's alone is owed.
+	track.skipGroups(1_000_001n, 1_045_000n);
+	track.skipGroups(1_045_001n, 1_090_000n);
 	const c = track.createGroup(1_090_000n);
 	c.writeFrame({
 		payload: encodeLegacyFrame(Math.round((90_000 / TIMESCALE) * 1_000_000) as number, new Uint8Array([0x03])),
@@ -1860,9 +1963,9 @@ test("Consumer delivers a contiguous group after one that completed out of order
 // old to play, so the head is the group to play next and must not be dropped as "slow".
 test("Consumer plays the head once a waited-out gap exceeds the budget (Legacy)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(replay(track), {
+	const consumer = new Consumer(owed(track, 100, 1000n), {
 		format: timedLegacy,
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 
 	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).
@@ -1895,9 +1998,9 @@ test("Consumer plays the head once a waited-out gap exceeds the budget (Legacy)"
 // A gap still inside the budget is waited out: the missing group may yet arrive in time.
 test("Consumer waits on a gap within the budget, then plays the head once it exceeds it (Legacy)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(replay(track), {
+	const consumer = new Consumer(owed(track, 100, 1000n), {
 		format: timedLegacy,
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 
 	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).
@@ -1915,12 +2018,16 @@ test("Consumer waits on a gap within the budget, then plays the head once it exc
 	await clock.advance(Duration.millis(99));
 	expect(await poll(pending)).toBe("pending");
 
-	// B alone grows past the budget (up to 12_000 ticks, 100ms past A's end and beyond).
+	// B alone grows past the budget (up to 12_000 ticks, 100ms past A's end and beyond). The ordered
+	// read measures the hole against the newest group's start, so that proves nothing yet.
 	for (let i = 1; i <= 3; i++) {
 		b.writeFrame(timedFrame(0x02, 6000 + i * 3000, 1 + i));
 		await flush();
 	}
+	expect(await poll(pending)).toBe("pending");
 
+	// B landed a whole budget ago, so the wall clock gives the hole up.
+	await clock.advance(Duration.millis(1));
 	const result = await poll(pending);
 	expect(result).toEqual({ kind: "gap", timestamp: Duration.micros(33_333), duration: Duration.micros(33_334) });
 	expect(frameOf(await consumer.next()).payload).toEqual(new Uint8Array([0x02]));
@@ -1961,12 +2068,13 @@ test("Consumer reads a marker group as an end, not a gap", async () => {
 	});
 
 	writeGroupWithLegacyFrames(track, 0n, [0]);
-	writeMarkerGroup(track, 1n, 0);
+	// One microsecond in, since a group's first frame has to start after the one before.
+	writeMarkerGroup(track, 1n, 1);
 	writeGroupWithLegacyFrames(track, 2n, [1_000_000]);
 	await flush();
 
 	expect(frameOf(await consumer.next()).timestamp.asMicros()).toBe(0);
-	expect(await consumer.next()).toEqual({ kind: "end", group: 1n, end: Duration.micros(0) });
+	expect(await consumer.next()).toEqual({ kind: "end", group: 1n, end: Duration.micros(1) });
 	// A declared stop loses nothing, so no gap follows it.
 	expect(frameOf(await consumer.next()).timestamp.asMicros()).toBe(1_000_000);
 
@@ -2055,7 +2163,7 @@ test("Consumer reads a shed marker group as a gap", async () => {
 	await flush();
 	expect((await nextFrame(consumer))?.frame?.timestamp.asMicros()).toBe(0);
 
-	writeMarkerGroup(track, 1n, 0);
+	writeMarkerGroup(track, 1n, 1);
 	writeGroupWithLegacyFrames(track, 2n, [500]);
 	await flush();
 
@@ -2095,15 +2203,15 @@ test("Consumer yields no gap across a PTS-contiguous group id jump (Legacy)", as
 });
 
 test("a live video frame is delivered before its duration marker arrives", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("video"),
 		delay: { max: Duration.millis(500) },
 	});
-	const group = track.appendGroup();
+	const group = track.appendGroup(Time.Timestamp.fromMicros(0));
 	group.writeFrame({
 		payload: encodeLegacyFrame(0, new Uint8Array([1])),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(0),
 	});
 	let delivered = false;
 	const read = consumer.next().then((value) => {
@@ -2115,7 +2223,7 @@ test("a live video frame is delivered before its duration marker arrives", async
 	expect(frameOf(await read).timestamp.asMicros()).toBe(0);
 	group.writeFrame({
 		payload: encodeLegacyFrame(15_000, new Uint8Array()),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(15_000),
 	});
 	group.finish();
 	track.finish();
@@ -2128,7 +2236,7 @@ test("a live video frame is delivered before its duration marker arrives", async
 });
 
 test("audio discontinuity writes no duration marker", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const subscriber = track.subscribe();
 	const producer = new LegacyProducer(track, new LegacyFormat("audio"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
@@ -2141,26 +2249,26 @@ test("audio discontinuity writes no duration marker", async () => {
 
 for (const code of [StreamCode.Cancel, StreamCode.Internal, StreamCode.Old, StreamCode.Evicted, StreamCode(1234)]) {
 	test(`Consumer preserves frames and continues after group reset ${code}`, async () => {
-		const track = new Track.Producer("test");
+		const track = micro("test");
 		const consumer = new Consumer(replay(track), {
 			format: new LegacyFormat("data"),
 			delay: { max: Duration.millis(0) },
 		});
 		const error = spyOn(console, "error").mockImplementation(() => {});
 		try {
-			const group = track.appendGroup();
+			const group = track.appendGroup(Time.Timestamp.fromMicros(0));
 			group.writeFrame({
 				payload: encodeLegacyFrame(0, new Uint8Array([1])),
-				timestamp: Time.Timestamp.now(),
+				timestamp: Time.Timestamp.fromMicros(0),
 			});
 			await flush();
 			group.abort(new NetError.Stream(code));
 			await flush();
 			expect(frameOf(await nextFrame(consumer)).payload).toEqual(new Uint8Array([1]));
-			const next = track.appendGroup();
+			const next = track.appendGroup(Time.Timestamp.fromMicros(1));
 			next.writeFrame({
 				payload: encodeLegacyFrame(1, new Uint8Array([2])),
-				timestamp: Time.Timestamp.now(),
+				timestamp: Time.Timestamp.fromMicros(1),
 			});
 			next.finish();
 			// The reset cut the group's tail.
@@ -2207,16 +2315,16 @@ for (const end of [
 }
 
 test("a group reset does not hide a later container decode failure", async () => {
-	const track = new Track.Producer("test");
+	const track = micro("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data") });
 	try {
-		const reset = track.appendGroup();
+		const reset = track.appendGroup(Time.Timestamp.fromMicros(0));
 		await flush();
 		reset.abort(new NetError.Stream(StreamCode.Cancel));
 		await flush();
-		const malformed = track.appendGroup();
+		const malformed = track.appendGroup(Time.Timestamp.fromMicros(1));
 		// A truncated timestamp varint.
-		malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.now() });
+		malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.fromMicros(1) });
 		malformed.finish();
 		track.finish();
 		track.close();
@@ -2281,7 +2389,7 @@ test("LegacyFormat rejects a timestamp past 2^53 - 1 instead of rounding", () =>
 // Mirrors the Rust `container::Finished` doctest: the track `finish` returns takes no frame, at
 // compile time and at run time.
 test("finishing a Legacy Producer returns a track that takes no frame", () => {
-	const producer = new LegacyProducer(new Track.Producer("test"), new LegacyFormat("video"));
+	const producer = new LegacyProducer(micro("test"), new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	const finished = producer.finish();
 	// @ts-expect-error a finished track takes no frame

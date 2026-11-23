@@ -21,12 +21,9 @@ pub struct Track<'a> {
 	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
-	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
-	pub node: u64,
-	/// How many leading segments of the broadcast path make up the prefix of the route
-	/// the request follows (lite-07); 0 with no node named.
-	pub depth: u64,
+	pub node: Option<crate::route::NodeId>,
 	pub track: Cow<'a, str>,
 }
 
@@ -37,7 +34,6 @@ impl Track<'_> {
 			broadcast: self.broadcast,
 			instance: self.instance,
 			node: self.node,
-			depth: self.depth,
 			track: Cow::Owned(self.track.into_owned()),
 		}
 	}
@@ -52,14 +48,13 @@ impl<'a> Message<'a> for Track<'a> {
 
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		let (node, depth) = super::instance::decode_node(r, version, &broadcast)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
 			instance,
 			node,
-			depth,
 			track,
 		})
 	}
@@ -71,7 +66,7 @@ impl<'a> Message<'a> for Track<'a> {
 
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node, self.depth)?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -84,8 +79,8 @@ impl<'a> Message<'a> for Track<'a> {
 /// Lite05+ only.
 #[derive(Clone, Debug)]
 pub struct TrackInfo {
-	/// Refresh byte ratio, advertised on lite-07 only.
-	pub refresh: Option<u32>,
+	/// When a reader asks for a new group, advertised on lite-07 only.
+	pub refresh: crate::track::Refresh,
 	/// The publisher's tie-break priority for this track.
 	pub priority: i8,
 	/// Publisher Max Age: an upper bound on how long the publisher caches a
@@ -132,7 +127,8 @@ impl From<TrackInfo> for crate::track::Info {
 /// `ietf` extension, TRACK_PROPERTIES.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Framing {
-	/// The units of every frame Timestamp on the wire, or `None` when frames carry none.
+	/// The units of every frame Timestamp on the wire, or `None` when frames carry none: before
+	/// lite-05, and on a scale-less lite-07 track.
 	pub timescale: Option<Timescale>,
 	/// The draft the track's moq-transport publisher spoke, which serialized its objects'
 	/// properties, or `None` for a moq-lite one, which carries no moq-transport state.
@@ -146,7 +142,7 @@ pub(crate) struct Framing {
 
 impl Framing {
 	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, an
-	/// untimed track's with its send time in milliseconds.
+	/// untimed track's with its group's start as milliseconds.
 	pub fn new(info: &crate::track::Info, version: Version) -> Self {
 		Self {
 			timescale: version.wire_timescale(info.timescale),
@@ -154,6 +150,12 @@ impl Framing {
 			compressed: info.compressed(),
 			length_first: version.has_length_first(),
 		}
+	}
+
+	/// Whether every FRAME carries a timestamp: lite-05/06 always declare a timescale, and a
+	/// scale-less lite-07 track's frames carry none, since each one's time is its group's start.
+	pub fn stamped(&self) -> bool {
+		self.timescale.is_some()
 	}
 }
 
@@ -178,13 +180,19 @@ impl<'a> Message<'a> for TrackInfo {
 		};
 
 		let refresh = match version.has_refresh() {
-			true => r
-				.varint()?
-				.checked_sub(1)
-				.map(u32::try_from)
-				.transpose()
-				.map_err(|_| DecodeError::InvalidValue)?,
-			false => None,
+			true => {
+				let ratio = r
+					.varint()?
+					.checked_sub(1)
+					.map(u32::try_from)
+					.transpose()
+					.map_err(|_| DecodeError::InvalidValue)?;
+				let interval = r.varint()?.checked_sub(1).map(Duration::from_millis);
+				crate::track::Refresh::default()
+					.with_ratio(ratio)
+					.with_interval(interval)
+			}
+			false => crate::track::Refresh::default(),
 		};
 		let compression = match version.has_compression() {
 			true => match r.varint()? {
@@ -220,7 +228,12 @@ impl<'a> Message<'a> for TrackInfo {
 		w.varint(encoded)?;
 		w.varint(version.wire_timescale(self.timescale).map_or(0, u64::from))?;
 		if version.has_refresh() {
-			w.varint(self.refresh.map_or(0, |ratio| u64::from(ratio) + 1))?;
+			w.varint(self.refresh.ratio.map_or(0, |ratio| u64::from(ratio) + 1))?;
+			let interval = match self.refresh.interval {
+				None => 0,
+				Some(interval) => u64::try_from(interval.as_millis() + 1).map_err(|_| EncodeError::BoundsExceeded)?,
+			};
+			w.varint(interval)?;
 		}
 		if version.has_compression() {
 			w.varint(self.compression as u64)?;
@@ -238,7 +251,7 @@ mod test {
 
 	fn info_sample() -> TrackInfo {
 		TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: 7,
 			max_age: Some(Duration::from_millis(2000)),
 			timescale: Some(Timescale::MICRO),
@@ -258,12 +271,20 @@ mod test {
 	fn refresh_is_lite07_only() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for ratio in [None, Some(0), Some(1), Some(u32::MAX)] {
-				let info = TrackInfo {
-					refresh: ratio,
-					..info_sample()
-				};
-				let expected = if version.has_refresh() { ratio } else { None };
-				assert_eq!(info_roundtrip(version, &info).refresh, expected);
+				for interval in [None, Some(Duration::ZERO), Some(Duration::from_millis(1500))] {
+					let refresh = crate::track::Refresh::default()
+						.with_ratio(ratio)
+						.with_interval(interval);
+					let info = TrackInfo {
+						refresh,
+						..info_sample()
+					};
+					let expected = match version.has_refresh() {
+						true => refresh,
+						false => crate::track::Refresh::default(),
+					};
+					assert_eq!(info_roundtrip(version, &info).refresh, expected);
+				}
 			}
 		}
 	}
@@ -463,7 +484,7 @@ mod test {
 	#[test]
 	fn track_info_roundtrips_varint_and_priority_bounds() {
 		let info = TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: i8::MIN,
 			max_age: None,
 			timescale: Some(Timescale::new((1u64 << 62) - 1).unwrap()),
@@ -483,7 +504,7 @@ mod test {
 	#[test]
 	fn track_info_encodes_sub_millisecond_max_age_as_zero() {
 		let info = TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: 0,
 			max_age: Some(Duration::from_nanos(999_999)),
 			timescale: Some(Timescale::MILLI),
@@ -497,7 +518,7 @@ mod test {
 	fn track_info_encode_rejects_max_age_past_varint() {
 		// Lite-07 varints carry the whole u64, and the age goes on the wire plus one.
 		let info = TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: 7,
 			max_age: Some(Duration::from_millis(u64::MAX)),
 			timescale: Some(Timescale::MILLI),
@@ -510,34 +531,57 @@ mod test {
 		));
 	}
 
-	/// Lite-07 names the origin node right after the instance; older versions carry
-	/// none, so the publisher always selects.
+	/// Lite-07 names the node right after the instance; older versions carry none, so
+	/// the publisher always selects.
 	#[test]
 	fn track_request_names_its_node_on_lite07_only() {
 		let msg = Track {
 			instance: None,
-			node: 5,
-			depth: 0,
+			node: Some(crate::route::NodeId {
+				relay: 5,
+				start: 9,
+				marked: false,
+			}),
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("v"),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
-		// Length, the path, an empty unminted instance, the node and its route's depth,
+		// Length, the path, an empty unminted instance, the node with its start and Marked,
 		// then the track name.
-		assert_eq!(&buf[..], [11, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 0, 1, b'v']);
-		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, 5);
+		assert_eq!(&buf[..], [12, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 9, 0, 1, b'v']);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, msg.node);
+
+		// A request may name a node's marked identity, and a Marked past 1 is refused.
+		let marked = Track {
+			node: msg.node.map(|node| crate::route::NodeId { marked: true, ..node }),
+			..msg.clone()
+		};
+		let buf = marked.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(buf[10], 1);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, marked.node);
+		let mut bad = buf.to_vec();
+		bad[10] = 2;
+		assert!(Track::decode_slice(&bad, Version::Lite07).is_err());
+
+		// No node is a Node ID of 0, which nothing follows.
+		let unnamed = Track {
+			node: None,
+			..msg.clone()
+		};
+		let buf = unnamed.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(&buf[..], [10, 4, b'r', b'o', b'o', b'm', 0, 0, 0, 1, b'v']);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, None);
 
 		let buf = msg.encode_bytes(Version::Lite06).unwrap();
 		assert_eq!(&buf[..], [7, 4, b'r', b'o', b'o', b'm', 1, b'v']);
-		assert_eq!(Track::decode_slice(&buf, Version::Lite06).unwrap().0.node, 0);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite06).unwrap().0.node, None);
 	}
 
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
@@ -554,8 +598,7 @@ mod test {
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};

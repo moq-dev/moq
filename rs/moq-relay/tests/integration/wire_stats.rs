@@ -40,7 +40,10 @@ async fn wire_sources(io_uring: bool) {
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert_path];
 	config.listen.tls.key = vec![key_path];
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	// Plain TCP and a WebSocket upgrade, the byte streams qmux counts through the kernel.
+	config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config.stats.enabled = true;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.stats.interval = Some(Duration::from_secs(3600).into());
@@ -52,6 +55,8 @@ async fn wire_sources(io_uring: bool) {
 	}
 	let relay = Relay::load(config).await.unwrap().with_signals(false);
 	let addr = relay.addr().unwrap();
+	let tcp = relay.tcp_addr().unwrap();
+	let ws = relay.web_addrs().http.unwrap();
 	let metrics = format!("http://{}/metrics", relay.internal().addr().unwrap());
 	let registry = relay.cluster().stats.clone();
 	let trigger = relay.shutdown_trigger().clone();
@@ -60,11 +65,20 @@ async fn wire_sources(io_uring: bool) {
 	ready.wait().await.expect("relay ready");
 	// Both adapters must expose UDP totals without asking Session::stats(),
 	// which would arm a periodic sampler. Snapshot reads the source directly.
-	for scheme in ["moql", "https"] {
+	// Only Linux's TCP_INFO counts bytes; elsewhere a byte stream's session contributes zero.
+	let streams: &[&str] = if cfg!(target_os = "linux") { &["tcp", "ws"] } else { &[] };
+	for scheme in ["moql", "https"].iter().chain(streams) {
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);
 		client.bind = Some("127.0.0.1:0".parse().unwrap());
 		let client = client.init(Default::default()).unwrap();
+		let addr = match *scheme {
+			"tcp" => tcp,
+			"ws" => ws,
+			_ => addr,
+		};
+		// A closed session's final count stays in the row, so each must add to what's there.
+		let base = presence(&registry);
 		let url: url::Url = format!("{scheme}://{addr}/wire").parse().unwrap();
 		let connection = kio::clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 			.await
@@ -74,8 +88,8 @@ async fn wire_sources(io_uring: bool) {
 			loop {
 				let row = presence(&registry);
 				if row.active() == 1
-					&& row.wire_tx > 0
-					&& row.wire_rx > 0
+					&& row.wire_tx > base.wire_tx
+					&& row.wire_rx > base.wire_rx
 					&& registry.snapshot().control().iter().any(|(_, class, bytes)| {
 						*class == moq_net::stats::Message::Announce && bytes.tx > 0 && bytes.rx > 0
 					}) {
@@ -138,7 +152,7 @@ async fn native_sessions_supply_direct_wire_counters() {
 	wire_sources(false).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_sessions_supply_direct_wire_counters() {
 	match moq_uring::Worker::new(Default::default()) {

@@ -19,9 +19,11 @@ const VERSIONS: [&str; 3] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22
 const GROUPS: u64 = 5;
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// The groups a reader subscribed with `budget` receives once it resumes from a stall
@@ -53,8 +55,8 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	// accepting streams, so the stream credit it grants runs out.
 	let gate = kio::Producer::new(true);
 	let mut downstream = MockConnectOptions::new(version);
-	// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
-	downstream.transport.max_concurrent_uni_streams = Some(1 + usize::from(!version.is_lite()));
+	// One for groups, past the stream the session keeps open.
+	downstream.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 	downstream.client_publish = Some(relay.consume());
 	downstream.server_subscribe = Some(viewer.clone());
 	downstream.server_gate = Some(gate.consume());
@@ -73,7 +75,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 		group
 			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}
 	let _source = source.finish().unwrap();
@@ -108,9 +110,10 @@ async fn a_stalled_reader_keeps_every_group_its_budget_covers() {
 
 /// The stall backs up the relay: with a budget shorter than it, the groups that waited for
 /// credit past the budget are skipped. Group 0 took the one free credit as the stall began.
+/// moq-transport carries no subscriber budget, so its relay keeps every group.
 #[kio::test]
 async fn a_budget_shorter_than_the_stall_skips_what_waited_past_it() {
-	for version in VERSIONS {
+	for version in VERSIONS.into_iter().filter(|version| version.starts_with("moq-lite")) {
 		let version: Version = version.parse().unwrap();
 		let got = stalled_read(version, Duration::from_millis(1500)).await;
 		assert_eq!(got, [0, 3, 4].into(), "{version}");

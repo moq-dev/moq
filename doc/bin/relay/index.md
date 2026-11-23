@@ -46,7 +46,7 @@ tls.generate = ["localhost"]
 listen = "[::]:4443"   # serves the certificate fingerprint for local browsers
 
 [auth]
-public = "**"          # anonymous access to everything; development only
+public = ""           # anonymous access to everything; development only
 ```
 
 Every option is also a `--flag` or `MOQ_*` environment variable, and
@@ -101,7 +101,7 @@ relay.with_web(web).run().await?;
   from `relay.shutdown().admission()` and pass `relay.shutdown().clone()` to
   `Connection::with_shutdown`, so the drain waits for its handshakes too.
 - To serve a session from any other moq-net transport, such as the in-memory
-  one in tests, enable the `test-support` feature, read its SETUP with `moq_net::Server::accept_request` and pass
+  one in tests, enable the `test-support` feature, read its SETUP with `moq_net::Server::handshake` and pass
   `Accepted::new(handshake, transport)` to `Connection::new`. The client must
   send its path in the SETUP. The server's accept timeout (`moq_net::Server::with_timeout`)
   bounds admission and, on moq-lite 01/02, the SETUP reply too.

@@ -174,16 +174,14 @@ impl Client {
 			for (index, kind) in &tracks {
 				let track = match kind {
 					Kind::H264 => {
-						let track =
-							broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
+						let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 						Track::Video(Box::new(Video::H264 {
 							split: h264::Split::new(),
 							import: h264::Import::new(track, reserved.clone(), Default::default())?,
 						}))
 					}
 					Kind::H265 => {
-						let track =
-							broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video))?;
+						let track = broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video));
 						Track::Video(Box::new(Video::H265 {
 							split: h265::Split::new(),
 							import: h265::Import::new(track, reserved.clone(), Default::default())?,
@@ -194,8 +192,7 @@ impl Client {
 							return Err(Error::Rtsp("AAC stream without an AudioSpecificConfig".to_string()));
 						};
 						let config = aac::config(params.extra_data())?;
-						let track =
-							broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio))?;
+						let track = broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio));
 						Track::Aac(Box::new(aac::Import::new(track, reserved.clone(), config)?))
 					}
 				};
@@ -289,13 +286,14 @@ enum Track {
 }
 
 impl Track {
-	fn finish(&mut self) -> moq_mux::Result<()> {
+	/// End the track cleanly. It leaves the broadcast with this handle.
+	fn finish(self) -> moq_mux::Result<()> {
 		match self {
-			Self::Video(video) => match &mut **video {
-				Video::H264 { import, .. } => import.finish(),
-				Video::H265 { import, .. } => import.finish(),
+			Self::Video(video) => match *video {
+				Video::H264 { import, .. } => import.finish().map(drop),
+				Video::H265 { import, .. } => import.finish().map(drop),
 			},
-			Self::Aac(import) => import.finish(),
+			Self::Aac(import) => import.finish().map(drop),
 		}
 	}
 
@@ -525,7 +523,7 @@ impl Ingest {
 	/// Flush every track and end it cleanly, reporting the first failure.
 	fn finish(&mut self) -> Result<()> {
 		let mut result = Ok(());
-		for mut stream in self.streams.drain(..).flatten() {
+		for stream in self.streams.drain(..).flatten() {
 			result = result.and(stream.track.finish().map_err(Error::from));
 		}
 		result

@@ -59,10 +59,11 @@ enum Late {
 const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 struct Outcome {
@@ -165,11 +166,9 @@ async fn round(version: &str, late: Late, final_key: u64, max_delay: Option<Dura
 	if final_key > 0 {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), PAYLOAD).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
-	track
-		.finish_at(moq_net::track::Position::group(final_key), None)
-		.unwrap();
+	track.finish_at(moq_net::track::Position::group(final_key)).unwrap();
 	drop(track);
 
 	if final_key > 0 {
@@ -314,7 +313,7 @@ async fn draft18_a_join_reaching_a_finished_track_keeps_its_head() {
 	pair.client_transport.set_latency(RTT / 2);
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), PAYLOAD).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
@@ -382,7 +381,7 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), PAYLOAD).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
@@ -447,7 +446,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 			.await
 			.expect("no subscriber appeared");
 
-		track.finish_at(moq_net::track::Position::group(2), None).unwrap();
+		track.finish_at(moq_net::track::Position::group(2)).unwrap();
 		let groups = [track.append_next().unwrap(), track.append_next().unwrap()];
 		// Paused time advances only once every task is idle: both headers and the end
 		// have reached the subscriber, ahead of any frame.
@@ -459,7 +458,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 
 		for mut group in groups {
 			group.write_frame(group.at_start(), PAYLOAD).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut groups = kio::clock::timeout(TIMEOUT, reader)
 			.await

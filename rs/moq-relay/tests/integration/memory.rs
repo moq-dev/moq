@@ -35,7 +35,7 @@ pub async fn connect(
 	let (cluster, auth) = (cluster.clone(), auth.clone());
 	drop(kio::clock::sim::spawn(async move {
 		let server = moq_net::Server::new().with_versions(version.into());
-		let Ok(handshake) = server.accept_request(moq_net::time::Instant::now(), relay_link).await else {
+		let Ok(handshake) = server.handshake(moq_net::time::Instant::now(), relay_link).await else {
 			return;
 		};
 		let request = Accepted::new(handshake, moq_auth::Transport::Quic);
@@ -54,11 +54,11 @@ pub async fn connect(
 /// `public_subscribe` to anyone, as the `[auth]` config does.
 #[cfg(feature = "test-support")]
 pub fn public(public: &[&str], publish: &[&str], subscribe: &[&str]) -> auth::Auth {
-	let patterns = |texts: &[&str]| texts.iter().map(|text| text.parse().expect("pattern")).collect();
+	let prefixes = |texts: &[&str]| texts.iter().map(|text| text.parse().expect("prefix")).collect();
 	let mut config = auth::Config::default();
-	config.public = patterns(public);
-	config.public_publish = patterns(publish);
-	config.public_subscribe = patterns(subscribe);
+	config.public = prefixes(public);
+	config.public_publish = prefixes(publish);
+	config.public_subscribe = prefixes(subscribe);
 	config
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init")

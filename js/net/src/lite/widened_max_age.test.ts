@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -21,29 +22,9 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 	while (got.length < count) {
 		const group = await reader.recvGroup();
 		if (!group) throw new Error("the track ended");
-		got.push(group.sequence);
+		got.push(group.start);
 	}
 	return got.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-}
-
-/**
- * Resolves once the publisher's re-drop of groups 1 and 2 reaches `reader`: the update clears
- * their stale verdict, and the drop under the update's number sets it again. Each change is
- * heard as it lands, so the clear is seen even when the re-drop follows it at once.
- */
-function redropped(reader: TrackSubscriber): Promise<void> {
-	return new Promise((resolve) => {
-		let cleared = false;
-		const check = () => {
-			const held = hooks.staleHeld(reader, 1n, 3n);
-			if (held.length === 0) cleared = true;
-			else if (cleared && held.length === 1 && held[0].start === 1n && held[0].end === 3n) {
-				for (const dispose of disposes) dispose();
-				resolve();
-			}
-		};
-		const disposes = hooks.givenUp(reader, 1n).changed.map((signal) => signal.subscribe(check));
-	});
 }
 
 test("a widened maxDelay re-offers what the publisher skipped below the start", async () => {
@@ -51,11 +32,11 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const origin = new OriginProducer();
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	// One group per second, so a budget picks how far back a reader reaches.
-	for (let sequence = 0; sequence < 10; sequence++) {
-		const group = producer.appendGroup();
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(sequence * 1000) });
+	for (let key = 0; key < 10; key++) {
+		const group = hooks.appendNext(producer);
+		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(key * 1000) });
 		group.finish();
 	}
 
@@ -87,16 +68,16 @@ for (const [version, alpn] of [
 	[Version.DRAFT_06, ALPN_06],
 	[Version.DRAFT_07, ALPN_07_WIP],
 ] as const) {
-	const reoffers = version === Version.DRAFT_07;
-	test(`a widened maxDelay ${reoffers ? "re-offers" : "keeps dropped"} the groups reported stale on ${alpn}`, async () => {
+	const recovers = version === Version.DRAFT_07;
+	test(`a widened maxDelay ${recovers ? "recovers" : "keeps dropped"} the groups reported stale on ${alpn}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const origin = new OriginProducer();
 		const publication = origin.route(Path.from("room"));
 		const broadcast = publication.broadcast;
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-		const write = (sequence: number, millis: number) => {
-			const group = producer.createGroup(BigInt(sequence));
-			group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const write = (key: number, millis: number) => {
+			const group = producer.createGroup(BigInt(key));
+			group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
 			group.finish();
 		};
 		write(0, 0);
@@ -110,19 +91,21 @@ for (const [version, alpn] of [
 		expect(await received(reader, 1)).toEqual([0n]);
 		// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge, so they are reported
 		// stale after SUBSCRIBE_START.
-		for (const [sequence, millis] of [
+		for (const [key, millis] of [
 			[1, 1000],
 			[2, 2000],
 			[3, 3000],
 			[4, 6000],
 		]) {
-			write(sequence, millis);
+			write(key, millis);
 		}
 		expect(await received(reader, 2)).toEqual([3n, 4n]);
 
-		// Lite-07 re-offers only the groups reported stale; earlier subscribers settled them for good.
+		// A lite-07 stale drop holds only for a budget no wider than the one it was judged under, so the
+		// widened reader asks for the groups with a request of its own; earlier versions' drops are
+		// final for every reader.
 		reader.update({ delay: { max: Duration.millis(10_000) } });
-		if (reoffers) expect(await received(reader, 2)).toEqual([1n, 2n]);
+		if (recovers) expect(await received(reader, 2)).toEqual([1n, 2n]);
 		producer.finish();
 		producer.close();
 		expect(await reader.recvGroup()).toBeUndefined();
@@ -136,15 +119,15 @@ for (const [version, alpn] of [
 	});
 }
 
-test("a widening keeps a bounded lite-07 subscription open for the stale groups it re-offers", async () => {
+test("a widening recovers the stale groups for a bounded lite-07 reader", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	const write = (sequence: number, millis: number) => {
-		const group = producer.createGroup(BigInt(sequence));
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const write = (key: number, millis: number) => {
+		const group = producer.createGroup(BigInt(key));
+		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
 		group.finish();
 	};
 	write(0, 0);
@@ -154,75 +137,24 @@ test("a widening keeps a bounded lite-07 subscription open for the stale groups 
 		accept({ transport: pair.server, url, version: Version.DRAFT_07, publish: origin.consume() }),
 	]);
 	const remote = wireOf(client).consume(Path.from("room"));
-	const ranges = [{ start: { absolute: 0n }, end: { absolute: 5n } }];
+	const ranges = [{ start: 0n, end: 4n }];
 	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) }, ranges });
 	expect(await received(reader, 1)).toEqual([0n]);
 	// Groups 1 and 2 are reported stale after SUBSCRIBE_START.
-	for (const [sequence, millis] of [
+	for (const [key, millis] of [
 		[1, 1000],
 		[2, 2000],
 		[3, 3000],
 		[4, 6000],
 	]) {
-		write(sequence, millis);
+		write(key, millis);
 	}
 	expect(await received(reader, 2)).toEqual([3n, 4n]);
 
-	// The widening re-offers them, and the track's end does not settle the tail before they arrive.
+	// The widened reader asks for them with a request of its own.
 	reader.update({ delay: { max: Duration.millis(10_000) }, ranges });
-	producer.finish();
 	expect(await received(reader, 2)).toEqual([1n, 2n]);
-
-	reader.close();
-	remote.close();
-	broadcast.close();
-	origin.close();
-	client.abort();
-	server.abort();
-});
-
-// Every lite-07 update reopens the stale drops, widening or not: the publisher drops again, under
-// the new update's number, what is still stale, so the subscriber settles at once rather than
-// waiting out its grace for a re-offer that never comes.
-test("an update keeping the budget drops the stale groups again on lite-07", async () => {
-	const pair = createMockTransportPair(ALPN_07_WIP);
-	const origin = new OriginProducer();
-	const publication = origin.route(Path.from("room"));
-	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	const write = (sequence: number, millis: number) => {
-		const group = producer.createGroup(BigInt(sequence));
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
-		group.finish();
-	};
-	write(0, 0);
-
-	const [client, server] = await Promise.all([
-		connect({ url, transport: pair.client }),
-		accept({ transport: pair.server, url, version: Version.DRAFT_07, publish: origin.consume() }),
-	]);
-	const remote = wireOf(client).consume(Path.from("room"));
-	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });
-	expect(await received(reader, 1)).toEqual([0n]);
-	for (const [sequence, millis] of [
-		[1, 1000],
-		[2, 2000],
-		[3, 3000],
-		[4, 6000],
-	]) {
-		write(sequence, millis);
-	}
-	expect(await received(reader, 2)).toEqual([3n, 4n]);
-
-	// Only the priority changes (the budget is resent, since an update replaces it): groups 1 and 2 are still stale, so they are dropped again. The
-	// track ends only once that re-drop has reached the reader, so the end is a FIN, not a reset
-	// of the reply still writing; a missing re-drop fails here instead of waiting out the grace.
-	const reached = redropped(reader);
-	reader.update({ priority: 5, delay: { max: Duration.millis(1500) } });
-	await reached;
 	producer.finish();
-	producer.close();
-	expect(await reader.recvGroup()).toBeUndefined();
 
 	reader.close();
 	remote.close();

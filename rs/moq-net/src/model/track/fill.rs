@@ -2,8 +2,8 @@
 //!
 //! A miss is a key a reader wants that the cache doesn't hold and the live feed will
 //! never deliver. A reader joins the fill already covering it, or queues a new one, and a
-//! handler serves each fill it takes as one bounded run: [`Fill::accept`] for each group it
-//! has, [`Fill::drop_groups`] for the rest.
+//! handler serves each fill it takes as one bounded run: [`FillGroups::accept`] for each group it
+//! has, [`FillGroups::drop_groups`] for the rest.
 //!
 //! A fill serves under what its readers ask now: a reader changing its priority, budget, or
 //! order moves every fill it waits on, queued or taken. Only the first group's start frame
@@ -47,8 +47,9 @@ struct Pending {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
-	// The time a lookup asks for, which owes no group.
-	time: Option<u64>,
+	// For a time start, the oldest key its group, the newest starting at or before the
+	// time, may start at.
+	floor: Option<u64>,
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
@@ -60,7 +61,7 @@ struct Pending {
 	// How many joins still read each key: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
 	// What its handler accepted that no join has picked up yet, which holds back the next
-	// group: see [`Fill::poll_wanted_changed`].
+	// group: see [`FillGroups::poll_wanted_changed`].
 	unseen: RangeSet<u64>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
 	// became of each key.
@@ -212,9 +213,18 @@ impl Outcome {
 		self.accepted.contains(&key)
 	}
 
-	/// The lowest group accepted: a lookup's answer.
-	pub(super) fn first_accepted(&self) -> Option<u64> {
-		self.accepted.iter().next().map(|run| run.start)
+	/// What a time start's fill answered, once `time`'s key is: `None` while it is out.
+	pub(super) fn time_start(&self, time: u64) -> Option<TimeStart> {
+		if let Some(run) = self.accepted.iter().next() {
+			return Some(TimeStart::Group(run.start));
+		}
+		match self.refused.get(&time) {
+			Some(refusal) if refusal.dropped => Some(TimeStart::Dropped),
+			Some(refusal) => Some(TimeStart::Refused(refusal.err.clone())),
+			// Answered and forgotten: nobody reads it any more.
+			None if self.resolved.contains(&time) => Some(TimeStart::Unanswered),
+			None => None,
+		}
 	}
 
 	/// The partial copy accepted for `key`, if it still holds `frames`.
@@ -250,15 +260,35 @@ impl Outcome {
 		self.resolved.insert(groups);
 	}
 
-	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>) {
+	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>, dropped: bool) {
 		if groups.is_empty() {
 			return;
 		}
 		let id = self.refusals;
 		self.refusals += 1;
-		self.refused.insert(groups.clone(), Refusal { id, err, asked });
+		self.refused.insert(
+			groups.clone(),
+			Refusal {
+				id,
+				err,
+				asked,
+				dropped,
+			},
+		);
 		self.resolved.insert(groups);
 	}
+}
+
+/// What a time start's fill answered.
+pub(super) enum TimeStart {
+	/// The group containing the time.
+	Group(u64),
+	/// No group from the fill's floor through the time.
+	Dropped,
+	/// Refused with this error, saying nothing of where the time falls.
+	Refused(Error),
+	/// Nothing answers it: no handler is left to.
+	Unanswered,
 }
 
 /// One refusal, equal only to itself: the map keeps a run it refused whole, but never merges
@@ -270,6 +300,8 @@ struct Refusal {
 	// The budget its source was asked under, so a looser reader can tell that an
 	// [`Error::Old`] was not its own.
 	asked: Option<Duration>,
+	// Named dropped, the source's word that it has none of them, rather than refused for now.
+	dropped: bool,
 }
 
 impl PartialEq for Refusal {
@@ -286,8 +318,6 @@ pub(super) struct Ask {
 	pub end: u64,
 	pub frame_end: Option<u64>,
 	pub asking: Asking,
-	/// A lookup of the group holding this time within the run, which owes none of it.
-	pub time: Option<u64>,
 	/// Asked by a fetch rather than a reader's miss, so a fetch-only handler takes it.
 	pub fetch: bool,
 }
@@ -475,15 +505,6 @@ impl FillState {
 		if span.is_empty() {
 			return (joins, unfillable);
 		}
-		if let Some(time) = ask.time {
-			// A lookup joins nothing and nothing joins it: it owes no group, so no other
-			// reader's run is answered through it.
-			match self.handlers {
-				0 => unfillable.push(span),
-				_ => joins.push(self.queue_lookup(shared, ask, time)),
-			}
-			return (joins, unfillable);
-		}
 		let covered: Vec<(ops::Range<u64>, u64)> = self
 			.covers
 			.overlapping(&span)
@@ -581,7 +602,7 @@ impl FillState {
 					start,
 					end: groups.end,
 					frame_end: if groups.end == ask.end { ask.frame_end } else { None },
-					time: None,
+					floor: None,
 					asks,
 					queued: true,
 					flight: false,
@@ -633,7 +654,7 @@ impl FillState {
 						start: Position { group: key, frame },
 						end: groups.end,
 						frame_end: None,
-						time: None,
+						floor: None,
 						asks: kio::Shared::new(asks),
 						queued: true,
 						flight: true,
@@ -660,42 +681,56 @@ impl FillState {
 		})
 	}
 
-	/// Queue a fill looking up `time` within `ask`'s run, with the join waiting on its answer.
-	fn queue_lookup(&mut self, shared: &kio::Shared<FillState>, ask: &Ask, time: u64) -> Join {
+	/// Queue a fill of the group containing `time`, a reader's time start no held group
+	/// resolves, with the join waiting on its answer: the group starting at `time`, or else the
+	/// newest one before it, starting at or after `floor`. It joins nothing and nothing joins
+	/// it, since an answer below `time` says nothing of the keys another reader asks. `None`
+	/// while no handler can take it.
+	pub(super) fn time_start(
+		&mut self,
+		shared: &kio::Shared<FillState>,
+		time: u64,
+		floor: u64,
+		asking: Asking,
+	) -> Option<Join> {
+		let groups = time..time.checked_add(1)?;
+		if self.handlers == 0 {
+			return None;
+		}
 		let id = self.next;
 		self.next += 1;
 		let result = kio::Producer::<Outcome>::default();
 		let mut asks = Asks::default();
-		asks.add(&ask.asking);
+		asks.add(&asking);
 		let asks = kio::Shared::new(asks);
 		let join = Join {
 			fills: shared.clone(),
 			id,
-			groups: ask.start.group..ask.end,
-			held: RangeSet::new(),
+			groups: groups.clone(),
+			held: RangeSet::from_iter([groups.clone()]),
 			outcome: Some(result.consume()),
 			attempt: result.weak(),
-			asking: ask.asking,
+			asking,
 			asks: asks.clone(),
 		};
 		self.pending.insert(
 			id,
 			Pending {
-				start: ask.start,
-				end: ask.end,
+				start: Position::group(time),
+				end: groups.end,
 				frame_end: None,
-				time: Some(time),
+				floor: Some(floor.min(time)),
 				asks,
 				queued: true,
 				flight: false,
 				fetch: false,
-				wants: RangeMap::new(),
+				wants: RangeMap::from_iter([(groups, 1)]),
 				unseen: RangeSet::new(),
 				result,
 			},
 		);
 		self.queue.push_back(id);
-		join
+		Some(join)
 	}
 
 	/// Count a join out of reading `groups` of fill `id`. What nobody reads any more is no
@@ -805,7 +840,7 @@ pub(super) fn poll_requested(
 	state: &kio::Producer<TrackState>,
 	fills: &kio::Shared<FillState>,
 	waiter: &kio::Waiter,
-) -> Poll<Result<Fill>> {
+) -> Poll<Result<FillGroups>> {
 	// Prefer serving a queued fill, even if the track has since aborted.
 	if let Poll::Ready(mut guard) = fills.poll(waiter, |fills| match fills.has_queued() {
 		true => Poll::Ready(()),
@@ -813,11 +848,11 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end, frame_end, time, flight) = (
+		let (start, end, frame_end, floor, flight) = (
 			pending.start,
 			pending.end,
 			pending.frame_end,
-			pending.time,
+			pending.floor,
 			pending.flight,
 		);
 		let (asks, result) = (pending.asks.clone(), pending.result.clone());
@@ -830,12 +865,12 @@ pub(super) fn poll_requested(
 			start,
 			end,
 			frame_end,
-			time,
+			floor,
 			flight,
 			asks,
 			result,
 		};
-		return Poll::Ready(Ok(Fill {
+		return Poll::Ready(Ok(FillGroups {
 			inner: Arc::new(SendCell::new(inner)),
 			prev: None,
 		}));
@@ -855,7 +890,9 @@ pub(super) fn poll_requested(
 /// A run of groups readers miss, for a [`Requests`](super::Requests) handler to serve.
 ///
 /// It names `start.group` up to the exclusive [`end`](Self::end), the first group from
-/// [`start`](Self::start)'s frame. Its [`priority`](Self::priority),
+/// [`start`](Self::start)'s frame. A reader's time start that no group the cache holds places
+/// asks for the group containing that time as a fill one key wide, from the time, whose first
+/// group may start below it: see [`floor`](Self::floor). Its [`priority`](Self::priority),
 /// [`max_delay`](Self::max_delay), and [`order`](Self::order) follow its readers as they
 /// change, so read them as each group is served. The handler calls [`accept`](Self::accept) for each group
 /// it has and [`drop_groups`](Self::drop_groups) for the rest, one group at a time as
@@ -870,7 +907,7 @@ pub(super) fn poll_requested(
 /// A clone serves the same fill, and the fill is settled once the last clone drops. Each
 /// clone watches on its own, so its first [`poll_wanted_changed`](Self::poll_wanted_changed)
 /// reports the current value.
-pub struct Fill {
+pub struct FillGroups {
 	// Its track state reaches every group of the track, so the cell proves `Send` once
 	// here instead of inside every session machine holding a fill.
 	inner: Arc<SendCell<Inner>>,
@@ -878,7 +915,7 @@ pub struct Fill {
 	prev: Option<Option<u64>>,
 }
 
-impl Clone for Fill {
+impl Clone for FillGroups {
 	fn clone(&self) -> Self {
 		Self {
 			inner: self.inner.clone(),
@@ -887,7 +924,7 @@ impl Clone for Fill {
 	}
 }
 
-/// The state a [`Fill`] and its per-group handles share. The last one dropping settles what
+/// The state a fill and its per-group handles share. The last one dropping settles what
 /// was left.
 struct Inner {
 	state: kio::Producer<TrackState>,
@@ -897,17 +934,40 @@ struct Inner {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
-	time: Option<u64>,
+	// A time start's floor; see [`FillGroups::floor`].
+	floor: Option<u64>,
 	// Answered with a copy of its own rather than the cache's; see [`FillState::fly`].
 	flight: bool,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
 
-impl Fill {
+impl FillGroups {
 	/// The first group to fill, and the frame within it to start from.
 	pub fn start(&self) -> Position {
 		self.inner.start
+	}
+
+	/// The oldest group the first group may start at: [`start`](Self::start)'s, unless that is a
+	/// reader's time start no group the cache holds places. Then the first group is the one
+	/// containing that time: the group starting at it, or else the newest one starting before
+	/// it, at or after the floor. A handler knowing its groups only by key serves that key as
+	/// any other; one that can tell which group holds the time, as from an index, may
+	/// [`accept`](Self::accept) that group instead, or [`drop_groups`](Self::drop_groups) the
+	/// key when none does. The reader starts where the answer says, never where the groups
+	/// the cache holds happen to say: a drop, or the fill closed unanswered, says no group
+	/// starts from the floor through the time, so it starts at the group just below the floor,
+	/// or past the time when the floor is 0. A [refusal](Self::refuse_groups) fails the reader
+	/// with its error until its ranges change.
+	pub fn floor(&self) -> u64 {
+		self.inner.floor.unwrap_or(self.inner.start.group)
+	}
+
+	/// Whether it answers a reader's time start, whose first group is the one containing the
+	/// time from the [`floor`](Self::floor) through it, even when the floor is the time
+	/// itself: a drop then says no group starts there, and a refusal fails the reader.
+	pub fn is_time_start(&self) -> bool {
+		self.inner.floor.is_some()
 	}
 
 	/// Whether a [`Consumer::fetch_group`](super::Consumer::fetch_group) asked or joined it,
@@ -934,22 +994,6 @@ impl Fill {
 		self.inner.end
 	}
 
-	/// The time a reader's range starts at that no group the cache holds resolves, in the
-	/// track's timescale (a bare start on a scale-less track), so this fill looks it up:
-	/// [`accept`](Self::accept) the group containing it, the newest one starting at or before
-	/// it, or the oldest group when every group starts after it. The reader's range then
-	/// starts there.
-	///
-	/// A lookup owes no group, so [`wanted`](Self::wanted) is `None` and
-	/// [`is_wanted`](Self::is_wanted) false throughout; it waits only on its first accept.
-	/// Dropped unanswered, as a handler that can't resolve times does, the reader's range
-	/// reaches back to the newest group the cache holds at or before the time, or, with none,
-	/// reads every group the cache holds and asks none starting before the time. `None` for
-	/// a fill of groups.
-	pub fn time(&self) -> Option<u64> {
-		self.inner.time
-	}
-
 	/// The most urgent delivery priority among the readers waiting on it now.
 	pub fn priority(&self) -> i8 {
 		self.inner.asks.read().priority()
@@ -969,13 +1013,18 @@ impl Fill {
 	/// Insert group `key` into the track's cache, handing it to the readers waiting on
 	/// it, and return a [`group::Producer`] to fill.
 	///
+	/// On a track this publisher accepted, a group past every one it produced is its live feed,
+	/// which its subscriptions deliver too; one below is history, served only to whoever misses
+	/// it. A relay's copy leaves that to its upstream's subscription.
+	///
 	/// The group starts at [`start`](Self::start)'s frame when it is the first group, so the
-	/// frames written keep the indices they have in the group. `info` sets the track's
-	/// [`Info`] if it hasn't been accepted yet (a fetch with no live subscription), and is
-	/// ignored otherwise. Errors with [`Error::InvalidRange`] outside the fill,
-	/// [`Error::Duplicate`] if the group was already answered or cached, [`Error::Skipped`] if
-	/// the track skipped it, or the track's abort error.
-	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<group::Producer> {
+	/// frames written keep the indices they have in the group. A key from the
+	/// [`floor`](Self::floor) up to the start's answers the start with that group, from its
+	/// first frame. `info` sets the track's [`Info`] if it hasn't been accepted yet (a fetch
+	/// with no live subscription), and is ignored otherwise. Returns `None` if the group was
+	/// already answered or cached. Errors with [`Error::InvalidRange`] outside the fill,
+	/// [`Error::Skipped`] if the track skipped it, or the track's abort error.
+	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
 		self.inner.accept(key, info.into())
 	}
 
@@ -1259,7 +1308,7 @@ impl Fill {
 
 impl Inner {
 	fn contains(&self, key: u64) -> bool {
-		(self.start.group..self.end).contains(&key)
+		(self.floor.unwrap_or(self.start.group)..self.end).contains(&key)
 	}
 
 	fn is_wanted(&self, key: u64) -> bool {
@@ -1319,19 +1368,25 @@ impl Inner {
 		}
 	}
 
-	fn accept(&self, key: u64, info: Option<Info>) -> Result<group::Producer> {
+	fn accept(&self, key: u64, info: Option<Info>) -> Result<Option<group::Producer>> {
 		self.accept_from(key, info, self.bounds(key))
 	}
 
-	fn accept_from(&self, key: u64, info: Option<Info>, frames: group::Bounds) -> Result<group::Producer> {
+	fn accept_from(&self, key: u64, info: Option<Info>, frames: group::Bounds) -> Result<Option<group::Producer>> {
 		if !self.contains(key) {
 			return Err(Error::InvalidRange);
 		}
 		let Some(end) = key.checked_add(1) else {
 			return Err(Error::InvalidRange);
 		};
-		if self.result.read().resolved.contains(&key) {
-			return Err(Error::Duplicate);
+		// A key below the start answers the start, so no other group starts from it through
+		// the start.
+		let answered = match key < self.start.group {
+			true => key..self.start.group + 1,
+			false => key..end,
+		};
+		if self.result.read().resolved.overlaps(&answered) {
+			return Ok(None);
 		}
 		// Written for a reader that has yet to pick it up, which the next group waits on.
 		// Recorded before the group is cached, since a reader may take it from the cache and
@@ -1349,7 +1404,7 @@ impl Inner {
 		// Cache the group before answering: readers resolve an accept through the cache.
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
 			let res = match self.flight {
-				true => state.insert_flight(key, frames, info),
+				true => state.insert_flight(key, frames, info).map(Some),
 				false => state.insert_group_request(key, frames, info),
 			};
 			let deferred = state.deferred();
@@ -1358,14 +1413,15 @@ impl Inner {
 			res
 		});
 		if unseen
-			&& res.is_err()
+			&& !matches!(res, Ok(Some(_)))
 			&& let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
 		{
 			pending.unseen.remove(key..end);
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(key..end);
-			if let Ok(group) = &res
+			outcome.resolved.insert(answered);
+			if let Ok(Some(group)) = &res
 				&& (self.flight || frames.start > 0 || frames.end.is_some())
 			{
 				outcome.partial.insert(key, group.handle());
@@ -1386,7 +1442,7 @@ impl Inner {
 				state.drop_unfed(groups.clone(), hole.clone());
 			}
 		}
-		self.refuse(groups, err, asked);
+		self.answer(groups, err, asked, true);
 	}
 
 	/// The part of `groups` inside the fill that a reader still reads and nothing answered yet.
@@ -1415,12 +1471,17 @@ impl Inner {
 	}
 
 	fn refuse(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>) {
+		self.answer(groups, err, asked, false);
+	}
+
+	/// Answer `groups` with `err`, `dropped` when the source has none of them.
+	fn answer(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>, dropped: bool) {
 		if groups.is_empty() {
 			return;
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			for groups in groups.iter() {
-				outcome.refuse(groups.clone(), err.clone(), asked);
+				outcome.refuse(groups.clone(), err.clone(), asked, dropped);
 			}
 		}
 		for groups in groups.iter() {
@@ -1512,7 +1573,7 @@ impl Drop for Inner {
 			}
 			if let Ok(mut outcome) = self.result.write() {
 				for groups in left.iter() {
-					outcome.refuse(groups.clone(), Error::Dropped, asked);
+					outcome.refuse(groups.clone(), Error::Dropped, asked, true);
 				}
 			}
 		}
@@ -1525,7 +1586,7 @@ impl TrackState {
 	/// or the live feed may still deliver: a fill refused is no verdict on the feed.
 	fn drop_unfed(&mut self, groups: ops::Range<u64>, hole: super::Hole) {
 		// Until the serving session resolves where the feed starts, it may deliver anything.
-		if matches!(self.start, super::Start::Pending(_)) {
+		if matches!(self.start, super::FeedStart::Pending(_)) {
 			return;
 		}
 		let now = self.cache.pool().now_wall();
@@ -1571,7 +1632,7 @@ impl Readers {
 	}
 }
 
-/// One group of a [`Fill`], for a session serving it a group at a time. Answering it answers
+/// One group of a [`FillGroups`], for a session serving it a group at a time. Answering it answers
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct GroupFill {
@@ -1612,11 +1673,11 @@ impl GroupFill {
 	}
 
 	/// Accept the actual wire range, which an older or compressed upstream may have widened.
-	pub(crate) fn accept_from(&self, info: Info, frames: group::Bounds) -> Result<group::Producer> {
+	pub(crate) fn accept_from(&self, info: Info, frames: group::Bounds) -> Result<Option<group::Producer>> {
 		self.inner.accept_from(self.key, Some(info), frames)
 	}
 
-	/// Poll until no reader waits on this group, as [`Fill::poll_unwanted`].
+	/// Poll until no reader waits on this group, as [`FillGroups::poll_unwanted`].
 	pub(crate) fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_unwanted(self.key, waiter)
 	}
@@ -1638,9 +1699,9 @@ impl GroupFill {
 		}
 	}
 
-	/// Insert the group into the cache, as [`Fill::accept`].
+	/// Insert the group into the cache, as [`FillGroups::accept`].
 	#[cfg(test)]
-	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
+	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
 		self.inner.accept(self.key, info.into())
 	}
 

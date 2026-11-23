@@ -322,6 +322,39 @@ describe("Backpressure", () => {
 		});
 	}
 
+	// A ring re-anchored on a retained backlog trails the clock, which a live picture moved on, and
+	// skips onto it. Metered by its playhead, the backlog would come one floor and window per state
+	// report, each skipped as late on arrival.
+	it("releases at once what a ring trailing the clock past its bound skips", () => {
+		const gate = new Backpressure(1000, false, Duration.millis(200), Duration.millis(200));
+		const signal = new AbortController().signal;
+		gate.observe(ms(0), false, ms(0));
+		for (let t = 0; t < 240; t += 20) gate.inserted(ms(t), ms(t + 20));
+		const wait = gate.wait(ms(240), signal);
+		expect(Bun.peek.status(wait)).toBe("pending");
+		// Within the bound the ring stretches onto the clock, playing everything from its playhead.
+		gate.observe(ms(0), false, ms(200));
+		expect(Bun.peek.status(wait)).toBe("pending");
+		gate.observe(ms(0), true, ms(2000));
+		expect(Bun.peek.status(wait)).toBe("fulfilled");
+		// Released up to a floor and window past the clock, where the ring skips to.
+		for (let t = 260; t <= 2220; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2240), signal))).toBe("pending");
+	});
+
+	// The ring skips all the way onto the clock, not to the bound behind it, so a floor short of the
+	// bound must still be released past the clock or the skip lands on an empty ring and stalls.
+	it("releases past the clock with a floor short of the bound", () => {
+		// At 48 kHz the floor is the 50 ms asked for, not a render quantum's 128 ms at 1 kHz.
+		const gate = new Backpressure(48_000, false, Duration.millis(50), Duration.millis(200));
+		const signal = new AbortController().signal;
+		gate.observe(ms(0), false, ms(0));
+		for (let t = 0; t < 80; t += 20) gate.inserted(ms(t), ms(t + 20));
+		gate.observe(ms(0), true, ms(2000));
+		for (let t = 80; t <= 2060; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2080), signal))).toBe("pending");
+	});
+
 	// The next frame past a hole lies far ahead of the playhead, which never nears it while the ring
 	// drains, so it is released by what the ring holds and the hole plays as silence.
 	it("releases the frame past a hole once the ring runs short", () => {
@@ -410,7 +443,7 @@ describe("Backpressure", () => {
 	it("counts a frame still decoding where its output lands", () => {
 		const gate = new Backpressure(1000, true, Duration.millis(2000));
 		gate.observe(ms(0), false);
-		gate.decoded(ms(520), ms(500));
+		gate.decoded(ms(520), ms(20));
 		gate.inserted(ms(480), ms(500));
 		const signal = new AbortController().signal;
 		expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("fulfilled");
@@ -547,7 +580,7 @@ describe("AudioBuffer steering", () => {
 		const { buffer, sent } = fake(100);
 		try {
 			buffer.received(Duration.millis(1000));
-			buffer.decoded(ms(1020), ms(1014));
+			buffer.decoded(ms(1020), ms(6));
 			buffer.received(Duration.millis(1040));
 			expect(sent.slice(1)).toEqual([
 				{ type: "received", end: 1_000_000 },
@@ -598,6 +631,71 @@ describe("AudioBuffer steering", () => {
 				{ type: "clock", timestamp: 2_400_000, time: 2.25 },
 				{ type: "clock", time: 2.5 },
 			]);
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// The gate reads the clock where the ring rendered its reported playhead, on the ring's timeline.
+	it("releases the backlog of a ring trailing the clock past its bound", () => {
+		let position = 1000;
+		const clock = started();
+		const { buffer, state, context } = fake(100, {
+			bound: 200,
+			clock: { position: () => position, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		const signal = new AbortController().signal;
+		try {
+			context.currentTime = 1;
+			context.sounding = 1;
+			buffer.insert(ms(1000), [new Float32Array(160)]);
+			state(ms(1000), false, 0, 1);
+			const wait = buffer.wait(ms(1160), signal);
+			expect(Bun.peek.status(wait)).toBe("pending");
+			position = 1200;
+			state(ms(1000), false, 0, 1);
+			expect(Bun.peek.status(wait)).toBe("pending");
+			position = 3000;
+			state(ms(1000), true, 0, 1);
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
+			// Released up to a floor and window past the clock, where the ring skips to.
+			for (const t of [2800, 2950, 3100]) expect(Bun.peek.status(buffer.wait(ms(t), signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(ms(3250), signal))).toBe("pending");
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// A rejoin's replayed backlog trails the clock by seconds, and the ring skips it unheard. Held to the
+	// ring's pace, the live edge behind it would arrive only once the ring had drained it all.
+	it("releases at once, and reports stale, what trails the clock past its bound short of a declared end", () => {
+		const clock = started();
+		const { buffer, state } = fake(100, {
+			bound: 200,
+			clock: { position: () => 3000, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		const signal = new AbortController().signal;
+		try {
+			buffer.insert(ms(2900), [new Float32Array(160)]);
+			state(ms(2900), false, 0);
+			// Within the bound the ring plays it, so the gate holds what lies past its floor and window.
+			expect(buffer.stale(ms(2850))).toBe(false);
+			expect(Bun.peek.status(buffer.wait(ms(3300), signal))).toBe("pending");
+			expect(buffer.stale(ms(2700))).toBe(true);
+			expect(Bun.peek.status(buffer.wait(ms(1000), signal))).toBe("fulfilled");
+
+			// A finite tail plays out however far it trails the clock, through the next utterance too.
+			buffer.end(ms(2800));
+			expect(buffer.stale(ms(2700))).toBe(false);
+			// The decoder asks with where its output ends, which for the last packet is the end itself.
+			expect(buffer.stale(ms(2800))).toBe(false);
+			buffer.next();
+			expect(buffer.stale(ms(2700))).toBe(false);
+			expect(buffer.stale(ms(2790))).toBe(false);
+			buffer.reset();
+			expect(buffer.stale(ms(2700))).toBe(true);
 		} finally {
 			buffer.close();
 			clock.close();
@@ -661,6 +759,36 @@ describe("AudioBuffer steering", () => {
 		}
 	});
 
+	// The ring renders ahead of what sounds by the context's current lead, which a fall in the output
+	// latency shortens at once, where `output` holds its peak for five seconds.
+	it("reports how far the worklet renders ahead of what sounds now", () => {
+		const clock = started();
+		const { buffer, state, context } = fake(300);
+		try {
+			context.baseLatency = 0.01;
+			context.outputLatency = 0.25;
+			context.currentTime = 1;
+			context.sounding = 0.74;
+			state(ms(0), false, 0);
+			expect(buffer.lead.peek()).toEqual(Duration.millis(260));
+			// The output latency fell to 20 ms: the peak stays, and the lead follows.
+			context.outputLatency = 0.02;
+			context.currentTime = 2;
+			context.sounding = 1.97;
+			state(ms(0), false, 0);
+			expect(buffer.output.peek()).toEqual(Duration.millis(260));
+			expect(buffer.lead.peek()).toEqual(Duration.millis(30));
+			// A move of a couple of milliseconds, a render callback's worth of noise, is left alone.
+			context.currentTime = 3;
+			context.sounding = 2.972;
+			state(ms(0), false, 0);
+			expect(buffer.lead.peek()).toEqual(Duration.millis(30));
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
 	// Startup holds only what the ring must from the first message, before any state report.
 	it("holds the delay less the output latency the context reports at construction", () => {
 		const sent: Message[] = [];
@@ -698,6 +826,31 @@ describe("AudioBuffer steering", () => {
 			context.sounding = 1.17;
 			state(ms(5050), true, 0, 1.2);
 			expect(buffer.timestamp.peek()).toBe(ms(5050));
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// Opus output lands on the ring a pre-skip before its frame timestamp, at its presentation time, so
+	// the clock maps onto the ring unshifted and the playhead reports the ring's position: only a frame
+	// timestamp, as `received` takes, moves back by the pre-skip.
+	it("plays and reports the ring at presentation time under a pre-skip", () => {
+		const clock = started();
+		const { buffer, sent, state, context } = fake(100, {
+			clock: { position: () => 5000, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		try {
+			buffer.decoded(ms(5020), ms(6.5));
+			buffer.received(Duration.millis(5020));
+			context.currentTime = 1;
+			context.sounding = 1;
+			state(ms(5000), false, 0, 1);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([
+				{ type: "clock", timestamp: 5_000_000, time: 1 },
+			]);
+			expect(sent).toContainEqual({ type: "received", end: 5_013_500 });
+			expect(buffer.timestamp.peek()).toBe(ms(5000));
 		} finally {
 			buffer.close();
 			clock.close();

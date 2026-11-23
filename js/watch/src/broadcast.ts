@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Instance, Error as NetError, Path, StreamCode, Track } from "@moq/net";
+import { Instance, Error as NetError, Path, Track } from "@moq/net";
 import {
 	Derived,
 	Effect,
@@ -61,8 +61,8 @@ function watchCovered(
 			for (;;) {
 				const entry = await announced.next();
 				if (!entry) break;
-				if (entry.kind === "absent" || entry.kind === "offline") active.delete(entry.prefix);
-				else if (entry.kind === "present") active.add(entry.prefix);
+				if (entry.kind === "absent") active.delete(entry.prefix);
+				else active.add(entry.prefix);
 				covered.set([...active].some((prefix) => Path.hasPrefix(prefix, path)));
 			}
 		} catch {
@@ -239,9 +239,13 @@ export type BroadcastInput = {
 	// ignored otherwise. Read `output.catalog` for the effective catalog in any mode.
 	catalog: Getter<Catalog.Root | undefined>;
 
-	// Whether playback still has media of the broadcast left to play once its publisher finished it.
-	// A finished broadcast reads "live" until this is false. Defaults to true, so a broadcast nothing
-	// plays out (one no Player drives, or an included one) reads "live" until it closes.
+	/**
+	 * Whether playback still has media of the broadcast left to play once its publisher finished it.
+	 * A finished broadcast reads "live" until this is false. Defaults to true, so a broadcast nothing
+	 * plays out (one no Player drives, or an included one) reads "live" until it closes.
+	 *
+	 * @internal Driven by the `Player`, which knows what its playout has left.
+	 */
 	tail: Getter<boolean>;
 };
 
@@ -250,7 +254,7 @@ export type BroadcastOutput = {
 	// "connecting" means no session can answer yet: none is attached, as while the connection
 	// dials, redials, or was refused, or one is still delivering its initial announcements.
 	// "offline" means one could answer and the broadcast is not there, or its publisher finished it
-	// and `tail` says nothing is left to play.
+	// and playback has nothing of it left to play.
 	// "error" means the origin refused the broadcast; `error` says why.
 	// "unsupported" means its catalog requires a newer player.
 	status: Signal<"connecting" | "offline" | "loading" | "live" | "error" | "unsupported">;
@@ -544,9 +548,9 @@ export class Broadcast {
 			const closed = nested.get(request.closed);
 			if (!closed) return;
 			// A follower outlives its instances, so only a refusal ends it. A plain request
-			// ends with its accepted instance, which reads as offline rather than an error.
-			const offline =
-				!follow && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
+			// ends with its accepted instance losing its route, which reads as offline rather
+			// than an error.
+			const offline = !follow && resolved && NetError.retry(closed) === NetError.Retry.Reroute;
 			if (!offline) nested.set(this.#out.error, closed, undefined);
 		});
 	}
@@ -581,7 +585,10 @@ export class Broadcast {
 				accepted =
 					catalog &&
 					Catalog.checkResolvable(Catalog.checkRenditions(Catalog.RootSchema.parse(catalog)), name);
-				if (accepted) status = "live";
+				if (accepted) {
+					status = "live";
+					warnSkipped(name, accepted);
+				}
 			} catch (err) {
 				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
 				console.error("rejecting catalog", name, err);
@@ -650,6 +657,7 @@ export class Broadcast {
 
 					this.#raw.set(Catalog.checkResolvable(Catalog.checkRenditions(update), name), true);
 					this.#progress.set("live");
+					warnSkipped(name, update);
 				}
 			} catch (err) {
 				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
@@ -764,7 +772,7 @@ export class Broadcast {
 	 * ```ts
 	 * effects.run((effect) => {
 	 *   const child = broadcast.include(effect, "alice");
-	 *   const source = new Video.Source({ broadcast: child, supported: Video.Decoder.supported });
+	 *   const source = new Video.Source({ broadcast: child });
 	 *   effect.cleanup(() => source.close());
 	 *   // Feed source into a decoder as with any broadcast.
 	 * });
@@ -808,4 +816,10 @@ export class Broadcast {
 		for (const { owner } of this.#children.values()) owner.close();
 		this.#children.clear();
 	}
+}
+
+// The rest of the catalog plays; an entry a newer draft defines only costs the viewer that entry.
+function warnSkipped(name: Moq.Path.Valid, root: Catalog.Root) {
+	const skipped = Catalog.skipped(root);
+	if (skipped) console.warn("catalog entries need moq-hang draft", skipped.version, "to read", name, skipped);
 }

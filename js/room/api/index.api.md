@@ -68,43 +68,57 @@ export const KIND: {
 
 export type Kind = typeof KIND[keyof typeof KIND];
 
+export namespace Local {
+	export interface Camera {
+		readonly broadcast: import("@moq/publish").Broadcast;
+		readonly capture: import("@moq/publish").Video.Capture;
+		readonly enabled: Signal<boolean>;
+		readonly source: Source.Camera;
+	}
+	export interface Microphone {
+		readonly enabled: Signal<boolean>;
+		readonly root: Getter<AudioNode | undefined>;
+		readonly source: Source.Microphone;
+		readonly volume: Signal<number>;
+	}
+	export interface Screen {
+		readonly audio: {
+			readonly root: Getter<AudioNode | undefined>;
+		};
+		readonly broadcast: import("@moq/publish").Broadcast;
+		readonly capture: import("@moq/publish").Video.Capture;
+		readonly enabled: Signal<boolean>;
+		readonly source: Source.Screen;
+	}
+}
+
 export class Local {
 	constructor(props: LocalProps);
-	readonly audio: {
-		readonly microphone: {
-			readonly root: Getter<AudioNode | undefined>;
-			readonly volume: Signal<number>;
-		};
-		readonly screen: {
-			readonly root: Getter<AudioNode | undefined>;
-		};
-	};
-	readonly camera: import("@moq/publish").Broadcast;
-	readonly cameraCapture: import("@moq/publish").Video.Capture;
-	readonly cameraEnabled: Signal<boolean>;
+	readonly camera: Local.Camera;
 	readonly chatting: Signal<boolean>;
 	close(): void;
 	readonly enabled: Signal<boolean>;
 	readonly identity: Getter<Path.Valid>;
-	readonly microphone: Source.Microphone;
-	readonly microphoneEnabled: Signal<boolean>;
+	readonly microphone: Local.Microphone;
 	get preview(): Getter<Preview>;
-	readonly screen: import("@moq/publish").Broadcast;
-	readonly screenCapture: import("@moq/publish").Video.Capture;
-	readonly screenEnabled: Signal<boolean>;
-	readonly share: Source.Screen;
+	readonly screen: Local.Screen;
 	readonly typing: Signal<boolean>;
 	readonly user: UserFields;
-	readonly webcam: Source.Camera;
 }
 
 export interface LocalProps {
-	cameraEnabled?: GetterInit<boolean>;
+	camera?: {
+		enabled?: GetterInit<boolean>;
+	};
 	connection: Connection;
 	enabled?: GetterInit<boolean>;
 	identity: GetterInit<Path.Valid>;
-	microphoneEnabled?: GetterInit<boolean>;
-	screenEnabled?: GetterInit<boolean>;
+	microphone?: {
+		enabled?: GetterInit<boolean>;
+	};
+	screen?: {
+		enabled?: GetterInit<boolean>;
+	};
 	user?: UserProps;
 }
 
@@ -170,7 +184,7 @@ export class Room {
 	readonly enabled: Getter<boolean>;
 	readonly identity: Getter<Path.Valid | undefined>;
 	readonly prefix: Getter<Path.Valid | undefined>;
-	get remotes(): Getter<Map<Path.Valid, Remote>>;
+	get remotes(): Getter<ReadonlyMap<Path.Valid, Remote>>;
 }
 
 export interface RoomProps {

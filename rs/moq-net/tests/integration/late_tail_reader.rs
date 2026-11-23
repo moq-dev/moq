@@ -19,10 +19,11 @@ const START: u64 = 407;
 const FRAMES: u64 = 10;
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Read every frame `subscription` delivers from the relay over a fresh `version` session.
@@ -89,13 +90,15 @@ async fn each_late_reader_reads_the_finished_group() {
 						.with_max_age(None),
 				)
 				.unwrap();
-			let mut group = track.append_group(START).unwrap();
+			let mut group = track
+				.append_group(moq_net::Timestamp::from_micros(START).unwrap())
+				.unwrap();
 			for frame in 0..FRAMES {
 				group
 					.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			let finished = track.finish().unwrap();
 			broadcast.announce().unwrap();
 
@@ -149,13 +152,15 @@ async fn concurrent_late_readers_read_the_finished_group() {
 					.with_max_age(None),
 			)
 			.unwrap();
-		let mut group = track.append_group(START).unwrap();
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_micros(START).unwrap())
+			.unwrap();
 		for frame in 0..FRAMES {
 			group
 				.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		let finished = track.finish().unwrap();
 		broadcast.announce().unwrap();
 
@@ -219,13 +224,15 @@ async fn an_empty_history_read_leaves_the_group_to_readers_joining_meanwhile() {
 						.with_max_age(None),
 				)
 				.unwrap();
-			let mut group = track.append_group(START).unwrap();
+			let mut group = track
+				.append_group(moq_net::Timestamp::from_micros(START).unwrap())
+				.unwrap();
 			for frame in 0..FRAMES {
 				group
 					.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			let finished = track.finish().unwrap();
 			broadcast.announce().unwrap();
 

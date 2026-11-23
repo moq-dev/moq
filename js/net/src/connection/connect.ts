@@ -14,7 +14,6 @@ import * as Hex from "../util/hex.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
-import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
 import type { Session } from "./session.ts";
@@ -44,7 +43,7 @@ const DEFAULT_MAX_STREAMS = 10_000;
 
 // Match moq-tokio so WebSocket readers have the same bandwidth-delay budget.
 const DEFAULT_RECEIVE_WINDOW = 4 << 20;
-const DEFAULT_STREAM_RECEIVE_WINDOW = 1 << 20;
+const DEFAULT_STREAM_RECEIVE_WINDOW = 4 << 20;
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
@@ -76,7 +75,7 @@ export interface WebSocketProps {
 	/** Connection receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	receiveWindow?: number;
 
-	/** Per-stream receive window in bytes (default: 1 MiB). Must be a positive safe integer. */
+	/** Per-stream receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	streamReceiveWindow?: number;
 }
 
@@ -252,13 +251,6 @@ export interface ConnectProps {
 	consume?: OriginProducer;
 
 	/**
-	 * The moq-transport extensions to offer, each on unless set to `false`.
-	 *
-	 * @internal Tests only; nothing outside the package consumes it.
-	 */
-	extensions?: Extensions.Extensions;
-
-	/**
 	 * Credentials to present, kept apart from the URL.
 	 *
 	 * The first is the connection credential: it rides SETUP, and the URL's `jwt` query too
@@ -267,6 +259,19 @@ export interface ConnectProps {
 	 * keeps it as the connection credential, and then every token rides AUTH.
 	 */
 	tokens?: readonly string[];
+
+	/**
+	 * Carry the connection credential, the first of {@link ConnectProps.tokens}, in the URL's
+	 * `auth` query parameter instead of SETUP and `jwt`. For a relay that reads a credential of
+	 * its own from the URL and takes a SETUP token or `jwt` to be its own kind. The peer's
+	 * verdict on it is judged like any connection credential, and a credential in a `Signal` of
+	 * tokens is replaced for each dial without changing the URL. Replacing it on a live session
+	 * takes a redial: the new credential rides no AUTH stream, so `answered()` waits for it.
+	 *
+	 * An `auth` parameter the URL already has is replaced. A URL's own `jwt` still wins: then
+	 * every token rides AUTH. A supplied `transport` never dials the URL, so it refuses `urlAuth`.
+	 */
+	urlAuth?: boolean;
 
 	/**
 	 * Build the session on `auth`, so it presents every token the handle holds and a route
@@ -313,8 +318,6 @@ type SessionProps = {
 	handle?: Auth.Handle;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
-	/** The moq-transport extensions this side offers. */
-	extensions: Extensions.Offered;
 	/** The connection credential SETUP presents, on versions that carry one. */
 	token?: Uint8Array;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
@@ -361,6 +364,8 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.versions = normalizeVersions(props);
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
+	// The URL is never dialed for a supplied transport, so the credential it carries would be dropped.
+	if (props.transport && props.urlAuth) throw new TypeError("urlAuth cannot reach a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	if (signal.aborted) reached?.transport.close();
 	signal.throwIfAborted();
@@ -429,13 +434,14 @@ export class Reached {
  */
 export async function reachable(
 	url: URL,
-	props: Pick<ConnectProps, "tokens" | "versions" | "webtransport" | "websocket" | "timeout">,
+	props: Pick<ConnectProps, "tokens" | "urlAuth" | "versions" | "webtransport" | "websocket" | "timeout">,
 	signal: AbortSignal,
 ): Promise<Reached | undefined> {
 	if (!isWebTransportSupported() || signal.aborted) return undefined;
 	const tokens = props.tokens ?? [];
 	const offered = offer(normalizeVersions(props));
-	const dialUrl = parse(credential(url, tokens, offered.setupToken).url).url;
+	const carrier = { setupToken: offered.setupToken, urlAuth: props.urlAuth };
+	const dialUrl = parse(credential(url, tokens, carrier).url).url;
 	const { promise: cancel, resolve } = Promise.withResolvers<void>();
 	const onAbort = () => resolve();
 	signal.addEventListener("abort", onAbort, { once: true });
@@ -468,14 +474,14 @@ async function connectInner(
 	reached?: WebTransport,
 ): Promise<[Session, Presentation]> {
 	const offered = offer(props.versions);
-	const dial = credential(raw, tokens, offered.setupToken);
+	const carrier = { setupToken: offered.setupToken, urlAuth: props.urlAuth };
+	const dial = credential(raw, tokens, carrier);
 	const url = parse(dial.url).url;
-	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
+	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, carrier);
 	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,
 		client: true,
-		extensions: Extensions.offered(props.extensions),
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
 		probeTarget: props.viewers?.target,
@@ -556,8 +562,7 @@ async function dialRace(
 					protocols: offered.alpns,
 					versions: Object.fromEntries(offered.alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
 					config: {
-						maxStreamsBidi: maxStreams,
-						maxStreamsUni: maxStreams,
+						maxStreams,
 						receiveWindow: BigInt(props.websocket?.receiveWindow ?? DEFAULT_RECEIVE_WINDOW),
 						streamReceiveWindow: BigInt(
 							props.websocket?.streamReceiveWindow ?? DEFAULT_STREAM_RECEIVE_WINDOW,

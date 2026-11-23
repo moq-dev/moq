@@ -3,9 +3,9 @@
 set -euo pipefail
 
 case "${1:-}" in
-    libmoq-v | moq-gst-v) prefix=$1 ;;
+    libmoq-v | moq-gst-v | moq-relay-v) prefix=$1 ;;
     *)
-        echo "usage: $0 {libmoq-v|moq-gst-v}" >&2
+        echo "usage: $0 {libmoq-v|moq-gst-v|moq-relay-v}" >&2
         exit 2
         ;;
 esac

@@ -28,10 +28,11 @@ const SUBSCRIBE: u8 = 0x03;
 const SUBSCRIBE_TRACKS: u8 = 0x51;
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// The next event as `+name`, `-name`, `synced`, `end`, or `error: ..`.
@@ -41,8 +42,8 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 		.expect("listing stalled")
 	{
 		Ok(Some(TracksEvent::Added { name, .. })) => format!("+{name}"),
-		Ok(Some(TracksEvent::Removed { name })) => format!("-{name}"),
-		Ok(Some(TracksEvent::Finished { name })) => format!("~{name}"),
+		Ok(Some(TracksEvent::Removed { name, .. })) => format!("-{name}"),
+		Ok(Some(TracksEvent::Finished { name, .. })) => format!("~{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
@@ -121,7 +122,7 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"before"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(read(&mut sub).await, Some((0, b"before".to_vec())), "{version}");
 		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 0, "{version}: listed unasked");
 
@@ -135,7 +136,7 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"after"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(read(&mut sub).await, Some((1, b"after".to_vec())), "{version}");
 		assert_eq!(subscribes(&pair), 1, "{version}");
 	}

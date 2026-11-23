@@ -12,43 +12,29 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
-use rangemap::RangeSet;
-
 pub(crate) use crate::ledger::{GRACE, grace};
 use crate::{
-	ledger::Ledger,
+	cache,
+	ledger::{Ledger, RUN_OVERHEAD},
 	time::{Deadline, Instant},
+	track,
 };
 
 /// The data streams a subscription has received, and the groups they account for.
 #[derive(Debug)]
 pub(crate) struct Tail {
 	ledger: Ledger,
+	// What the ledger's gaps bill to the copy's account, once it has one. A publisher's drops
+	// and skips name any range, so under pool pressure the oldest gaps fold early rather
+	// than grow with a grace that never passes.
+	bill: Option<cache::Reader>,
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
 	// The publisher's FIN ended the track, its only end before lite-05, so a session that
 	// dies before the tail settles declares that end before aborting.
 	ended: bool,
-	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under
-	// that update names one only if it was sent before the publisher served the group, so the
-	// group won over it, even once the cache evicted it.
-	finished: RangeSet<u64>,
-	// The span of the finished runs a fold under the pool's debt forgot since the last update.
-	// A stale drop there for a group the ledger already accounted may be one its stream
-	// overtook, so the next update owes none of it again.
-	folded: Option<Range<u64>>,
-	// How many updates were sent, so a stale drop can tell whether a later one superseded it.
-	updates: u64,
-	// What `finished` bills to the track's account, [`FINISHED_OVERHEAD`] per run, once the
-	// subscription has a copy to bill.
-	bill: Option<crate::model::track::Bill>,
 }
-
-/// Heap `finished` keeps per run, doubled for half-full `BTreeMap` nodes as the cache's own
-/// overheads are. Billed, so a publisher fragmenting the streams it finishes between updates
-/// costs what the cache would hold.
-const FINISHED_OVERHEAD: u64 = 2 * size_of::<Range<u64>>() as u64;
 
 impl Default for Tail {
 	fn default() -> Self {
@@ -61,57 +47,11 @@ impl Tail {
 	pub fn new(grace: Duration) -> Self {
 		Self {
 			ledger: Ledger::new(grace),
+			bill: None,
 			streams: 0,
 			active: 0,
 			ended: false,
-			finished: RangeSet::new(),
-			folded: None,
-			updates: 0,
-			bill: None,
 		}
-	}
-
-	/// Bill what this tail keeps to `bill`, the subscription's copy's account.
-	pub fn bill(&mut self, bill: crate::model::track::Bill) {
-		self.bill = Some(bill);
-		self.rebill();
-	}
-
-	/// Bill what `finished` keeps, and under the pool's debt [`Self::fold`] it.
-	fn rebill(&mut self) {
-		let Some(bill) = &mut self.bill else {
-			return;
-		};
-		let runs = self.finished.len() + usize::from(self.folded.is_some());
-		bill.set(runs as u64 * FINISHED_OVERHEAD);
-		if bill.debt() > 0
-			&& self.fold()
-			&& let Some(bill) = &mut self.bill
-		{
-			bill.set(2 * FINISHED_OVERHEAD);
-		}
-	}
-
-	/// Fold all but the newest finished run into `folded`, returning whether any was: a stale
-	/// drop under this update then stands as the publisher judged it, but the update owes none
-	/// of what it names that [`Self::overtaken`] reports. The newest run stays, so streams
-	/// finishing in key grow nothing to charge again.
-	pub fn fold(&mut self) -> bool {
-		let (Some(first), Some(older), Some(newest)) = (
-			self.finished.iter().next().cloned(),
-			self.finished.iter().nth_back(1).cloned(),
-			self.finished.iter().next_back().cloned(),
-		) else {
-			return false;
-		};
-		let span = match self.folded.take() {
-			Some(folded) => folded.start.min(first.start)..folded.end.max(older.end),
-			None => first.start..older.end,
-		};
-		self.folded = Some(span);
-		self.finished = RangeSet::new();
-		self.finished.insert(newest);
-		true
 	}
 
 	/// Record that the publisher's FIN ended the track.
@@ -129,6 +69,31 @@ impl Tail {
 		self.ledger.set_grace(grace);
 	}
 
+	/// Follow the copy `track`: wait on its max age and `budget`, and bill the ledger to its
+	/// account. Call it with no lock on `track`'s state held, as [`Self::account`] and
+	/// [`Self::expire`] must be: billing the ledger can take that lock to settle the debt.
+	pub fn follow(&mut self, track: &track::Producer, budget: Duration) {
+		self.set_grace(track.tail_grace(budget));
+		if self.bill.is_none() {
+			self.bill = Some(track.tail_bill());
+			self.rebill();
+		}
+	}
+
+	/// Bill the ledger's gaps, then pay what the pool is owed from them: fold the oldest gaps
+	/// early, giving up on them as the grace passing would, until the debt is paid or none is
+	/// left. The run they split is the subscription's own, so an in-order feed bills nothing.
+	fn rebill(&mut self) {
+		let Some(bill) = &mut self.bill else {
+			return;
+		};
+		let bytes = |ledger: &Ledger| ledger.len().saturating_sub(1) as u64 * RUN_OVERHEAD;
+		bill.set(bytes(&self.ledger));
+		while bill.debt() > 0 && self.ledger.fold_oldest().is_some() {
+			bill.set(bytes(&self.ledger));
+		}
+	}
+
 	/// Record groups as accounted for without a stream: dropped, or sent as a datagram.
 	pub fn account(&mut self, groups: Range<u64>, now: Instant) {
 		if groups.is_empty() {
@@ -136,12 +101,6 @@ impl Tail {
 		}
 		self.ledger.account(groups, now);
 		self.expire(now);
-	}
-
-	/// Owe `groups` again from `now`: a stale drop that accounted for them was reversed by a
-	/// widening, so the publisher serves or drops them anew.
-	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
-		self.ledger.unaccount(groups, now);
 	}
 
 	/// Restart the age of every gap reaching into `groups`, which the demand newly asks for.
@@ -152,6 +111,7 @@ impl Tail {
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
 		self.ledger.expire(now);
+		self.rebill();
 	}
 
 	/// See [`Ledger::covers`].
@@ -170,37 +130,6 @@ impl Tail {
 		self.ledger.folds_at(group, self.ledger.grace())
 	}
 
-	/// The runs of `groups` whose stream finished since the last update was sent.
-	pub fn finished(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
-		self.finished.overlapping(groups).cloned()
-	}
-
-	/// The runs of `groups` inside the span a fold forgot that the ledger accounts for, asked
-	/// before a stale drop of `groups` is accounted: the header of each arrived, or the grace gave
-	/// up on it, before the drop, so the drop may be one a finished stream overtook.
-	pub fn overtaken(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
-		let span = self
-			.folded
-			.as_ref()
-			.map(|folded| groups.start.max(folded.start)..groups.end.min(folded.end))
-			.filter(|span| !span.is_empty());
-		span.into_iter().flat_map(|span| self.ledger.accounted(span))
-	}
-
-	/// Forget which streams finished, for an update being sent: a stale drop under an earlier
-	/// one is no verdict, so none needs them.
-	pub fn updated(&mut self) {
-		self.updates += 1;
-		self.finished = RangeSet::new();
-		self.folded = None;
-		self.rebill();
-	}
-
-	/// How many updates were sent, each superseding the stale drops before it.
-	pub fn updates(&self) -> u64 {
-		self.updates
-	}
-
 	/// Whether a data stream whose header arrived is still being read.
 	pub fn is_reading(&self) -> bool {
 		self.active > 0
@@ -210,17 +139,11 @@ impl Tail {
 	pub fn streams(&self) -> u64 {
 		self.streams
 	}
-
-	/// Whether a stream or a drop accounted for `group` already.
-	pub fn accounts(&self, group: u64) -> bool {
-		self.ledger.covers(group..group.saturating_add(1))
-	}
 }
 
 /// A data stream whose header arrived, holding its subscription's end open until dropped.
 pub(crate) struct Reading {
 	tail: Option<kio::Producer<Tail>>,
-	group: Option<u64>,
 	active: bool,
 }
 
@@ -230,7 +153,6 @@ impl Reading {
 		let Ok(mut state) = tail.write() else {
 			return Self {
 				tail: None,
-				group,
 				active: false,
 			};
 		};
@@ -241,18 +163,16 @@ impl Reading {
 		}
 		Self {
 			tail: Some(tail.clone()),
-			group,
 			active: true,
 		}
 	}
 
-	/// Record that the stream's group arrived whole, once it finished.
-	pub fn finish(&self) {
-		if let (Some(tail), Some(group)) = (&self.tail, self.group)
+	/// Record `groups` as accounted for by this stream, such as the span its GROUP_END closed.
+	pub fn account(&self, groups: Range<u64>, now: Instant) {
+		if let Some(tail) = &self.tail
 			&& let Ok(mut state) = tail.write()
 		{
-			state.finished.insert(group..group.saturating_add(1));
-			state.rebill();
+			state.account(groups, now);
 		}
 	}
 
@@ -380,5 +300,65 @@ mod tests {
 		assert_eq!(tail.read().active, 1);
 		drop(reading);
 		assert_eq!(tail.read().active, 0);
+	}
+
+	/// A copy with no max age and a subscription with no max delay never ages a gap out, so a
+	/// publisher's alternating single-group drops bill the pool instead, and the oldest gaps
+	/// fold once it is short of room.
+	#[kio::test]
+	async fn drops_are_billed_and_fold_under_pressure() {
+		const DROPS: u64 = 1000;
+		let runtime = crate::time::sim();
+		let capacity = 64 * RUN_OVERHEAD;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		let broadcast = crate::broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		};
+		let track = track::Producer::new(std::sync::Arc::new(broadcast), "test", track::Info::timed());
+		let base = pool.used();
+
+		let mut tail = Tail::default();
+		tail.follow(&track, Duration::MAX);
+		assert_eq!(tail.ledger.grace(), Duration::MAX, "nothing ever ages a gap out");
+		let now = runtime.now();
+		for drop in 0..DROPS {
+			tail.account(2 * drop..2 * drop + 1, now);
+		}
+		assert!(tail.ledger.len() < DROPS as usize, "the oldest gaps folded");
+		assert!(
+			pool.used() <= base + capacity + 2 * RUN_OVERHEAD,
+			"the ledger stayed within the pool: {}",
+			pool.used()
+		);
+		assert_eq!(
+			pool.used(),
+			base + (tail.ledger.len() - 1) as u64 * RUN_OVERHEAD,
+			"what is left is billed"
+		);
+
+		drop(tail);
+		assert_eq!(pool.used(), base, "the bill went with the tail");
+	}
+
+	/// Without pressure nothing folds early: the pool bills the gaps and keeps them.
+	#[kio::test]
+	async fn drops_are_kept_while_the_pool_has_room() {
+		let runtime = crate::time::sim();
+		let pool = cache::Pool::unbounded();
+		let broadcast = crate::broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		};
+		let track = track::Producer::new(std::sync::Arc::new(broadcast), "test", track::Info::timed());
+		let base = pool.used();
+
+		let mut tail = Tail::default();
+		tail.follow(&track, Duration::MAX);
+		for drop in 0..100 {
+			tail.account(2 * drop..2 * drop + 1, runtime.now());
+		}
+		assert_eq!(tail.ledger.len(), 100);
+		assert_eq!(pool.used(), base + 99 * RUN_OVERHEAD);
 	}
 }

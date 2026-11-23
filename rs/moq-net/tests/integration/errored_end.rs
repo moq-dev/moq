@@ -11,7 +11,7 @@ use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::track::{Position, Subscription};
+use moq_net::track::Subscription;
 use moq_net::{Error, StreamError, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -20,10 +20,11 @@ const GROUPS: u64 = 2;
 const FRAMES: [&[u8]; 2] = [b"first", b"second"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Read every group from the first, frame by frame, returning each group's key and
@@ -87,16 +88,16 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
-		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
+		let track = broadcast.broadcast().create_track("video", info).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {
 			let mut group = track.append_next().unwrap();
 			for frame in FRAMES {
 				group.write_frame(group.at_start(), frame).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
-		track.finish_at(Position::group(GROUPS), Some(Error::App(7))).unwrap();
+		let track = track.fail(Error::App(7)).unwrap();
 
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version);

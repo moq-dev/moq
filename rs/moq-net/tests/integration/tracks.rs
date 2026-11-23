@@ -9,32 +9,38 @@ use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::broadcast::TracksEvent;
+use moq_net::broadcast::{Kind, Listed, TracksEvent};
 use moq_net::{Version, session::Limits};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn lite07() -> Version {
 	"moq-lite-07-wip".parse().unwrap()
 }
 
-/// The next event as `+name`, `-name`, `synced`, `end`, or `error: ..`.
+/// The next event as `+name`, `-name`, `~name` (finished), `synced`, `end`, or `error: ..`, a
+/// datagram track's name prefixed `d:`.
 async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
+	let named = |kind: Kind, name: &str| match kind {
+		Kind::Track => name.to_string(),
+		Kind::Datagrams => format!("d:{name}"),
+	};
 	match kio::clock::timeout(TIMEOUT, tracks.next())
 		.await
 		.expect("listing stalled")
 	{
-		Ok(Some(TracksEvent::Added { name, .. })) => format!("+{name}"),
-		Ok(Some(TracksEvent::Removed { name })) => format!("-{name}"),
-		Ok(Some(TracksEvent::Finished { name })) => format!("~{name}"),
+		Ok(Some(TracksEvent::Added { name, info })) => format!("+{}", named(info.kind(), &name)),
+		Ok(Some(TracksEvent::Removed { kind, name })) => format!("-{}", named(kind, &name)),
+		Ok(Some(TracksEvent::Finished { kind, name })) => format!("~{}", named(kind, &name)),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
@@ -103,7 +109,7 @@ async fn a_listing_carries_track_info() {
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_max_age(Duration::from_secs(3))
 		.with_priority(9)
-		.with_refresh(4)
+		.with_refresh(moq_net::track::Refresh::default().with_ratio(4))
 		.with_compression(moq_net::track::Compression::Deflate);
 	let _a = broadcast.broadcast().create_track("a", info).unwrap();
 	broadcast.announce().unwrap();
@@ -114,15 +120,83 @@ async fn a_listing_carries_track_info() {
 		.await
 		.expect("listing stalled")
 		.unwrap();
-	let Some(TracksEvent::Added { name, info }) = event else {
+	let Some(TracksEvent::Added {
+		name,
+		info: Listed::Track(info),
+	}) = event
+	else {
 		panic!("expected an add, got {event:?}");
 	};
 	assert_eq!(&*name, "a");
 	assert_eq!(info.timescale, Some(moq_net::Timescale::MILLI));
 	assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	assert_eq!(info.priority, 9);
-	assert_eq!(info.refresh, Some(4));
+	assert_eq!(info.refresh, moq_net::track::Refresh::default().with_ratio(4));
 	assert_eq!(info.compression, moq_net::track::Compression::Deflate);
+}
+
+/// A datagram track is listed apart from the track of its name, with its DATAGRAMS_INFO, and
+/// the listed name reads its datagrams.
+#[kio::test]
+async fn a_session_lists_its_peers_datagram_tracks() {
+	let publisher = produce_origin(1);
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("a", None).unwrap();
+	let mut datagrams = broadcast
+		.broadcast()
+		.create_datagrams(
+			"a",
+			moq_net::datagram::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_priority(-2),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+
+	let (subscriber, _pair) = connect(&publisher, 2, lite07()).await;
+	let remote = resolve(&subscriber).await;
+	let mut tracks = remote.tracks().unwrap();
+	assert_eq!(next(&mut tracks).await, "+a");
+	let event = kio::clock::timeout(TIMEOUT, tracks.next())
+		.await
+		.expect("listing stalled")
+		.unwrap();
+	let Some(TracksEvent::Added {
+		name,
+		info: Listed::Datagrams(info),
+	}) = event
+	else {
+		panic!("expected the datagram track, got {event:?}");
+	};
+	assert_eq!(&*name, "a");
+	assert_eq!(info.timescale, Some(moq_net::Timescale::MILLI));
+	assert_eq!(info.priority, -2);
+	assert_eq!(next(&mut tracks).await, "synced");
+
+	let mut reader = remote.datagrams(&name).unwrap();
+	kio::clock::timeout(TIMEOUT, reader.info()).await.unwrap().unwrap();
+	// Sent until one arrives: a datagram is best-effort.
+	let received = kio::clock::timeout(TIMEOUT, async {
+		loop {
+			datagrams
+				.append(moq_net::Timestamp::from_millis(0).unwrap(), b"x".as_ref())
+				.unwrap();
+			if let Some(Ok(datagram)) = futures::FutureExt::now_or_never(reader.recv()) {
+				break datagram;
+			}
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("no datagram arrived");
+	assert_eq!(received.expect("a datagram").payload, &b"x"[..]);
+
+	datagrams.finish();
+	assert_eq!(next(&mut tracks).await, "~d:a", "TRACKS_FINISH of the datagram track");
+	drop(track);
+	assert_eq!(next(&mut tracks).await, "-a");
 }
 
 /// A listed track is a track like any other: a SUBSCRIBE from the listing reads the
@@ -145,7 +219,7 @@ async fn a_listed_track_serves_its_cached_group() {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), &b"first"[..])
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(next(&mut tracks).await, "+late");
 
 	let mut sub = kio::clock::timeout(TIMEOUT, remote.track("late").unwrap().subscribe(None))

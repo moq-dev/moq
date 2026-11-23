@@ -8,7 +8,9 @@
 //!
 //! Ingest's window is the stream receive credit its transport grants, capped at [`AHEAD`]
 //! (see [`window`]), so a hop holds about what its upstream peer can have in flight on
-//! that stream. A local writer, which has no transport, uses [`AHEAD`] itself.
+//! that stream; twice that on a transport that shapes a paced stream's credit to the room
+//! left, which then buffers in the group what the transport no longer does. A local
+//! writer, which has no transport, uses [`AHEAD`] itself.
 //!
 //! Progress is in bytes on one scale per group copy: each frame entering the copy's log
 //! ends where the frames before it, payload and slot, add up to. A frame larger than the
@@ -127,6 +129,25 @@ impl Pace {
 	/// Whether the writer is paced, as [`Self::paced`] judges it now.
 	pub fn ahead(&self, partial: u64, window: u64) -> bool {
 		self.paced(self.read.load(Ordering::SeqCst), partial, window)
+	}
+
+	/// How many more bytes a writer `partial` bytes into an uncommitted frame may take
+	/// before it is more than `window` past the fastest reader, or `None` once nothing holds
+	/// it back: that reader fell off, or the writer is past the window with no reader
+	/// (`wanted` false), so it reads on and sheds.
+	///
+	/// Measured from where readers got even before one holds the group, since the first to
+	/// arrive starts there.
+	pub fn room(&self, partial: u64, window: u64, wanted: bool) -> Option<u64> {
+		let read = self.read.load(Ordering::SeqCst);
+		if read < self.front.load(Ordering::SeqCst) {
+			return None;
+		}
+		let lead = self.written().saturating_add(partial).saturating_sub(read);
+		match window.checked_sub(lead) {
+			None if !wanted => None,
+			room => Some(room.unwrap_or(0)),
+		}
 	}
 
 	/// Register `waiter` for the next read or shed, returning how far readers got, read
@@ -275,10 +296,7 @@ mod tests {
 			},
 			fields: Some(Arc::new(Fields {
 				id,
-				properties: Properties {
-					block: Some(block),
-					..Default::default()
-				},
+				properties: Properties { block: Some(block) },
 			})),
 			inflated: None,
 		}
@@ -506,5 +524,33 @@ mod tests {
 		group.handle().abort(Error::Cancel).unwrap();
 		assert!(flag.woken());
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
+	}
+
+	/// The room a writer has left runs from where its fastest reader got, even before one
+	/// holds the group; it is unbounded once that reader fell off, or past the window with
+	/// nobody reading, since the writer then reads on.
+	#[test]
+	fn room_runs_from_the_fastest_reader() {
+		let window = 4 * MB as u64;
+		let group = written(2);
+		let room = group.room(0, window).expect("within the window");
+		assert!(room < window - 2 * MB as u64, "frames cost more than their payload");
+		assert_eq!(
+			group.room(MB as u64, window),
+			Some(room - MB as u64),
+			"less what is partly in"
+		);
+		assert_eq!(group.room(0, MB as u64), None, "past the window with nobody reading");
+
+		let mut reader = group.consume();
+		assert_eq!(group.room(0, MB as u64), Some(0), "a reader holds it back");
+		read(&mut reader);
+		read(&mut reader);
+		assert_eq!(group.room(0, MB as u64), Some(MB as u64), "the reader caught up");
+
+		let group = written(17);
+		let _reader = group.consume();
+		group.handle().shed(u64::MAX, u64::MAX);
+		assert_eq!(group.room(0, AHEAD), None, "the reader fell off");
 	}
 }

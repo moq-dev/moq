@@ -1007,31 +1007,6 @@ impl moq_net::transport::poll::Session for Session {
 			.set_limits(quic)
 			.map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
 	}
-	/// The connection's exporter on raw QUIC; on WebTransport, this session's own.
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		match self.web() {
-			None => self.conn.export_keying_material(label, context),
-			Some(web) => self.conn.export_keying_material(
-				WEBTRANSPORT_EXPORTER,
-				&webtransport_exporter_context(web.session_id.into_inner(), label, context)?,
-			),
-		}
-	}
-}
-
-/// The TLS exporter label WebTransport derives each session's exporter under.
-const WEBTRANSPORT_EXPORTER: &[u8] = b"EXPORTER-WebTransport";
-
-/// The TLS exporter context for WebTransport session `id`'s exporter (draft-ietf-webtrans-http3
-/// section 4.8), or `None` when `label` or `context` exceeds 255 bytes.
-fn webtransport_exporter_context(id: u64, label: &[u8], context: &[u8]) -> Option<Vec<u8>> {
-	let mut exporter = Vec::with_capacity(10 + label.len() + context.len());
-	exporter.extend_from_slice(&id.to_be_bytes());
-	exporter.push(u8::try_from(label.len()).ok()?);
-	exporter.extend_from_slice(label);
-	exporter.push(u8::try_from(context.len()).ok()?);
-	exporter.extend_from_slice(context);
-	Some(exporter)
 }
 
 #[cfg(test)]
@@ -1326,7 +1301,7 @@ mod tests {
 	/// fail.
 	#[tokio::test]
 	async fn an_offset_stays_acknowledged_through_a_reset() {
-		use moq_net::transport::poll::{Acked, SendStream};
+		use moq_net::transport::poll::SendStream;
 
 		for (framed, finish) in [false, true]
 			.into_iter()
@@ -1347,7 +1322,7 @@ mod tests {
 			};
 			let (acked, (recv, read)) = tokio::join!(kio::wait(|waiter| send.poll_acked(waiter, &payload)), recv);
 			assert_eq!(read, b"payload", "framed: {framed}");
-			assert!(matches!(acked, Ok(Acked::Delivered)), "framed: {framed}: {acked:?}");
+			assert!(matches!(acked, Ok(())), "framed: {framed}: {acked:?}");
 
 			// The driver runs on this thread, so nothing acknowledges this before the reset.
 			let cut = match finish {
@@ -1372,7 +1347,7 @@ mod tests {
 			SendStream::reset(&mut send, 1);
 			let acked = |offset| SendStream::poll_acked(&send, &Waiter::noop(), offset);
 			assert!(
-				matches!(acked(&payload), Poll::Ready(Ok(Acked::Delivered))),
+				matches!(acked(&payload), Poll::Ready(Ok(()))),
 				"framed: {framed}, finished: {finish}: the reset forgot it"
 			);
 			assert_eq!(SendStream::offset(&send), end, "framed: {framed}, finished: {finish}");
@@ -1389,7 +1364,7 @@ mod tests {
 	/// acknowledged: the stop fails only the bytes it had not.
 	#[tokio::test]
 	async fn an_offset_stays_acknowledged_through_a_stop() {
-		use moq_net::transport::poll::{Acked, SendStream};
+		use moq_net::transport::poll::SendStream;
 
 		for framed in [false, true] {
 			let (client, server, _endpoints) = pair().await;
@@ -1406,7 +1381,7 @@ mod tests {
 				recv
 			};
 			let (acked, recv) = tokio::join!(kio::wait(|waiter| send.poll_acked(waiter, &payload)), recv);
-			assert!(matches!(acked, Ok(Acked::Delivered)), "framed: {framed}: {acked:?}");
+			assert!(matches!(acked, Ok(())), "framed: {framed}: {acked:?}");
 
 			recv.stop(3);
 			let stopped = kio::wait(|waiter| SendStream::poll_closed(&send, waiter)).await;
@@ -1416,38 +1391,8 @@ mod tests {
 			);
 			let acked = SendStream::poll_acked(&send, &Waiter::noop(), &payload);
 			assert!(
-				matches!(acked, Poll::Ready(Ok(Acked::Delivered))),
+				matches!(acked, Poll::Ready(Ok(()))),
 				"framed: {framed}: the stop forgot it: {acked:?}"
-			);
-		}
-	}
-
-	/// Both ends of a session export the same keying material as soon as it starts. A
-	/// WebTransport session derives its own from the connection's, so it differs from what
-	/// raw QUIC on the same connection would export.
-	#[tokio::test]
-	async fn both_ends_export_the_same_keying_material() {
-		use moq_net::transport::poll::Session as _;
-
-		for framed in [false, true] {
-			let (client, server, _endpoints) = pair().await;
-			let (client, server) = sessions(framed, client, server).await;
-			let exported = client.export_keying_material(b"label", b"context");
-			assert!(exported.is_some(), "framed: {framed}");
-			assert_eq!(
-				server.export_keying_material(b"label", b"context"),
-				exported,
-				"framed: {framed}"
-			);
-			assert_ne!(
-				client.export_keying_material(b"label", b""),
-				exported,
-				"framed: {framed}"
-			);
-			assert_eq!(
-				client.conn.export_keying_material(b"label", b"context") == exported,
-				!framed,
-				"framed: {framed}"
 			);
 		}
 	}

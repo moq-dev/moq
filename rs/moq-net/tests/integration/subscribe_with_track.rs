@@ -41,9 +41,11 @@ enum Arrival {
 }
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// `subscriber` reads what `publisher` serves, over a link with [`LATENCY`] each way.
@@ -78,7 +80,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 		.unwrap();
 	let mut cached = track.append_next().unwrap();
 	cached.write_frame(cached.at_start(), b"cached".as_ref()).unwrap();
-	cached.close().unwrap();
+	cached.finish().unwrap();
 	broadcast.announce().unwrap();
 
 	let consumer = nodes.last().unwrap().consume();
@@ -126,7 +128,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	let mut live = track.append_next().unwrap();
 	live.write_frame(Timestamp::from_millis(1).unwrap(), b"live".as_ref())
 		.unwrap();
-	live.close().unwrap();
+	live.finish().unwrap();
 	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: the live group did not arrive"))

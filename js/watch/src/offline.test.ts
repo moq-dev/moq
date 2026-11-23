@@ -11,6 +11,7 @@ import { accept, connect } from "../../net/src/connection/index.ts";
 import * as Lite from "../../net/src/lite/index.ts";
 import { createMockTransportPair, waitFor } from "../../net/src/mock.ts";
 import { Broadcast } from "./broadcast";
+import { defined } from "./defined.test-util.ts";
 import type MoqWatch from "./element";
 import { offlineIndicator } from "./ui/components/offline-indicator";
 import { refusedIndicator } from "./ui/components/refused-indicator";
@@ -23,10 +24,10 @@ test("a live broadcast reads connecting until connected and again once the conne
 	const name = Path.from("live.hang");
 	const route = relay.route(name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
-		track: route.broadcast.createTrack(Catalog.TRACK),
+		track: defined(route.broadcast.createTrack(Catalog.TRACK)),
 		deltas: false,
 	});
-	producer.update({ value: {}, at: key() });
+	producer.update({}, key());
 
 	const viewer = new Origin.Producer();
 	const source = new Broadcast({ origin: viewer, name, catalogFormat: "hang", enabled: true });

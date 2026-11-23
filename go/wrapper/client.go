@@ -105,7 +105,7 @@ type QUICConfig struct {
 	GSO *bool
 	// MTUDiscovery toggles path MTU discovery.
 	MTUDiscovery *bool
-	// CongestionControl picks the congestion control family; nil leaves the choice to the backend.
+	// CongestionControl picks the congestion control algorithm; nil runs BBR v3.
 	CongestionControl *CongestionControl
 	// Qlog is a directory, which must exist, to write qlog traces into.
 	Qlog string
@@ -204,58 +204,39 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 
 // Backoff is the retry pacing for automatic reconnects: the delay starts at
 // Initial, multiplies by Multiplier after each failed attempt, and caps at Max.
-// After Timeout of consecutive failures the connection gives up for good. It
-// applies only once a session has been established: a first dial that reaches no
-// session ends the connection with its error rather than retrying.
+// After Timeout of consecutive failures the connection gives up for good. Until the
+// peer has accepted a session's credential or drained a session with a GOAWAY
+// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a
+// closed session, such as a refused credential, ends the connection with its
+// error rather than retrying.
 //
-// Every field is optional: the zero value means the native default (1s, x2, 5s,
-// and no give-up), so a partial Backoff overrides only what it sets. Pass
-// RetryForever as Timeout to keep retrying indefinitely.
+// A nil duration means the native default (1s, 5s, and no give-up), so a partial
+// Backoff overrides only what it sets, and zero means zero: Initial or Max of 0
+// retries at once, and a Timeout of 0 gives up at the first failure. A zero
+// Multiplier keeps the default of x2. MaxUnlimited lifts the cap instead of Max.
 type Backoff struct {
-	Initial    time.Duration // delay before the first retry
-	Multiplier uint32        // applied to the delay after each failure
-	Max        time.Duration // ceiling on the delay
-	Timeout    time.Duration // give up after this long
+	Initial      *time.Duration // delay before the first retry
+	Multiplier   uint32         // applied to the delay after each failure
+	Max          *time.Duration // ceiling on the delay
+	MaxUnlimited bool           // no ceiling on the delay; exclusive with Max
+	Timeout      *time.Duration // give up after this long
 }
 
-// RetryForever, passed as Backoff.Timeout, keeps a reconnecting session retrying
-// indefinitely instead of giving up.
-const RetryForever time.Duration = -1
-
-// ffi leaves the zero fields unset, which is load-bearing rather than cosmetic:
-// the native side reads a zero timeout as "retry forever" and a zero delay as no
-// pacing at all, so passing Go's zero value straight through would turn
-// Backoff{} into an unthrottled dial loop.
+// ffi refuses a negative duration, which the generated converter would panic on.
 func (b Backoff) ffi() (ffi.MoqBackoff, error) {
-	var out ffi.MoqBackoff
-	var err error
-	if out.Initial, err = backoffDuration("backoff initial", b.Initial); err != nil {
-		return out, err
-	}
-	if out.Max, err = backoffDuration("backoff max", b.Max); err != nil {
-		return out, err
-	}
+	out := ffi.MoqBackoff{Initial: b.Initial, Max: b.Max, MaxUnlimited: b.MaxUnlimited, Timeout: b.Timeout}
 	if b.Multiplier != 0 {
 		out.Multiplier = &b.Multiplier
 	}
-	// Zero is the native encoding of "forever" and also Go's zero value, so the
-	// two are spelled apart here: Backoff{} keeps the default and forever is
-	// explicit at the call site.
-	if b.Timeout == RetryForever {
-		forever := time.Duration(0)
-		out.Timeout = &forever
-	} else if out.Timeout, err = backoffDuration("backoff timeout", b.Timeout); err != nil {
-		return out, err
+	for _, d := range []struct {
+		name  string
+		value *time.Duration
+	}{{"backoff initial", b.Initial}, {"backoff max", b.Max}, {"backoff timeout", b.Timeout}} {
+		if err := bridge.NonNegative(d.value, d.name); err != nil {
+			return out, err
+		}
 	}
 	return out, nil
-}
-
-// backoffDuration leaves a zero duration unset and refuses a negative one.
-func backoffDuration(name string, d time.Duration) (*time.Duration, error) {
-	if d == 0 {
-		return nil, nil
-	}
-	return &d, bridge.NonNegative(&d, name)
 }
 
 // Client is a connected MoQ client with automatic origin wiring. When no origin
@@ -271,8 +252,10 @@ type Client struct {
 }
 
 // Dial starts a MoQ connection and returns without waiting for its first native dial to succeed. Cancel ctx
-// to abort an in-flight connect. If that first dial reaches no session, the session closes with its error
-// (see Session.Closed) rather than retrying; only an established session reconnects.
+// to abort an in-flight connect. Until the peer has accepted a session's credential or drained a session with a GOAWAY
+// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed
+// dial or a closed session, such as a refused credential, closes the session with its error (see Session.Closed)
+// rather than retrying.
 func Dial(ctx context.Context, url string, config ClientConfig) (*Client, error) {
 	native, err := config.ffi()
 	if err != nil {
@@ -309,7 +292,7 @@ func (c *Client) Route(path string, options RouteOptions) (*Route, error) {
 	return c.publisher.Route(path, options)
 }
 
-// Announced lists the paths the remote announces under a pattern scope, as each becomes present or absent.
+// Announced lists the paths the remote announces matching a discovery filter, as each becomes present or absent.
 func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(options)
 }

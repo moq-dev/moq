@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_relay::Relay;
 use moq_tokio::quic::driver;
 
@@ -33,7 +33,7 @@ fn timed() -> moq_net::track::Info {
 /// Publish and subscribe everything under `root`, for an hour, without a re-check
 /// of its own: a test pushes one through `/sessions/revalidate` when it wants it.
 fn rooted(root: &str) -> Grant {
-	let all: Patterns = [Pattern::all()].into_iter().collect();
+	let all = Prefixes::all();
 	let mut grant = Grant::new(all.clone(), all);
 	grant.root = Some(root.into());
 	grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
@@ -224,7 +224,9 @@ impl Publisher {
 			.create_track("video", timed())
 			.expect("create track");
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
@@ -513,7 +515,7 @@ async fn tokio_keeps_tenants_apart() {
 	matrix(false).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_keeps_tenants_apart() {
 	if !crate::runtime_uring::supported() {

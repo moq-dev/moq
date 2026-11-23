@@ -2,7 +2,7 @@
 import { Duration } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { Consumer } from "../src/container/consumer.ts";
+import { Consumer, type Delay } from "../src/container/consumer.ts";
 import { Format } from "../src/container/legacy.ts";
 
 // Far past every fixture's span, so only the burst case skips anything.
@@ -39,28 +39,22 @@ function wire(group: number, frame: number): Group.Frame {
 	return { payload: payload(group, frame), timestamp: Time.Timestamp.fromMicros(timestamp(group, frame)) };
 }
 
-function open(track: Track.Producer, delay: Signal<Track.Delay>): Player {
+function open(track: Track.Producer, delay: Signal<Delay>): Player {
 	const subscriber = track.subscribe({ delay: { max: HOLD } });
 	const received: Group.Consumer[] = [];
-	const recv = subscriber.recvGroup.bind(subscriber);
-	subscriber.recvGroup = async () => {
-		const group = await recv();
-		if (group) received.push(group);
-		return group;
+	// The consumer reads through the subscriber's ordered read, so that is where groups arrive.
+	const ordered = subscriber.ordered.bind(subscriber);
+	subscriber.ordered = () => {
+		const reader = ordered();
+		const next = reader.nextItem.bind(reader);
+		reader.nextItem = async () => {
+			const item = await next();
+			if (item?.group) received.push(item.group);
+			return item;
+		};
+		return reader;
 	};
 	return { track, consumer: new Consumer(subscriber, { format: new Format("video"), delay }), received };
-}
-
-// The deterministic arrival order of the sparse case: every group exactly once, shuffled.
-function shuffled(count: number): number[] {
-	const order = Array.from({ length: count }, (_, i) => i);
-	let seed = 42;
-	for (let i = count - 1; i > 0; i--) {
-		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-		const j = seed % (i + 1);
-		[order[i], order[j]] = [order[j], order[i]];
-	}
-	return order;
 }
 
 // Write one frame to every publisher, then wait until every player decoded it, as each arrival would
@@ -108,7 +102,7 @@ async function measure(
 	publishers: number,
 	readers: number,
 ): Promise<{ ns: number; ops: number; gaps: number; warnings: number }> {
-	const delay = new Signal<Track.Delay>({ min: HOLD, max: HOLD });
+	const delay = new Signal<Delay>({ min: HOLD, max: HOLD });
 	// Stamped like a hang publisher's media, so the transport finds its live edge at the newest group.
 	const tracks = Array.from({ length: publishers }, (_, i) =>
 		new Track.Producer(`p${i}`).accept({ timescale: Time.Timescale.MICRO, maxAge: HOLD }),
@@ -120,8 +114,10 @@ async function measure(
 		warnings++;
 	};
 	try {
+		// Sparse groups skip every other key. They land in key order: the ordered read hands groups out
+		// in key order whatever order they land in, so a reordered arrival never reaches the consumer.
 		const sequence = (i: number) => (scenario === "sparse" ? i * 2 : i);
-		const order = scenario === "sparse" ? shuffled(groups) : Array.from({ length: groups }, (_, i) => i);
+		const order = Array.from({ length: groups }, (_, i) => i);
 		const expected = Array.from({ length: groups * frames }, (_, i) =>
 			timestamp(sequence(Math.floor(i / frames)), i % frames),
 		);
@@ -149,8 +145,6 @@ async function measure(
 			for (let frame = 0; frame < frames; frame++) await arrive(sources, players, sequence(i), frame);
 			for (const source of sources) source.finish();
 		}
-		// A finished track proves no missing group can still arrive.
-		if (scenario === "sparse") for (const track of tracks) track.finish();
 		await Promise.resolve();
 
 		for (const player of players) {
@@ -176,7 +170,8 @@ async function measure(
 			for (const player of players) {
 				if (ranges(player) !== JSON.stringify([{ start: newest, end: newest }]))
 					throw new Error(`skip left ${ranges(player)}`);
-				if (player.received.slice(0, groups).some((group) => !group.isClosed))
+				if (player.received.length < groups) throw new Error("groups not received");
+				if (player.received.slice(0, groups).some((group) => group.closed.peek() === undefined))
 					throw new Error("skipped group left open");
 				const read = await player.consumer.next();
 				if (read?.kind !== "frame" || read.frame.timestamp.asMicros() !== timestamp(groups, 0))

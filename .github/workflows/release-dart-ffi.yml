@@ -5,12 +5,15 @@ name: Release Dart FFI
 # release-dart.yml from its own tag.
 
 on:
-  push:
-    tags:
-      - "moq-ffi-v*"
-  # Dry-run: build everything, publish nothing. Nightly calls every release
-  # workflow this way so a broken build surfaces before the tag is cut.
+  # The tag coordinator (release-shared-ffi.yml) calls this with reuse-native and
+  # supplies the libraries it already built. Manual calls and release PR
+  # dry-runs build every target themselves.
   workflow_call:
+    inputs:
+      reuse-native:
+        description: "Take the targets the shared coordinator built instead of rebuilding them"
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -25,33 +28,53 @@ concurrency:
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
+  # Dart ships every target of the shared build plus the two Apple ones only it
+  # needs. With reuse-native the shared ones come from this run's default-lib-*
+  # artifacts, which are the same default-feature libraries.
+  plan:
+    name: Plan targets
+    runs-on: ubuntu-latest
+    outputs:
+      all: ${{ steps.plan.outputs.all }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - name: Plan
+        id: plan
+        env:
+          REUSE_NATIVE: ${{ inputs.reuse-native }}
+          # Kept equal to release-shared-ffi.yml's native targets by sh/gh/ffi.test.ts.
+          SHARED: >-
+            ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin",
+            "x86_64-pc-windows-msvc", "aarch64-linux-android", "armv7-linux-androideabi",
+            "x86_64-linux-android", "aarch64-apple-ios", "aarch64-apple-ios-sim"]
+          ALL: >-
+            ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android",
+            "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin",
+            "x86_64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim", "x86_64-apple-ios",
+            "x86_64-pc-windows-msvc"]
+        run: |
+          echo "all=$(jq -c . <<<"$ALL")" >> "$GITHUB_OUTPUT"
+          if [[ "$REUSE_NATIVE" == true ]]; then
+            echo "build=$(jq -c --argjson shared "$SHARED" '. - $shared' <<<"$ALL")" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=$(jq -c . <<<"$ALL")" >> "$GITHUB_OUTPUT"
+          fi
+
   ffi:
     name: moq-ffi
+    needs: [plan]
     uses: ./.github/workflows/release-ffi.yml
     with:
       language: dart
-      # The raw bindings are checked in under dart/moq_ffi, so none here.
+      # The package job generates the raw bindings itself: they are not checked in.
       bindings: false
-      targets: >-
-        [
-          "aarch64-linux-android",
-          "armv7-linux-androideabi",
-          "x86_64-linux-android",
-          "x86_64-unknown-linux-gnu",
-          "aarch64-unknown-linux-gnu",
-          "aarch64-apple-darwin",
-          "x86_64-apple-darwin",
-          "aarch64-apple-ios",
-          "aarch64-apple-ios-sim",
-          "x86_64-apple-ios",
-          "x86_64-pc-windows-msvc"
-        ]
+      targets: ${{ needs.plan.outputs.build }}
 
   # hook/build.dart downloads moq-ffi-<version>-<target>-<library> and its
   # .sha256 from the release, so each target's shared library is renamed flat.
   assets:
     name: Stage Native Assets
-    needs: [ffi]
+    needs: [plan, ffi]
     runs-on: ubuntu-latest
 
     steps:
@@ -59,15 +82,19 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: libs-raw
-          pattern: dart-lib-*
+          pattern: "{default,dart}-lib-*"
 
       - name: Stage
         env:
           BUILD_VERSION: ${{ needs.ffi.outputs.version }}
+          TARGETS: ${{ needs.plan.outputs.all }}
         run: |
           mkdir -p assets
-          for dir in libs-raw/dart-lib-*; do
-            target="${dir#libs-raw/dart-lib-}"
+          # A missing library fails the release rather than shipping without a platform.
+          for target in $(jq -r '.[]' <<<"$TARGETS"); do
+            dirs=(libs-raw/*-lib-"$target")
+            [[ -d "${dirs[0]}" ]] || { echo "missing native library artifact for $target" >&2; exit 1; }
+            dir=${dirs[0]}
             case "$target" in
               *-apple-ios* | *-apple-darwin*) library=libmoq_ffi.dylib ;;
               *-windows-*) library=moq_ffi.dll ;;
@@ -97,7 +124,14 @@ jobs:
 
       - uses: ./.github/actions/just
 
-      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+      - uses: ./.github/actions/nix
+
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+
+      # dart/moq_ffi/lib/src is not in git. The package must carry the generated
+      # bindings, since a consumer installing from pub.dev has no generator.
+      - name: Generate bindings
+        run: nix develop --command just dart generate
 
       - name: Stage and check package
         env:
@@ -110,7 +144,12 @@ jobs:
           cd "release-out/moq_ffi-$BUILD_VERSION"
           dart pub get --enforce-lockfile
           dart analyze
-          dart pub publish --dry-run
+          # pipefail keeps a failed dry run failing the step, and the log stays
+          # outside the package directory, which is uploaded and published.
+          set -o pipefail
+          dart pub publish --dry-run 2>&1 | tee "$RUNNER_TEMP/publish.log"
+          grep -q -- '── moq.dart (' "$RUNNER_TEMP/publish.log"
+          grep -q -- '── uniffi_runtime.dart (' "$RUNNER_TEMP/publish.log"
 
       - name: Upload pub package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -170,7 +209,7 @@ jobs:
           name: dart-ffi-package
           path: package
 
-      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
 
       - name: Publish
         env:

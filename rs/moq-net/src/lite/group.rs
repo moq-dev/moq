@@ -12,20 +12,86 @@ pub struct Group {
 
 	// The index of the first frame on this stream. 0 (the common case) means the stream
 	// carries the group from its beginning; a higher value means the leading frames are
-	// missing, either because the subscription started partway in or because the
-	// publisher only holds the tail. Lite06+ only; older versions always start at 0.
+	// missing, because the subscription started partway in. Lite06+ only; older versions
+	// always start at 0.
 	pub frame_start: u64,
 }
 
 impl Group {
-	/// The varints the newest layout carries: Subscribe ID, Group Sequence and Frame Start.
+	/// The varints the newest layout carries: Subscribe ID, Group Start and Frame Start.
 	const FIELDS: usize = 3;
+}
+
+/// The times one Group or Fetch Stream carries: what each FRAME's `Timestamp Delta` counts
+/// from, and what GROUP_END's `End` counts from, as raw wire values.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Clock {
+	/// The group's start, which GROUP_END counts from on a stream that carried no timestamp.
+	start: u64,
+	/// The previous FRAME's timestamp, or what the first counts from.
+	prev: u64,
+	/// The highest timestamp a FRAME on this stream carried, which GROUP_END counts from.
+	highest: Option<u64>,
+}
+
+impl Clock {
+	/// A stream of the group starting at `start`. Lite-07 counts the first FRAME's delta from
+	/// that start, so frame 0's is 0; earlier versions count it from 0.
+	pub fn new(version: Version, start: u64) -> Self {
+		let prev = match version.has_group_end() {
+			true => start,
+			false => 0,
+		};
+		Self {
+			start,
+			prev,
+			highest: None,
+		}
+	}
+
+	/// The `Timestamp Delta` of the next FRAME, at `timestamp`, which it advances to; `None`
+	/// when the delta doesn't fit.
+	pub fn delta(&mut self, timestamp: u64) -> Option<i64> {
+		let delta = (timestamp as i128 - self.prev as i128).try_into().ok()?;
+		self.advance(timestamp);
+		Some(delta)
+	}
+
+	/// The timestamp of the next FRAME, which carries `delta`, and advances to it; `None` when
+	/// it falls outside 64 bits.
+	pub fn timestamp(&mut self, delta: i64) -> Option<u64> {
+		let timestamp = (self.prev as i128 + delta as i128).try_into().ok()?;
+		self.advance(timestamp);
+		Some(timestamp)
+	}
+
+	fn advance(&mut self, timestamp: u64) {
+		self.prev = timestamp;
+		self.highest = Some(self.highest.map_or(timestamp, |highest| highest.max(timestamp)));
+	}
+
+	/// What GROUP_END's `End` counts from: the highest timestamp on the stream, or the group's
+	/// start when none was carried, such as on a scale-less track.
+	fn base(&self) -> u64 {
+		self.highest.unwrap_or(self.start)
+	}
+
+	/// GROUP_END's delta for a group ending at `end`; `None` when `end` is below the base, which
+	/// a group never is (see [`crate::group::Producer::finish_at`]).
+	pub fn end_delta(&self, end: u64) -> Option<u64> {
+		end.checked_sub(self.base())
+	}
+
+	/// Where a group ends whose GROUP_END carries `delta`; `None` past 64 bits.
+	pub fn end(&self, delta: u64) -> Option<u64> {
+		self.base().checked_add(delta)
+	}
 }
 
 impl<'a> Message<'a> for Group {
 	/// Every field at its longest varint, so a header still arriving holds few bytes at its
 	/// [unidentified](crate::priority::RECV_UNIDENTIFIED) receive rank. Versions before
-	/// lite-07 carry no more fields, in a shorter varint form.
+	/// lite-07 carry fewer fields, in a shorter varint form.
 	const MAX_SIZE: usize = Self::FIELDS * crate::coding::varint::MAX_LEN;
 
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
@@ -46,7 +112,6 @@ impl<'a> Message<'a> for Group {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		w.varint(self.subscribe)?;
 		w.varint(self.key)?;
-
 		if version.has_frame_bounds() {
 			w.varint(self.frame_start)?;
 		} else if self.frame_start != 0 {
@@ -70,12 +135,13 @@ mod test {
 			key: 7,
 			frame_start: 4,
 		};
-		let mut buf = Vec::new();
-		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
-			.unwrap();
-		let got =
-			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite06, |r, v| Group::decode_msg(r, v)).unwrap();
-		assert_eq!((got.key, got.frame_start), (7, 4));
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut buf = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			let got = crate::coding::decode_buf(&mut buf.as_slice(), version, |r, v| Group::decode_msg(r, v)).unwrap();
+			assert_eq!((got.key, got.frame_start), (7, 4), "{version:?}");
+		}
 	}
 
 	/// An older peer would number the frames from 0 and silently misalign the group.
@@ -121,7 +187,7 @@ mod test {
 				Form::Quic => (crate::coding::varint::MAX_QUIC, 8),
 				Form::LeadingOnes => (u64::MAX, crate::coding::varint::MAX_LEN),
 			};
-			let fields = if version.has_frame_bounds() { 3 } else { 2 };
+			let fields = 2 + usize::from(version.has_frame_bounds());
 			let msg = Group {
 				subscribe: max,
 				key: max,

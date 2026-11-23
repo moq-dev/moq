@@ -91,7 +91,7 @@ export class Capture {
 								try {
 									for await (const arrival of arrivals(group, { decoder, config })) {
 										// A resubscribe after a rerun re-delivers cached frames with a later stamp.
-										const key = `${group.sequence}:${arrival[1]}`;
+										const key = `${group.start}:${arrival[1]}`;
 										if (this.#seen.has(key)) continue;
 										this.#seen.add(key);
 										this.#arrivals.push(arrival);
@@ -141,12 +141,11 @@ export class Capture {
 
 /**
  * The publisher's largest group as `track`'s subscription began, read the way the container consumer
- * reads it: once the track's info or `tuned`, its first group, shows the subscription established and
- * its start resolved, so a cached group racing the answer, or live groups landing after it, don't set it.
+ * reads it: once the track's info or `tuned`, its first group, shows the subscription established, so
+ * live groups landing after it don't set it.
  */
 export async function joined(track: Track.Subscriber, tuned: Promise<unknown>): Promise<number | undefined> {
 	await Promise.race([track.info().catch(() => undefined), tuned]);
-	await track.start();
 	const largest = await track.largest();
 	return largest === undefined ? undefined : Number(largest.group);
 }
@@ -179,7 +178,7 @@ export async function* arrivals(
 				if (duration === undefined || duration.isZero()) {
 					throw new Error(`no encoded frame duration for ${config.codec}`);
 				}
-				yield [at, frame.timestamp.asMillis(), Number(group.sequence), duration.asMillis()];
+				yield [at, frame.timestamp.asMillis(), Number(group.start), duration.asMillis()];
 			}
 		}
 	} finally {

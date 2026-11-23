@@ -296,7 +296,7 @@ pub(crate) struct Estimator {
 	oldest: f64,
 	/// The first arrival, when the subscription began, once one has been seen.
 	start: Option<f64>,
-	/// The latest a frame produced before the subscription arrived, starting at `start`.
+	/// The latest a frame produced before the subscription arrived, no earlier than `start`.
 	joined: f64,
 	/// Every interval closed so far measured the join, so a skipped backlog can still extend it.
 	open: bool,
@@ -353,9 +353,11 @@ impl Estimator {
 		// before the subscription began: it is the backlog a join delivers, and the join
 		// lasts until it has all arrived.
 		match self.start {
+			// A backlog skipped before this may have landed after it, as when a newest-first
+			// replay lands the newer group first.
 			None => {
 				self.start = Some(arrival);
-				self.joined = arrival;
+				self.joined = self.joined.max(arrival);
 			}
 			Some(start) => {
 				if media + self.history.fastest() < start {
@@ -485,9 +487,9 @@ impl Estimator {
 	/// A frame produced before the subscription, skipped unread, so the join lasts
 	/// until it arrived as if it had been observed.
 	fn backlog(&mut self, arrival: f64) {
-		// Before any observation the join has not started, and starts later than this. Once
-		// an interval measured the path the join is over, and a skip is an outage's.
-		if self.start.is_some() && self.open {
+		// Before any observation the join has not started, and lasts at least until this once it
+		// does. Once an interval measured the path the join is over, and a skip is an outage's.
+		if self.open {
 			self.joined = self.joined.max(arrival);
 		}
 	}
@@ -586,8 +588,7 @@ pub(crate) mod tests {
 	/// implementation is graded against the other.
 	pub(crate) fn case(name: &str) -> Case {
 		let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-			.join("../../doc/concept/audio-jitter")
-			.join(format!("{name}.json"));
+			.join(format!("../../doc/concept/audio-jitter/{name}.json"));
 		let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
 		serde_json::from_str(&json).unwrap()
 	}
@@ -664,6 +665,28 @@ pub(crate) mod tests {
 			}
 			assert_eq!(reported.millis(), plain.millis());
 		}
+	}
+
+	/// A newest-first replay lands the newer group first, so a backlog given up before
+	/// anything was observed can land after the first observed frame. The join lasts until
+	/// it did either way, so the frames held behind it fold nothing.
+	#[test]
+	fn holds_a_backlog_skipped_before_the_first_observation_until_the_join_starts() {
+		let [plain, early, late] = [None, Some(0), Some(1)].map(|at| {
+			let mut target = Target::new(Duration::ZERO, true, None);
+			(0..100)
+				.map(|i| {
+					if at == Some(i) {
+						target.backlog(1000.0);
+					}
+					let late = if (5..10).contains(&i) { 200.0 } else { 0.0 };
+					target.observe(500.0 + i as f64 * 20.0 + late, i as f64 * 20.0);
+					target.millis()
+				})
+				.collect::<Vec<_>>()
+		});
+		assert_eq!(early, late);
+		assert_ne!(late, plain);
 	}
 
 	/// The #3517 regression, without the corpus: a stale frame then paced audio far

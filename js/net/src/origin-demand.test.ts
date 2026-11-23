@@ -104,6 +104,48 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 	},
 );
 
+test("a cancelled lite subscribe leaves the held request unwanted", async () => {
+	const pair = createMockTransportPair();
+	const origin = new Producer();
+	const claim = origin.claim(Path.from("room"));
+	const requests = claim.requested();
+	const publisher = new LitePublisher(pair.server, LiteVersion.DRAFT_06, randomHop(), origin.consume());
+	let input!: ReadableStreamDefaultController<Uint8Array>;
+	const stream = new Stream({
+		version: LiteVersion.DRAFT_06,
+		readable: new ReadableStream({
+			start(c) {
+				input = c;
+			},
+		}),
+		writable: new WritableStream(),
+	});
+	const task = publisher.runSubscribe(
+		new LiteSubscribe({ id: 0n, broadcast: path, track: "video", priority: 0 }),
+		stream,
+	);
+	try {
+		const held = (await requests.next()).value;
+		if (!held) throw new Error("expected a pending request");
+		let unwanted = false;
+		void held.unwanted().then(() => {
+			unwanted = true;
+		});
+		await settle();
+		expect(unwanted).toBe(false);
+
+		input.error(new Error("request cancelled"));
+		await settle();
+		expect(unwanted).toBe(true);
+	} finally {
+		origin.close();
+		await task.catch(() => undefined);
+		publisher.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});
+
 test("last cancellation finishes the internal wait and discards a late consumer", async () => {
 	const origin = new Producer();
 	const dynamic = origin.claim(Path.from("room"));

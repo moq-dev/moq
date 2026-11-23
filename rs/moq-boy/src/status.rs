@@ -1,10 +1,11 @@
 //! Status track: JSON state published to viewers each frame.
 //!
-//! Contains which buttons are held, how many viewers are playing, encoding
-//! stats, and an optional location label. Each viewer's latency travels on its
-//! own session instead (see [`crate::input`]). Published through
+//! Contains which buttons are held, per-viewer latency measurements,
+//! encoding stats, and an optional location label. Published through
 //! [`moq_json`], which skips unchanged values and emits merge-patch
 //! deltas between snapshots so frequent small changes stay cheap.
+
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
@@ -23,8 +24,9 @@ pub struct LatencyEntry {
 pub struct Status {
 	/// Currently pressed buttons (union across all viewers).
 	pub buttons: Vec<Button>,
-	/// How many viewers have a session open.
-	pub players: usize,
+	/// Per-viewer latency breakdown: viewer id to its ordered components. The player count is
+	/// the number of keys.
+	pub latency: BTreeMap<crate::input::ViewerId, Vec<LatencyEntry>>,
 	/// Encoding and emulation performance stats.
 	pub stats: StatsReport,
 	/// Optional server location label (e.g. "Dallas, TX").
@@ -39,13 +41,15 @@ pub struct StatusPublisher {
 
 impl StatusPublisher {
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<Self> {
-		let producer = broadcast.create_track(
-			"status",
-			moq_net::track::Info::default()
-				.with_timescale(moq_net::Timescale::MILLI)
-				// A joiner asks for a fresh snapshot once the deltas outweigh eight of them.
-				.with_refresh(8),
-		)?;
+		let producer = broadcast
+			.create_track(
+				"status",
+				moq_net::track::Info::default()
+					.with_timescale(moq_net::Timescale::MILLI)
+					// A joiner asks for a fresh snapshot once the deltas outweigh eight of them.
+					.with_refresh(moq_net::track::Refresh::default().with_ratio(8)),
+			)
+			.ok_or_else(|| anyhow::anyhow!("the status track already exists"))?;
 
 		Ok(Self {
 			producer: moq_json::snapshot::Producer::new(producer, moq_json::snapshot::Config::default()),
@@ -60,7 +64,7 @@ impl StatusPublisher {
 		if let std::task::Poll::Ready(Err(err)) = self.producer.poll_refresh(&kio::Waiter::noop()) {
 			tracing::warn!(%err, "failed to refresh status");
 		}
-		if let Err(err) = self.producer.update(moq_json::Timed::new(status, now())) {
+		if let Err(err) = self.producer.update(status, now()) {
 			tracing::warn!(%err, "failed to publish status");
 		}
 	}

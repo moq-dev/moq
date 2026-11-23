@@ -37,7 +37,7 @@ pub mod sim;
 pub mod stats;
 #[cfg(feature = "test-support")]
 mod test_support;
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 pub(crate) mod uring;
 /// The HTTP/HTTPS server: health, certificate fingerprint, announcements, fetch, and WebSocket sessions.
 pub mod web;

@@ -10,10 +10,12 @@
 //! Traffic is bucketed by an arbitrary [`Tier`] label chosen by business logic
 //! (billing class, region, ...) and, within a tier, by broadcast path and
 //! [`Role`] (publisher = egress, subscriber = ingress). Connected sessions are
-//! tracked separately per (tier, label), counting presence regardless of
+//! tracked separately per (tier, root, label), counting presence regardless of
 //! whether any data flows. The label is a stats key the auth decider picks,
 //! independent of what the session may access; the empty label holds sessions
-//! without one.
+//! without one. The root is the origin path the session is scoped to, so a
+//! publisher can show each root only its own sessions; rows that differ only by
+//! root share their label.
 //!
 //! # Where counting happens
 //!
@@ -53,7 +55,8 @@
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
 //!   groups/frames are read (egress) or written (ingress) in the model. A
 //!   session's egress `bytes` / `frames` count only payload the peer
-//!   acknowledged (see [`SendStream::poll_acked`](crate::transport::poll::SendStream::poll_acked)),
+//!   acknowledged, or that a reliable link such as qmux's took (see
+//!   [`SendStream::poll_acked`](crate::transport::poll::SendStream::poll_acked)),
 //!   never what a reset or a lost session discarded: a frame's bytes once an
 //!   offset past them is acknowledged, and the frame with its last byte. A
 //!   transport that cannot see acknowledgments counts the bytes the stream
@@ -85,9 +88,21 @@
 //!   [`Registry::report`] and [`Registry::snapshot`] read each registered [`Wire`]
 //!   without polling the session. A retag flushes its old tier and label; dropping the guard flushes
 //!   its final nonnegative delta. Unsupported transports contribute zero.
+//! * `credit_stalls` / `credit_stalled_us` ([`Presence`]): cumulative episodes, and
+//!   microseconds, that the label's connections spent with a write blocked on the
+//!   peer's connection-level credit (`MAX_DATA`), read from the same
+//!   [`crate::transport::Wire`] counters as `wire_tx`.
+//! * `credit_held_readers_us` / `credit_held_evicted_us` ([`Presence`]): cumulative
+//!   microseconds the label's connections had their whole receive window spent by the
+//!   peer while eviction waited, on a reader behind or on an evicted reader yet to stop
+//!   its stream, read from the same counters.
 //! * `routes_refused` ([`Presence`]): cumulative routes and claims that lite-07
 //!   sessions under the label forwarded and this node refused, each withdrawn while
-//!   the session stays open.
+//!   the session stays open; [`Routes::refused`] splits it by reason.
+//! * `routes` ([`Presence`], [`Routes`]): what the label's lite-07 sessions did on
+//!   the route layer: route changes their peers caused and the broadcasts each
+//!   rewrote into the origin, DEAD and DRAIN withdrawals sent and received, refusals
+//!   by reason, and sessions closed for their route layer by kind.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the label held
 //!   at once, to compare against what bounds them. A peak never
@@ -138,7 +153,8 @@
 //! empty handles (whose bumps no-op) for any path they match. The `moq-stats`
 //! publisher excludes its own top-level subtree this way, breaking the feedback
 //! loop where serving a stats broadcast would itself generate more stats
-//! traffic.
+//! traffic. [`Config::exclude_rooted`] does the same for a subtree under each
+//! session's own root, where a relay presents that root's stats.
 
 use std::{
 	collections::HashMap,
@@ -150,13 +166,16 @@ use std::{
 };
 
 use kio::Lock;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::{Path, Pattern, Patterns, time::Instant, util::SendCell};
 
 mod outcomes;
+mod routes;
 pub use outcomes::{Failure, Failures, RefusalKind, Refusals};
 use outcomes::{FailureCounters, RefusalCounters};
+use routes::RouteCounters;
+pub use routes::{RouteClose, RouteCloses, RouteRefusal, RouteRefusals, Routes, Withdrawal, Withdrawals};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -304,12 +323,16 @@ struct SessionCounters {
 	sessions_ended: AtomicU64,
 	announces_peak: AtomicU64,
 	subscriptions_peak: AtomicU64,
-	routes_refused: AtomicU64,
+	routes: RouteCounters,
 	/// Payload bytes of the sessions recording here. One lock covers the folded totals
 	/// and the live sessions, so a readout never goes down when a session leaves.
 	bytes: Mutex<SessionBytes>,
 	wire_tx: AtomicU64,
 	wire_rx: AtomicU64,
+	credit_stalls: AtomicU64,
+	credit_stalled_us: AtomicU64,
+	credit_held_readers_us: AtomicU64,
+	credit_held_evicted_us: AtomicU64,
 	/// Per class: bytes sent and received, then messages sent and received.
 	control: [[AtomicU64; 4]; Message::ALL.len()],
 }
@@ -334,19 +357,25 @@ impl SessionCounters {
 			let (sent, received, activity) = bytes.read(now);
 			(sent, received, activity, bytes.live.is_empty())
 		};
+		let routes = self.routes.snapshot();
 		let presence = Presence {
 			sessions_refused: self.sessions_refused.snapshot(),
 			sessions_failed,
 			requests: self.requests.load(Ordering::Relaxed),
 			wire_tx: self.wire_tx.load(Ordering::Relaxed),
 			wire_rx: self.wire_rx.load(Ordering::Relaxed),
+			credit_stalls: self.credit_stalls.load(Ordering::Relaxed),
+			credit_stalled_us: self.credit_stalled_us.load(Ordering::Relaxed),
+			credit_held_readers_us: self.credit_held_readers_us.load(Ordering::Relaxed),
+			credit_held_evicted_us: self.credit_held_evicted_us.load(Ordering::Relaxed),
 			sessions_started,
 			sessions_ended,
 			sent_bytes,
 			received_bytes,
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
-			routes_refused: self.routes_refused.load(Ordering::Relaxed),
+			routes_refused: routes.refused.total(),
+			routes,
 		};
 		(presence, activity, empty)
 	}
@@ -477,12 +506,10 @@ impl SessionBytes {
 /// Every counter is cumulative, so a rate is `delta / delta_t` and a live
 /// count is `started - ended`. This is also the wire shape of one entry on a
 /// published stats track (the `moq-stats` crate serializes maps of these).
-/// Serialize writes both the canonical `*_started`/`*_ended` names and the
-/// legacy `announced`/`*_closed` spellings so an older consumer still reads a
-/// new relay; deserialize accepts either spelling, with the canonical name
-/// winning when both are present. Unknown fields from a newer publisher are
-/// ignored and missing fields from an older one default to zero.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Unknown fields from a newer publisher are ignored and missing fields from
+/// an older one default to zero.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 #[non_exhaustive]
 pub struct Traffic {
 	/// Cumulative broadcast announce events on this slice.
@@ -526,134 +553,6 @@ pub struct Traffic {
 	pub stale: Content,
 }
 
-/// One spelling of a counter edge on the wire: absent, or a present integer.
-///
-/// Decoding goes through `u64`, so an explicit `null` is refused rather than
-/// read as absent; only a missing field takes the default.
-#[derive(Default, Clone, Copy)]
-struct Edge(Option<u64>);
-
-impl<'de> Deserialize<'de> for Edge {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		u64::deserialize(deserializer).map(|v| Self(Some(v)))
-	}
-}
-
-/// Prefer the canonical `*_started`/`*_ended` spelling; fall back to the
-/// legacy name so a consumer built after the rename still reads an older relay.
-fn counter_edge(canonical: Edge, legacy: Edge) -> u64 {
-	canonical.0.or(legacy.0).unwrap_or(0)
-}
-
-#[derive(Serialize)]
-struct TrafficSer {
-	announces_started: u64,
-	announced: u64,
-	announces_ended: u64,
-	announced_closed: u64,
-	announced_bytes: u64,
-	broadcasts_started: u64,
-	broadcasts: u64,
-	broadcasts_ended: u64,
-	broadcasts_closed: u64,
-	subscriptions_started: u64,
-	subscriptions: u64,
-	subscriptions_ended: u64,
-	subscriptions_closed: u64,
-	fetches: u64,
-	bytes: u64,
-	frames: u64,
-	groups: u64,
-	datagrams: u64,
-	inflated: u64,
-	stale: Content,
-}
-
-impl From<Traffic> for TrafficSer {
-	fn from(t: Traffic) -> Self {
-		Self {
-			announces_started: t.announces_started,
-			announced: t.announces_started,
-			announces_ended: t.announces_ended,
-			announced_closed: t.announces_ended,
-			announced_bytes: t.announced_bytes,
-			broadcasts_started: t.broadcasts_started,
-			broadcasts: t.broadcasts_started,
-			broadcasts_ended: t.broadcasts_ended,
-			broadcasts_closed: t.broadcasts_ended,
-			subscriptions_started: t.subscriptions_started,
-			subscriptions: t.subscriptions_started,
-			subscriptions_ended: t.subscriptions_ended,
-			subscriptions_closed: t.subscriptions_ended,
-			fetches: t.fetches,
-			bytes: t.bytes,
-			frames: t.frames,
-			groups: t.groups,
-			datagrams: t.datagrams,
-			inflated: t.inflated,
-			stale: t.stale,
-		}
-	}
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct TrafficDe {
-	announces_started: Edge,
-	announced: Edge,
-	announces_ended: Edge,
-	announced_closed: Edge,
-	announced_bytes: u64,
-	broadcasts_started: Edge,
-	broadcasts: Edge,
-	broadcasts_ended: Edge,
-	broadcasts_closed: Edge,
-	subscriptions_started: Edge,
-	subscriptions: Edge,
-	subscriptions_ended: Edge,
-	subscriptions_closed: Edge,
-	fetches: u64,
-	bytes: u64,
-	frames: u64,
-	groups: u64,
-	datagrams: u64,
-	inflated: u64,
-	stale: Content,
-}
-
-impl From<TrafficDe> for Traffic {
-	fn from(d: TrafficDe) -> Self {
-		Self {
-			announces_started: counter_edge(d.announces_started, d.announced),
-			announces_ended: counter_edge(d.announces_ended, d.announced_closed),
-			announced_bytes: d.announced_bytes,
-			broadcasts_started: counter_edge(d.broadcasts_started, d.broadcasts),
-			broadcasts_ended: counter_edge(d.broadcasts_ended, d.broadcasts_closed),
-			subscriptions_started: counter_edge(d.subscriptions_started, d.subscriptions),
-			subscriptions_ended: counter_edge(d.subscriptions_ended, d.subscriptions_closed),
-			fetches: d.fetches,
-			bytes: d.bytes,
-			frames: d.frames,
-			groups: d.groups,
-			datagrams: d.datagrams,
-			inflated: d.inflated,
-			stale: d.stale,
-		}
-	}
-}
-
-impl Serialize for Traffic {
-	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		TrafficSer::from(*self).serialize(serializer)
-	}
-}
-
-impl<'de> Deserialize<'de> for Traffic {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		TrafficDe::deserialize(deserializer).map(Into::into)
-	}
-}
-
 impl Traffic {
 	/// Fold another readout into this one, counter by counter.
 	pub fn add(&mut self, other: Traffic) {
@@ -692,16 +591,20 @@ impl Traffic {
 	}
 }
 
+/// Whether a counter is zero, which serializing skips.
+fn is_zero(value: &u64) -> bool {
+	*value == 0
+}
+
 /// Request admissions and connected-session presence for a label on a tier, or their sum.
 /// The session counters are cumulative connects and disconnects, so
 /// `sessions_started - sessions_ended` is the current live session count. The peaks
 /// show how close one session came to the bounds on what it holds.
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
-/// sessions, presence, or totals track. Serialize writes both the canonical names and the legacy
-/// `sessions`/`sessions_closed` spellings; deserialize accepts either, with
-/// the canonical name winning when both are present.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// sessions, presence, or totals track.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 #[non_exhaustive]
 pub struct Presence {
 	/// Cumulative sessions refused before admission, by reason.
@@ -727,100 +630,30 @@ pub struct Presence {
 	pub wire_tx: u64,
 	/// Cumulative transport bytes received, including transport framing.
 	pub wire_rx: u64,
+	/// Cumulative times a connection's write blocked with all the peer's connection-level
+	/// credit (`MAX_DATA`) spent.
+	// The credit counters stay zero on most labels, so a zero stays off the wire; readers default it.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub credit_stalls: u64,
+	/// Cumulative microseconds connections spent blocked on the peer's connection-level credit.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub credit_stalled_us: u64,
+	/// Cumulative microseconds the peer had a connection's whole receive window spent while a
+	/// reader had data it had not looked at yet: readers behind holding the window.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub credit_held_readers_us: u64,
+	/// Cumulative microseconds the peer had a connection's whole receive window spent while an
+	/// evicted reader had not stopped its stream.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub credit_held_evicted_us: u64,
 	/// Cumulative routes and claims a lite-07 session forwarded that this
-	/// node refused, withdrawing each and keeping the session.
+	/// node refused, withdrawing each and keeping the session: the total of
+	/// [`Routes::refused`].
 	pub routes_refused: u64,
-}
-
-#[derive(Serialize)]
-struct PresenceSer {
-	sessions_refused: Refusals,
-	sessions_failed: Failures,
-	requests: u64,
-	sessions_started: u64,
-	sessions: u64,
-	sessions_ended: u64,
-	sessions_closed: u64,
-	sent_bytes: u64,
-	received_bytes: u64,
-	announces_peak: u64,
-	subscriptions_peak: u64,
-	wire_tx: u64,
-	wire_rx: u64,
-	routes_refused: u64,
-}
-
-impl From<Presence> for PresenceSer {
-	fn from(p: Presence) -> Self {
-		Self {
-			sessions_refused: p.sessions_refused,
-			sessions_failed: p.sessions_failed,
-			requests: p.requests,
-			wire_tx: p.wire_tx,
-			wire_rx: p.wire_rx,
-			sessions_started: p.sessions_started,
-			sessions: p.sessions_started,
-			sessions_ended: p.sessions_ended,
-			sessions_closed: p.sessions_ended,
-			sent_bytes: p.sent_bytes,
-			received_bytes: p.received_bytes,
-			announces_peak: p.announces_peak,
-			subscriptions_peak: p.subscriptions_peak,
-			routes_refused: p.routes_refused,
-		}
-	}
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct PresenceDe {
-	sessions_refused: Refusals,
-	sessions_failed: Failures,
-	requests: u64,
-	sessions_started: Edge,
-	sessions: Edge,
-	sessions_ended: Edge,
-	sessions_closed: Edge,
-	sent_bytes: u64,
-	received_bytes: u64,
-	announces_peak: u64,
-	subscriptions_peak: u64,
-	#[serde(default)]
-	wire_tx: u64,
-	#[serde(default)]
-	wire_rx: u64,
-	routes_refused: u64,
-}
-
-impl From<PresenceDe> for Presence {
-	fn from(d: PresenceDe) -> Self {
-		Self {
-			sessions_refused: d.sessions_refused,
-			sessions_failed: d.sessions_failed,
-			requests: d.requests,
-			wire_tx: d.wire_tx,
-			wire_rx: d.wire_rx,
-			sessions_started: counter_edge(d.sessions_started, d.sessions),
-			sessions_ended: counter_edge(d.sessions_ended, d.sessions_closed),
-			sent_bytes: d.sent_bytes,
-			received_bytes: d.received_bytes,
-			announces_peak: d.announces_peak,
-			subscriptions_peak: d.subscriptions_peak,
-			routes_refused: d.routes_refused,
-		}
-	}
-}
-
-impl Serialize for Presence {
-	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		PresenceSer::from(*self).serialize(serializer)
-	}
-}
-
-impl<'de> Deserialize<'de> for Presence {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		PresenceDe::deserialize(deserializer).map(Into::into)
-	}
+	/// What the label's lite-07 sessions did on the route layer.
+	// Most labels never route, so an all-zero readout stays off the wire; readers default it.
+	#[serde(skip_serializing_if = "Routes::is_zero")]
+	pub routes: Routes,
 }
 
 impl Presence {
@@ -831,6 +664,10 @@ impl Presence {
 		self.requests += other.requests;
 		self.wire_tx += other.wire_tx;
 		self.wire_rx += other.wire_rx;
+		self.credit_stalls += other.credit_stalls;
+		self.credit_stalled_us += other.credit_stalled_us;
+		self.credit_held_readers_us += other.credit_held_readers_us;
+		self.credit_held_evicted_us += other.credit_held_evicted_us;
 		self.sessions_started += other.sessions_started;
 		self.sessions_ended += other.sessions_ended;
 		self.sent_bytes += other.sent_bytes;
@@ -838,6 +675,7 @@ impl Presence {
 		self.announces_peak = self.announces_peak.max(other.announces_peak);
 		self.subscriptions_peak = self.subscriptions_peak.max(other.subscriptions_peak);
 		self.routes_refused += other.routes_refused;
+		self.routes.add(other.routes);
 	}
 
 	/// Sessions currently connected.
@@ -1082,14 +920,14 @@ impl Snapshot {
 }
 
 /// The per-broadcast detail [`Registry::report`] fills: one traffic entry per
-/// `(broadcast, tier)` and one session entry per `(tier, label)`. Entries are
+/// `(broadcast, tier)` and one session entry per `(tier, root, label)`. Entries are
 /// unordered. Reuse one across drains to keep its capacity.
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct Report {
 	/// Per-`(broadcast, tier)` traffic, both roles per entry.
 	pub traffic: Vec<TrafficEntry>,
-	/// Per-`(tier, label)` connected-session presence.
+	/// Per-`(tier, root, label)` connected-session presence.
 	pub sessions: Vec<SessionEntry>,
 }
 
@@ -1110,12 +948,14 @@ pub struct TrafficEntry {
 	pub closed: bool,
 }
 
-/// One `(tier, label)` row of a [`Report`].
+/// One `(tier, root, label)` row of a [`Report`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionEntry {
 	/// The tier the sessions recorded under.
 	pub tier: Tier,
+	/// The root the sessions are scoped to, empty for sessions without one.
+	pub root: Path,
 	/// The label the sessions record under, empty for sessions without one.
 	pub label: Path,
 	/// Cumulative request admissions and connect/disconnect gauge.
@@ -1138,6 +978,11 @@ pub struct Config {
 	/// (`.stats/**`) this way, breaking the stats-of-stats feedback loop. Empty
 	/// (the default) tracks everything.
 	pub exclude: Patterns,
+	/// Patterns matched against a path relative to the counting session's root:
+	/// a match under that root is not tracked for that session. A relay that
+	/// presents each root's stats under the root excludes that subtree this way.
+	/// Empty (the default) excludes nothing.
+	pub exclude_rooted: Patterns,
 }
 
 impl Config {
@@ -1152,6 +997,13 @@ impl Config {
 		self.exclude.insert(pattern);
 		self
 	}
+
+	/// Add a pattern to exclude under each session's root. May be chained to
+	/// exclude several. See [`Self::exclude_rooted`].
+	pub fn with_exclude_rooted(mut self, pattern: Pattern) -> Self {
+		self.exclude_rooted.insert(pattern);
+		self
+	}
 }
 
 /// Counter collection registry. Cheap to clone (`Arc` inside for the shared
@@ -1163,6 +1015,8 @@ pub struct Registry {
 	/// Paths these patterns match get empty handles (bumps no-op); see
 	/// [`Config::exclude`].
 	exclude: Patterns,
+	/// The same, relative to the counting session's root; see [`Config::exclude_rooted`].
+	exclude_rooted: Patterns,
 	/// `None` for a disabled registry: bumps are dropped and nothing is tracked.
 	shared: Option<Arc<Shared>>,
 }
@@ -1173,13 +1027,16 @@ struct Shared {
 	/// so a snapshot sees each entry either here or live, never both or neither.
 	retired: Lock<Snapshot>,
 	entries: Lock<HashMap<Path, Arc<BroadcastEntry>>>,
-	/// Connected-session gauges keyed by `(tier, label)`. Independent of any
+	/// Connected-session gauges keyed by `(tier, (root, label))`. Independent of any
 	/// broadcast; surfaced on the per-tier session tracks and in the totals and
 	/// presence tracks. A tier's inner map is
 	/// created the first time a session records under it.
-	sessions: Lock<HashMap<Tier, HashMap<Path, Arc<SessionCounters>>>>,
+	sessions: Lock<HashMap<Tier, HashMap<SessionKey, Arc<SessionCounters>>>>,
 	wire: Lock<Vec<Weak<WireInner>>>,
 }
+
+/// The `(root, label)` a tier's session gauges are keyed by.
+type SessionKey = (Path, Path);
 
 /// Per-broadcast counters, lazily split by tier. A tier's [`TierCounters`] is
 /// created the first time a guard records under that label, so the set of tiers
@@ -1220,9 +1077,13 @@ struct TierCounters {
 impl Registry {
 	/// Build an enabled registry from `config`.
 	pub fn new(config: Config) -> Self {
-		let Config { exclude } = config;
+		let Config {
+			exclude,
+			exclude_rooted,
+		} = config;
 		Self {
 			exclude,
+			exclude_rooted,
 			shared: Some(Arc::new(Shared {
 				retired: Lock::default(),
 				entries: Lock::default(),
@@ -1236,6 +1097,7 @@ impl Registry {
 	pub fn disabled() -> Self {
 		Self {
 			exclude: Patterns::new(),
+			exclude_rooted: Patterns::new(),
 			shared: None,
 		}
 	}
@@ -1267,7 +1129,7 @@ impl Registry {
 	#[cfg(any(test, feature = "fuzz"))]
 	#[cfg(feature = "async")]
 	pub(crate) fn bump_publisher_bytes(&self, path: impl Into<Path>, tier: &Tier, n: u64) {
-		let Some(entry) = self.entry(path) else {
+		let Some(entry) = self.entry(path, &Path::empty()) else {
 			return;
 		};
 		entry.tier(tier).publisher.bytes.fetch_add(n, Ordering::Relaxed);
@@ -1278,14 +1140,15 @@ impl Registry {
 	#[cfg(feature = "async")]
 	pub(crate) fn publisher_meter(&self, path: impl Into<Path>, tier: &Tier) -> Meter {
 		Meter {
-			counters: self.entry(path).map(|entry| entry.tier(tier)),
+			counters: self.entry(path, &Path::empty()).map(|entry| entry.tier(tier)),
 			traffic: None,
 			side: Side::Publisher,
 			delegated: false,
 		}
 	}
 
-	fn entry(&self, path: impl Into<Path>) -> Option<Arc<BroadcastEntry>> {
+	/// The counters for `path`, as a session scoped to `root` counts it.
+	fn entry(&self, path: impl Into<Path>, root: &Path) -> Option<Arc<BroadcastEntry>> {
 		// A disabled registry never allocates state.
 		let shared = self.shared.as_ref()?;
 		let path: Path = path.into();
@@ -1293,6 +1156,12 @@ impl Registry {
 		// under the same prefix) so serving a stats broadcast doesn't generate
 		// more stats.
 		if self.exclude.matches(path.as_str()) {
+			return None;
+		}
+		if !self.exclude_rooted.is_empty()
+			&& let Some(relative) = path.strip_prefix(root)
+			&& self.exclude_rooted.matches(relative.as_str())
+		{
 			return None;
 		}
 		let mut entries = shared.entries.lock();
@@ -1304,18 +1173,17 @@ impl Registry {
 		)
 	}
 
-	/// Get-or-create the session gauge for `label` on `tier`. `None` for a
-	/// disabled registry. Unlike [`Self::entry`], labels key sessions rather than
-	/// broadcasts, so no cycle-breaking filter is needed.
-	fn session_counters(&self, tier: &Tier, label: impl Into<Path>) -> Option<Arc<SessionCounters>> {
+	/// Get-or-create the session gauge for `label` under `root` on `tier`. `None`
+	/// for a disabled registry. Unlike [`Self::entry`], labels key sessions rather
+	/// than broadcasts, so no cycle-breaking filter is needed.
+	fn session_counters(&self, tier: &Tier, root: &Path, label: &Path) -> Option<Arc<SessionCounters>> {
 		let shared = self.shared.as_ref()?;
-		let owned = label.into();
 		let mut sessions = shared.sessions.lock();
 		Some(
 			sessions
 				.entry(tier.clone())
 				.or_default()
-				.entry(owned)
+				.entry((root.clone(), label.clone()))
 				.or_default()
 				.clone(),
 		)
@@ -1375,7 +1243,7 @@ impl Registry {
 	///
 	/// Clears `report`, keeping its capacity so a caller draining on an
 	/// interval reuses one report instead of allocating per drain, then fills
-	/// every `(broadcast, tier)` traffic readout and every `(tier, label)`
+	/// every `(broadcast, tier)` traffic readout and every `(tier, root, label)`
 	/// session gauge. Entries no guard references anymore are dropped after
 	/// their final readout, which is marked `closed`, so a publisher draining on
 	/// an interval sees the closing readout exactly once. A pruned path that
@@ -1421,7 +1289,7 @@ impl Registry {
 		});
 
 		shared.sessions.lock().retain(|tier, labels| {
-			labels.retain(|label, counters| {
+			labels.retain(|(root, label), counters| {
 				// Nothing can join a row only the map holds (that needs the lock held here),
 				// but a meter outliving its session still writes until its last clone drops.
 				let unheld = Arc::strong_count(counters) == 1;
@@ -1429,6 +1297,7 @@ impl Registry {
 				let closed = unheld && empty;
 				report.sessions.push(SessionEntry {
 					tier: tier.clone(),
+					root: root.clone(),
 					label: label.clone(),
 					presence,
 					closed,
@@ -1488,25 +1357,38 @@ impl Refusal {
 	}
 }
 
-/// A connected session, as [`Handle::session`] records it.
+/// A connected session or admitted request, as [`Handle::session`] and
+/// [`Handle::request`] record it.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct SessionInfo {
 	/// The session's resolved stats label.
 	pub label: Path,
+	/// The origin root the session is scoped to, empty (the default) for none.
+	/// Fixed for the session's life: a [`Session::retag`] keeps it.
+	pub root: Path,
 }
 
 impl SessionInfo {
-	/// A session under `label`.
+	/// A session under `label`, without a root.
 	pub fn new(label: impl Into<Path>) -> Self {
-		Self { label: label.into() }
+		Self {
+			label: label.into(),
+			root: Path::empty(),
+		}
+	}
+
+	/// Set the root the session is scoped to.
+	pub fn with_root(mut self, root: impl Into<Path>) -> Self {
+		self.root = root.into();
+		self
 	}
 }
 
 impl Handle {
 	/// Count a session refused outside relay admission under its resolved label and tier.
 	pub fn refuse(&self, refusal: Refusal) {
-		if let Some(presence) = self.stats.session_counters(&self.tier, refusal.label) {
+		if let Some(presence) = self.stats.session_counters(&self.tier, &Path::empty(), &refusal.label) {
 			presence
 				.sessions_refused
 				.counter(refusal.reason)
@@ -1520,19 +1402,20 @@ impl Handle {
 	/// is still billable. Surfaced on the session track for this tier, keyed by
 	/// its label, in its totals, and in that label's presence track.
 	pub fn session(&self, session: SessionInfo) -> Session {
-		self.context(session.label, Context::Session)
+		self.context(session, Context::Session)
 	}
 
-	/// Count one admitted request under `label` and meter its traffic without session presence.
+	/// Count one admitted request under its label and root, and meter its traffic
+	/// without session presence.
 	///
 	/// A request has no session end to classify, so it never records a failure.
-	pub fn request(&self, label: impl Into<Path>) -> Session {
-		self.context(label, Context::Request)
+	pub fn request(&self, request: SessionInfo) -> Session {
+		self.context(request, Context::Request)
 	}
 
-	fn context(&self, label: impl Into<Path>, context: Context) -> Session {
-		let label = label.into();
-		let presence = self.stats.session_counters(&self.tier, &label);
+	fn context(&self, info: SessionInfo, context: Context) -> Session {
+		let SessionInfo { label, root } = info;
+		let presence = self.stats.session_counters(&self.tier, &root, &label);
 		if let Some(presence) = &presence {
 			match context {
 				Context::Session => {
@@ -1557,6 +1440,7 @@ impl Handle {
 		Session {
 			inner: Some(SendCell::new(Arc::new(SessionInner {
 				registry: self.stats.clone(),
+				root,
 				connected: matches!(context, Context::Session),
 				current: Mutex::new(Current {
 					failure: None,
@@ -1602,6 +1486,10 @@ struct WireInner {
 struct WireState {
 	sent_bytes: u64,
 	received_bytes: u64,
+	credit_stalls: u64,
+	credit_stalled_us: u64,
+	credit_held_readers_us: u64,
+	credit_held_evicted_us: u64,
 	closed: bool,
 }
 
@@ -1619,17 +1507,42 @@ impl WireInner {
 		};
 		let sent_bytes = self.counters.sent_bytes();
 		let received_bytes = self.counters.received_bytes();
+		let credit_stalls = self.counters.credit_stalls();
+		let micros = |time: std::time::Duration| u64::try_from(time.as_micros()).unwrap_or(u64::MAX);
+		let credit_stalled_us = micros(self.counters.credit_stalled());
+		let credit_held_readers_us = micros(self.counters.credit_held_readers());
+		let credit_held_evicted_us = micros(self.counters.credit_held_evicted());
 		if let Some(presence) = &current.presence {
-			presence
-				.wire_tx
-				.fetch_add(sent_bytes.saturating_sub(last.sent_bytes), Ordering::Relaxed);
-			presence
-				.wire_rx
-				.fetch_add(received_bytes.saturating_sub(last.received_bytes), Ordering::Relaxed);
+			for (counter, now, then) in [
+				(&presence.wire_tx, sent_bytes, last.sent_bytes),
+				(&presence.wire_rx, received_bytes, last.received_bytes),
+				(&presence.credit_stalls, credit_stalls, last.credit_stalls),
+				(&presence.credit_stalled_us, credit_stalled_us, last.credit_stalled_us),
+				(
+					&presence.credit_held_readers_us,
+					credit_held_readers_us,
+					last.credit_held_readers_us,
+				),
+				(
+					&presence.credit_held_evicted_us,
+					credit_held_evicted_us,
+					last.credit_held_evicted_us,
+				),
+			] {
+				// Most counters hold still between ticks, and an atomic add costs even when zero.
+				let delta = now.saturating_sub(then);
+				if delta > 0 {
+					counter.fetch_add(delta, Ordering::Relaxed);
+				}
+			}
 		}
 		*last = WireState {
 			sent_bytes,
 			received_bytes,
+			credit_stalls,
+			credit_stalled_us,
+			credit_held_readers_us,
+			credit_held_evicted_us,
 			closed: close,
 		};
 		!close
@@ -1708,6 +1621,8 @@ struct SessionInner {
 	/// Requests meter traffic but never open or close connected-session presence.
 	connected: bool,
 	registry: Registry,
+	/// The origin root the session is scoped to; a retag keeps it.
+	root: Path,
 	/// The current tier, label, and presence gauge, swapped together by [`Session::retag`].
 	current: Mutex<Current>,
 	/// This session's payload bytes, shared with the meters it hands out.
@@ -1822,7 +1737,7 @@ impl Session {
 				let Some(source) = source.upgrade() else { return false };
 				source.sample_on(&current, false)
 			});
-		let presence = inner.registry.session_counters(&tier, &label);
+		let presence = inner.registry.session_counters(&tier, &inner.root, &label);
 		// Bytes before the cut stay on the old row; later ones, through any meter, go to the new.
 		let (cut, sample) = match &current.presence {
 			Some(old) => old.bytes().leave(&inner.traffic),
@@ -1883,11 +1798,42 @@ impl Session {
 
 	/// Count a route or claim the peer forwarded that this node refused.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn refuse_route(&self) {
+	pub(crate) fn refuse_route(&self, kind: RouteRefusal) {
+		self.refuse_routes(kind, 1);
+	}
+
+	/// Count `count` routes or claims the peer forwarded that this node refused.
+	pub(crate) fn refuse_routes(&self, kind: RouteRefusal, count: u64) {
+		if count > 0 {
+			self.routes(|routes| routes.refused.add(kind, count));
+		}
+	}
+
+	/// Count a change to a relay's route that the peer caused, and the broadcasts it rewrote.
+	pub(crate) fn route_changed(&self, rewritten: u64) {
+		self.routes(|routes| routes.changed(rewritten));
+	}
+
+	/// Count a withdrawal sent to the peer, or `received` from it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn withdrawal(&self, kind: Withdrawal, received: bool) {
+		self.routes(|routes| match received {
+			true => routes.received.add(kind, 1),
+			false => routes.sent.add(kind, 1),
+		});
+	}
+
+	/// Count the session closing for its route layer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn route_closed(&self, kind: RouteClose) {
+		self.routes(|routes| routes.closed.add(kind, 1));
+	}
+
+	fn routes(&self, bump: impl FnOnce(&RouteCounters)) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(presence) = &current.presence else { return };
-		presence.routes_refused.fetch_add(1, Ordering::Relaxed);
+		bump(&presence.routes);
 	}
 
 	/// Egress (publisher / reads) scope for a broadcast path. The path is the
@@ -1961,7 +1907,7 @@ impl SessionInner {
 		};
 		Resolved {
 			generation,
-			counters: self.registry.entry(path).map(|entry| entry.tier(&tier)),
+			counters: self.registry.entry(path, &self.root).map(|entry| entry.tier(&tier)),
 		}
 	}
 }
@@ -2424,17 +2370,28 @@ mod tests {
 		);
 		bytes.set_sent_bytes(15);
 		bytes.set_received_bytes(27);
+		let ms = std::time::Duration::from_millis;
+		bytes.set_credit_stalls(2, ms(3));
+		bytes.set_credit_held(ms(4), ms(1));
 		session.retag(new.clone(), crate::Path::from_static("hall"));
 		bytes.set_sent_bytes(25);
 		bytes.set_received_bytes(50);
+		bytes.set_credit_stalls(5, ms(10));
+		bytes.set_credit_held(ms(9), ms(3));
 		let report = drain(&registry);
-		for (tier, label, expected) in [(old, "room", (15, 27)), (new, "hall", (10, 23))] {
+		for (tier, label, expected, stalls, held) in [
+			(old, "room", (15, 27), (2, 3_000), (4_000, 1_000)),
+			(new, "hall", (10, 23), (3, 7_000), (5_000, 2_000)),
+		] {
 			let row = report
 				.sessions
 				.iter()
 				.find(|row| row.tier == tier && row.label.as_str() == label)
 				.unwrap();
 			assert_eq!((row.presence.wire_tx, row.presence.wire_rx), expected);
+			assert_eq!((row.presence.credit_stalls, row.presence.credit_stalled_us), stalls);
+			let presence = &row.presence;
+			assert_eq!((presence.credit_held_readers_us, presence.credit_held_evicted_us), held);
 		}
 	}
 
@@ -2496,6 +2453,44 @@ mod tests {
 		assert_eq!(output["wire_rx"], 29);
 	}
 
+	/// A label that never routed writes no `routes` and reads back as zeros, and one count
+	/// writes the whole readout.
+	#[test]
+	fn presence_routes_stay_off_the_wire_until_counted() {
+		let mut presence = Presence::default();
+		let output = serde_json::to_value(presence).unwrap();
+		assert!(output.get("routes").is_none(), "{output}");
+		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
+
+		presence.routes.closed.other = 1;
+		let output = serde_json::to_value(presence).unwrap();
+		assert_eq!(output["routes"]["closed"]["other"], 1);
+		assert_eq!(output["routes"]["changed"], 0);
+		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
+	}
+
+	/// A zero credit counter stays off the wire and reads back as zero; a nonzero one is written.
+	#[test]
+	fn presence_credit_counters_stay_off_the_wire_while_zero() {
+		let mut presence = Presence::default();
+		let output = serde_json::to_value(presence).unwrap();
+		for key in [
+			"credit_stalls",
+			"credit_stalled_us",
+			"credit_held_readers_us",
+			"credit_held_evicted_us",
+		] {
+			assert!(output.get(key).is_none(), "{output}");
+		}
+		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
+
+		presence.credit_held_evicted_us = 5;
+		let output = serde_json::to_value(presence).unwrap();
+		assert_eq!(output["credit_held_evicted_us"], 5);
+		assert!(output.get("credit_stalls").is_none(), "{output}");
+		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
+	}
+
 	#[test]
 	fn outcomes_survive_clones_tier_changes_and_pruning() {
 		let stats = test_stats();
@@ -2546,7 +2541,7 @@ mod tests {
 
 	#[test]
 	fn outcome_wire_fields_default_and_roundtrip_without_changing_live_count() {
-		let old: Presence = serde_json::from_str(r#"{"sessions":4,"sessions_closed":2}"#).unwrap();
+		let old: Presence = serde_json::from_str(r#"{"sessions_started":4,"sessions_ended":2}"#).unwrap();
 		assert_eq!(old.sessions_refused, Refusals::default());
 		assert_eq!(old.sessions_failed, Failures::default());
 		let mut current = old;
@@ -2585,7 +2580,7 @@ mod tests {
 	fn session_snapshot(stats: &Registry, tier: &Tier, label: &str) -> Option<Presence> {
 		stats.shared().sessions.lock().get(tier).and_then(|labels| {
 			labels
-				.get(&crate::Path::try_from(label.to_string()).unwrap())
+				.get(&(crate::Path::empty(), crate::Path::try_from(label.to_string()).unwrap()))
 				.map(|c| c.snapshot(Instant::ZERO).0)
 		})
 	}
@@ -3088,7 +3083,7 @@ mod tests {
 	fn traffic_parses_with_missing_and_unknown_fields() {
 		// Wire forward/backward compat: a frame entry from an older publisher
 		// (missing fields) or a newer one (extra fields) must still parse.
-		let old: Traffic = serde_json::from_str(r#"{"announced":1,"bytes":5}"#).expect("older shape parses");
+		let old: Traffic = serde_json::from_str(r#"{"announces_started":1,"bytes":5}"#).expect("older shape parses");
 		assert_eq!(old.announces_started, 1);
 		assert_eq!(old.bytes, 5);
 		assert_eq!(old.announced_bytes, 0, "missing fields default to zero");
@@ -3253,6 +3248,42 @@ mod tests {
 		assert_eq!((key.sessions_started, key.sessions_ended, key.sent_bytes), (1, 0, 7));
 	}
 
+	/// A rooted exclusion skips the subtree under the counting session's own root
+	/// and no other, and a session's rows stay under its root across a retag.
+	#[test]
+	fn rooted_exclusion_follows_the_session_root() {
+		let stats = Registry::new(Config::new().with_exclude_rooted(Pattern::subtree(".stats").unwrap()));
+		let tier = Tier::default();
+		let path = crate::Path::from_static;
+		let rooted = stats
+			.tier(tier.clone())
+			.session(SessionInfo::new(path("x")).with_root(path("a")));
+		let unrooted = stats.tier(tier.clone()).session(SessionInfo::new(path("x")));
+		rooted.egress(path("a/.stats/node")).meter().bytes(1);
+		rooted.egress(path("a/b/.stats/node")).meter().bytes(2);
+		unrooted.egress(path(".stats/node")).meter().bytes(4);
+		unrooted.egress(path("a/.stats/node")).meter().bytes(8);
+		rooted.retag(tier.clone(), path("y"));
+		rooted.egress(path("a/live")).meter().bytes(16);
+
+		let mut report = Report::default();
+		stats.report(&mut report, Instant::now());
+		let mut traffic: Vec<_> = report
+			.traffic
+			.iter()
+			.map(|row| (row.path.as_str(), row.publisher.bytes))
+			.collect();
+		traffic.sort();
+		assert_eq!(traffic, [("a/.stats/node", 8), ("a/b/.stats/node", 2), ("a/live", 16)]);
+		let mut sessions: Vec<_> = report
+			.sessions
+			.iter()
+			.map(|row| (row.root.as_str(), row.label.as_str(), row.presence.sent_bytes))
+			.collect();
+		sessions.sort();
+		assert_eq!(sessions, [("", "x", 8), ("a", "x", 2), ("a", "y", 16)]);
+	}
+
 	#[test]
 	fn retag_back_counts_bytes_once() {
 		let stats = test_stats();
@@ -3312,7 +3343,9 @@ mod tests {
 		let busy = stats
 			.tier(tier.clone())
 			.session(SessionInfo::new(crate::Path::from_static("acme")));
-		let _request = stats.tier(tier.clone()).request(crate::Path::from_static("acme"));
+		let _request = stats
+			.tier(tier.clone())
+			.request(SessionInfo::new(crate::Path::from_static("acme")));
 		let meter = busy.egress(crate::Path::from_static("acme/live")).meter();
 		let _held = quiet.ingress(crate::Path::from_static("acme/other")).meter();
 		assert_eq!(
@@ -3465,7 +3498,7 @@ mod tests {
 		let stats = test_stats();
 		let request = stats
 			.tier(Tier::new(crate::Path::from_static("old")))
-			.request(crate::Path::from_static("root"));
+			.request(SessionInfo::new(crate::Path::from_static("root")));
 		let clone = request.clone();
 		request.egress(crate::Path::from_static("root/video")).meter().bytes(7);
 		request.retag(
@@ -3506,7 +3539,7 @@ mod tests {
 
 	#[test]
 	fn request_counter_is_additive_and_compatible_with_old_frames() {
-		let old: Presence = serde_json::from_str(r#"{"sessions":2,"sessions_closed":1}"#).unwrap();
+		let old: Presence = serde_json::from_str(r#"{"sessions_started":2,"sessions_ended":1}"#).unwrap();
 		assert_eq!(old.requests, 0);
 		let mut requests = Presence {
 			requests: 3,
@@ -3642,66 +3675,47 @@ mod tests {
 	}
 
 	#[test]
-	fn traffic_decodes_old_new_and_both_spellings() {
-		// A new consumer reads an old relay, a new relay, and the dual-name
-		// frame this serializer actually emits, all as the same Traffic.
+	fn traffic_round_trips_each_counter_once() {
 		let expected = expected_traffic();
-		let old = r#"{"announced":2,"announced_closed":1,"broadcasts":4,"broadcasts_closed":3,"subscriptions":6,"subscriptions_closed":5,"bytes":9}"#;
-		let new = r#"{"announces_started":2,"announces_ended":1,"broadcasts_started":4,"broadcasts_ended":3,"subscriptions_started":6,"subscriptions_ended":5,"bytes":9}"#;
-		assert_eq!(serde_json::from_str::<Traffic>(old).unwrap(), expected);
-		assert_eq!(serde_json::from_str::<Traffic>(new).unwrap(), expected);
-		let both = serde_json::to_string(&expected).unwrap();
-		assert!(both.contains("\"announces_started\":2"), "{both}");
-		assert!(both.contains("\"announced\":2"), "{both}");
-		assert!(both.contains("\"announces_ended\":1"), "{both}");
-		assert!(both.contains("\"announced_closed\":1"), "{both}");
-		assert!(both.contains("\"broadcasts_started\":4"), "{both}");
-		assert!(both.contains("\"broadcasts\":4"), "{both}");
-		assert!(both.contains("\"subscriptions_started\":6"), "{both}");
-		assert!(both.contains("\"subscriptions\":6"), "{both}");
-		assert_eq!(serde_json::from_str::<Traffic>(&both).unwrap(), expected);
+		let json = serde_json::to_string(&expected).unwrap();
+		for name in [
+			"announces_started",
+			"announces_ended",
+			"broadcasts_started",
+			"broadcasts_ended",
+			"subscriptions_started",
+			"subscriptions_ended",
+		] {
+			assert_eq!(json.matches(&format!("\"{name}\":")).count(), 1, "{json}");
+		}
+		for old in [
+			"announced",
+			"announced_closed",
+			"broadcasts",
+			"broadcasts_closed",
+			"subscriptions",
+			"subscriptions_closed",
+		] {
+			assert!(!json.contains(&format!("\"{old}\":")), "{json}");
+		}
+		assert_eq!(serde_json::from_str::<Traffic>(&json).unwrap(), expected);
+		// A counter the frame omits reads as zero.
+		let missing: Traffic = serde_json::from_str(r#"{"announces_started":2}"#).unwrap();
+		assert_eq!(missing.announces_started, 2);
+		assert_eq!(missing.announces_ended, 0);
 	}
 
 	#[test]
-	fn presence_decodes_old_new_and_both_spellings() {
+	fn presence_round_trips_each_counter_once() {
 		let expected = expected_presence();
-		assert_eq!(
-			serde_json::from_str::<Presence>(r#"{"sessions":3,"sessions_closed":1}"#).unwrap(),
-			expected
-		);
-		assert_eq!(
-			serde_json::from_str::<Presence>(r#"{"sessions_started":3,"sessions_ended":1}"#).unwrap(),
-			expected
-		);
-		let both = serde_json::to_string(&expected).unwrap();
-		assert!(both.contains("\"sessions_started\":3"), "{both}");
-		assert!(both.contains("\"sessions\":3"), "{both}");
-		assert!(both.contains("\"sessions_ended\":1"), "{both}");
-		assert!(both.contains("\"sessions_closed\":1"), "{both}");
-		assert_eq!(serde_json::from_str::<Presence>(&both).unwrap(), expected);
-	}
-
-	#[test]
-	fn counter_edge_canonical_wins_when_spellings_disagree() {
-		let traffic: Traffic =
-			serde_json::from_str(r#"{"announces_started":9,"announced":1,"announces_ended":8,"announced_closed":0}"#)
-				.unwrap();
-		assert_eq!(traffic.announces_started, 9);
-		assert_eq!(traffic.announces_ended, 8);
-
-		let presence: Presence =
-			serde_json::from_str(r#"{"sessions_started":4,"sessions":0,"sessions_ended":2,"sessions_closed":9}"#)
-				.unwrap();
-		assert_eq!(presence.sessions_started, 4);
-		assert_eq!(presence.sessions_ended, 2);
-	}
-
-	#[test]
-	fn counter_edge_refuses_null() {
-		// A present null is malformed, not absent: it must not fall through to the legacy spelling or to zero.
-		assert!(serde_json::from_str::<Traffic>(r#"{"announces_started":null,"announced":7}"#).is_err());
-		assert!(serde_json::from_str::<Traffic>(r#"{"subscriptions_closed":null}"#).is_err());
-		assert!(serde_json::from_str::<Presence>(r#"{"sessions_started":null}"#).is_err());
-		assert!(serde_json::from_str::<Presence>(r#"{"sessions":null,"sessions_closed":1}"#).is_err());
+		let json = serde_json::to_string(&expected).unwrap();
+		assert_eq!(json.matches("\"sessions_started\":3").count(), 1, "{json}");
+		assert_eq!(json.matches("\"sessions_ended\":1").count(), 1, "{json}");
+		assert!(!json.contains("\"sessions\":"), "{json}");
+		assert!(!json.contains("\"sessions_closed\":"), "{json}");
+		assert_eq!(serde_json::from_str::<Presence>(&json).unwrap(), expected);
+		let missing: Presence = serde_json::from_str(r#"{"sessions_started":3}"#).unwrap();
+		assert_eq!(missing.sessions_started, 3);
+		assert_eq!(missing.sessions_ended, 0);
 	}
 }

@@ -58,7 +58,6 @@ pipewire = ["cpal?/pipewire"]
 pulseaudio = ["cpal?/pulseaudio"]
 
 [dependencies]
-bitstream-io = { workspace = true }
 bytes = { workspace = true }
 # Pure-Rust cross-platform audio I/O. Optional: only the `capture` and
 # `playback` features need it. Encode stays on unsafe-libopus, so a build
@@ -73,10 +72,11 @@ rand = { workspace = true }
 # callback, and carry PCM into the playback mixer and the bus.
 ringbuf = "0.6.0"
 # Decoded and captured audio converts through the sinc resampler, and the PCM
-# rings through the cubic one, which an audio callback can afford. Neither is
-# the FFT resampler, so skip the default fft_resampler feature and its
+# rings through the cubic one, which an audio callback can afford. Capture at
+# the codec's rate follows the host clock through the slip, which 5.1 added.
+# None is the FFT resampler, so skip the default fft_resampler feature and its
 # RustFFT/realfft dependencies.
-rubato = { version = "5.0", default-features = false }
+rubato = { version = "5.1", default-features = false }
 # Pure-Rust port of WebRTC's audio processing module (AEC3, noise suppression,
 # AGC2). The reason the echo canceller can always compile: every other option is a
 # C++ build (webrtc-audio-processing wants CMake and abseil), which is the same
@@ -120,7 +120,13 @@ dispatch2 = { workspace = true, optional = true }
 objc2 = { workspace = true, optional = true }
 objc2-av-foundation = { workspace = true, optional = true }
 objc2-core-audio-types = { version = "0.3.2", optional = true }
-objc2-core-media = { workspace = true, features = ["CMSampleBuffer", "CMBlockBuffer", "CMSync", "objc2-core-audio-types"], optional = true }
+objc2-core-media = { workspace = true, features = [
+    "CMSampleBuffer",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSync",
+    "objc2-core-audio-types",
+], optional = true }
 objc2-foundation = { workspace = true, optional = true }
 objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCShareableContent"], optional = true }
 

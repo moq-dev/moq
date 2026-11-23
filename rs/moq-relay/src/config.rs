@@ -83,8 +83,8 @@ pub struct Config {
 	#[serde(default)]
 	pub stats: stats::Config,
 
-	/// Group cache sizing. Unbounded unless `cache.capacity` or `cache.headroom`
-	/// is set.
+	/// Group cache sizing. Targets 10% of memory free unless `cache.capacity` or
+	/// `cache.headroom` says otherwise; `cache.headroom = "0"` removes that bound.
 	#[usage(flatten)]
 	#[serde(default)]
 	pub cache: cache::Config,
@@ -157,8 +157,34 @@ struct Cli {
 /// flattens it has its own spec, so `Config::spec()` would hand back the wrong
 /// one and read as though it were theirs.
 pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
-	Cli::spec()
+	static SPEC: std::sync::OnceLock<usage_rs::spec::Spec<'static>> = std::sync::OnceLock::new();
+	SPEC.get_or_init(|| {
+		let base = Cli::spec();
+		// `[connect]` is the shared client fragment, flattened whole; its `url` and `tokens`
+		// still parse so [`Config::resolve`] can refuse them, but help no longer offers them.
+		let flags = base
+			.root
+			.flags
+			.iter()
+			.map(|meta| usage_rs::spec::FlagMeta {
+				hide: meta.hide || meta.flag.longs.iter().any(|long| REFUSED_CONNECT.contains(long)),
+				..*meta
+			})
+			.collect::<Vec<_>>();
+		let root = usage_rs::spec::CommandMeta {
+			flags: flags.leak(),
+			..*base.root
+		};
+		usage_rs::spec::Spec {
+			root: Box::leak(Box::new(root)),
+			..*base
+		}
+	})
 }
+
+/// The `[connect]` flags a relay refuses: cluster dials take their peers and
+/// credentials from `[cluster]`.
+const REFUSED_CONNECT: [&str; 2] = ["connect", "connect-token"];
 
 /// Every setting the relay merges, as its flags declare them.
 pub(crate) const fn registry() -> usage_rs::config::Registry {
@@ -219,7 +245,7 @@ impl Config {
 		let (cli, cli_layer) = match Cli::parse_from_with_settings(&argv) {
 			Ok(parsed) => parsed,
 			Err(err) => {
-				let answer = moq_tokio::cli::answer(Cli::spec(), Cli::command(), &argv, err);
+				let answer = moq_tokio::cli::answer(spec(), Cli::command(), &argv, err);
 				if answer.is_question() {
 					answer.exit();
 				}
@@ -300,7 +326,6 @@ impl Config {
 		deprecated.extend(self.listen.deprecated());
 		deprecated.extend(self.connect.deprecated());
 		deprecated.extend(self.cluster.deprecated());
-		deprecated.extend(self.auth.deprecated());
 		if let Some(server) = &self.server {
 			deprecated.toml("[server]", "[listen]", None);
 			deprecated.extend(server.deprecated());
@@ -322,6 +347,7 @@ impl Config {
 	pub(crate) fn resolve(mut self) -> anyhow::Result<Resolved> {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		self.check_connect()?;
 		// Here rather than at an endpoint, since io_uring workers and lazily built
 		// dial clients would otherwise check `[quic]` late or never. `[limits.peer.quic]`
 		// is checked by `Cluster::new`, which embedders call directly.
@@ -329,6 +355,8 @@ impl Config {
 		self.check_runtime()?;
 		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
+		self.cluster.check_dials()?;
+		self.cluster.listen.check()?;
 		self.check_lan()?;
 
 		self.quic
@@ -336,17 +364,44 @@ impl Config {
 			.get_or_insert(moq_tokio::quic::DEFAULT_MAX_STREAMS);
 		// A relay keeps the moq-transport object state it forwards across a moq-lite hop to
 		// another relay. Only negotiated when both sides offer it, so other peers never see it.
-		self.listen.extensions.ietf = true;
-		self.connect.extensions.ietf = true;
+		self.listen.ietf = true;
+		self.connect.ietf = true;
 		// Name the relay ahead of its core unless the embedder set a name (empty omits it),
 		// and dial cluster peers under the same name.
 		let implementation = self
 			.listen
 			.implementation
-			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+			.get_or_insert_with(|| format!("{} {}", crate::auth::RELAY, moq_net::IMPLEMENTATION))
 			.clone();
 		self.connect.implementation = Some(implementation);
 		Ok(Resolved(self))
+	}
+
+	/// Refuse the `[connect]` keys a cluster dial has no use for.
+	///
+	/// The relay flattens the whole client fragment as the template for cluster dials,
+	/// but a peer's address and credential come from `[cluster]`: a URL here would be
+	/// read by nothing, and tokens here would reach every peer, LAN ones included.
+	fn check_connect(&self) -> anyhow::Result<()> {
+		let mut refused = Vec::new();
+		if self.connect.url.is_some() {
+			refused.push(
+				"--connect / MOQ_CONNECT / connect.url: name the peers to dial with \
+				 --cluster-connect / MOQ_CLUSTER_CONNECT / cluster.connect",
+			);
+		}
+		if !self.connect.tokens.is_empty() {
+			refused.push(
+				"--connect-token / MOQ_CONNECT_TOKEN / connect.tokens: give peers a credential with \
+				 --cluster-token / MOQ_CLUSTER_TOKEN / cluster.token, or a `token` on a cluster.connect peer",
+			);
+		}
+		anyhow::ensure!(
+			refused.is_empty(),
+			"moq-relay does not read these settings; remove them and try again:\n  {}",
+			refused.join("\n  ")
+		);
+		Ok(())
 	}
 
 	/// Refuse worker options that need a worker group, or a build, this relay lacks.
@@ -361,8 +416,11 @@ impl Config {
 			!io_uring || self.listen.bind.is_some(),
 			"runtime.io_uring requires listen.bind"
 		);
-		#[cfg(not(target_os = "linux"))]
-		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
+		#[cfg(not(uring))]
+		anyhow::ensure!(
+			!io_uring,
+			"runtime.io_uring needs Linux on x86_64, aarch64, riscv64, loongarch64, or powerpc64"
+		);
 		// Refused rather than ignored: a group is the whole point of the setting, and
 		// silently serving from the shared runtime instead would look like it worked.
 		Ok(())
@@ -385,6 +443,12 @@ impl Config {
 		anyhow::ensure!(
 			!self.cluster.dials_statics() || self.connect.resolve().bind.port() == 0,
 			"handoff.socket cannot hand on the cluster's dial socket: give --connect-bind port 0"
+		);
+		// Its socket is bound outside the handed-on groups, so a successor could not
+		// bind it beside the relay it replaces.
+		anyhow::ensure!(
+			self.cluster.listen.bind.is_none(),
+			"handoff.socket cannot hand on --cluster-listen's socket"
 		);
 		// The QUIC port is handed on as a reuseport group with room for a successor,
 		// which only a worker group binds.
@@ -455,7 +519,7 @@ mod tests {
 			"--cluster-connect-api-tls-root",
 			"MOQ_CLUSTER_CONNECT_API_TLS_ROOT",
 			"api.pem",
-			"--cluster-api-tls-root",
+			"--cluster-api-root",
 		),
 	];
 
@@ -490,7 +554,7 @@ mod tests {
 		let path = dir.path().join("obsolete.toml");
 		for (body, replacement) in [
 			("[cluster]\nconnect_api = 'peers.json'", "[cluster.api] url"),
-			("[cluster]\nconnect_api_tls_root = []", "[cluster.api.tls] root"),
+			("[cluster]\nconnect_api_tls_root = []", "[cluster.api] root"),
 		] {
 			std::fs::write(&path, body).unwrap();
 			let error =
@@ -499,26 +563,32 @@ mod tests {
 		}
 	}
 
-	/// The moq-transport extension choices are file-only, so the loader must carry them through.
+	/// The SETUP extensions are no setting: the relay always offers `ietf` on its own links,
+	/// and a file naming either table is refused.
 	#[test]
-	fn loader_keeps_toml_extension_settings() {
+	fn extension_tables_are_refused() {
 		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("relay.toml");
-		std::fs::write(
-			&path,
-			"[listen.extensions]\nietf = true\n\n[connect.extensions]\nsolicit = false\n",
-		)
-		.unwrap();
-		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
-		assert!(config.listen.extensions.ietf);
-		assert!(config.listen.extensions.solicit);
-		assert!(!config.connect.extensions.solicit);
-		assert!(!config.connect.extensions.ietf);
+		for table in [
+			"[listen.extensions]\nietf = true\n",
+			"[connect.extensions]\nsolicit = false\n",
+		] {
+			let path = dir.path().join("relay.toml");
+			std::fs::write(&path, table).unwrap();
+			let parsed = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]);
+			assert!(parsed.is_err(), "{table}");
+		}
 	}
 
 	#[test]
 	fn session_limits_merge_without_crossing_peer_policy() {
-		if !test_env::Env::without(&["MOQ_LIMITS_CLIENT_ANNOUNCES", "MOQ_LIMITS_PEER_ANNOUNCES"]).isolate() {
+		if !test_env::Env::without(&[
+			"MOQ_LIMITS_CLIENT_ANNOUNCES",
+			"MOQ_LIMITS_PEER_ANNOUNCES",
+			"MOQ_LIMITS_CLIENT_LIVE_EDGES",
+			"MOQ_LIMITS_PEER_LIVE_EDGES",
+		])
+		.isolate()
+		{
 			return;
 		}
 		let dir = tempfile::tempdir().unwrap();
@@ -527,14 +597,21 @@ mod tests {
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 7);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
+		// Clients are bounded by default; a peer link carrying every publisher is not.
+		assert_eq!(config.limits.client.resolve().live_edges, Some(256 << 20));
+		assert_eq!(config.limits.peer.resolve().live_edges, None);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
 			"--limits-client-announces=0".into(),
+			"--limits-client-live-edges=0".into(),
+			"--limits-peer-live-edges=1024".into(),
 		])
 		.unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 0);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
+		assert_eq!(config.limits.client.resolve().live_edges, None);
+		assert_eq!(config.limits.peer.resolve().live_edges, Some(1024));
 	}
 
 	/// `[limits.peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.
@@ -630,6 +707,39 @@ mod tests {
 		assert_eq!(config.quic.max_streams, Some(crate::DEFAULT_MAX_STREAMS));
 	}
 
+	/// The environment picks the congestion controller by algorithm name.
+	#[test]
+	fn congestion_control_from_the_environment() {
+		if !test_env::Env::default()
+			.set("MOQ_QUIC_CONGESTION_CONTROL", "unlimited")
+			.isolate()
+		{
+			return;
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
+		assert_eq!(
+			config.quic.congestion_control,
+			Some(moq_tokio::quic::CongestionControl::Unlimited)
+		);
+	}
+
+	/// A released family name in a file stops the relay, naming the algorithms.
+	#[test]
+	fn congestion_family_in_a_file_refuses_to_boot() {
+		if !test_env::Env::without(&["MOQ_QUIC_CONGESTION_CONTROL"]).isolate() {
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("relay.toml");
+		std::fs::write(&path, "[quic]\ncongestion_control = \"delay\"\n").unwrap();
+		let err =
+			Config::parse_and_merge(["moq-relay", path.to_str().unwrap()]).expect_err("a family name must not boot");
+		let err = format!("{err:#}");
+		for name in ["bbr", "cubic", "unlimited"] {
+			assert!(err.contains(name), "{err}");
+		}
+	}
+
 	/// A released `--server-*` spelling stops the relay and names its replacement.
 	///
 	/// Booting anyway is the failure this replaced: those flags land on hidden
@@ -670,6 +780,80 @@ mod tests {
 		}
 	}
 
+	/// What the refusal says for `[connect]`'s URL and its tokens.
+	const REFUSED_URL: &str = "--connect / MOQ_CONNECT / connect.url: name the peers to dial with \
+	                           --cluster-connect / MOQ_CLUSTER_CONNECT / cluster.connect";
+	const REFUSED_TOKENS: &str = "--connect-token / MOQ_CONNECT_TOKEN / connect.tokens: give peers a credential \
+	                              with --cluster-token / MOQ_CLUSTER_TOKEN / cluster.token";
+
+	/// `[connect]`'s URL and tokens stop the relay from a flag or the file, naming
+	/// what replaces each, while the rest of `[connect]` still resolves.
+	#[test]
+	fn connect_url_and_tokens_refuse_to_boot() {
+		if !test_env::Env::without(&["MOQ_CONNECT", "MOQ_CONNECT_TOKEN"]).isolate() {
+			return;
+		}
+		let refusal = |config: Config| config.resolve().expect_err("must refuse").to_string();
+
+		let flags = Config::parse_and_merge(["moq-relay", "--connect", "https://peer.example/"]).unwrap();
+		let err = refusal(flags);
+		assert!(err.contains(REFUSED_URL) && !err.contains("connect.tokens"), "{err}");
+		let flags = Config::parse_and_merge(["moq-relay", "--connect-token", "secret"]).unwrap();
+		let err = refusal(flags);
+		assert!(err.contains(REFUSED_TOKENS) && !err.contains("connect.url"), "{err}");
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("relay.toml");
+		std::fs::write(&path, "[connect]\nurl = 'https://peer.example/'\ntokens = ['secret']\n").unwrap();
+		let file = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
+		let err = refusal(file);
+		assert!(err.contains(REFUSED_URL) && err.contains(REFUSED_TOKENS), "{err}");
+
+		let rest = Config::parse_and_merge([
+			"moq-relay",
+			"--connect-bind",
+			"[::]:0",
+			"--connect-timeout",
+			"5s",
+			"--connect-version",
+			"moq-lite-05",
+			"--connect-tls-root",
+			"ca.pem",
+		])
+		.unwrap();
+		rest.resolve().expect("the dial template's other keys still resolve");
+	}
+
+	/// The same refusal from the environment, the half a deployment most often uses.
+	#[test]
+	fn connect_env_refuses_to_boot() {
+		if !test_env::Env::default()
+			.set("MOQ_CONNECT", "https://peer.example/")
+			.set("MOQ_CONNECT_TOKEN", "secret")
+			.isolate()
+		{
+			return;
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
+		let err = config.resolve().expect_err("must refuse").to_string();
+		assert!(err.contains(REFUSED_URL) && err.contains(REFUSED_TOKENS), "{err}");
+	}
+
+	/// `--help` no longer offers the two refused `[connect]` flags, and still lists the rest.
+	#[test]
+	fn help_omits_the_refused_connect_flags() {
+		let argv = [std::ffi::OsStr::new("--help")];
+		let err = Cli::parse_from(&argv).unwrap_err();
+		let help = moq_tokio::cli::answer(spec(), Cli::command(), &argv, err)
+			.message()
+			.to_string();
+		assert!(help.contains("--connect-bind"), "{help}");
+		assert!(
+			!help.contains("--connect <") && !help.contains("--connect-token"),
+			"{help}"
+		);
+	}
+
 	/// A released config file is parsed where the tables used to live, so the relay
 	/// can name `[quic]` instead of failing with `unknown field quic`, which is what
 	/// `deny_unknown_fields` would say on its own.
@@ -696,34 +880,13 @@ max_streams = 64
 		assert!(err.contains("both directions"), "{err}");
 	}
 
-	/// A 0.14 `[auth]` config with `key` and `public` would otherwise boot with
-	/// every JWT ignored; each removed key refuses with its replacement named.
+	/// A 0.14 `[auth]` key is an unknown key like any other, never a tailored refusal.
 	#[test]
-	fn released_auth_keys_refuse_to_boot() {
-		let toml = r#"
-[auth]
-key = "root.jwk"
-key_dir = "keys/"
-auth_api = "https://api.example.com/auth"
-domains = ["example.com"]
-mtls_tier = "internal"
-public = "anon/**"
-
-[auth.tls]
-root = ["ca.pem"]
-"#;
-		let config: Config = toml::from_str(toml).expect("released config must still parse");
-		let err = config.resolve().expect_err("must refuse").to_string();
-		for old in [
-			"[auth] key -> --auth-url to `moq auth serve --key`",
-			"[auth] key_dir -> --auth-url to `moq auth serve --key-dir`",
-			"[auth] auth_api -> ",
-			"[auth] domains -> ",
-			"[auth] mtls_tier -> --auth-url to `moq auth serve --tier`",
-			"[auth.tls] -> --connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
-		] {
-			assert!(err.contains(old), "{old}: {err}");
+	fn a_released_auth_key_is_an_unknown_key() {
+		for key in ["key", "key_dir", "auth_api", "domains", "mtls_tier"] {
+			toml::from_str::<Config>(&format!("[auth]\n{key} = \"x\"\n")).expect_err(key);
 		}
+		toml::from_str::<Config>("[auth.tls]\nroot = [\"ca.pem\"]\n").expect_err("tls");
 	}
 
 	#[test]
@@ -760,46 +923,28 @@ root = ["ca.pem"]
 		assert_eq!(config.connect.tls.root, vec![std::path::PathBuf::from("mesh.pem")]);
 	}
 
-	/// The released auth variables, each with the spelling its refusal names.
-	const RELEASED_AUTH_ENV: [(&str, &str); 7] = [
-		("MOQ_AUTH_KEY", "--auth-key / MOQ_AUTH_KEY"),
-		("MOQ_AUTH_KEY_DIR", "--auth-key-dir / MOQ_AUTH_KEY_DIR"),
-		("MOQ_AUTH_API", "--auth-api / MOQ_AUTH_API"),
-		("MOQ_AUTH_PUBLIC_API", "--auth-public-api / MOQ_AUTH_PUBLIC_API"),
-		("MOQ_AUTH_DOMAIN", "--auth-domain / MOQ_AUTH_DOMAIN"),
-		("MOQ_AUTH_MTLS_TIER", "--auth-mtls-tier / MOQ_AUTH_MTLS_TIER"),
-		("MOQ_AUTH_TLS_ROOT", "--auth-tls-* / MOQ_AUTH_TLS_*"),
-	];
-
-	/// The environment is the half a removed flag silently misses: a relay deployed
-	/// through it never typed the flag.
+	/// A 0.14 auth variable or flag is unknown like any other: startup stops naming it,
+	/// so a left-over `MOQ_AUTH_KEY` never boots a relay with its tokens ignored.
 	#[test]
-	fn released_auth_env_refuses_to_boot() {
-		let env = RELEASED_AUTH_ENV
-			.iter()
-			.fold(test_env::Env::default(), |env, (var, _)| env.set(var, "x"));
-		if !env.isolate() {
+	fn a_released_auth_variable_and_flag_are_unknown() {
+		if !test_env::Env::default().set("MOQ_AUTH_KEY", "root.jwk").isolate() {
 			return;
 		}
-		// One refusal names every variable, so the operator fixes them all in one pass.
-		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**"])
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon"])
 			.expect_err("must refuse")
 			.to_string();
-		for (var, spelling) in RELEASED_AUTH_ENV {
-			assert!(err.contains(spelling), "{var}: {err}");
-		}
+		assert!(err.contains("MOQ_AUTH_KEY"), "{err}");
 	}
 
-	/// 0.14 took the bare flag, so it has to parse to be refused by name.
 	#[test]
-	fn released_auth_flag_refuses_to_boot() {
-		if !test_env::Env::without(&RELEASED_AUTH_ENV.map(|(var, _)| var)).isolate() {
+	fn a_released_auth_flag_is_unknown() {
+		if !test_env::Env::without(&["MOQ_AUTH_KEY"]).isolate() {
 			return;
 		}
-		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**", "--auth-tls-disable-verify"])
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon", "--auth-key", "root.jwk"])
 			.expect_err("must refuse")
 			.to_string();
-		assert!(err.contains("--auth-tls-* / MOQ_AUTH_TLS_*"), "{err}");
+		assert!(err.contains("--auth-key"), "{err}");
 	}
 
 	/// A released flag and a released table are refused together, in one message.
@@ -872,6 +1017,28 @@ root = ["ca.pem"]
 			resolve(cluster);
 		}
 		resolve("[stats]\nenabled = true\n");
+		refuse("[stats]\nroots = true\n", "--stats-roots requires --stats-enabled");
+		resolve("[stats]\nenabled = true\nroots = true\n");
+
+		// A setting only a dialed peer or API reads is refused with none to read it.
+		refuse(
+			"[cluster.api]\nroot = [\"api.pem\"]\n",
+			"--cluster-api-root requires --cluster-api-url",
+		);
+		resolve("[cluster.api]\nurl = \"https://api.example/peers\"\nroot = [\"api.pem\"]\n");
+		for alone in [
+			"[cluster]\ntoken = \"cluster.jwt\"\n",
+			"[cluster]\nnode = \"https://a.example\"\nconnect = [\"https://a.example\"]\ntoken = \"cluster.jwt\"\n",
+			"[cluster]\ntoken = \"cluster.jwt\"\n[cluster.lan]\nenabled = true\n",
+		] {
+			refuse(alone, "--cluster-token requires a peer to dial");
+		}
+		for peers in [
+			"connect = [\"https://b.example\"]\n",
+			"api.url = \"https://api.example/peers\"\n",
+		] {
+			resolve(&format!("[cluster]\ntoken = \"cluster.jwt\"\n{peers}"));
+		}
 
 		// Embedders build a cluster without resolving, so it refuses the same.
 		let cluster: cluster::Config = toml::from_str("node = \"https://a.example\"\n").expect("parse");
@@ -881,6 +1048,12 @@ root = ["ca.pem"]
 			.expect("an unnamed clustered stats node must be refused")
 			.to_string();
 		assert!(err.contains("--stats-node"), "{err}");
+
+		// A cluster listener admitting clients without a certificate is refused.
+		refuse(
+			"[cluster.listen]\nbind = \"127.0.0.1:0\"\ncert = \"c.pem\"\nkey = \"k.pem\"\n",
+			"needs --cluster-listen-root",
+		);
 
 		// The io_uring workers need an explicit bind, whatever the build.
 		refuse(
@@ -919,6 +1092,13 @@ root = ["ca.pem"]
 			resolve(&format!(
 				"{quic}[cluster]\nnode = \"https://a.example\"\nconnect = [\"https://a.example\"]\n[connect]\nbind = \"0.0.0.0:4444\"\n"
 			));
+			// The cluster listener's socket is in no handed-on group.
+			refuse(
+				&format!(
+					"{quic}[cluster.listen]\nbind = \"127.0.0.1:0\"\ncert = \"c.pem\"\nkey = \"k.pem\"\nroot = \"ca.pem\"\n"
+				),
+				"cannot hand on --cluster-listen's socket",
+			);
 		}
 		#[cfg(not(target_os = "linux"))]
 		refuse(
@@ -960,32 +1140,45 @@ root = ["ca.pem"]
 	/// Real relay examples, packaging and test fixtures use the same loader as an embedding CLI.
 	#[test]
 	fn repository_configs_load() {
-		let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+		let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 		// Only repository inputs belong here; installed clients and build output below
 		// test/ can contain unrelated TOML. Git's tracked list also includes new fixtures.
-		let tracked = std::process::Command::new("git")
-			.args(["ls-files", "-z", "--", "demo/relay", "packaging", "test"])
-			.current_dir(&root)
-			.output()
-			.expect("list repository fixtures");
-		assert!(tracked.status.success());
-		let tracked = String::from_utf8(tracked.stdout).unwrap();
-		for area in ["demo/relay", "packaging", "test"] {
+		// Each glob names its files from this crate, so sh/rs/reads.sh finds the read
+		// and a new fixture selects this test.
+		for area in [
+			"../../demo/relay/**/*.toml",
+			"../../packaging/**/*.toml",
+			"../../test/**/*.toml",
+		] {
+			let tracked = std::process::Command::new("git")
+				.args(["ls-files", "-z", "--", &format!(":(glob){area}")])
+				.current_dir(manifest)
+				.output()
+				.expect("list repository fixtures");
+			assert!(tracked.status.success());
+			let tracked = String::from_utf8(tracked.stdout).unwrap();
 			let mut checked = 0;
-			for name in tracked.split('\0').filter(|name| name.starts_with(area)) {
-				let path = root.join(name);
-				if path.extension().is_none_or(|ext| ext != "toml")
-					|| matches!(
-						path.file_name().and_then(|name| name.to_str()),
-						// `cases.toml` holds test/quic-interop's expected results.
-						Some("Cargo.toml" | "rust-toolchain.toml" | "bunfig.toml" | "cases.toml")
-					) {
+			// test/mesh-replay/ holds mesh topologies and event scripts, not relay configs; the
+			// replay writes each relay's config at run time.
+			for name in tracked
+				.split('\0')
+				.filter(|name| !name.is_empty() && !name.contains("/test/mesh-replay/"))
+			{
+				let path = manifest.join(name);
+				if matches!(
+					path.file_name().and_then(|name| name.to_str()),
+					// `cases.toml` holds test/quic-interop's expected results.
+					Some("Cargo.toml" | "rust-toolchain.toml" | "bunfig.toml" | "cases.toml")
+				) {
 					continue;
 				}
 				let result = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]);
 				if path.file_name().unwrap() == "smoke-legacy.toml" {
 					let error = result.expect_err("the published legacy fixture must be refused");
 					assert!(error.to_string().contains("[server]"), "{}: {error}", path.display());
+				} else if path.file_name().unwrap() == "smoke-patterns.toml" {
+					let error = result.expect_err("the published pattern fixture must be refused");
+					assert!(error.to_string().contains("wildcard"), "{}: {error}", path.display());
 				} else {
 					result.unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 				}
@@ -1450,13 +1643,13 @@ ws = false
 			},
 			Case {
 				name: "enum-from-file",
-				toml: "[quic]\ncongestion_control = \"delay\"\n",
+				toml: "[quic]\ncongestion_control = \"cubic\"\n",
 				cli: &[],
 				key: "quic.congestion_control",
 				check: |config| {
 					assert_eq!(
 						config.quic.congestion_control,
-						Some(moq_tokio::quic::CongestionControl::Delay)
+						Some(moq_tokio::quic::CongestionControl::Cubic)
 					)
 				},
 				source: "congestion_control",
@@ -1600,7 +1793,7 @@ ws = false
 		]);
 	}
 
-	/// The variables the public patterns could also be read from.
+	/// The variables the public prefixes could also be read from.
 	const PUBLIC_ENV: &[&str] = &[
 		"MOQ_AUTH_PUBLIC",
 		"MOQ_AUTH_PUBLIC_SUBSCRIBE",
@@ -1608,10 +1801,9 @@ ws = false
 		"MOQ_AUTH_URL",
 	];
 
-	/// The public patterns arrive from the CLI and TOML alike, as patterns rather
-	/// than prefixes.
+	/// The public prefixes arrive from the CLI and TOML alike.
 	#[test]
-	fn public_patterns_merge_from_every_source() {
+	fn public_prefixes_merge_from_every_source() {
 		if !test_env::Env::without(PUBLIC_ENV).isolate() {
 			return;
 		}
@@ -1619,9 +1811,9 @@ ws = false
 		let config = Config::parse_and_merge([
 			"moq-relay",
 			"--auth-public-subscribe",
-			"demo/**",
+			"demo",
 			"--auth-public-publish",
-			"uploads/**",
+			"uploads",
 		])
 		.expect("config load");
 
@@ -1629,8 +1821,8 @@ ws = false
 			config.auth.validate(false).is_ok(),
 			"CLI public flags must admit anonymous sessions"
 		);
-		assert_eq!(config.auth.public_subscribe, vec!["demo/**".parse().unwrap()]);
-		assert_eq!(config.auth.public_publish, vec!["uploads/**".parse().unwrap()]);
+		assert_eq!(config.auth.public_subscribe, vec!["demo".parse().unwrap()]);
+		assert_eq!(config.auth.public_publish, vec!["uploads".parse().unwrap()]);
 		assert!(
 			config
 				.source("auth.public_subscribe")
@@ -1639,20 +1831,20 @@ ws = false
 			config.source("auth.public_subscribe")
 		);
 
-		let toml = "[auth]\npublic = \"anon/**\"\n";
+		let toml = "[auth]\npublic = \"anon\"\n";
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("auth-public-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("toml load");
-		assert_eq!(config.auth.public, vec!["anon/**".parse().unwrap()]);
+		assert_eq!(config.auth.public, vec!["anon".parse().unwrap()]);
 	}
 
-	/// The environment carries a list of public patterns, comma separated.
+	/// The environment carries a list of public prefixes, comma separated.
 	#[test]
-	fn public_patterns_merge_from_the_environment() {
+	fn public_prefixes_merge_from_the_environment() {
 		if !test_env::Env::without(PUBLIC_ENV)
-			.set("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env/**,other/**")
+			.set("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env,other")
 			.isolate()
 		{
 			return;
@@ -1660,12 +1852,86 @@ ws = false
 		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
 		assert_eq!(
 			config.auth.public_subscribe,
-			vec!["from-env/**".parse().unwrap(), "other/**".parse().unwrap()]
+			vec!["from-env".parse().unwrap(), "other".parse().unwrap()]
 		);
 	}
 
-	/// The variables a QUIC-LB setting could also be read from.
-	const QUIC_LB_ENV: &[&str] = &["MOQ_LISTEN_QUIC_LB_ID", "MOQ_LISTEN_QUIC_LB_NONCE"];
+	/// The public rule granting everything, as each source spells the empty prefix.
+	fn everything(config: &Config) -> Option<(moq_auth::Prefixes, moq_auth::Prefixes)> {
+		let grant = config.auth.public_grant()?;
+		Some((grant.publish.path, grant.subscribe.path))
+	}
+
+	/// "Anyone may do anything" is the empty prefix, which the CLI and TOML both spell.
+	#[test]
+	fn the_empty_public_prefix_covers_everything() {
+		if !test_env::Env::without(PUBLIC_ENV).isolate() {
+			return;
+		}
+		let all = Some((moq_auth::Prefixes::all(), moq_auth::Prefixes::all()));
+
+		for args in [
+			&["moq-relay", "--auth-public", ""][..],
+			&["moq-relay", "--auth-public="],
+		] {
+			let config = Config::parse_and_merge(args.iter().copied()).expect("cli load");
+			assert_eq!(everything(&config), all, "{args:?}");
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		for (name, body) in [
+			("string.toml", "[auth]\npublic = \"\"\n"),
+			("list.toml", "[auth]\npublic = [\"\"]\n"),
+		] {
+			let path = dir.path().join(name);
+			std::fs::write(&path, body).unwrap();
+			let args = [std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+			let config = Config::parse_and_merge(args).expect("toml load");
+			assert_eq!(everything(&config), all, "{body}");
+		}
+	}
+
+	/// The environment spells the empty prefix as a set but empty variable.
+	#[test]
+	fn the_empty_public_prefix_from_the_environment() {
+		if !test_env::Env::without(PUBLIC_ENV).set("MOQ_AUTH_PUBLIC", "").isolate() {
+			return;
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
+		assert_eq!(
+			everything(&config),
+			Some((moq_auth::Prefixes::all(), moq_auth::Prefixes::all()))
+		);
+	}
+
+	/// A wildcard public rule is refused where it is read, from every source, naming the
+	/// prefix to write instead.
+	#[test]
+	fn a_wildcard_public_rule_is_refused_from_every_source() {
+		if !test_env::Env::without(PUBLIC_ENV).isolate() {
+			return;
+		}
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon/**"]).unwrap_err();
+		assert!(format!("{err:#}").contains("`anon` covers `anon`"), "{err:#}");
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("wildcard.toml");
+		std::fs::write(&path, "[auth]\npublic = \"**\"\n").unwrap();
+		let args = [std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let err = Config::parse_and_merge(args).unwrap_err();
+		assert!(
+			format!("{err:#}").contains("the empty prefix covers every path"),
+			"{err:#}"
+		);
+	}
+
+	/// The variables a QUIC-LB setting could also be read from, current and released.
+	const QUIC_LB_ENV: &[&str] = &[
+		"MOQ_LISTEN_LB_ID",
+		"MOQ_LISTEN_LB_NONCE",
+		"MOQ_LISTEN_QUIC_LB_ID",
+		"MOQ_LISTEN_QUIC_LB_NONCE",
+	];
 
 	/// Merge `body` as the config file named `name` with `cli`, and require that the
 	/// listener refuses to start with an error containing `needle`.
@@ -1685,7 +1951,7 @@ ws = false
 	/// A QUIC-LB nonce with no server id stops startup from TOML, and CLI
 	/// assignments override the same nested fields.
 	///
-	/// The CLI flag pair already requires `--listen-quic-lb-id`, so this does not
+	/// The CLI flag pair already requires `--listen-lb-id`, so this does not
 	/// add a second command-line error for that spelling.
 	#[test]
 	fn quic_lb_nonce_and_conflicts_refuse_to_start() {
@@ -1693,16 +1959,11 @@ ws = false
 			return;
 		}
 
-		let err = Config::parse_and_merge(["moq-relay", "--listen-quic-lb-nonce", "8"])
+		let err = Config::parse_and_merge(["moq-relay", "--listen-lb-nonce", "8"])
 			.expect_err("the flag pair is already required");
-		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
+		assert!(err.to_string().contains("--listen-lb-id"), "{err}");
 
-		refuse_quic_lb(
-			"nonce.toml",
-			"[listen.lb]\nnonce = 8\n",
-			&[],
-			"requires --listen-quic-lb-id",
-		);
+		refuse_quic_lb("nonce.toml", "[listen.lb]\nnonce = 8\n", &[], "requires --listen-lb-id");
 
 		{
 			let dir = tempfile::tempdir().unwrap();
@@ -1716,7 +1977,7 @@ ws = false
 			let config = Config::parse_and_merge([
 				std::ffi::OsString::from("moq-relay"),
 				path.into(),
-				"--listen-quic-lb-id".into(),
+				"--listen-lb-id".into(),
 				"ee".into(),
 			])
 			.expect("CLI overrides the same nested config field");
@@ -1730,12 +1991,33 @@ ws = false
 	#[test]
 	fn quic_lb_env_nonce_without_an_id_refuses_to_start() {
 		if !test_env::Env::without(QUIC_LB_ENV)
-			.set("MOQ_LISTEN_QUIC_LB_NONCE", "8")
+			.set("MOQ_LISTEN_LB_NONCE", "8")
 			.isolate()
 		{
 			return;
 		}
 		let err = Config::parse_and_merge(["moq-relay"]).expect_err("env nonce without id");
-		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
+		assert!(err.to_string().contains("--listen-lb-id"), "{err}");
+	}
+
+	/// The released `--listen-quic-lb-*` spellings stop startup naming their
+	/// replacement, from the command line and the environment alike.
+	#[test]
+	fn released_quic_lb_spellings_name_their_replacement() {
+		if !test_env::Env::without(QUIC_LB_ENV)
+			.set("MOQ_LISTEN_QUIC_LB_NONCE", "8")
+			.isolate()
+		{
+			return;
+		}
+		let err = Config::parse_and_merge(["moq-relay", "--listen-quic-lb-id", "ab"])
+			.expect_err("released spellings are refused")
+			.to_string();
+		for line in [
+			"--listen-quic-lb-id / MOQ_LISTEN_QUIC_LB_ID -> --listen-lb-id / MOQ_LISTEN_LB_ID",
+			"--listen-quic-lb-nonce / MOQ_LISTEN_QUIC_LB_NONCE -> --listen-lb-nonce / MOQ_LISTEN_LB_NONCE",
+		] {
+			assert!(err.contains(line), "missing {line:?} from {err}");
+		}
 	}
 }

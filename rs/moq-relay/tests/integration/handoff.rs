@@ -12,7 +12,17 @@ use futures::FutureExt;
 use moq_net::stats::{Presence, Registry, Tier};
 use moq_relay::{Config, Relay};
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// Out of reach of any test: a stall on a loaded host must not end a session or a
+/// drain the test expects to outlast it. Each wait below follows an event instead of
+/// a deadline, and nextest's slow-timeout bounds a real hang.
+const NEVER: Duration = Duration::from_secs(600);
+
+/// QUIC whose idle timeout no stall reaches.
+fn quic() -> moq_tokio::quic::Config {
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.idle_timeout = Some(NEVER.into());
+	quic
+}
 
 /// A self-signed certificate on disk, which both relays load: workers refuse
 /// `listen.tls.generate`.
@@ -36,7 +46,7 @@ fn certificate(dir: &Path) -> (PathBuf, PathBuf) {
 #[derive(Clone, Copy, Debug)]
 enum Backend {
 	Tokio,
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	Uring,
 }
 
@@ -53,13 +63,15 @@ fn config(dir: &Path, cert: &Path, key: &Path, backend: Backend) -> Config {
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(2).unwrap());
 	config.runtime.pin = false;
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config.stats.enabled = true;
 	config.stats.node = Some("test".into());
 	config.handoff.socket = Some(dir.join("handoff.sock"));
+	config.quic = quic();
+	config.drain_timeout = Some(NEVER.into());
 	match backend {
 		Backend::Tokio => {}
-		#[cfg(target_os = "linux")]
+		#[cfg(uring)]
 		Backend::Uring => config.runtime.io_uring = true,
 	}
 	config
@@ -81,14 +93,13 @@ fn active(registry: &Registry) -> u64 {
 }
 
 /// Wait until the relay behind `registry` serves `count` sessions.
-async fn serving(registry: &Registry, count: u64, what: &str) {
-	kio::clock::timeout(TIMEOUT, async {
-		while active(registry) != count {
-			tokio::task::yield_now().await;
-		}
-	})
-	.await
-	.unwrap_or_else(|_| panic!("{what}: serving {} sessions, not {count}", active(registry)));
+///
+/// The registry has no change notification, so this polls; a sleep lets the runtime
+/// park between polls instead of spinning a core the relays need on a loaded host.
+async fn serving(registry: &Registry, count: u64) {
+	while active(registry) != count {
+		kio::clock::sleep(Duration::from_millis(5)).await;
+	}
 }
 
 fn dial() -> moq_tokio::connect::Config {
@@ -99,29 +110,37 @@ fn dial() -> moq_tokio::connect::Config {
 }
 
 async fn established(client: moq_tokio::Client, url: &str) -> moq_tokio::Connection {
-	kio::clock::timeout(TIMEOUT, client.connect(url.parse::<url::Url>().unwrap()).established())
+	client
+		.connect(url.parse::<url::Url>().unwrap())
+		.established()
 		.await
-		.expect("connect timeout")
 		.expect("connect failed")
 }
 
 /// A session that leaves on the relay's GOAWAY.
 async fn connect(url: &str) -> moq_tokio::Connection {
-	established(dial().init(Default::default()).unwrap().with_reconnect(false), url).await
+	established(dial().init(quic()).unwrap().with_reconnect(false), url).await
 }
 
-/// A session that stays through the relay's drain until the relay closes it.
-async fn stays(url: &str, quic: moq_tokio::quic::Config) -> moq_tokio::Connection {
-	established(dial().init(quic).unwrap().with_restart(moq_tokio::Restart::Wait), url).await
+/// A session that ignores the relay's GOAWAY and stays through its drain until the relay
+/// closes it.
+///
+/// Under [`moq_tokio::Restart::Handoff`] a GOAWAY that drains a session before it is
+/// healthy changes nothing, and this healthy bar outlasts the test.
+async fn stays(url: &str) -> moq_tokio::Connection {
+	let mut config = dial();
+	config.backoff.healthy = Some(Duration::from_secs(3600).into());
+	established(
+		config.init(quic()).unwrap().with_restart(moq_tokio::Restart::Handoff),
+		url,
+	)
+	.await
 }
 
 /// Wait for the GOAWAY a draining relay sends `connection`.
 async fn drained(connection: &moq_tokio::Connection) {
 	let draining = connection.draining().unwrap();
-	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
-		.await
-		.expect("the old relay never drained")
-		.unwrap();
+	let goaway = kio::wait(|waiter| draining.poll(waiter)).await.unwrap();
 	assert_eq!(goaway.uri(), "");
 }
 
@@ -130,7 +149,7 @@ async fn a_new_relay_takes_over_while_the_old_one_drains() {
 	takes_over(Backend::Tokio, Backend::Tokio).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn an_io_uring_relay_takes_over() {
 	if crate::runtime_uring::supported() {
@@ -139,7 +158,7 @@ async fn an_io_uring_relay_takes_over() {
 }
 
 /// Both backends hand on the same group, with connection IDs in the same layout.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn a_relay_takes_over_across_backends() {
 	if crate::runtime_uring::supported() {
@@ -175,7 +194,7 @@ async fn takes_over(from: Backend, to: Backend) {
 
 	let quic = format!("https://{addr}/handoff");
 	let held = connect(&quic).await;
-	serving(&old_stats, 1, "the old relay").await;
+	serving(&old_stats, 1).await;
 
 	let new = Relay::load(config(dir.path(), &cert, &key, to))
 		.await
@@ -198,7 +217,7 @@ async fn takes_over(from: Backend, to: Backend) {
 	// New sessions, by either transport, reach the new relay.
 	let fresh = connect(&quic).await;
 	let stream = connect(&format!("tcp://{tcp}/handoff")).await;
-	serving(&new_stats, 2, "the new relay").await;
+	serving(&new_stats, 2).await;
 	assert_eq!(
 		presence(&old_stats).sessions_started,
 		1,
@@ -220,28 +239,17 @@ async fn takes_over(from: Backend, to: Backend) {
 	);
 
 	drop((held, staying));
-	kio::clock::timeout(TIMEOUT, old_running)
-		.await
-		.expect("the old relay outlived its last session")
-		.unwrap()
-		.unwrap();
-	kio::clock::timeout(TIMEOUT, stats.available())
-		.await
-		.expect("the node's stats stayed held once the old relay exited")
-		.unwrap()
-		.unwrap();
+	old_running.await.unwrap().unwrap();
+	// The node's stats, held until the old relay exited.
+	stats.available().await.unwrap().unwrap();
 
 	// Every handshake reaches the new relay now, and a third may take over.
 	let last = connect(&quic).await;
-	serving(&new_stats, 3, "the new relay alone").await;
+	serving(&new_stats, 3).await;
 
 	trigger.start();
 	drop((fresh, stream, last));
-	kio::clock::timeout(TIMEOUT, new_running)
-		.await
-		.expect("the new relay outlived its sessions")
-		.unwrap()
-		.unwrap();
+	new_running.await.unwrap().unwrap();
 }
 
 /// A new relay that dies while the old one drains takes none of the old one's
@@ -253,16 +261,9 @@ async fn the_old_relay_outlives_a_new_one_that_dies() {
 	moq_tokio::crypto::install_default().unwrap();
 	let dir = tempfile::tempdir().unwrap();
 	let (cert, key) = certificate(dir.path());
-	// Neither an idle session nor the drain deadline ends a session within the test's
-	// timeout, so only a close that reaches the old relay ends one there.
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(Duration::from_secs(600).into());
-	let config = || {
-		let mut config = config(dir.path(), &cert, &key, Backend::Tokio);
-		config.quic = quic.clone();
-		config.drain_timeout = Some(Duration::from_secs(600).into());
-		config
-	};
+	// Neither an idle session nor the drain deadline ends a session (see `NEVER`), so
+	// only a close that reaches the old relay ends one there.
+	let config = || config(dir.path(), &cert, &key, Backend::Tokio);
 
 	let old = Relay::load(config()).await.unwrap().with_signals(false);
 	let addr = old.addr().unwrap();
@@ -274,9 +275,9 @@ async fn the_old_relay_outlives_a_new_one_that_dies() {
 	ready.wait().await.unwrap();
 
 	let quic_url = format!("https://{addr}/handoff");
-	let first = stays(&quic_url, quic.clone()).await;
-	let second = stays(&quic_url, quic.clone()).await;
-	serving(&old_stats, 2, "the old relay").await;
+	let first = stays(&quic_url).await;
+	let second = stays(&quic_url).await;
+	serving(&old_stats, 2).await;
 
 	let new = Relay::load(config()).await.unwrap().with_signals(false);
 	let ready = new.ready();
@@ -290,7 +291,7 @@ async fn the_old_relay_outlives_a_new_one_that_dies() {
 
 	// A session of the old relay still reaches it: its close arrives there.
 	drop(first);
-	serving(&old_stats, 1, "the old relay after the new one died").await;
+	serving(&old_stats, 1).await;
 
 	// The next relay takes over from the old one, on the same sockets.
 	let next = Relay::load(config())
@@ -306,22 +307,14 @@ async fn the_old_relay_outlives_a_new_one_that_dies() {
 	ready.wait().await.unwrap();
 	let fresh = connect(&quic_url).await;
 	let stream = connect(&format!("tcp://{tcp}/handoff")).await;
-	serving(&next_stats, 2, "the next relay").await;
+	serving(&next_stats, 2).await;
 
 	drop((second, staying));
-	kio::clock::timeout(TIMEOUT, old_running)
-		.await
-		.expect("the old relay outlived its last session")
-		.unwrap()
-		.unwrap();
+	old_running.await.unwrap().unwrap();
 
 	trigger.start();
 	drop((fresh, stream));
-	kio::clock::timeout(TIMEOUT, next_running)
-		.await
-		.expect("the next relay outlived its sessions")
-		.unwrap()
-		.unwrap();
+	next_running.await.unwrap().unwrap();
 }
 
 /// A stand-in that takes its relay with it when dropped, such as on a failed
@@ -357,7 +350,7 @@ struct Reap(Option<libc::pid_t>);
 
 impl Reap {
 	/// Wait for the relay to exit, reaping it so the guard never signals a reused pid.
-	async fn exited(&mut self, what: &str) -> libc::c_int {
+	async fn exited(&mut self) -> libc::c_int {
 		let relay = self.0.expect("reaped already");
 		let status = tokio::task::spawn_blocking(move || {
 			let mut status = 0;
@@ -365,11 +358,9 @@ impl Reap {
 			let reaped = unsafe { libc::waitpid(relay, &mut status, 0) };
 			assert_eq!(reaped, relay);
 			status
-		});
-		let status = kio::clock::timeout(TIMEOUT, status)
-			.await
-			.unwrap_or_else(|_| panic!("{what} kept serving"))
-			.unwrap();
+		})
+		.await
+		.unwrap();
 		self.0 = None;
 		status
 	}
@@ -388,7 +379,7 @@ impl Drop for Reap {
 /// Start `moq-relay --handoff-supervise` with its config in the environment, which
 /// is all it reads: the test's own would reach it too.
 fn stand_in(dir: &Path, cert: &Path, key: &Path, notify: &Path) -> StandIn {
-	stand_in_draining(dir, cert, key, notify, "10s")
+	stand_in_draining(dir, cert, key, notify, &format!("{}s", NEVER.as_secs()))
 }
 
 /// [`stand_in`], with a `drain_timeout` of `drain`.
@@ -400,7 +391,7 @@ fn stand_in_draining(dir: &Path, cert: &Path, key: &Path, notify: &Path, drain: 
 		.env("MOQ_LISTEN_TLS_CERT", cert)
 		.env("MOQ_LISTEN_TLS_KEY", key)
 		.env("MOQ_RUNTIME_WORKERS", "1")
-		.env("MOQ_AUTH_PUBLIC", "**")
+		.env("MOQ_AUTH_PUBLIC", "")
 		.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
 		.env("NOTIFY_SOCKET", notify)
 		.env("MOQ_DRAIN_TIMEOUT", drain)
@@ -425,7 +416,7 @@ async fn a_relay_no_successor_takes_over_from_drains() {
 	let notify = tokio::net::UnixDatagram::bind(&notify_path).unwrap();
 
 	let mut stand_in = stand_in_draining(dir.path(), &cert, &key, &notify_path, "1s");
-	ready(&notify).await;
+	ready(&notify, &mut stand_in).await;
 	let relays = children(stand_in.id().unwrap());
 	assert_eq!(relays.len(), 1, "the stand-in runs one relay: {relays:?}");
 	let mut left = Reap(Some(relays[0]));
@@ -436,10 +427,10 @@ async fn a_relay_no_successor_takes_over_from_drains() {
 		unsafe { libc::kill(stand_in.id().unwrap() as libc::pid_t, libc::SIGUSR2) },
 		0
 	);
-	let status = exited(&mut stand_in, "the stand-in").await;
+	let status = stand_in.wait().await.unwrap();
 	assert_eq!(status.code(), Some(0), "{status}");
 
-	let status = left.exited("a relay no successor took over from").await;
+	let status = left.exited().await;
 	assert!(
 		libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
 		"the relay exited with {status:#x}"
@@ -459,10 +450,10 @@ fn relay(dir: &Path, cert: &Path, key: &Path, port: u16, notify: &Path) -> tokio
 		.env("MOQ_LISTEN_TLS_CERT", cert)
 		.env("MOQ_LISTEN_TLS_KEY", key)
 		.env("MOQ_LISTEN_RESET_SECRET", dir.join("reset.key"))
-		.env("MOQ_QUIC_IDLE_TIMEOUT", "600s")
-		.env("MOQ_DRAIN_TIMEOUT", "600s")
+		.env("MOQ_QUIC_IDLE_TIMEOUT", format!("{}s", NEVER.as_secs()))
+		.env("MOQ_DRAIN_TIMEOUT", format!("{}s", NEVER.as_secs()))
 		.env("MOQ_RUNTIME_WORKERS", "2")
-		.env("MOQ_AUTH_PUBLIC", "**")
+		.env("MOQ_AUTH_PUBLIC", "")
 		.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
 		.env("NOTIFY_SOCKET", notify)
 		.kill_on_drop(true)
@@ -488,45 +479,49 @@ async fn a_killed_relay_s_clients_are_reset_by_the_one_it_replaced() {
 		.unwrap()
 		.port();
 	let url = format!("https://127.0.0.1:{port}/handoff");
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(Duration::from_secs(600).into());
+	let mut quic = quic();
 	// Keeps sending, so a reset comes back at once.
 	quic.keep_alive = Some(Duration::from_millis(200).into());
 
-	let _old = relay(dir.path(), &cert, &key, port, &notify_path);
-	ready(&notify).await;
+	let mut old = relay(dir.path(), &cert, &key, port, &notify_path);
+	ready(&notify, &mut old).await;
 	// Holds the old relay in its drain once the new one takes over.
-	let _kept = stays(&url, quic.clone()).await;
+	let _kept = stays(&url).await;
 
 	let mut new = relay(dir.path(), &cert, &key, port, &notify_path);
-	ready(&notify).await;
-	let mut orphan = stays(&url, quic).await;
+	ready(&notify, &mut new).await;
+	let orphan = established(dial().init(quic).unwrap(), &url).await;
+	// Past the default healthy bar, so the reset reconnects rather than ending the loop.
+	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	new.kill().await.unwrap();
-	kio::clock::timeout(TIMEOUT, async {
-		while orphan.status().await.unwrap() != moq_tokio::Status::Disconnected {}
-	})
-	.await
-	.expect("the killed relay's client was never reset");
+	// Reset, rather than left to its idle timeout, which no test reaches.
+	let monitor = orphan.monitor();
+	let mut seen = monitor.state();
+	while !matches!(seen.phase, moq_tokio::connection::Phase::Disconnected { .. }) {
+		seen = monitor.state_changed(seen.revision).await.unwrap();
+	}
 }
 
-/// Wait for a READY notification on `notify`, as a service manager does.
-async fn ready(notify: &tokio::net::UnixDatagram) {
+/// Wait for a READY notification on `notify`, as a service manager does, failing
+/// if `process` exits first: however long a loaded host takes to start a relay, one
+/// that will report READY is still running.
+async fn ready(notify: &tokio::net::UnixDatagram, process: &mut tokio::process::Child) {
 	let mut message = [0; 1024];
-	kio::clock::timeout(TIMEOUT, async {
-		loop {
-			let len = notify.recv(&mut message).await.unwrap();
-			if std::str::from_utf8(&message[..len])
-				.unwrap()
-				.lines()
-				.any(|line| line == "READY=1")
-			{
-				return;
+	loop {
+		tokio::select! {
+			len = notify.recv(&mut message) => {
+				if std::str::from_utf8(&message[..len.unwrap()])
+					.unwrap()
+					.lines()
+					.any(|line| line == "READY=1")
+				{
+					return;
+				}
 			}
+			status = process.wait() => panic!("exited before READY: {}", status.unwrap()),
 		}
-	})
-	.await
-	.expect("no READY reached the service manager");
+	}
 }
 
 /// The processes whose parent is `parent`.
@@ -543,13 +538,6 @@ fn children(parent: u32) -> Vec<libc::pid_t> {
 			(ppid == parent).then_some(pid)
 		})
 		.collect()
-}
-
-async fn exited(child: &mut tokio::process::Child, what: &str) -> std::process::ExitStatus {
-	kio::clock::timeout(TIMEOUT, child.wait())
-		.await
-		.unwrap_or_else(|_| panic!("{what} never exited"))
-		.unwrap()
 }
 
 /// What a service manager does across a restart with `KillMode=process` and
@@ -570,7 +558,7 @@ async fn a_restart_starts_the_new_relay_beside_the_old() {
 	let notify = tokio::net::UnixDatagram::bind(&notify_path).unwrap();
 
 	let mut old = stand_in(dir.path(), &cert, &key, &notify_path);
-	ready(&notify).await;
+	ready(&notify, &mut old).await;
 	let relays = children(old.id().unwrap());
 	assert_eq!(relays.len(), 1, "the stand-in runs one relay: {relays:?}");
 	let relay = relays[0];
@@ -582,7 +570,7 @@ async fn a_restart_starts_the_new_relay_beside_the_old() {
 		unsafe { libc::kill(old.id().unwrap() as libc::pid_t, libc::SIGUSR2) },
 		0
 	);
-	let status = exited(&mut old, "the old stand-in").await;
+	let status = old.wait().await.unwrap();
 	assert_eq!(status.code(), Some(0), "{status}");
 	let mut status = 0;
 	// SAFETY: waitpid writes only to `status`.
@@ -591,8 +579,8 @@ async fn a_restart_starts_the_new_relay_beside_the_old() {
 
 	// The restart's start: the new relay takes over, and the old one drains.
 	let mut new = stand_in(dir.path(), &cert, &key, &notify_path);
-	ready(&notify).await;
-	let status = left.exited("the old relay, after the new one took over,").await;
+	ready(&notify, &mut new).await;
+	let status = left.exited().await;
 	assert!(
 		libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
 		"the old relay exited with {status:#x}"
@@ -604,7 +592,7 @@ async fn a_restart_starts_the_new_relay_beside_the_old() {
 		unsafe { libc::kill(new.id().unwrap() as libc::pid_t, libc::SIGTERM) },
 		0
 	);
-	let status = exited(&mut new, "the new stand-in").await;
+	let status = new.wait().await.unwrap();
 	assert_eq!(status.code(), Some(0), "{status}");
 
 	// SIGUSR1, a heap profile's signal, reaches the relay rather than ending the
@@ -613,13 +601,13 @@ async fn a_restart_starts_the_new_relay_beside_the_old() {
 	#[cfg(not(feature = "jemalloc"))]
 	{
 		let mut last = stand_in(dir.path(), &cert, &key, &notify_path);
-		ready(&notify).await;
+		ready(&notify, &mut last).await;
 		// SAFETY: kill has no memory-safety preconditions.
 		assert_eq!(
 			unsafe { libc::kill(last.id().unwrap() as libc::pid_t, libc::SIGUSR1) },
 			0
 		);
-		let status = exited(&mut last, "the last stand-in").await;
+		let status = last.wait().await.unwrap();
 		assert_eq!(status.code(), Some(128 + libc::SIGUSR1), "{status}");
 	}
 

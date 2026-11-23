@@ -105,7 +105,7 @@ struct Ctx<G = group::Producer> {
 fn fresh_group() -> Ctx {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	let track = broadcast.create_track("bench", timed()).unwrap();
-	let group = track.append_group(0).unwrap();
+	let group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	Ctx {
 		_broadcast: broadcast,
 		_track: track,
@@ -168,7 +168,7 @@ fn filled_group(n: usize, payload: &Bytes) -> (Ctx<group::Finished>, group::Cons
 	for _ in 0..n {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
-	let group = group.close().unwrap();
+	let group = group.finish().unwrap();
 	let consumer = group.consume();
 	(
 		Ctx {
@@ -262,9 +262,9 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	let track = broadcast.create_track("bench", timed()).unwrap();
 	for key in 0..n as u64 {
-		let mut group = track.append_group(key).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 		group.write_frame(at(key), payload.clone()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	TrackCtx {
 		_broadcast: broadcast,
@@ -277,7 +277,7 @@ fn replay() -> track::Subscription {
 	track::Subscription::default()
 		.with_delay(track::Delay::default().with_max(Duration::MAX))
 		.with_ranges([track::Range {
-			start: track::Anchor::Time(0),
+			start: track::Start::Time(0),
 			end: None,
 		}])
 }
@@ -339,9 +339,9 @@ fn bench_track_recv(c: &mut Criterion) {
 				},
 				|(ctx, mut subscriber)| {
 					for key in (n..n + LIVE_BATCH).map(|key| key as u64) {
-						let mut group = ctx.track.append_group(key).unwrap();
+						let mut group = ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 						group.write_frame(at(key), payload.clone()).unwrap();
-						group.close().unwrap();
+						group.finish().unwrap();
 						let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
 						black_box(group);
 					}
@@ -367,7 +367,7 @@ fn bench_roundtrip(c: &mut Criterion) {
 					for _ in 0..n {
 						ctx.group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 					}
-					let group = ctx.group.close().unwrap();
+					let group = ctx.group.finish().unwrap();
 					let mut consumer = group.consume();
 					for _ in 0..n {
 						let frame = consumer.read_frame().now_or_never().unwrap().unwrap();
@@ -454,9 +454,9 @@ fn bench_stamp(c: &mut Criterion) {
 						let batch = left.min(n as u64);
 						let start = Instant::now();
 						for key in n as u64..n as u64 + batch {
-							let mut group = ctx.track.append_group(key).unwrap();
+							let mut group = ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 							group.write_frame(at(key), payload.clone()).unwrap();
-							group.close().unwrap();
+							group.finish().unwrap();
 						}
 						total += start.elapsed();
 						left -= batch;
@@ -473,7 +473,9 @@ fn bench_stamp(c: &mut Criterion) {
 				let mut left = iters;
 				while left > 0 {
 					let ctx = filled_track(0, &payload);
-					let mut groups: Vec<_> = (0..n as u64).map(|key| ctx.track.append_group(key).unwrap()).collect();
+					let mut groups: Vec<_> = (0..n as u64)
+						.map(|key| ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap())
+						.collect();
 					let batch = left.min(n as u64);
 					let start = Instant::now();
 					for group in groups.iter_mut().take(batch as usize) {
@@ -514,11 +516,11 @@ fn bench_inflate(c: &mut Criterion) {
 							.unwrap();
 						let consumers: Vec<group::Consumer> = (0..groups as u64)
 							.flat_map(|key| {
-								let mut group = track.append_group(key).unwrap();
+								let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 								for payload in &payloads {
 									group.write_frame(at(key), payload.clone()).unwrap();
 								}
-								let group = group.close().unwrap();
+								let group = group.finish().unwrap();
 								(0..readers).map(move |_| group.consume()).collect::<Vec<_>>()
 							})
 							.collect();
@@ -561,11 +563,11 @@ fn bench_compressed_updates(c: &mut Criterion) {
 										track::Info::default().with_compression(moq_net::track::Compression::Deflate),
 									)
 									.unwrap();
-								let mut group = track.append_group(0).unwrap();
+								let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
 								group
 									.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone())
 									.unwrap();
-								group.close().unwrap();
+								group.finish().unwrap();
 								track
 							})
 							.collect();
@@ -576,14 +578,14 @@ fn bench_compressed_updates(c: &mut Criterion) {
 							for track in &producers {
 								for index in 0..concurrent {
 									let key = (1 + update * concurrent + index) as u64;
-									let mut group = track.append_group(key).unwrap();
+									let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
 									group
 										.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone())
 										.unwrap();
 									groups.push(group);
 								}
 								for group in groups.drain(..) {
-									group.close().unwrap();
+									group.finish().unwrap();
 								}
 							}
 						}
@@ -741,7 +743,7 @@ fn contended(
 		.create_track("bench", track::Info::default().with_max_age(None))
 		.unwrap();
 	let mut key = 0;
-	let mut group = track.append_group(key).unwrap();
+	let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
 	// The group readers move to once theirs ends.
 	let next = Arc::new(Mutex::new(group.consume()));
 	let mut sets: Vec<Vec<(Option<track::Subscriber>, group::Consumer)>> = (0..threads).map(|_| Vec::new()).collect();
@@ -797,10 +799,10 @@ fn contended(
 		for _ in 0..iters {
 			if written + burst > ROLL {
 				key += 1;
-				let rolled = track.append_group(key).unwrap();
+				let rolled = track.append_group(Timestamp::unscaled(key)).unwrap();
 				*next.lock().unwrap() = rolled.consume();
 				let done = std::mem::replace(&mut group, rolled);
-				done.close().unwrap();
+				done.finish().unwrap();
 				written = 0;
 			}
 			for _ in 0..burst {
@@ -860,7 +862,7 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 		timestamp: moq_net::Timestamp::unscaled(key),
 	};
 	let mut key = 0;
-	let group = track.append_group(key).unwrap();
+	let group = track.append_group(Timestamp::unscaled(key)).unwrap();
 	// The group readers move to once theirs ends.
 	let next = Arc::new(Mutex::new(group.consume()));
 	let mut sets: Vec<Vec<(group::Consumer, Option<frame::Consumer>)>> = (0..threads).map(|_| Vec::new()).collect();
@@ -918,9 +920,9 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 					frames += 1;
 					if frames == ROLL {
 						key += 1;
-						let rolled = track.append_group(key).unwrap();
+						let rolled = track.append_group(Timestamp::unscaled(key)).unwrap();
 						*next.lock().unwrap() = rolled.consume();
-						group.close().unwrap();
+						group.finish().unwrap();
 						frames = 0;
 						rolled.create_frame(info(key)).unwrap()
 					} else {
@@ -947,7 +949,7 @@ fn pooled_group(capacity: Option<u64>) -> Ctx {
 	}
 	let broadcast = broadcast::Producer::new(info);
 	let track = broadcast.create_track("bench", timed()).unwrap();
-	let group = track.append_group(0).unwrap();
+	let group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	Ctx {
 		_broadcast: broadcast,
 		_track: track,
@@ -1061,7 +1063,7 @@ fn shed_live_group(payloads: &[Bytes]) -> Flights {
 	let broadcast = broadcast::Producer::new(info);
 	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
 	let requests = track.requests();
-	let mut live = track.append_group(0).unwrap();
+	let mut live = track.append_group(Timestamp::unscaled(0)).unwrap();
 	let mut reader = live.consume();
 	let waiter = kio::Waiter::noop();
 	for payload in payloads {
@@ -1112,7 +1114,7 @@ fn replay_flights(ctx: &Flights, payloads: &[Bytes], readers: usize, apart: usiz
 		}
 		while let Poll::Ready(Ok(fill)) = ctx.requests.poll_requested_fill(&waiter) {
 			let start = fill.start();
-			let group = fill.accept(start.group, None).unwrap();
+			let group = fill.accept(start.group, None).unwrap().expect("a fresh group");
 			let demand = group.demand();
 			served += 1;
 			flights.push(Flight {

@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 
-use crate::{Claims, Key, KeyOperation, KeySet, Pattern, Rate};
+use crate::{Claims, Key, KeyOperation, KeySet, Prefix, Rate};
 
 /// One fuzz target body: it returns whether the input parsed.
 pub type Target = fn(&[u8]) -> bool;
@@ -42,14 +42,14 @@ fn keys() -> &'static [Key] {
 
 /// What the keys signed, as the targets compare it: the claims, encoded.
 fn claims() -> Vec<Claims> {
-	let pattern = |text: &str| text.parse::<Pattern>().expect("a fixed pattern parses");
+	let prefix = |text: &str| text.parse::<Prefix>().expect("a fixed prefix parses");
 	let at = |secs| kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(secs);
 	vec![
-		Claims::default().with_root("demo").with_publish([pattern("alice/**")]),
+		Claims::default().with_root("demo").with_publish([prefix("alice")]),
 		Claims::default()
 			.with_root("room/123")
-			.with_publish([pattern("alice")])
-			.with_subscribe([pattern("**")])
+			.with_publish([prefix("alice/cam")])
+			.with_subscribe([Prefix::all()])
 			.with_subscribe_rate(Rate::from_bps(1_000_000).expect("a fixed rate"))
 			.with_expires(at(4_000_000_000))
 			.with_issued(at(1_700_000_000)),
@@ -95,7 +95,7 @@ fn set() -> &'static KeySet {
 	SET.get_or_init(|| KeySet {
 		keys: keys()
 			.iter()
-			.map(|key| Arc::new(key.to_public().unwrap_or_else(|_| key.clone())))
+			.map(|key| Arc::new(key.public().unwrap_or_else(|_| key.clone())))
 			.collect(),
 	})
 }
@@ -288,7 +288,7 @@ fn check_key(key: &Key) {
 	let mut jwk = key.export();
 	jwk.operations = [KeyOperation::Verify].into();
 	let verifier = jwk.import().expect("a parsed key imports");
-	let verifier = verifier.to_public().unwrap_or(verifier);
+	let verifier = verifier.public().unwrap_or(verifier);
 	for claims in claims() {
 		let Ok(token) = key.sign(&claims) else { continue };
 		let verified = verifier

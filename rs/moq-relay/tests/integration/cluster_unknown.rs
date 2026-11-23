@@ -35,7 +35,7 @@ impl Mesh {
 	/// version the relays dial each other with.
 	async fn start(cluster_version: Option<moq_net::Version>) -> Self {
 		let net = Net::new();
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 		let mut relays = Vec::new();
 		for (name, peers) in [("a", &[][..]), ("b", &["a"]), ("c", &["a", "b"]), ("d", &["c"])] {
 			let cluster = memory::spawn_cluster(net.options(name, peers));
@@ -97,12 +97,14 @@ async fn publish_version(relay: &cluster::Cluster, auth: &auth::Auth, version: &
 	let streamer = kio::clock::sim::spawn(async move {
 		while running.load(std::sync::atomic::Ordering::Relaxed) {
 			let mut group = track
-				.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
 				.expect("append group");
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 				.expect("write frame");
-			group.close().expect("finish group");
+			group.finish().expect("finish group");
 			kio::clock::sleep(Duration::from_millis(100)).await;
 		}
 		let _track = track;

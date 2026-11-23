@@ -168,8 +168,9 @@ nix develop --command just bench origin/release "quic ws wss tcp"
 ```
 
 Beside relay CPU in cores, each case
-reports CPU microseconds per delivered frame and cores per delivered Gbps; base
-comparisons pair those too.
+reports CPU microseconds per delivered frame, cores per delivered Gbps, and the
+relay's peak RSS over the window; base comparisons pair those too. Only `chat`,
+with 2,001 connections, shows a per-connection memory change.
 
 The qmux micro-bench isolates the transport from the relay. It connects
 client/server pairs over loopback TCP, each echoing one message at a time on one
@@ -425,7 +426,7 @@ hides steps of a few percent. `just bench-fanout` counts the chat fan-out
 without a relay process or sockets, so the counts are the code's alone:
 
 ```bash
-nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
+nix develop --command just bench-fanout origin/main
 nix develop --command just bench-fanout "" "model" "1 512"
 ```
 
@@ -435,7 +436,8 @@ run by default:
 - `model`: one finished group a cycle through the track model, which every
   subscriber takes before parking again, as moq-net's `track_fanout_group`
   bench does. It builds against every revision since
-  [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+  [moq-dev/moq#8961](https://github.com/moq-dev/moq/pull/8961) started groups at a
+  timestamp; an older revision reports it unsupported.
 - `session`: one publisher session into a relay origin and one viewer session
   out of it per subscriber, over `transport::memory`, on one current-thread
   runtime. It counts the publisher, relay, and viewer sessions together, but no
@@ -712,7 +714,7 @@ Rust counterpart is `cargo bench -p moq-net --features fuzz --bench bandwidth`, 
 `BANDWIDTH_COUNTS=<iterations>` mode prints allocations and wakes per operation.
 `pattern` runs `js/pattern/bench/algebra.ts` against every checkout's `@moq/pattern`:
 the same peer grant shapes as the Rust `pattern-algebra` sweep below, reduced and
-compared against a previous grant, up to a whole `AUTH_OK`.
+compared against a previous grant, up to a whole `AUTH_OK`, plus the prefix grant `AUTH_OK` carries now.
 The drift sweep includes untimed controls and timed groups with decode-order
 B-frames, independently varying publisher and reader counts and retained history.
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
@@ -747,7 +749,10 @@ It sweeps fronts, names read per route, and route count, with `stable` names
 route), each read by info lookup, fetch, or subscription and then closed. Once a
 manual clock ages out every cache, asynchronous major collections from Chromium's
 exposed `gc` run without stack heap pointers, so dead stack slots cannot pin a route
-even under tracing. Weak references count the retired routes' sessions, transports,
+even under tracing. Chromium compiles on the main thread here
+(`--no-concurrent-recompilation`): a queued background optimization job holds its
+closure's context strongly, so a cold run would otherwise keep a route a hot closure
+captured until the job landed. Weak references count the retired routes' sessions, transports,
 broadcast handles, and delivered payload buffers still reachable. These counts are exact,
 so any nonzero one in a timed or traced pass fails the run once every sample is
 written, leaving a retaining `before` revision's counts in the JSON. A concluded control must release everything,
@@ -851,32 +856,6 @@ The table includes these measurements:
 - Shipping sizes, in bytes: the release artifacts and JS
   bundles the [size report](../sh/size/README.md) measures, recorded even on a
   night its growth check fails. Release build times stay out.
-- The merge gate's own cost (`bench-gate-cost`), described below.
-
-The gate cost source runs `just gh gate-cost` on a merge queue runner in two
-scenarios: `cold`, a `just ci --all` from an empty target directory with no
-Rust cache, then `moq-net`, the diff-scoped `just ci` an agent runs after an
-edit to moq-net, on what `cold` built. Modules run one at a time
-(`CHECK_JOBS=1`), so each module's cost is its own rather than whichever lane
-reached a shared build first. Each scenario records `total` and
-`module/MODULE/PHASE` wall and CPU seconds, which the dispatcher writes to
-`CHECK_TIMES`; CPU counts the processes a phase waited for, so a daemon's work,
-such as a Nix build or Gradle's, is wall time only. `rustc` and
-`crate/PACKAGE/KIND` (`lib`, `bin`, `test`, or `build` for a build script's
-compile) for the repository's own crates, or `crate/PACKAGE` for a dependency,
-are the user-space instructions of every rustc run, which
-`sh/gh/rustc-cost.sh` counts under `perf stat` as the `RUSTC_WRAPPER`.
-Instructions are the low-noise series for compiles; build script runs, such as
-aws-lc-sys's C build, and tooling tests' fixture crates count only in their
-module. `rust-test/BINARY` and
-`js-test/FILE` are summed test seconds (slot time, which more workers do not
-shrink) from the workspace nextest run's JUnit report and a Bun JUnit report
-per package. The total's history keeps the load average before the scenario
-and the toolchain versions. Reproduce it from a clean checkout with an empty
-target directory, the Rust cache off (no mbx shim on PATH), and
-`kernel.perf_event_paranoid` at 2 or below, and `perf_event_open` allowed by
-any seccomp filter (a systemd-nspawn container needs
-`--system-call-filter=perf_event_open`); it takes hours.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.
@@ -1039,12 +1018,3 @@ OOM kill does too, even inside a Quest scope: each worker watches `local.py`
 through a pidfd and stops once it exits. macOS has no pidfd, so there killing
 `local.py` with SIGKILL frees the lock while its workers keep measuring until
 their own gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.
-
-### Python socket sessions
-
-The Python binding runner also sweeps both TCP and track sockets over 1, 4,
-and 16 accepting endpoints and 1, 4, and 16 concurrent sessions per endpoint.
-Each session sends a checked payload and finishes both halves. The
-`socket/<protocol>/endpoints=N/sessions=M` entries report complete sessions per
-second, including handshake, FFI calls, reads, and teardown. Run with
-`just py bench`; Nightly's binding lane runs the same sweep.

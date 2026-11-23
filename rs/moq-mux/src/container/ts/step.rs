@@ -25,6 +25,7 @@ use bytes::Bytes;
 use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::demux::Demux;
+use super::error::Result;
 use super::health::{Continuation, Continuity, Delta, PTS_LIMIT};
 use super::import::{Framer, Payload, STAGING_BYTES_MAX, adaptation_valid, discontinuity_indicator, payload, pcr};
 use super::mux_rate::PCR_WRAP;
@@ -32,19 +33,17 @@ use super::passthrough::PCR_HZ;
 use super::psi::{Pat, PesStart};
 
 /// A forward step beyond this is another timeline: ffmpeg's `dts_delta_threshold`.
-const LEAP: Duration = Duration::from_secs(10);
+pub(super) const LEAP: Duration = Duration::from_secs(10);
 const PTS_HZ: u64 = 90_000;
 const PTS_WRAP: u64 = 1 << 33;
 
 /// The source's clock stepped onto another timeline, or its PAT named another program, so the
 /// [`Import`](super::Import) ended its instance there.
 ///
-/// What follows is another broadcast. [`Republish`](super::Republish) carries on into a new
-/// instance on the same path.
-#[derive(Clone, Debug, thiserror::Error)]
-#[non_exhaustive]
-#[error("the source {step}; what follows is a new broadcast")]
-pub struct Restart {
+/// Only [`Republish`](super::Republish) sees it, and reads [`remainder`](Self::remainder) into a
+/// new instance on the same path; a raw import fails with [`Error::Restarted`](super::Error::Restarted).
+#[derive(Clone, Debug)]
+pub(super) struct Restart {
 	/// How the source changed.
 	pub step: Step,
 	/// The input from the step on, which this import did not read.
@@ -239,7 +238,7 @@ impl Headers {
 				return (Some(chain), None);
 			}
 		}
-		// The import refuses a malformed adaptation field and cannot read a scrambled payload.
+		// The import ends on a malformed adaptation field and cannot read a scrambled payload.
 		if !adaptation_valid(pkt) || pkt[3] & 0xc0 != 0 {
 			chain.begun = None;
 			return (Some(chain), None);
@@ -247,7 +246,7 @@ impl Headers {
 		let Payload::Bytes(payload) = payload(pkt) else {
 			return (Some(chain), None);
 		};
-		// A PES start abandons whatever header was begun before it, as the import's does.
+		// A PES start abandons whatever header was begun before it, where the import ends.
 		let begun = chain.begun.take();
 		let header = if pkt[1] & 0x40 != 0 {
 			payload.to_vec()

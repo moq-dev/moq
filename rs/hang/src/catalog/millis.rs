@@ -14,8 +14,9 @@ use serde_with::{DeserializeAs, SerializeAs};
 /// truncating advertises 23; anything under a millisecond truncates to 0, which reads as
 /// "flushed immediately" rather than "a little".
 ///
-/// The optional implementation is for jitter and delay, where zero decodes as absent and
-/// cannot be written. Fields such as warmup, where zero is meaningful, use `Option<MillisCeil>`.
+/// The optional implementation is for jitter and delay, where zero decodes as absent and cannot
+/// be written, and `null` is refused. Fields such as warmup, where zero is meaningful, use
+/// `NotNull<MillisCeil>`.
 /// A `delay` of zero is a publisher stating it trails nothing, so that field skips it with
 /// [`no_delay`] instead of refusing it.
 pub(crate) struct MillisCeil;
@@ -59,8 +60,9 @@ impl SerializeAs<Option<Duration>> for MillisCeil {
 
 impl<'de> DeserializeAs<'de, Option<Duration>> for MillisCeil {
 	fn deserialize_as<D: Deserializer<'de>>(deserializer: D) -> Result<Option<Duration>, D::Error> {
-		let millis: Option<u64> = Option::<crate::snapshot::Number>::deserialize_as(deserializer)?;
-		Ok(millis.filter(|millis| *millis != 0).map(Duration::from_millis))
+		// Zero reads as absent, but `null` is refused like any other field's.
+		let millis: u64 = crate::snapshot::Number::deserialize_as(deserializer)?;
+		Ok((millis != 0).then(|| Duration::from_millis(millis)))
 	}
 }
 

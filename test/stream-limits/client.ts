@@ -19,10 +19,12 @@ try {
 		const publication = origin.route(path, { hidden: true });
 		// One group per track, never finished, so every group the reader receives stays live.
 		for (let i = 0; i < count; i++) {
-			const group = publication.broadcast.createTrack(String(i)).appendGroup();
+			const track = publication.broadcast.createTrack(String(i));
+			if (!track) throw new Error(`the track ${i} already exists`);
+			const group = track.appendGroup(Moq.Time.Timestamp.unscaled(0n));
 			group.writeFrame({
 				payload: new TextEncoder().encode(String(i)),
-				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+				timestamp: Moq.Time.Timestamp.unscaled(group.start),
 			});
 		}
 		publication.announce();
@@ -35,10 +37,7 @@ try {
 	} else {
 		const session = await Moq.Connection.connect({ url, consume: origin });
 		const request = origin.request(path);
-		let broadcast = request.active.peek();
-		while (!broadcast) broadcast = await request.active.changed();
-		assert(broadcast);
-		const active = broadcast;
+		const active = await request.broadcast();
 		// Each subscription is a stream to the publisher; each group, one from the relay.
 		const tracks = Array.from({ length: count }, (_, i) => active.track(String(i)).subscribe());
 		const groups = await Promise.all(

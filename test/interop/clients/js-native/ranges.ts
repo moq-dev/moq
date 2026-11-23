@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as Moq from "@moq/net";
 import WebTransport from "@moq/web-transport";
-import { offered } from "../../../../js/net/src/connection/extensions.ts";
 import { exchangeSetup } from "../../../../js/net/src/connection/handshake.ts";
 import { Connection } from "../../../../js/net/src/ietf/connection.ts";
 import { Version } from "../../../../js/net/src/ietf/version.ts";
@@ -26,9 +25,8 @@ async function connect() {
 	await transport.ready;
 	// Moxygen's pinned HTTP/3 server predates subprotocol negotiation. This fixture's
 	// server offers draft 18 alone, so exchange that SETUP directly on its WebTransport.
-	const extensions = offered({ solicit: false });
-	const setup = await exchangeSetup(transport, Version.DRAFT_18, "interop-ranges", { client: true, extensions });
-	return new Connection({ url, quic: transport, version: Version.DRAFT_18, client: true, extensions, ...setup });
+	const setup = await exchangeSetup(transport, Version.DRAFT_18, "interop-ranges", { client: true, solicit: false });
+	return new Connection({ url, quic: transport, version: Version.DRAFT_18, client: true, ...setup });
 }
 
 function payload(bytes: Uint8Array, size: number) {
@@ -47,7 +45,7 @@ try {
 		assert(group, "publisher ended before its past range existed");
 		while (await group.readFrame()) {}
 		group.close();
-		if (group.sequence >= 8n) break;
+		if (group.start >= 8n) break;
 	}
 	const history = await connect();
 	const broadcast = wireOf(history).consume(path);
@@ -57,7 +55,7 @@ try {
 			[0n, 5n, [0n, 2n, 4n]],
 		] as const) {
 			const reader = broadcast.track("test").subscribe({
-				ranges: [{ ...(start === 0n ? {} : { start: { absolute: start } }), end: { absolute: end } }],
+				ranges: [{ ...(start === 0n ? {} : { start }), end: end - 1n }],
 				delay: { max: null },
 				order: "ascending",
 			});
@@ -65,7 +63,7 @@ try {
 				const seen: bigint[] = [];
 				const ordered = reader.ordered();
 				for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
-					seen.push(group.sequence);
+					seen.push(group.start);
 					try {
 						for (const size of [1024, 513, 513]) {
 							const frame = await group.readFrame();

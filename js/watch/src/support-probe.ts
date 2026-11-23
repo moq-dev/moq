@@ -1,21 +1,21 @@
 import { type Effect, type Getter, Signal } from "@moq/signals";
 
-/** Internal key used to describe which fields can change a support probe's result. */
-export const supportCacheKey = Symbol("supportCacheKey");
-
-/** A function that checks if a rendition configuration can be played. */
-type Supported<Config extends { codec: string }> = ((config: Config) => Promise<boolean>) & {
-	[supportCacheKey]?: (config: Config) => string;
-};
+/** How a decoder answers whether it can play a rendition, and which config fields change that answer. */
+export interface Probe<Config> {
+	/** Whether the decoder can play `config`. */
+	supported(config: Config): Promise<boolean>;
+	/** A key equal for every config `supported` answers the same. */
+	key(config: Config): string;
+}
 
 /**
- * Probes which renditions a `supported` function accepts, shared by the audio and video sources.
+ * Probes which renditions a decoder can play, shared by the audio and video sources.
  *
- * A result is cached per rendition until the rendition's config changes, keyed by the probe's
- * `supportCacheKey` or else the whole config.
+ * A result is cached per rendition until the probe's key for its config changes.
  */
 export class SupportProbe<Config extends { codec: string }> {
 	readonly #kind: string;
+	readonly #probe: Probe<Config>;
 
 	readonly #pending = new Signal(false);
 	/** Whether rendition support is still being resolved. */
@@ -24,10 +24,11 @@ export class SupportProbe<Config extends { codec: string }> {
 	/** A `NotSupportedError` once no rendition of a non-empty catalog is supported. */
 	readonly error = new Signal<Error | undefined>(undefined);
 
-	#cache = new WeakMap<Supported<Config>, Map<string, { key: string; supported: boolean }>>();
+	readonly #cache = new Map<string, { key: string; supported: boolean }>();
 
-	constructor(kind: "audio" | "video") {
+	constructor(kind: "audio" | "video", probe: Probe<Config>) {
 		this.#kind = kind;
+		this.#probe = probe;
 	}
 
 	/**
@@ -36,24 +37,17 @@ export class SupportProbe<Config extends { codec: string }> {
 	 */
 	run(
 		effect: Effect,
-		supported: Supported<Config> | undefined,
 		renditions: Record<string, Config>,
 		publish: (available: Record<string, Config>) => void,
 	): void {
 		this.error.set(undefined);
-		if (!supported) return;
 
-		let cache = this.#cache.get(supported);
-		if (!cache) {
-			cache = new Map();
-			this.#cache.set(supported, cache);
-		}
+		const cache = this.#cache;
+		const probe = this.#probe;
 		const names = new Set(Object.keys(renditions));
 		for (const name of cache.keys()) {
 			if (!names.has(name)) cache.delete(name);
 		}
-
-		const cacheKey = supported[supportCacheKey] ?? ((config: Config) => JSON.stringify(config));
 
 		effect.set(this.#pending, true, false);
 		effect.spawn(async () => {
@@ -61,14 +55,14 @@ export class SupportProbe<Config extends { codec: string }> {
 			const available = new Map<string, Config>();
 
 			for (const [name, config] of Object.entries(renditions)) {
-				const key = cacheKey(config);
+				const key = probe.key(config);
 				const cached = cache.get(name);
 				let isSupported = cached?.key === key ? cached.supported : undefined;
 				if (isSupported === undefined) {
 					try {
-						// `supported` comes from the consumer, so we cannot assume it ever settles. A
-						// rerun waits for the tasks it spawned, so an unraced probe would hold it shut.
-						const result = await effect.race(supported(config));
+						// A decoder's probe need not ever settle. A rerun waits for the tasks it
+						// spawned, so an unraced probe would hold it shut.
+						const result = await effect.race(probe.supported(config));
 						// Undefined when torn down; the abort check below handles it.
 						if (result !== undefined) {
 							isSupported = !!result;

@@ -157,7 +157,7 @@ impl V4l2 {
 		let size = config.size();
 		size.validate("V4L2 encode of")?;
 
-		let device = v4l2::open(&ROLE, config.v4l2.as_deref())?;
+		let device = v4l2::open(&ROLE, config.device.video())?;
 
 		// Before `VIDIOC_S_FMT`: bcm2835-codec picks its encoder configuration
 		// from the profile and level at format time, and a level set afterwards
@@ -570,7 +570,10 @@ impl Backend for V4l2 {
 		// Also reclaims finished input buffers, so the codec is drained even when
 		// the caller never asks for output.
 		let index = self.free_buffer()?;
-		self.planes.write(&mut self.raw, index, &i420)?;
+		if let Err(err) = self.planes.write(&mut self.raw, index, &i420) {
+			self.raw.reclaim(index);
+			return Err(err);
+		}
 
 		let bytesused: Vec<u32> = self.raw.format().planes.iter().map(|plane| plane.sizeimage).collect();
 		self.raw.queue(&self.device, index, &bytesused, key)?;
@@ -595,8 +598,8 @@ impl Backend for V4l2 {
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		// Settable on a streaming encoder and applied without an IDR, which is
 		// exactly what the congestion controller wants. A driver that refuses gets
-		// `BitrateUnsupported`, which tells the control loop to stop adapting
-		// rather than to stop encoding.
+		// `BitrateUnsupported`, which leaves it encoding at its current rate rather
+		// than stopping it.
 		set_bitrate(&self.device, bitrate).map_err(|err| {
 			tracing::debug!(encoder = NAME, %err, "driver refused a bitrate change");
 			Error::BitrateUnsupported(NAME)

@@ -7,9 +7,9 @@
 
 /** Re-export of {@link https://www.npmjs.com/package/@moq/loc | @moq/loc}, the LOC container. */
 export * as Loc from "@moq/loc";
-export { Consumer, type ConsumerProps, DELAY_MAX, type Playhead, type Read } from "./consumer";
-export type { Format } from "./format";
+export { Consumer, type ConsumerProps, DELAY_MAX, type Delay, type Read, subscription } from "./consumer.ts";
+export type { Format } from "./format.ts";
 /** The legacy varint container. */
-export * as Legacy from "./legacy";
-export { MAX_AGE, type TrackInfoOptions, trackInfo } from "./track";
-export * from "./types";
+export * as Legacy from "./legacy.ts";
+export { MAX_AGE, type TrackInfoOptions, trackInfo } from "./track.ts";
+export * from "./types.ts";

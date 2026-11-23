@@ -59,6 +59,13 @@ export default defineConfig({
 		["meta", { name: "theme-color", content: "#0f172a" }],
 	],
 
+	// Serves /sitemap.xml, which public/robots.txt names. It lists the clean URLs,
+	// since the host redirects `.html` ones.
+	sitemap: {
+		hostname: "https://doc.moq.dev",
+		transformItems: (items) => items.map((item) => ({ ...item, url: item.url.replace(/\.html$/, "") })),
+	},
+
 	appearance: "force-dark",
 
 	themeConfig: {
@@ -117,7 +124,6 @@ export default defineConfig({
 						{ text: "Transport", link: "/concept/transport" },
 						{ text: "moq-lite", link: "/concept/moq-lite" },
 						{ text: "Identity and recovery", link: "/concept/identity" },
-						{ text: "Sockets", link: "/concept/socket" },
 						{ text: "hang", link: "/concept/hang" },
 						{ text: "Archives", link: "/concept/archives" },
 						{ text: "Audio jitter", link: "/concept/audio-jitter" },
@@ -176,7 +182,7 @@ export default defineConfig({
 							items: [
 								{ text: "RTMP", link: "/bin/rtmp" },
 								{ text: "SRT", link: "/bin/srt" },
-								{ text: "WebRTC", link: "/bin/rtc" },
+								{ text: "WebRTC", link: "/bin/webrtc" },
 								{ text: "HLS", link: "/bin/hls" },
 							],
 						},

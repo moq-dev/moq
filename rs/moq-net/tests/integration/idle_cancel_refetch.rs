@@ -13,10 +13,11 @@ use support::harness::{MockConnectOptions, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 #[kio::test]
@@ -37,7 +38,7 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 	g0.write_frame(moq_net::Timestamp::unscaled(g0.start), &b"0a"[..])
 		.unwrap();
-	g0.close().unwrap();
+	g0.finish().unwrap();
 	let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 	g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1a"[..])
 		.unwrap();
@@ -82,7 +83,7 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 
 	g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1b"[..])
 		.unwrap();
-	g1.close().unwrap();
+	g1.finish().unwrap();
 	let mut g2 = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
 	g2.write_frame(moq_net::Timestamp::unscaled(g2.start), &b"2a"[..])
 		.unwrap();

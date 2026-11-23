@@ -29,9 +29,11 @@ const BUDGET: Duration = Duration::from_secs(100);
 const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
@@ -86,7 +88,7 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 			group
 				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		broadcast.announce().unwrap();
 
@@ -120,7 +122,7 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 			group
 				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		broadcast.announce().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, subscribe(&relay)).await.unwrap();
@@ -130,7 +132,7 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 		group
 			.write_frame(Timestamp::from_millis(GROUPS * 1000).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let got = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 			.await
 			.unwrap()

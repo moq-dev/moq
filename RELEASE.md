@@ -5,7 +5,7 @@
 After the `0.22.0` cut, which still waits on every break planned for it, each release cycle runs in three phases by kind of change, recorded as `phase` in `version.json`: `additive` work first, then `api` breaks, then `wire` changes.
 An API break is what a published consumer adapts to when it rebuilds: the public Rust, JS, or bindings API, CLI flags, config keys, and environment variables.
 A wire change is what a deployed peer adapts to without rebuilding: a frozen wire version, the hang catalog JSON, or a stored or exported container format.
-The maintainer opens the next phase with a PR that changes `phase`. After the `0.22.0` cut, and after the wire cut that ends each cycle, a PR on `main` sets it to `additive` once the cut has merged into `release` and every package it bumps is published (crates.io, npm, and the `moq-c-v*`/`moq-ffi-v*` GitHub releases): the cut PR itself carries breaks, so its API diff must only report, and the API diff's baselines are those published versions, so an earlier reset fails Nightly's `--deny` on every break the cut shipped.
+The maintainer opens the next phase with a PR that changes `phase`. After the `0.22.0` cut, and after the wire cut that ends each cycle, a PR on `main` sets it to `additive` once the cut has merged into `release` and every package it bumps is published (crates.io, npm, and the `libmoq-v*`/`moq-ffi-v*` GitHub releases): the cut PR itself carries breaks, so its API diff must only report, and the API diff's baselines are those published versions, so an earlier reset fails Nightly's `--deny` on every break the cut shipped.
 `main` can be cut on demand in the additive and API phases; in the wire phase it is cut only once its wire version is final, so wire work comes last and stays short.
 While `phase` is `additive`, Nightly runs `just api-diff --deny` on `main` and the cut PR's API diff denies too, so a break that lands early is reverted, or the maintainer opens the API phase.
 
@@ -14,7 +14,7 @@ While `phase` is `additive`, Nightly runs `just api-diff --deny` on `main` and t
 - A breaking cut first writes, on `main`, each changed package's version-transition section in its `MIGRATE.md` (`## 0.3 -> 0.4`), the only `MIGRATE.md` edit `just check` allows, from the migration audit: the `!` subjects since the `release` merge base, each of those PRs' Impact section, and the API diff.
 - Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch. A backport quest or PR names "the next release", never a version number, since the `release` bump can land first. The Release gate's API diff (`just api-diff --deny`) fails a backport that changes one; on the cut PR, whose head is `main`, it only reports, unless `phase` is `additive`.
 - A bench-only backport ports `main`'s benchmarks onto `release`, so a pairing against `release` (`just bench origin/release`) compares them. It carries only benchmarks and their harness: bench targets, bench-only dev-dependencies, and `bench/`. It changes no shipped code, and it shims locally any API that `release` lacks, keeping each case's ID the same as on `main`. A case that measures code `release` doesn't have is left out, and the PR lists it. Merging one makes release-plz propose patch bumps for the crates it touches, though no shipped code changed.
-- After Rust or JS publication, **Release remeasure** checks the published pins, runs `just test wire-compat --remeasure` on `main` when they change, and updates one pin-update PR on `release/planned-breaks` for the merge queue. A later measurement replaces the pending PR head and requests landing again. Its body preserves each break’s failing cells after the run logs expire. Check that run and its PR before considering the release complete. Dispatch the workflow with its default dry-run input to verify current pins without writing a PR.
+- After Rust or JS publication, **Release remeasure** checks the published pins, runs `just test wire-compat --remeasure` on `main` when they change, and updates one pin-update PR on the `release-remeasure` branch (a `release/` prefix collides with the `release` branch) for the merge queue. A later measurement replaces the pending PR head and requests landing again. Its body preserves each break’s failing cells after the run logs expire. Check that run and its PR before considering the release complete. Dispatch the workflow with its default dry-run input to verify current pins without writing a PR.
 - Nothing merges `release` into `main` automatically. Before every cut, the maintainer merges `release` into `main` once, so trunk carries the published versions, CHANGELOGs, and any `release`-only commits. It lands as a merge commit with `--admin`, never squashed, so the cut starts from an advanced merge base.
 
 A cut's kind follows what it carries since the last cut:
@@ -33,6 +33,10 @@ versions stay independent per package, including Rust: release-plz has no
 
 `kio`, `kio-macros`, `qmux`, and npm `@moq/qmux` keep their own version lines;
 `@moq/signals` joins the shared minor. New experiments start at `0.0.x`.
+Dart's `moq` wrapper keeps its own 0.x version too, since Dart is
+experimental: no interop client runs it and nobody has loaded it on iOS. An
+interop client or a passing iOS run ends the exemption. `moq_ffi` stays on the
+shared minor, as the artifact of `rs/moq-ffi`.
 A published library's normal or build dependency on an experimental package
 in the same ecosystem promotes that package into the shared minor, including
 optional and target-specific dependencies. Dev dependencies and binary-only

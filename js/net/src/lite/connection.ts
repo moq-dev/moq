@@ -3,23 +3,22 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway as Received } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
-import { type Hop, randomHop, toHop } from "../hop.ts";
+import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
-import { hooks } from "../internal.ts";
 import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
-import type { Own } from "../route.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
-import { registerWire, wireOf } from "../wire.ts";
-import { AnnounceRequest } from "./announce.ts";
+import { registerWire } from "../wire.ts";
+import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
+import { AnnounceStream } from "./announce_stream.ts";
 import { LiteAuthWire } from "./auth.ts";
 import { Datagrams } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
@@ -27,9 +26,8 @@ import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
-import { proveRouteKey } from "./route_key.ts";
 import { SessionInfo } from "./session.ts";
-import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
+import { hasClientParameters, ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -40,10 +38,7 @@ import {
 	hasDatagrams,
 	hasDatagramTracks,
 	hasGoaway,
-	hasHidden,
-	hasPadding,
 	hasProbeRtt,
-	hasRouteKey,
 	hasRoutes,
 	hasSetupStream,
 	hasTrackStream,
@@ -115,8 +110,6 @@ export class Connection implements Session {
 
 	// Module for contributing tracks.
 	#publisher: Publisher;
-	// The lite-07 route identity our published claims are originated under, if we publish.
-	#own?: Own;
 
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
@@ -139,10 +132,10 @@ export class Connection implements Session {
 	// until the peer's SETUP arrives; stays undefined forever on older drafts.
 	#peerSetup = new Signal<Setup | undefined>(undefined);
 	#setupSeen = false;
-
-	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
-	// direction without handing out the whole SETUP (whose probe level gates our own streams).
-	#peerRole = new Signal<Role | undefined>(undefined);
+	// Lite-07: the peer opened its one Announce Stream.
+	#announceSeen = false;
+	// The transport closed, so a stream breaking says nothing about the peer.
+	#transportClosed = false;
 
 	// Written by the Subscriber as PROBE messages arrive.
 	#probe = new Observed<Probe>({});
@@ -161,20 +154,10 @@ export class Connection implements Session {
 	readonly peerImplementation = this.#peerImplementation.promise;
 
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
-	#goaway = new Once<Drain>();
+	#goaway = new Once<Received>();
 
-	/**
-	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
-	 * peer's authorization grants the direction it intends to use.
-	 *
-	 * `undefined` until the peer's SETUP arrives, and forever on pre-lite-05 versions, which
-	 * carry no in-band role. {@link Role.Both} is the absence of the parameter, so it is what
-	 * a peer reports when it declines to declare a direction, sends a value we don't
-	 * recognize, or is a server (which never sends one).
-	 */
-	get peerRole(): Getter<Role | undefined> {
-		return this.#peerRole;
-	}
+	// How the session ended: `fromClose` of the transport's close, settled after auth lets go of it.
+	#closed = new Once<Error | null>();
 
 	/**
 	 * Creates a new Connection instance.
@@ -212,29 +195,42 @@ export class Connection implements Session {
 		// Opens waiting for credit make room after about this RTT when the transport has none.
 		lines(quic).probe = this.#probe;
 
-		this.#own = publish && wireOf(publish).own;
-		this.hop = hasRoutes(version) && this.#own ? toHop(this.#own.hop) : randomHop();
+		this.hop = randomHop();
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
 		this.#auth = new AuthSession({
 			wire: hasAuth(version) ? new LiteAuthWire(quic, version) : undefined,
 			peerGrant: {
-				publish: new Path.Patterns([Path.Pattern.all()]),
-				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
+				publish: Path.Prefixes.all(),
+				subscribe: publish ? Path.Prefixes.all() : new Path.Prefixes(),
 			},
 			handle,
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
+			// Without AUTH, the server checks a client's credential before its SETUP, which the client reads after going live.
+			awaiting: client && hasSetupStream(version) && !hasAuth(version),
+			// Lite-03/04 have neither, so the peer refuses the credential only by closing the
+			// session. Lite-01/02 answered in the negotiation SETUP already read.
+			silent: client && (version === Version.DRAFT_03 || version === Version.DRAFT_04),
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
-		const leave = () => this.#auth.close();
+		const leave = () => {
+			this.#transportClosed = true;
+			this.#auth.close();
+		};
 		void quic.closed.then(leave, leave);
-		// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
-		// them, and a socket endpoint behind it is unreachable. A server leaves it to the
-		// client, whose origin holds that endpoint.
-		if (client && publish && !hasHidden(version)) {
-			const withholding = hooks.withholdHidden(publish);
-			void quic.closed.then(withholding, withholding);
+		void quic.closed.then(
+			(info) => this.#closed.set(fromClose(info)),
+			(err: unknown) => this.#closed.set(error(err)),
+		);
+		// Lite-07: a send on this endpoint's Announce Stream failed while the session lives, so
+		// what it said is lost and the session cannot go on, as rs/moq-net closes it. An ending
+		// session's own end says why.
+		if (hasRoutes(version)) {
+			void AnnounceStream.of(quic, version).broken.then((err) => {
+				if (this.#transportClosed || this.#phase.kind === "closed") return;
+				this.#fail(error(err));
+			});
 		}
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
@@ -264,7 +260,6 @@ export class Connection implements Session {
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path, instance) => this.#subscriber.consume(path, instance),
-			covers: (node, at, path) => this.#subscriber.covers(node, at, path),
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,
@@ -305,6 +300,8 @@ export class Connection implements Session {
 		switch (this.#phase.kind) {
 			case "open":
 			case "leaving": {
+				// Leaving finishes our Announce Stream, which asks the peer for nothing more.
+				this.#subscriber.announceSilenced();
 				const done = withTimeout(
 					this.#publisher.drain(),
 					Duration.millis(1000),
@@ -398,14 +395,14 @@ export class Connection implements Session {
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return announce.list(this.#subscriber.routes(scope, options));
+	/** The paths announced matching `filter`, each present or absent; see {@link Session.announced}. */
+	announced(filter?: Path.Pattern, options?: announce.Options): announce.Consumer {
+		return announce.list(this.#subscriber.routes(filter, options));
 	}
 
-	/** Every route change matching `scope`, for code that forwards routes. @internal */
-	routes(scope?: Path.Pattern, options?: announce.RouteOptions): announce.Routes {
-		return this.#subscriber.routes(scope, options);
+	/** Every route change matching `filter`, for code that forwards routes. @internal */
+	routes(filter?: Path.Pattern, options?: announce.RouteOptions): announce.Routes {
+		return this.#subscriber.routes(filter, options);
 	}
 
 	async #runSession() {
@@ -430,20 +427,18 @@ export class Connection implements Session {
 	// Role stays Both: the publish origin starts empty and fills later, and consume is
 	// called after this point, so there is nothing to narrow yet. Before lite-07 the hop
 	// declares our session identity so the peer can filter reflected announcements
-	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). From lite-07 the parameter
-	// is the Node ID our published claims originate under, omitted when we publish nothing.
+	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). Lite-07 sends none: only a node
+	// that forwards declares a Node ID.
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic, { version: this.#version });
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
 			await new Setup({
 				probe,
-				hop: hasRoutes(this.#version) ? this.#own && toHop(this.#own.node) : this.hop,
+				hop: this.hop,
 				token: this.#token,
 				implementation: this.#implementation,
-				routeKey,
 			}).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
@@ -478,7 +473,8 @@ export class Connection implements Session {
 		// opened without negotiating it: a plain error resets the stream and keeps the session.
 		if (typ === StreamId.Session) {
 			throw new ProtocolViolation("duplicate session stream");
-		} else if (typ === StreamId.Announce) {
+		} else if (typ === StreamId.Announce && !hasRoutes(this.#version)) {
+			// Lite-07 asks on its Announce Stream instead, and knows no such stream type.
 			const msg = await AnnounceRequest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
 		} else if (typ === StreamId.Subscribe) {
@@ -564,8 +560,11 @@ export class Connection implements Session {
 		if (typ === DataType.Group) {
 			const msg = await Group.decode(stream, this.#version);
 			await this.#subscriber.runGroup(msg, stream);
-		} else if (typ === DataType.Padding && hasPadding(this.#version)) {
-			await stream.discard();
+		} else if (typ === DataType.Announce && hasRoutes(this.#version)) {
+			// Claim the stream before reading it, so two that say nothing yet are duplicates too.
+			if (this.#announceSeen) throw new ProtocolViolation("duplicate Announce Stream");
+			this.#announceSeen = true;
+			await this.#runAnnounce(stream);
 		} else if (typ === DataType.Setup) {
 			// Claim the stream before decoding, so two incomplete SETUPs are duplicates too.
 			if (this.#setupSeen) throw new ProtocolViolation("duplicate SETUP");
@@ -582,11 +581,36 @@ export class Connection implements Session {
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
-			this.#peerRole.set(setup.role);
+			this.#auth.accept();
 			this.#peerImplementation.resolve(setup.implementation);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
+	}
+
+	// Lite-07: everything the peer says about discovery and routing, in order, until it leaves.
+	// The peer may only finish the stream: a reset or a message cut short breaks the session.
+	async #runAnnounce(stream: Reader) {
+		for (;;) {
+			let msg: AnnounceBroadcast | undefined;
+			try {
+				msg = await decodeAnnounceBroadcastMaybe(stream, this.#version);
+			} catch (err: unknown) {
+				// While the session lives, whatever broke the stream, a reset, a message cut
+				// short, or one that does not decode, lost what the peer said. An ending
+				// session's own end says why.
+				if (this.#transportClosed || this.#phase.kind === "closed") throw err;
+				throw new ProtocolViolation("Announce Stream broke", { cause: err });
+			}
+			if (!msg) break;
+			// Nothing comes between the ANNOUNCE_REQUESTs of one edit.
+			if (msg.status !== "request" && this.#publisher.continuing())
+				throw new ProtocolViolation("a message inside an edit");
+			await this.#subscriber.announce(msg);
+			if (msg.status === "request") this.#publisher.request(msg.more, msg.remove, msg.add);
+		}
+		// The peer is leaving: its routes end, and what it asked for is still answered.
+		this.#subscriber.announceFinished();
 	}
 
 	/** Snapshot the transport's counters; see {@link Session.stats}. */
@@ -597,13 +621,13 @@ export class Connection implements Session {
 	}
 
 	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
-	get draining(): GetPromise<Drain> {
+	get draining(): GetPromise<Received> {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
-	get closed(): Promise<Error | null> {
-		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
+	/** Settles when the session closes, decoding the peer's close code; see {@link Session.closed}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
 	}
 }
 

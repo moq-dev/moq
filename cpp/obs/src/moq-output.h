@@ -130,6 +130,11 @@ private:
 		// weak ref so Reset() can hand the configured bitrate back.
 		std::shared_ptr<moq::RateControl> rate;
 		OBSWeakEncoder encoder;
+		// The encoder setting that holds its peak, which following the grant retunes.
+		const char *rate_key = "bitrate";
+		// The average NVENC's plain VBR holds beside its peak, or 0: following lowers it
+		// with the peak and Reset() restores it.
+		long long average_kbps = 0;
 		// The bitrate the encoder was last told, which Reset() restores when it moved.
 		uint64_t applied_bps = 0;
 		// Whether the last target enabled this rendition.

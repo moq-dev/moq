@@ -60,9 +60,11 @@ final class ConnectOptions {
   /// The WebSocket fallback raced against QUIC for `http(s)` URLs.
   final WebSocketConfig? websocket;
 
-  /// Set true for a one-shot dial. By default an established session redials
-  /// with backoff whenever the transport drops; a first dial that reaches no
-  /// session ends it with that error instead.
+  /// Set true for a one-shot dial. By default a session whose credential the peer accepted,
+  /// or that the peer drained with a GOAWAY (or, on moq-lite 03/04, which never answer it,
+  /// that stayed up 1s), redials with backoff whenever the transport
+  /// drops; before then, a failed dial or a closed session, such as a refused
+  /// credential, ends it with that error instead.
   final bool once;
 
   /// Retry pacing for the automatic reconnect.
@@ -128,7 +130,7 @@ final class QuicConfig {
   /// Path MTU discovery; null leaves the choice to the backend.
   final bool? mtuDiscovery;
 
-  /// The congestion control family; null leaves the choice to the backend.
+  /// The congestion control algorithm; null runs BBR v3.
   final CongestionControl? congestionControl;
 
   /// Directory, which must exist, to write qlog traces into.
@@ -220,7 +222,7 @@ final class Moq {
   MoqRoute route(String path, {RouteOptions? options}) =>
       session.publish().route(path: path, options: options ?? RouteOptions());
 
-  /// List the paths matching [options] as each becomes present, absent, or offline, or changes availability;
+  /// List the paths matching [options] as each becomes present or absent;
   /// prefixes stay relative to the origin.
   ///
   /// Listen to `announced(...).updates()` for a [Stream] of [AnnounceEvent]
@@ -271,8 +273,7 @@ final class Moq {
   /// [Tokens.set_] replaces them, such as before the current ones expire: the
   /// next dial presents them, and a live session with in-band AUTH presents
   /// them at once, withdrawing each replaced token once its replacements are
-  /// answered, even when one is refused. After an authorization refusal the
-  /// session redials only if they changed. An empty token throws
+  /// answered, even when one is refused. An empty token throws
   /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
   Tokens tokens() => session.tokens()!;
 
@@ -347,7 +348,7 @@ final class _Grants extends NativeStream<Grant?> {
 
   @override
   bool ended(Object error) =>
-      error is CancelledMoqException || error is ClosedMoqException;
+      error is MoqException && moqErrorIsShutdown(err: error);
 
   @override
   void release() {

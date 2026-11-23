@@ -24,7 +24,9 @@ pub enum Address {
 	Setup,
 }
 
-/// One connection's cumulative wire counters, which its transport updates as it sends and receives.
+/// One connection's cumulative wire counters, which its transport updates as it sends and receives:
+/// its bytes, its sender's waits on the peer's connection-level credit, and its receiver's holds
+/// on a spent receive window.
 ///
 /// Clones share the counters, so stats read them without polling the session or keeping the
 /// connection alive, and the final totals stay readable after it closes. Each counter is
@@ -36,6 +38,14 @@ pub struct Wire(std::sync::Arc<WireCounters>);
 struct WireCounters {
 	sent_bytes: std::sync::atomic::AtomicU64,
 	received_bytes: std::sync::atomic::AtomicU64,
+	credit_stalls: std::sync::atomic::AtomicU64,
+	credit_stalled_us: std::sync::atomic::AtomicU64,
+	credit_held_readers_us: std::sync::atomic::AtomicU64,
+	credit_held_evicted_us: std::sync::atomic::AtomicU64,
+}
+
+fn micros(time: Duration) -> u64 {
+	u64::try_from(time.as_micros()).unwrap_or(u64::MAX)
 }
 
 impl Wire {
@@ -62,6 +72,49 @@ impl Wire {
 	/// Record the cumulative bytes received so far.
 	pub fn set_received_bytes(&self, total: u64) {
 		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// How many times the sender blocked with all the peer's connection credit (`MAX_DATA`) spent.
+	pub fn credit_stalls(&self) -> u64 {
+		self.0.credit_stalls.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// How long the sender spent blocked on the peer's connection credit.
+	pub fn credit_stalled(&self) -> Duration {
+		Duration::from_micros(self.0.credit_stalled_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// Record the cumulative episodes and time the sender spent blocked on the peer's connection
+	/// credit. An episode starts when a write blocks with every credited byte sent, and ends when
+	/// the peer grants more; a write held by the local send window is not one.
+	pub fn set_credit_stalls(&self, stalls: u64, stalled: Duration) {
+		self.0.credit_stalls.store(stalls, std::sync::atomic::Ordering::Relaxed);
+		self.0
+			.credit_stalled_us
+			.store(micros(stalled), std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// How long the peer had this side's whole receive window spent while a reader had data it
+	/// had not looked at yet: a reader behind holding the window.
+	pub fn credit_held_readers(&self) -> Duration {
+		Duration::from_micros(self.0.credit_held_readers_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// How long the peer had this side's whole receive window spent while an evicted reader had
+	/// not stopped its stream.
+	pub fn credit_held_evicted(&self) -> Duration {
+		Duration::from_micros(self.0.credit_held_evicted_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// Record the cumulative time the peer had the whole receive window spent while eviction
+	/// waited on `readers` behind or on `evicted` readers yet to stop their streams.
+	pub fn set_credit_held(&self, readers: Duration, evicted: Duration) {
+		self.0
+			.credit_held_readers_us
+			.store(micros(readers), std::sync::atomic::Ordering::Relaxed);
+		self.0
+			.credit_held_evicted_us
+			.store(micros(evicted), std::sync::atomic::Ordering::Relaxed);
 	}
 }
 
@@ -144,11 +197,13 @@ impl Metrics for Untracked {}
 /// stops reading still holds.
 ///
 /// A session's ingest stops reading a group's stream while the group's fastest reader is far
-/// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
-/// `stream` bytes it has not read, plus what it read of a frame's unsealed segment, counted
-/// against the shared `connection` window, so the session pauses only as many streams as fit
-/// in half of it; the rest keep reading. See
-/// [`poll::Session::receive_window`].
+/// behind, so flow control pushes back to the publisher. Such a paused stream holds the
+/// connection credit it was granted, counted against the shared `connection` window, so the
+/// session pauses only as many streams as fit in half of it; the rest keep reading. A
+/// transport that shapes a stream's credit ([`poll::RecvStream::set_window`]) holds a paused
+/// one to a small allowance, which shrinks with each stream the session shapes yet sums to
+/// under that half however many there are, so every one pauses; any other holds its `stream`
+/// window. See [`poll::Session::receive_window`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiveWindow {
@@ -400,17 +455,6 @@ pub mod poll {
 			Err(super::LimitsError::Unsupported)
 		}
 
-		/// Export 32 bytes of keying material from this session's handshake under `label` and
-		/// `context` (RFC 8446 section 7.5), or `None` when the transport has no exporter.
-		///
-		/// Both ends of one session export the same bytes, and no other session does.
-		/// WebTransport derives them per session as its draft specifies, since other sessions
-		/// may share the connection.
-		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-			let _ = (label, context);
-			None
-		}
-
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&self) -> AcceptUni<'_, Self> {
 			AcceptUni::new(self)
@@ -619,10 +663,6 @@ pub mod poll {
 		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 			(**self).set_limits(limits)
 		}
-
-		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-			(**self).export_keying_material(label, context)
-		}
 	}
 
 	/// A transport that the async client and server can box:
@@ -698,16 +738,6 @@ pub mod poll {
 		}
 	}
 
-	/// What [`SendStream::poll_acked`] learned about the bytes below an offset.
-	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-	#[non_exhaustive]
-	pub enum Acked {
-		/// The peer acknowledged every byte below the offset.
-		Delivered,
-		/// The transport cannot see acknowledgments, so delivery is unknown, never assumed.
-		Unsupported,
-	}
-
 	/// An outgoing stream with partial writes, priorities, and reset codes.
 	pub trait SendStream: 'static {
 		/// The error type for every operation on this stream.
@@ -723,16 +753,17 @@ pub mod poll {
 		/// The position just past every byte written so far.
 		fn offset(&self) -> Self::Offset;
 
-		/// Poll until the peer acknowledged every byte below `offset`.
+		/// Poll until every byte below `offset` reaches the peer unless the session fails.
 		///
-		/// Errors once those bytes can never be acknowledged: the stream was reset by either
-		/// side or the session closed. Bytes already acknowledged stay so after a reset or stop.
-		/// A transport that cannot see acknowledgments is ready with [`Acked::Unsupported`]
-		/// immediately, the default, on every stream, so a caller can decide once per session. An
-		/// offset minted by another stream may panic.
-		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<Acked, Self::Error>> {
+		/// That is once the peer acknowledged them, or, over a reliable link such as qmux's TCP,
+		/// once the link took them, so a reset can no longer discard them. Errors once those
+		/// bytes can never get there: the stream was reset by either side or the session closed.
+		/// Bytes already acknowledged stay so after a reset or stop. The default, for a transport
+		/// that cannot see acknowledgments, is ready at once: the bytes it took are all it knows.
+		/// An offset minted by another stream may panic.
+		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
 			let _ = (waiter, offset);
-			Poll::Ready(Ok(Acked::Unsupported))
+			Poll::Ready(Ok(()))
 		}
 
 		/// Poll to write some of the buffer to the stream, returning how many bytes were
@@ -949,6 +980,21 @@ pub mod poll {
 			Poll::Pending
 		}
 
+		/// Let the peer send at most `window` bytes past what the reader took, rather than the
+		/// stream's full receive credit, returning the connection credit the stream may hold from
+		/// now on: the bytes that arrived and were not released, and those the peer may still send.
+		///
+		/// A session pacing a stream (see [`Session::receive_window`]) shrinks its window as the
+		/// group runs out of room, so the stream holds little once paused, and many fit in the
+		/// connection window. Credit already granted stays granted. `None` when the transport
+		/// cannot, the default, whose paused streams hold their full stream credit.
+		///
+		/// A transport that can also implements [`Lease::set_window`].
+		fn set_window(&mut self, window: u64) -> Option<u64> {
+			let _ = window;
+			None
+		}
+
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
 		/// stream. Its credit returns as it is read.
 		///
@@ -992,6 +1038,17 @@ pub mod poll {
 
 		/// Return the credit of every byte read so far, by this lease or an earlier one.
 		fn release(self);
+
+		/// Set the stream's window, as [`RecvStream::set_window`] does, in the same step as the
+		/// lease is handed back, by [`release`](Self::release) or a drop.
+		///
+		/// The reader shrinks the window for the bytes it just read, and the credit they return
+		/// may be granted from the window as the transport builds the grant. A shrink made
+		/// after the hand back can lose that race, and credit granted cannot be taken back.
+		/// Ignored by default, for a transport whose streams cannot set a window.
+		fn set_window(&mut self, window: u64) {
+			let _ = window;
+		}
 	}
 
 	/// A pending [`RecvStream::read_chunk`].

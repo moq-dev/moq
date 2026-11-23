@@ -67,8 +67,8 @@ Tracks have separate directories, with each track name percent-encoded as one
 segment. Within one broadcast prefix:
 
 - Each track's `.info` stores its timescale, when timed, and priority.
-- Data objects are keyed by their first group's start, frame index, and
-  presentation timestamp; untimed tracks omit the timestamp. The sorted key listing is the
+- Data objects are keyed by their first group's start and frame index. On a
+  timed track a group's start is its time, so the sorted key listing is the
   index, with no manifest or timeline object.
 - Each track's `end` records its final position or stream error. The broadcast's
   `.end` marks the recording complete, after its track markers are written.
@@ -82,7 +82,10 @@ window and grace; the newest object of each track stays. Pruning runs only while
 the recorder runs: once a recording completes or its recorder stops, objects not
 yet due stay until something else deletes them, such as a store lifecycle rule.
 
-The [moq-archive rustdoc](https://docs.rs/moq-archive) specifies the format for
+The store format is versioned, and a reader accepts only its own version: a
+prefix written in another one is refused with the version it found. Version 1
+shipped first; the current format is version 2, which cannot read version 1
+recordings. The [moq-archive rustdoc](https://docs.rs/moq-archive) specifies the format for
 the published version. This page follows the
 [layout documented in current source](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/src/lib.rs#L8),
 which can differ from an installed package; use the reference matching your version.
@@ -99,17 +102,22 @@ like any other broadcast; it does not look in object storage on a cache miss.
 Each track starts live at its newest stored group and serves older groups
 from storage when requested by their start. It advertises no max age, so the
 source's live max age cannot make archived history stale. A growing recording is
-periodically listed for new tracks and objects. Once `.end` appears, refreshing
+periodically listed for new tracks and objects, and each track is listed whole
+again as it grows, or once a read finds an object gone, so a server attached to
+a pruned recording tracks what the store retains. Once `.end` appears, refreshing
 stops and tracks end as recorded; without it, including when a recorder stopped
 early, the archive stays live. Empty or unrecognized prefixes are refused.
 
-Serving history is not paced playback from the beginning. Time ranges currently
-resolve against the served track's cache, not the archive's stored keys, so they
-cannot reliably seek old stored content. There is no automatic switch from a
-live broadcast to its archive at the original path.
+A time range the served track's cache can't resolve is looked up from the stored
+keys: its start reaches the stored group containing that time, however old, or
+the oldest group the store still holds from its first frame when the time is
+older, such as one retention pruned; its end stops just past the group
+containing it. Serving
+history is not paced playback from the beginning, and there is no automatic
+switch from a live broadcast to its archive at the original path.
 
 The archived catalog is an ordinary track. [HLS](/bin/hls) serves a recording
-from its media tracks, numbered on the catalog's `media.join.interval`, just as
+from its media tracks, numbered on the catalog's `sync.interval`, just as
 it serves a live broadcast; a recording whose catalog declares no interval gets
 no playlists. The [join interval](/concept/hang#catalog) describes HLS
 segmentation, not archive discovery. Protected broadcasts are outside this archive workflow.

@@ -74,7 +74,7 @@ use super::hang::{Catalog, CatalogExt};
 /// let info = moq_net::track::Info::default()
 ///     .with_timescale(moq_net::Timescale::MILLI)
 ///     .with_compression(moq_net::track::Compression::Deflate);
-/// let track = broadcast.create_track("telemetry", info)?;
+/// let track = broadcast.create_track("telemetry", info).ok_or(moq_net::Error::Duplicate)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
 /// let mut telemetry = catalog.json_stream::<serde_json::Value>(track, entry)?;
@@ -444,7 +444,7 @@ impl<E: CatalogExt> Reserved<E> {
 		}
 	}
 
-	/// Declare the track's longest group (its GOP), which the catalog's `media.join.interval`
+	/// Declare the track's longest group (its GOP), which the catalog's `sync.interval`
 	/// promises. Without one, a video or audio track measures it over its first second or group,
 	/// whichever is longer, before the interval is declared.
 	pub fn with_interval(mut self, interval: impl Into<Option<std::time::Duration>>) -> Self {
@@ -610,7 +610,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		info: moq_net::track::Info,
 		interval: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
-		let track = self.catalog.fresh_track(&self.name, info)?;
+		let track = self.catalog.fresh_track(&self.name, info);
 		let rendition = self.catalog.rendition(track.name())?;
 		self.catalog.media(track, container, rendition, None, interval)
 	}
@@ -683,7 +683,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		}
 		config.set_estimate(resolved.clone());
 		{
-			let mut guard = self.catalog.modify()?;
+			let mut guard = self.catalog.edit()?;
 			write(&mut guard, &self.name, config)?;
 			self.present = true;
 			guard.list::<C>(&self.name);
@@ -760,7 +760,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if self.published.as_ref() == Some(&resolved) {
 			// Still an observation: it releases a rise held back until its window ended. A closed
 			// catalog has nothing left to release.
-			if let Ok(guard) = self.catalog.modify() {
+			if let Ok(guard) = self.catalog.edit() {
 				guard.commit_estimate(true)?;
 			}
 			return Ok(());
@@ -831,7 +831,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			return Err(self.unpublished());
 		}
 		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
-		let mut guard = self.catalog.modify()?;
+		let mut guard = self.catalog.edit()?;
 		write(&mut guard, &self.name, config)?;
 		Ok(guard)
 	}
@@ -853,7 +853,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Drop for Rendition<E, C> {
 		// The entry and the name it holds are released together under one lock. Removing mutates the
 		// catalog, so the guard publishes it (immediately if live, else it accumulates until the gate
 		// opens). A closed catalog has nothing left to release from.
-		if let Ok(mut catalog) = self.catalog.modify() {
+		if let Ok(mut catalog) = self.catalog.edit() {
 			catalog.release::<C>(&self.name, self.present);
 		}
 		// Our reservation (`gate`) drops here. If still held (never set), its release flushes any
@@ -1438,7 +1438,7 @@ mod tests {
 	fn an_existing_entry_owns_its_name() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
-		catalog.modify().unwrap().video.insert("v", config(None, None)).unwrap();
+		catalog.edit().unwrap().video.insert("v", config(None, None)).unwrap();
 
 		assert!(
 			catalog.reserve().init::<hang::catalog::VideoConfig>("v").is_err(),

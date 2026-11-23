@@ -6,12 +6,10 @@
 //! - WebSocket (qmux over WebSocket, the fallback when QUIC is blocked)
 //! - TCP via the `tcp://` (plaintext) and `tls://` schemes (qmux)
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; unix-only)
-//! - A qmux session established elsewhere, such as over a WebRTC data channel
 //!
 //! Every transport is compiled in, and the URL scheme or config picks one at runtime.
 //! [`client::Client`] connects to relays, [`server::Server`] accepts connections, and
-//! [`mdns`] finds peers on the local network. [`quic::driver`] is an async QUIC stack
-//! for any application, MoQ or not.
+//! [`mdns`] finds peers on the local network.
 //!
 //! Cryptography always comes from rind. TLS setup checks CPU support and returns
 //! an error naming a missing CPU feature. Older x86_64 CPUs and aarch64 boards without
@@ -41,7 +39,7 @@ mod resolve;
 mod runtime;
 pub mod secret;
 pub mod server;
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 pub mod sim;
 pub mod tcp;
 pub mod tls;
@@ -85,7 +83,7 @@ fn spawn_qmux<T: qmux::transport::Transport + Send + 'static>(
 // new `pub` item in these modules doesn't silently join it.
 pub use client::Client;
 pub use connect::{Addrs, ConnectError};
-pub use connection::{Backoff, Connection, Redirect, Restart, Status};
+pub use connection::{Backoff, Connection, Hold, Redirect, Restart};
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 pub use server::{Listener, Server};

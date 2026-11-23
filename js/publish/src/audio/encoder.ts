@@ -15,11 +15,11 @@ import {
 } from "@moq/signals";
 import { hosted } from "../assets";
 import type { Broadcast } from "../broadcast";
-import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
+import { Gate } from "./gate";
 import { Resampler } from "./resampler";
 import type { CodecMime, Kind } from "./types";
 import { sourceKind } from "./types";
@@ -36,7 +36,8 @@ const FADE = Duration.millis(50);
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
 
-import { Duration, Instant, now } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import * as MediaClock from "../media-clock";
 import { Backlog } from "./backlog";
 import { Framer } from "./framer";
 
@@ -191,12 +192,14 @@ export class Encoder {
 	 * A snapshot, for reaching the shared capture format knobs (`audio.capture?.sampleRate`). Read
 	 * {@link in}.capture through an effect instead when you need to react to it being swapped.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	get capture(): Capture | undefined {
 		return this.in.capture.peek();
 	}
 
-	// The exact encoder settings and probed decoder description, advertised before the first frame.
-	#config = new Signal<(Resolved & { encoder: AudioEncoderConfig }) | undefined>(undefined);
+	// The exact encoder settings and probed decoder description, advertised before the first frame, and
+	// whether the source is a voice, whose silence is not sent.
+	#config = new Signal<(Resolved & { encoder: AudioEncoderConfig; voice: boolean }) | undefined>(undefined);
 
 	// The last Opus probe: the encoder settings it ran with, serialized, and the description it
 	// produced. Kept across a disable so re-enabling with the same capture format and settings
@@ -218,9 +221,9 @@ export class Encoder {
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
 	#encoding = false;
-	// The demand's max delay, past which retained audio is stale to every subscriber, or undefined
-	// for the retention alone. Replayed groups land as fresh arrivals, so only this cut keeps a
-	// rejoining live viewer from receiving all the retained audio before the live edge.
+	// How far back retained audio is replayed (see replayBudget): a live join's lag, else the max
+	// delay, and for fetches alone the retention. Replayed groups land as fresh arrivals, so only this
+	// cut keeps a rejoining live viewer from receiving all the retained audio before the live edge.
 	#budget: Duration | undefined;
 
 	// The rendition's track and producer, kept across subscriber changes.
@@ -485,10 +488,9 @@ export class Encoder {
 			const fatal = effect.get(this.#out.error);
 
 			const onDemand = effect.get(broadcast.in.onDemand) !== "off";
-			const demanded = !!track && effect.get(track.demand().wanted) !== undefined;
+			const demanded = !!track && effect.get(track.demand().wanted);
 			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
-			const max = track && effect.get(track.subscription)?.delay?.max;
-			this.#budget = max === undefined || max === null ? undefined : max;
+			this.#budget = replayBudget(track && effect.get(track.subscription));
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
 			this.#encoding = !!format && !!track && !fatal && (!onDemand || demanded);
 			effect.set(this.#out.active, enabled && this.#encoding, false);
@@ -511,7 +513,7 @@ export class Encoder {
 			const allocator = effect.get(this.in.bandwidth);
 			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
-			const demanded = watched(track, effect);
+			const demanded = track.demand().wanted;
 			effect.run((effect) => {
 				if (!effect.get(demanded)) return;
 
@@ -554,16 +556,17 @@ export class Encoder {
 		// Set before the config is listed, so the catalog's first listing declares it.
 		this.#spacing.set(groupSpacing(join, resolved));
 		const source = capture ? effect.get(capture.in.source) : undefined;
-		const kind = source ? sourceKind(source) : "auto";
+		const kind = source ? sourceKind(source) : undefined;
+		const voice = kind === "voice";
 		const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
 		if (resolved.catalog.codec !== "opus") {
-			this.#config.set({ ...resolved, encoder: encoderConfig });
+			this.#config.set({ ...resolved, encoder: encoderConfig, voice });
 			return;
 		}
 
 		const key = JSON.stringify(encoderConfig);
 		if (this.#probed?.key === key) {
-			this.#config.set(withDescription(resolved, encoderConfig, this.#probed.description));
+			this.#config.set({ ...withDescription(resolved, encoderConfig, this.#probed.description), voice });
 			return;
 		}
 
@@ -612,7 +615,7 @@ export class Encoder {
 				if (failure) throw failure;
 				encoder.close();
 				this.#probed = { key, description };
-				this.#config.set(withDescription(resolved, encoderConfig, description));
+				this.#config.set({ ...withDescription(resolved, encoderConfig, description), voice });
 			} catch (error) {
 				if (superseded.aborted) return;
 				this.#config.set(undefined);
@@ -717,6 +720,10 @@ export class Encoder {
 							});
 				let resampler = createResampler();
 				let framer = createFramer(resolved, config.sampleRate);
+				// A voice's silence is dropped here, before it costs an encode, as a mute's is.
+				const gate = resolved.voice
+					? new Gate({ sampleRate: config.sampleRate, frame: frameDuration(resolved) })
+					: undefined;
 
 				// What the codec still owes, in submission order: each input's timestamp, or a break whose
 				// marker goes down once every chunk before it is out. Chunks are stamped from here, never
@@ -791,10 +798,15 @@ export class Encoder {
 				let paused = false;
 				// A pause left retained audio, so the timeline breaks after it rather than at once.
 				let breakPending = false;
+				// End the epoch where the encoded audio stops, or once the audio retained before it is.
+				const pause = () => {
+					if (backlog.empty) cut();
+					else breakPending = true;
+				};
 
 				const backlog = new Backlog(retention, config.sampleRate);
 				const deadline = new Signal<Duration | undefined>(undefined);
-				const clock = () => now().since(Instant.ZERO);
+				const clock = MediaClock.now;
 				effect.run((timer) => {
 					const at = timer.get(deadline);
 					if (at === undefined) return;
@@ -847,6 +859,20 @@ export class Encoder {
 					this.#next = contiguous;
 				};
 
+				// Encode a captured frame now, or retain it until a subscriber wants it.
+				const take = (data: AudioFrame, end: Duration) => {
+					const pending = breakPending;
+					breakPending = false;
+					if (this.#encoding && backlog.empty) {
+						if (pending) cut();
+						submit(data, end);
+						return;
+					}
+					// It waits for a subscriber. Started here rather than from the backlog, which may not
+					// keep the frame: a zero max age retains nothing.
+					backlog.push(data, end, clock(), pending);
+				};
+
 				const pipeline: Pipeline = {
 					channelCount: config.numberOfChannels,
 					drain: () => {
@@ -878,17 +904,17 @@ export class Encoder {
 						const frames = framer.push(input);
 						for (const [i, data] of frames.entries()) {
 							if (!this.#live) continue;
-							const pending = breakPending;
-							breakPending = false;
 							const end = frames[i + 1]?.timestamp ?? framer.next;
-							if (this.#encoding && backlog.empty) {
-								if (pending) cut();
-								submit(data, end);
+							if (!gate) {
+								take(data, end);
 								continue;
 							}
-							// It waits for a subscriber. Started here rather than from the backlog, which
-							// may not keep the frame: a zero max age retains nothing.
-							backlog.push(data, end, clock(), pending);
+							const open = gate.open;
+							const passed = gate.push(data, end);
+							for (const entry of passed) take(entry.frame, entry.end);
+							// The talker fell silent: declare the end now, not when speech resumes, after the
+							// last frame sent, which may be this one.
+							if (open && !gate.open) pause();
 						}
 						deadline.set(backlog.deadline);
 					},
@@ -907,8 +933,9 @@ export class Encoder {
 					// The capture resumes on a later timeline, so drop the partial frame and filter state.
 					resampler = createResampler();
 					framer = createFramer(resolved, config.sampleRate);
-					if (backlog.empty) cut();
-					else breakPending = true;
+					// The gate would miss a resume that leaves no gap in the timeline.
+					gate?.reset();
+					pause();
 				});
 
 				// Publish it last: the read loop starts pushing the moment this is visible.
@@ -1004,6 +1031,24 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 	};
 }
 
+// How far back a subscription wants retained audio replayed. A live join (an open range starting
+// live) starts its lag behind the live edge, which a player states as its playout delay plus the
+// codec's warmup, so the largest lag bounds it within the max delay. Any other range, such as one
+// from the oldest group (moq-transport, moq-lite before 07), wants all its max delay keeps.
+// Undefined with no subscription, leaving the retention.
+function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
+	const delay = subscription?.delay;
+	if (!delay) return undefined;
+	const max = delay.max ?? undefined;
+	let lag: Duration | undefined;
+	for (const range of subscription.ranges ?? [{}]) {
+		if (typeof range.start !== "object" || range.end !== undefined) return max;
+		lag = lag === undefined ? range.start.live : lag.max(range.start.live);
+	}
+	if (lag === undefined) return max;
+	return max === undefined ? lag : lag.min(max);
+}
+
 /**
  * How far apart audio groups start: a frame opens one once it is at least `join` past the
  * open group's start, so groups are a whole number of frames apart, and at least one.
@@ -1013,6 +1058,11 @@ export function groupSpacing(join: Duration, resolved: Resolved): Duration {
 	const frame = resolved.frameDuration?.asMicros() ?? (AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate;
 	const frames = Math.max(1, Math.ceil(join.asMicros() / frame));
 	return Duration.micros(frames * frame);
+}
+
+// How much audio each encoded frame carries.
+function frameDuration(resolved: Resolved): Duration {
+	return resolved.frameDuration ?? Duration.micros((AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate);
 }
 
 // The resolved config with the encoder settings and the probed decoder description, if the codec emitted one.
@@ -1067,15 +1117,15 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 }
 
 // Opus settings implied by the audio kind. These are only defaults: any field set explicitly via
-// OpusConfig (carried in opusOptions) overrides them, so a caller can always opt out. "auto" leaves
+// OpusConfig (carried in opusOptions) overrides them, so a caller can always opt out. No kind leaves
 // every knob to the browser.
-function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
+function opusKindDefaults(kind: Kind | undefined): OpusEncoderConfigExt {
 	switch (kind) {
 		case "voice":
 			return { application: "voip", signal: "voice" };
 		case "music":
 			return { application: "audio", signal: "music" };
-		default:
+		case undefined:
 			return {};
 	}
 }
@@ -1086,7 +1136,11 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
  * no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
  * @internal
  */
-export function toEncoderConfig(resolved: Resolved, kind: Kind, opusOptions: OpusEncoderConfigExt): AudioEncoderConfig {
+export function toEncoderConfig(
+	resolved: Resolved,
+	kind: Kind | undefined,
+	opusOptions: OpusEncoderConfigExt,
+): AudioEncoderConfig {
 	const config = resolved.catalog;
 	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,

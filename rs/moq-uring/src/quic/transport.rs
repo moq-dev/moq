@@ -1,6 +1,5 @@
 //! The per-connection transport knobs, the same for either role.
 
-use super::Congestion;
 use super::qlog;
 use crate::quic::Limits;
 
@@ -30,13 +29,12 @@ pub struct Config {
 	///   it to fit the largest message it assembles,
 	///   [`MIN_RECEIVE_WINDOW`](moq_net::transport::MIN_RECEIVE_WINDOW), or a
 	///   partial one can stall the connection.
-	/// - A 1 MiB stream window. Stream credit returns as bytes are read,
+	/// - A 4 MiB stream window. Stream credit returns as bytes are read,
 	///   whether or not their message is complete, so this only paces one
 	///   stream.
 	/// - 4 MiB of unacknowledged outgoing data, whatever the peer allows.
 	pub limits: Limits,
-	/// The congestion controller each connection runs, BBRv3 by default. A
-	/// [`Congestion`] family converts into one with `.into()`.
+	/// The congestion controller each connection runs, BBRv3 by default.
 	pub congestion: std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>,
 	/// How often to send an ack-eliciting packet on an otherwise idle
 	/// connection, `None` (the default) to derive it from the negotiated idle
@@ -61,7 +59,7 @@ impl Default for Config {
 			idle_timeout: std::time::Duration::from_secs(10),
 			handshake_timeout: moq_quic::transport::Config::default().handshake_timeout,
 			limits: Limits::default(),
-			congestion: Congestion::Delay.into(),
+			congestion: std::sync::Arc::new(moq_congestion::bbr3::Config::default()),
 			keep_alive: None,
 			mtu_discovery: false,
 			qlog: None,

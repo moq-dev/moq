@@ -36,9 +36,11 @@ const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 const VERSION: &str = "moq-lite-07-wip";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
@@ -98,7 +100,7 @@ impl Chain {
 			group
 				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	}
 
@@ -124,7 +126,7 @@ impl Chain {
 			.unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(budget))
-			.with_ranges([Range::oldest()]);
+			.with_ranges([Range::default()]);
 		remote.track("video").unwrap().subscribe(subscription).await.unwrap()
 	}
 }
@@ -181,7 +183,7 @@ async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 			.update(
 				Subscription::default()
 					.with_delay(Delay::default().with_max(NARROW))
-					.with_ranges([Range::oldest()]),
+					.with_ranges([Range::default()]),
 			)
 			.unwrap();
 		while source.subscription_changed().await.unwrap().and_then(|s| s.delay.max) != Some(NARROW) {}
@@ -219,7 +221,7 @@ async fn a_widened_reader_gets_what_was_skipped() {
 
 			let wide = Subscription::default()
 				.with_delay(Delay::default().with_max(WIDE))
-				.with_ranges([Range::oldest()]);
+				.with_ranges([Range::default()]);
 			reader.update(wide).unwrap();
 			let widened = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
 			assert_eq!(
@@ -318,7 +320,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		group
 			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	broadcast.announce().unwrap();
 
@@ -337,7 +339,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 			.unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(budget))
-			.with_ranges([Range::oldest()]);
+			.with_ranges([Range::default()]);
 		let mut reader = remote.track("video").unwrap().subscribe(subscription).await.unwrap();
 		let got = received(&mut reader).await;
 		readers.push((viewer, reader));
@@ -379,7 +381,7 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 			group
 				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let consumer = viewer.consume();

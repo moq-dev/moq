@@ -9,9 +9,11 @@ use moq_net::{Error, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: u64) -> MockPair {
@@ -76,7 +78,7 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), b"catalog".to_vec())
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let result = pending.await;
 	if carries_instance {
 		let mut subscription = result.expect("the same instance must acquire");

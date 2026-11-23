@@ -63,15 +63,6 @@ The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
 broken media automatically.
 
-A video rendition encoded with intra refresh has no keyframes, and its catalog
-`warmup` says how long a decoder takes to clean up after joining. The player
-joins such a rendition that much earlier and decodes from the group start, but
-shows nothing until the warmup has passed, after a join and after each skip.
-An H.264 group opens on a recovery point that is not an IDR, which Chromium's
-WebCodecs refuses unless it counts zero frames, so the player inserts one that
-does before the first slice. Firefox and Safari are untested, and Chromium
-refuses an H.265 group that opens without an IDR.
-
 `el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
 It reads `connecting` until a session could have announced the broadcast: while the
 connection dials, redials, or was refused (`el.connection.error` says why), and until the
@@ -199,6 +190,12 @@ const player = new Watch.Player({
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `audio.muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
+
+`video.target`'s `width` and `height` cap the picture and, unless the box is
+square, prefer the renditions shown in its orientation, falling back to the
+other only when none can be decoded. `<moq-watch>` sets them from its rendered
+size, so rotating a phone switches between a broadcast's portrait and landscape
+renditions.
 
 `viewer.viewers` claims the broadcast's share of the connection's receive
 estimate (see [`connection.viewers`](/lib/js/net)). Its ceiling follows the

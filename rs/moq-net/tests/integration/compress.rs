@@ -31,10 +31,11 @@ fn compressed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A repetitive payload, which DEFLATE shrinks, distinct per frame.
@@ -131,7 +132,7 @@ const RANGED: &[&str] = &["moq-lite-07-wip", "moq-transport-18", "moq-transport-
 /// pair of hops, compressed or not, whether the group began before it subscribed or after.
 #[kio::test]
 async fn a_start_group_arrives_whole() {
-	use moq_net::track::{Anchor, Subscription};
+	use moq_net::track::Subscription;
 	let write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
 		for index in frames {
 			group
@@ -165,12 +166,12 @@ async fn a_start_group_arrives_whole() {
 						if lite {
 							assert_eq!(
 								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
-								Anchor::Time(5),
+								moq_net::track::Start::Time(5),
 								"{case}: upstream asks for the start group"
 							);
 						}
 						write(&mut group, head..5);
-						group.close().unwrap();
+						group.finish().unwrap();
 						let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
 						assert_eq!(reading.start, 5, "{case}");
 						for index in 0..5 {
@@ -225,7 +226,7 @@ async fn relay_serves_every_version() {
 			group
 				.write_frame(Timestamp::from_millis(3).unwrap(), bytes::Bytes::new())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 
 			let mut group = fixture.subscriber.recv_group().await.unwrap().expect("group");
 			for index in 0..3 {
@@ -257,7 +258,7 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 						.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
 						.unwrap();
 				}
-				group.close().unwrap();
+				group.finish().unwrap();
 				let mut received = fixture.subscriber.recv_group().await.unwrap().unwrap();
 				for index in 0..3 {
 					assert_eq!(
@@ -289,7 +290,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 					.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			let _track = track.finish().unwrap();
 			broadcast.announce().unwrap();
 			let origin = produce_origin(2);

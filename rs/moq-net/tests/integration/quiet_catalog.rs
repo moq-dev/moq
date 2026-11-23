@@ -27,9 +27,11 @@ const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"
 const LITE: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
@@ -55,7 +57,7 @@ fn publish(origin: &origin::Producer) -> (moq_net::origin::Route, track::Produce
 	broadcast.announce().unwrap();
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), b"snapshot").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	(broadcast, track)
 }
 

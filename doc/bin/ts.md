@@ -24,7 +24,7 @@ moq ... --broadcast event.hang export ts --passthrough > out.ts
 
 | | Semantic | Passthrough (`--passthrough`) |
 | --- | --- | --- |
-| On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [`m2ts`](/concept/hang#transport-streams) track of whole 188-byte packets |
+| On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [passthrough](/concept/hang#transport-streams) track of whole 188-byte packets, named in the same section |
 | Output | A rebuilt TS: same media, programs, descriptors and kept SI; new packetization, PCR and table cadence | The source's packets, byte for byte, from the first group on |
 | Browsers and `moq play` | Watch the video and AAC or Opus audio; MP2, AC-3 and E-AC-3 play only where the player has a decoder for them, which `moq play` does not | Have nothing to decode |
 | A relay | Drops and prioritizes per track | Caches and drops whole runs of packets |
@@ -137,13 +137,20 @@ are refused rather than reframed. `--pcr-pid` paces on another PID's PCR.
 Each frame is a run of packets that ends at the next PCR on the clock PID or at
 the next group start, stamped with the PCR time of its first byte. A group
 starts at a `random_access_indicator` on the video PID (or the clock PID with
-no video), at a flagged PCR jump forward, after a second without either, or
-where the next frame would take the group past the relay's cache bound. Any
-step back ends the import.
+no video), at a PCR clock break, after a second without either, or where the
+next frame would take the group past the relay's cache bound. A flagged PCR
+jump forward carries its step into the timestamps. A step back, flagged or
+not, or an unflagged one more than 10 s forward, such as a switch between two
+unlocked encoders, is spliced instead: the timestamps carry on from where the
+clock was, and the bytes still go out unchanged, step and all.
 
 `export ts --passthrough` writes each run `--delay` after its time on the
-source clock, so two exporters emit the same bytes. It takes neither
-`--follow`, `--stitch` nor `--mux-rate`. Only the hang catalog names the
+source clock, so two exporters emit the same bytes. It takes no `--mux-rate`.
+`--follow` and `--stitch` carry it across the broadcast's returns and
+replacements: a restarted import is a new publisher instance, so `--stitch`
+writes its packets verbatim from the first group its live subscription delivers,
+after what the old one delivered, with no overlap window. The seam shows as each PID's
+continuity break, as a splice in the source would. Only the hang catalog names the
 track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
 
@@ -185,8 +192,9 @@ what the network drops, so random packet loss alone loses no content.
   hole longer than the export can pad over skips PCR slots, and then the first
   PCR after them flags the clock jump. PAT/PMT versions do not change either
   way. A group cut short keeps what arrived. Video resumes at its next
-  keyframe, dropping orphaned leading pictures; other tracks carry on. On a path slower than the media, whole groups
-  are shed and the latency holds. After an outage that exhausts the buffered
+  keyframe, dropping H.264 and H.265 leading pictures that reference the group
+  before; MPEG-2 video goes out whole. Other tracks carry on. On a path slower
+  than the media, whole groups are shed and the latency holds. After an outage that exhausts the buffered
   media, overdue padding can arrive in a burst when media resumes.
 - **Passthrough:** surviving packets go out unchanged, on their source schedule.
   A missing interval stays missing: the export never repairs continuity counters,
@@ -196,9 +204,14 @@ what the network drops, so random packet loss alone loses no content.
   the output decodes, or meets the T-STD, across the gap.
 
 Damage in the source is the importer's concern, not MoQ's. In semantic mode a
-damaged packet is dropped on its own PID, so video freezes until its next
-keyframe while the other tracks carry on, and feed health (stalled streams,
-TR 101 290 counters) is logged and reported without changing what publishes.
+lost packet, or one the receiver flagged with the transport error indicator, is
+dropped on its own PID, so video freezes until its next keyframe while the
+other tracks carry on, and feed health (stalled streams, TR 101 290 counters)
+is logged and reported without changing what publishes. A media unit, PES
+header, or adaptation field that arrives whole but does not parse ends the
+import with the cause: with neither loss nor the flag to explain it, the muxer
+wrote it wrong. A packet or PES scrambled by conditional access is refused and
+counted, and its stream resumes once it is clear, video at its next keyframe.
 Passthrough carries damaged packets as they came.
 
 ## Evidence
@@ -222,7 +235,7 @@ details each grader and its negative controls.
 | Whole PES (KLV, DVB AC-3) come back byte-equal outside PTS/DTS, at their placement | `just test ts --klv --strict`; [`pes_packet_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/pes_packet_test.rs) | Nightly, PR |
 | MPEG-2 video decodes to the source's pictures | `just test ts --mpeg2`; [`routes_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/routes_test.rs) `mpeg2_video_rides_whole_and_survives_a_round_trip` | Nightly, PR |
 | SCTE-35 and DSM-CC sections round-trip | [`export_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/export_test.rs) `scte35_fixtures_survive_roundtrip`; [`routes_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/routes_test.rs) `dsmcc_types_ride_as_sections` | PR |
-| Refusals: PES clock fields, scrambling, ambiguous `0x86`, unclaimed PIDs | [`pes_packet_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/pes_packet_test.rs) `a_pes_with_a_field_no_rebase_reaches_refuses_its_stream`; [`routes_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/routes_test.rs) `ambiguous_streams_are_refused_and_latm_rides_whole`, `unclaimed_pids_count_once_the_pmt_is_in` | PR |
+| Refusals: PES clock fields, scrambling, ambiguous `0x86`, unclaimed PIDs | [`pes_packet_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/pes_packet_test.rs) `a_pes_with_a_field_no_rebase_reaches_refuses_its_stream`; [`routes_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/routes_test.rs) `ambiguous_streams_are_refused_and_latm_rides_whole`, `unclaimed_pids_count_once_the_pmt_is_in`; [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `scrambled_pes_is_refused_until_clear` | PR |
 | DVB SI survives, on its own interval, pending versions dropped | [`export_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/export_test.rs) `service_layer_survives_roundtrip`, `si_pids_are_re_emitted_on_their_own_interval`; `just test ts-eit` | PR, Nightly |
 | PMT revisions: streams joining and leaving, retypes, PID reuse | `just test ts --revision --strict`; [`revision_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/revision_test.rs) | Nightly, PR |
 | PAT changes: moved PMT, programs added and dropped | [`revision_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/revision_test.rs) `a_moved_pmt_moves_behind_a_new_pat`; [`programs.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/programs.rs) `programs_follow_the_pat` | PR |
@@ -239,10 +252,11 @@ details each grader and its negative controls.
 | --- | --- | --- |
 | The capture is the source in place over the admitted interval, with the source's compliance verdicts | `just test ts --passthrough`; `just test ts-passthrough-capture` (a hardware encoder's capture with a dirty start) | Nightly |
 | A whole MPTS, two programs on their own clocks | `just test ts --passthrough --mpts` | Nightly |
+| An import killed and restarted under a running export costs no more than its downtime and the restarted import's first group | `just test ts --passthrough --restart 10`; [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_stitched_release_carries_on_into_a_restarted_import`, `a_stitched_release_carries_on_into_a_rewound_clock`, `the_same_instance_returning_resumes_the_release` | Nightly, PR |
 | Byte identity from the first group; nothing before PMT and PCR; off-grid junk dropped | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_broadcast_capture_is_byte_identical_from_the_first_group`, `nothing_is_published_before_the_pmt_and_a_pcr`, `leading_junk_does_not_hide_the_grid` | PR |
 | Scrambled input groups and paces like its clear twin | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_scrambled_twin_groups_and_paces_the_same` | PR |
 | `randomAccess` false for several programs or video streams | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `two_programs_on_one_clock_publish_no_random_access`, `two_video_streams_in_one_program_publish_no_random_access` | PR |
-| Clock: wrap, flagged jump, step back refused, 192/204-byte packets refused | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) | PR |
+| Clock: wrap, flagged jump, steps spliced, 192/204-byte packets refused | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) | PR |
 | Export releases each run byte-identical on its own PCR, whatever the delivery skew | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_capture_is_released_byte_identical_on_its_own_pcr`, `releases_fed_with_different_skew_write_the_same_bytes` | PR |
 
 ### Acquisition and loss
@@ -257,7 +271,8 @@ details each grader and its negative controls.
 | Semantic: a congested and an overflowing path shed whole groups, stay T-STD compliant, keep their latency | `just test ts --headroom --rate 7000000`, with `--queue 250ms` | Nightly only |
 | Passthrough: a missing group leaves its time out and counts one gap; a cut group loses only its tail; a late run is dropped alone | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_group_never_delivered_leaves_its_time_out`, `a_group_cut_short_loses_only_its_tail`, `an_object_past_its_deadline_is_a_gap_in_that_release_only` | PR |
 | Passthrough: an overflowing path keeps surviving packets in place through the source's last | `just test ts --passthrough --rate 7000000 --queue 250ms` | Nightly only |
-| Source damage drops only the damaged PID's unit | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `damaged_h264_nal_recovers`, `video_drops_a_partial_access_unit_across_a_continuity_break` | PR |
+| Source damage drops only the damaged PID's unit | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `damaged_tei_recovers`, `video_drops_a_partial_access_unit_across_a_continuity_break` | PR |
+| A whole unit or header that does not parse ends the import | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `undecodable_nal_ends_the_import`, `malformed_opus_pes_ends_the_import_unpublished`, `malformed_headers_end_the_import`, `invalid_adaptation_fields_end_the_import_on_media_and_clock_pids` | PR |
 
 ### Not claimed
 

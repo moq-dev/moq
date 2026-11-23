@@ -76,7 +76,8 @@
         # string pool 4-byte aligned, which macOS 27's dyld refuses to load, so
         # release-profile proc macros and cdylibs are a coin flip there. The
         # crates still declare their own lower floors (Cargo.toml rust-version).
-        rust-toolchain = pkgs.rust-bin.stable."1.98.1".minimal.override {
+        rust-stable = pkgs.rust-bin.stable."1.98.1".minimal;
+        rust-toolchain = rust-stable.override {
           # `minimal` rather than `default`, which adds 740 MB of offline HTML
           # docs to a closure every CI job downloads.
           extensions = [
@@ -571,7 +572,7 @@
             moq-relay
             moq-bench
             moq-boy
-            moq-c
+            libmoq
             moq-gst
             ;
 
@@ -610,6 +611,11 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
+          # Nightly `just test route-proof` type-checks the route rule's convergence
+          # proof. Its own Agda pin, so neither the dev shell nor `nix flake check`
+          # fetches it.
+          route-proof = import ./nix/route-proof.nix { inherit system; };
+
           # The QUIC Interop Runner's host tools (`just test quic-interop`): tshark
           # reads its pcaps, OpenSSL makes its certificates (the dev shell's LibreSSL
           # has no config for them), and Compose drives Podman where Docker's plugin is
@@ -628,6 +634,17 @@
           # bump it on purpose, like the stable toolchain above. Kept out of
           # the dev shell, which every CI job downloads.
           rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;
+
+          # The gate's `just rs cross-lint` runs clippy for the macOS and Windows
+          # targets from Linux with it: the dev shell's compiler plus those
+          # targets' std, kept out of the dev shell, which every CI job downloads.
+          rust-cross = rust-stable.override {
+            extensions = [ "clippy" ];
+            targets = [
+              "aarch64-apple-darwin"
+              "x86_64-pc-windows-msvc"
+            ];
+          };
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out

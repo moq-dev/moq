@@ -6,12 +6,17 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
 import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import parallel_tests
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -40,7 +45,7 @@ class FeaturesTest(unittest.TestCase):
                         sys.exit(1)
                     if call[0] == 'just':
                         if os.environ['FEATURE_NESTED'] == '1' and args[1] in (
-                            'net-features', 'quic-features', 'crypto-key', 'media-features',
+                            'net-features', 'quic-features', 'media-features',
                             'coroutines',
                         ):
                             sys.exit(subprocess.call([os.environ['FEATURE_REAL_JUST'], *args]))
@@ -305,7 +310,7 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-bench")
         self.assertEqual(result.returncode, 0, result.stderr)
         release = [call for call in calls if call.startswith("just gh criterion")]
-        self.assertEqual(len(release), 4)  # moq-net, its CPU clock, kio, then GStreamer.
+        self.assertEqual(len(release), 3)  # moq-net, its CPU clock, then kio.
         # The CPU clock reuses moq-net's build instead of rebuilding it without fuzz.
         self.assertTrue(
             any(
@@ -313,7 +318,7 @@ class NightlyTest(unittest.TestCase):
                 for call in release
             )
         )
-        self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
+        self.assertEqual(release[-1], "just gh criterion --no-fail-fast -p kio --bench *")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
         result, calls = self.run_group("rust-shared")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -469,7 +474,7 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-bench", build)
         self.assertEqual(result.returncode, 1)
         # A failed group publishes no report, but every later target still runs.
-        self.assertEqual(calls[-1], "just gh criterion -p moq-gst --bench catalog")
+        self.assertEqual(calls[-1], "just gh criterion --no-fail-fast -p kio --bench *")
 
     def test_unknown_group_fails_before_running_anything(self):
         result, calls = self.run_group("unknown")
@@ -538,4 +543,4 @@ class FuzzTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    parallel_tests.main(sys.modules[__name__])

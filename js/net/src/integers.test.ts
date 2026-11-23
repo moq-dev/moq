@@ -4,12 +4,11 @@ import { ObjectDatagram } from "./ietf/datagram.ts";
 import * as Filter from "./ietf/filter.ts";
 import { GoAway } from "./ietf/goaway.ts";
 import * as Message from "./ietf/message.ts";
-import { decodeFetchObject, decodeObjectTime, Frame, Group, type GroupFlags } from "./ietf/object.ts";
+import { decodeFetchObject, decodeGroupGap, Frame, Group, type GroupFlags } from "./ietf/object.ts";
 import { Parameters } from "./ietf/parameters.ts";
 import { PublishDone } from "./ietf/publish.ts";
 import { RequestError } from "./ietf/request.ts";
 import { Version } from "./ietf/version.ts";
-import { Datagram } from "./lite/datagram.ts";
 import { Fetch } from "./lite/fetch.ts";
 import { frameDecoder, Group as LiteGroup } from "./lite/group.ts";
 import * as LiteMessage from "./lite/message.ts";
@@ -20,8 +19,8 @@ import { TrackInfo } from "./lite/track.ts";
 import { Version as Lite } from "./lite/version.ts";
 import * as Path from "./path.ts";
 import { Cursor, concat, encodeVarint, Reader, Writer } from "./stream.ts";
-import { Timescale, Timestamp } from "./time.ts";
-import { rangesOf, union, Window } from "./window.ts";
+import { Timescale } from "./time.ts";
+import { type Holdings, rangesOf, union, Window } from "./window.ts";
 
 const UNSAFE = (1n << 53n) + 1n;
 const FLAGS: GroupFlags = {
@@ -58,8 +57,8 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 // Build the peer's fields independently of each message encoder, so a numeric writer
 // cannot reject the fixture before its decoder sees the full-width value.
 
-test("relative anchors round-trip beyond 2^53 and resolve adjacent counts exactly", async () => {
-	const ranges = [{ start: { relative: UNSAFE }, end: { relative: UNSAFE - 1n } }];
+test("time anchors round-trip beyond 2^53 and resolve adjacent times exactly", async () => {
+	const ranges = [{ start: { time: UNSAFE - 1n }, end: { time: UNSAFE } }];
 	const message = new Subscribe({ id: UNSAFE, broadcast: Path.from("room"), track: "video", priority: 0, ranges });
 	const bytes = await Writer.collect(Lite.DRAFT_07, (w) => message.encode(w, Lite.DRAFT_07));
 	expect((await Subscribe.decode(new Reader(undefined, bytes, Lite.DRAFT_07), Lite.DRAFT_07)).ranges).toEqual(ranges);
@@ -68,11 +67,17 @@ test("relative anchors round-trip beyond 2^53 and resolve adjacent counts exactl
 	expect((await SubscribeUpdate.decode(new Reader(undefined, updated, Lite.DRAFT_07), Lite.DRAFT_07)).ranges).toEqual(
 		ranges,
 	);
-	expect(new Window(rangesOf(ranges), UNSAFE + 5n).runs()).toEqual([{ start: 5n, end: 7n }]);
-	expect(union([{ start: { relative: UNSAFE - 1n } }, { start: { relative: UNSAFE } }])).toEqual([
-		{ start: { relative: UNSAFE } },
-	]);
-	expect(() => rangesOf([{ start: { relative: 1 as never } }])).toThrow(TypeError);
+	// Every group from 0 through the latest held, so a time names the group starting there.
+	const contiguous: Holdings = {
+		resolves: () => true,
+		containing: (time) => ({ group: time }),
+		nextStart: (from) => from,
+		complete: () => false,
+	};
+	const model = rangesOf([{ start: UNSAFE - 1n, end: UNSAFE }]);
+	expect(new Window(model, UNSAFE + 5n, contiguous).runs()).toEqual([{ start: UNSAFE - 1n, end: UNSAFE + 1n }]);
+	expect(union([{ start: UNSAFE - 1n, end: UNSAFE - 1n }, { start: UNSAFE }])).toEqual([{ start: UNSAFE - 1n }]);
+	expect(() => rangesOf([{ start: 1 as never }])).toThrow(TypeError);
 });
 
 for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
@@ -97,10 +102,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 			body: { payload: new Uint8Array([1]) },
 		});
 		expect(await ObjectDatagram.decode(datagram.encode(version), version)).toEqual(datagram);
-		const fetched = decodeFetchObject(
-			new Cursor(fields(version, 0x1f, UNSAFE, UNSAFE + 1n, 0, 0, 0), version),
-			undefined,
-		);
+		const fetched = decodeFetchObject(new Cursor(fields(version, 0x1f, UNSAFE, UNSAFE + 1n, 0, 0, 0), version));
 		expect(fetched).toMatchObject({ kind: "object", group: UNSAFE, subgroupId: UNSAFE + 1n });
 	});
 
@@ -129,15 +131,16 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(Filter.decodeFill(fields(version, 1, 0x0a, max), version)).toEqual({ rangeFilters: false });
 	});
 
-	test(`${version}: object indices, timestamps, lengths and statuses refuse unsafe numbers`, () => {
+	test(`${version}: object indices, lengths and statuses refuse unsafe numbers`, () => {
 		const cursor = (...values: (number | bigint)[]) => new Cursor(fields(version, ...values), version);
-		expect(() => Frame.decode(cursor(UNSAFE), FLAGS, undefined, true)).toThrow(RangeError);
-		expect(() => Frame.decode(cursor(0, UNSAFE), FLAGS, undefined)).toThrow(RangeError);
-		expect(() => Frame.decode(cursor(0, 0, UNSAFE), FLAGS, undefined)).toThrow(RangeError);
-		expect(() => decodeFetchObject(cursor(0x0c, 0, UNSAFE), undefined)).toThrow(RangeError);
-		expect(() => decodeFetchObject(cursor(0x8c, 0, UNSAFE), undefined)).toThrow(RangeError);
-		expect(() => decodeFetchObject(cursor(0, UNSAFE), undefined)).toThrow(RangeError);
-		expect(() => decodeObjectTime(cursor(0x10, UNSAFE), Timescale.NANO)).toThrow(RangeError);
+		expect(() => Frame.decode(cursor(UNSAFE), FLAGS, true)).toThrow(RangeError);
+		expect(() => Frame.decode(cursor(0, UNSAFE), FLAGS)).toThrow(RangeError);
+		expect(() => Frame.decode(cursor(0, 0, UNSAFE), FLAGS)).toThrow(RangeError);
+		expect(() => decodeFetchObject(cursor(0x0c, 0, UNSAFE))).toThrow(RangeError);
+		// An End of Range's Object ID is any varint, since it can close out the rest of a group.
+		expect(decodeFetchObject(cursor(0x8c, 0, UNSAFE))).toMatchObject({ kind: "endOfRange", object: UNSAFE });
+		expect(() => decodeFetchObject(cursor(0, UNSAFE))).toThrow(RangeError);
+		expect(() => decodeGroupGap(cursor(0x0b, UNSAFE))).toThrow(RangeError);
 	});
 }
 
@@ -149,9 +152,11 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 				await Writer.collect(version, (w) => LiteMessage.encode(w, (w) => w.write(body))),
 				version,
 			);
-		await expect(LiteGroup.decode(await framed(fields(version, 0, 0, UNSAFE)), version)).rejects.toThrow(
-			RangeError,
-		);
+		// Only lite-06 carries a Frame Start.
+		if (version === Lite.DRAFT_06)
+			await expect(LiteGroup.decode(await framed(fields(version, 0, 0, UNSAFE)), version)).rejects.toThrow(
+				RangeError,
+			);
 		if (version === Lite.DRAFT_07)
 			await expect(SubscribeStart.decode(await framed(fields(version, 1, UNSAFE)), version)).rejects.toThrow(
 				RangeError,
@@ -160,11 +165,10 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 			const body = await Writer.collect(version, async (w) => {
 				await w.string("room");
 				if (version === Lite.DRAFT_07) {
-					// No pinned instance: empty and unminted, and no origin node nor route depth.
+					// No pinned instance: empty and unminted, and no node named.
 					await w.u53(0);
 					await w.bool(false);
 					await w.u62(0n);
-					await w.u53(0);
 				}
 				await w.string("video");
 				await w.u8(0);
@@ -182,8 +186,6 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 		);
 		const decode = frameDecoder({ scale: Timescale.NANO });
 		expect(() => decode(new Cursor(fields(version, UNSAFE << 1n, 0), version))).toThrow(RangeError);
-		const datagram = fields(version, ...(version === Lite.DRAFT_07 ? [0] : []), 0, 0, UNSAFE);
-		await expect(Datagram.decode(datagram, version, () => ({ timed: true }))).rejects.toThrow(RangeError);
 	});
 }
 
@@ -193,8 +195,10 @@ test("legacy session bitrate refuses unsafe numbers", async () => {
 	await expect(SessionInfo.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(RangeError);
 });
 
-test("time anchors convert at the declared scale without losing an aligned unit", () => {
-	expect(
-		toWireRanges([{ start: { time: new Timestamp(4611686021000000, Timescale.NANO) } }], Timescale.MILLI),
-	).toEqual([{ start: { time: 4611686021 } }]);
+test("time anchors round-trip beyond 2^53 as group starts", async () => {
+	const ranges = toWireRanges([{ start: UNSAFE, end: UNSAFE + 1n }]);
+	expect(ranges).toEqual([{ start: { time: UNSAFE }, end: { time: UNSAFE + 1n } }]);
+	const message = new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 0, ranges });
+	const bytes = await Writer.collect(Lite.DRAFT_07, (w) => message.encode(w, Lite.DRAFT_07));
+	expect((await Subscribe.decode(new Reader(undefined, bytes, Lite.DRAFT_07), Lite.DRAFT_07)).ranges).toEqual(ranges);
 });

@@ -21,9 +21,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 #[kio::test]
@@ -51,7 +53,7 @@ async fn an_empty_group_arrives_empty() {
 			.expect("subscribe");
 		subscribed(&track).await;
 
-		track.append_next().unwrap().close().unwrap();
+		track.append_next().unwrap().finish().unwrap();
 		let mut empty = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the empty group was dropped"))
@@ -66,7 +68,7 @@ async fn an_empty_group_arrives_empty() {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), &b"ok"[..]).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut next = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")

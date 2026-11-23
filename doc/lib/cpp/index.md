@@ -14,7 +14,7 @@ C++17 is the floor, and C++20 adds `co_await` on a future. The bindings are
 generated from the same [UniFFI](https://mozilla.github.io/uniffi-rs/) crate as
 the other wrappers, so
 a method means the same thing here as in Python or Go. For a plain C ABI, use
-[moq-c](/lib/c/).
+[libmoq](/lib/c/).
 
 ## Install
 
@@ -51,7 +51,7 @@ an explicit directory, a release pin in `cpp/moq/FFI_VERSION` selects the defaul
 input; `just cpp package` fetches it with the checked-in SHA-256 hashes and fails
 if it cannot verify it. Direct CMake builds and `just cpp check` build the
 current checkout unless given an explicit native directory. The package is
-`moq-cpp`. It and the C package, `moq-c`, each link in their own copy of the
+`moq-cpp`. It and the C package, `libmoq`, each link in their own copy of the
 Rust core, so a program links one of the two, never both.
 
 ## Example
@@ -92,7 +92,9 @@ auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes ever
 auto session = ok(client->connect("https://relay.example.com").get());
 auto announced = ok(session->consume()->follow("my-stream.hang", nullptr));
 auto broadcast = ok(announced->available().get());   // the first call is never null
-auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
+// A zero delay reads only the newest catalog; a player that holds each update until its
+// media reaches the catalog's `timestamp` passes its playout delay instead.
+auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast, {}).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[id, video] : catalog->video) {
         // The rendition carries its own broadcast and track, which the subscribe follows.
@@ -125,7 +127,7 @@ Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several
 use one source timeline; omitting it keeps an independent offset. A timebase belongs to
 its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
 anywhere, so a raw byte stream needs no other importer.
-`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample.
+`moq::ContainerFormat::fmp4()` splits each fragment into one frame per sample.
 Media times are exact `moq::Timestamp{value, scale}` records, `value` units at `scale` units
 per second, and read back at the track's timescale, so a 90 kHz tick republishes unchanged.
 An untimed track has no time: its frames carry `moq::Timestamp{key, std::nullopt}`, the
@@ -139,12 +141,12 @@ moq::RouteOptions options;
 options.hidden = true; // fill tracks before anyone finds it; hold the route to stay announced
 auto route = ok(session->publish()->route("my-stream.hang", options));
 auto broadcast = route->broadcast();
-auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
+auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::opus(), opus_init}));
 ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 
-moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
+moq::VideoEncoderOutput output{moq::VideoCodec::h264(), std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
-auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
+auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::rgba(), 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
 ok(route->announce()); // each route mints a fresh instance, route->instance_id()
 ok(broadcast->close()); // keep the producer alive while publishing, then close explicitly
@@ -231,31 +233,31 @@ screen.reset();              // stopped watching: its share returns to camera
 
 ## Compressed tracks
 
-`moq::TrackInfo::compression` set to DEFLATE on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`moq::TrackInfo::compression` set to `moq::Compression::deflate()` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 
 ## Subscription defaults
 
-Start every subscription from `moq::subscription_defaults()` and change its fields. It holds moq-net's defaults, a zero `delay` that starts at the newest group and skips a superseded one at once, and passing `std::nullopt` for a subscription means the same. A bare `moq::Subscription{}` does not: the generated records carry no duration defaults, so its unset `delay.max` sets no subscriber limit and its unset `delay.min` leaves the target latency unstated.
+Start every subscription from `moq::subscription_defaults()` and change its fields. It holds moq-net's defaults, a zero `delay` that starts at the newest group and skips a superseded one at once, and passing `std::nullopt` for a subscription means the same. A bare `moq::Subscription{}` does not: the generated records carry no duration defaults, so its unset `delay.max` sets no subscriber limit and its unset `delay.min` leaves the target latency unstated. Likewise a bare `moq::TrackInfo{}` leaves `max_age` unset, which sets no publisher limit, while passing `std::nullopt` for the info keeps moq-net's zero, which serves only the live edge; set `max_age` to zero to keep that default in a record.
 
 ## Track demand
 
-`demand()->wanted()` is the group subscribers want, or `std::nullopt` while nobody subscribes, and `wanted_changed()` waits for it to move: start a new group once it passes your largest. Set `TrackInfo::refresh` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
+`demand()->wanted()` is whether anyone subscribes, and `wanted_changed()` waits for it to change. `demand()->refresh()` resolves once a subscriber asks for a new group: the first group of a track with none, or a join judged by `TrackInfo::refresh`. Write a group starting with a keyframe or snapshot, which answers it, then wait again. Set `refresh.ratio` to have a joining subscriber ask once the newest group has grown past that many times its first frame, and `refresh.interval` to have a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask. A subscriber asks with `consumer->refresh()`, which resolves once the request is sent (forwarded upstream, or read by a local publisher); cancelling the future first withdraws it.
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
-To end a track nobody wants, call the producer's `abort_unwanted(code)` once `wanted_changed()` returns `std::nullopt` rather than releasing it: it returns false and keeps the track for a subscriber that joined since.
+To end a track nobody wants, call `abort_unwanted(code)` on its producer (raw, media, audio, video, or JSON) once `wanted_changed()` returns false rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next false on a fresh `demand()`, since one that already returned false misses a subscriber that came and went.
 
 ## Authorization
 
 On `moq-lite-07-wip` (opt in with `ClientConfig::versions`), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
 
-Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `answered()` resolves once the relay accepts them, or to an `Error` carrying its refusal code. A server-accepted session's `tokens()` is null. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `session->credential(token)` returns a `Credential` that `route->set_auth(credential)` or `claim->set_auth(credential)` names (empty for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `answered()` resolves to the verdict, and `cancel()` withdraws it unless a route or claim still names it.
+Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once. `answered()` resolves once the relay accepts them, or to an `Error` carrying its refusal code. A server-accepted session's `tokens()` is null. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `session->credential(token)` returns a `Credential` that `route->set_auth(credential)` or `claim->set_auth(credential)` names (empty for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `answered()` resolves to the verdict, and `cancel()` withdraws it unless a route or claim still names it.
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its reconnects (a first dial that reaches no session ends the session with that error rather than retrying); independent watchers keep their own revisions.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its reconnects (until the peer has accepted a session's credential or drained a session with a GOAWAY (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed session, such as a refused credential, ends the session with that error rather than retrying); independent watchers keep their own revisions.
 
 ## Shutdown
 

@@ -44,10 +44,11 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// How the publisher's groups reach the relay.
@@ -142,7 +143,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	// tells the relay where its feed starts; otherwise the outcome rests on whether the
 	// first group is written before SUBSCRIBE_OK.
 	kio::clock::sleep(Duration::from_millis(1)).await;
-	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
 	match arrival {
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();
@@ -162,7 +163,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			kio::clock::sleep(Duration::from_millis(100)).await;
 			for mut group in groups {
 				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 		}
 		Arrival::NewestFirst => {
@@ -171,7 +172,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 				let mut group = track.append_next().unwrap();
 				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
 				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				// IETF serves from the live edge, so let each group open its stream before
 				// the next one supersedes it.
 				kio::clock::sleep(Duration::from_millis(10)).await;

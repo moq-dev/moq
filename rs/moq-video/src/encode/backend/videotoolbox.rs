@@ -7,6 +7,18 @@
 //! codes, and on each keyframe we prepend the parameter sets pulled from the
 //! format description.
 //!
+//! Rate control holds every second, and every few frames, to the bitrate with
+//! `DataRateLimits`, the only limit VideoToolbox honors in real time; it keeps
+//! the limit by aiming its average about 30% below it. The one exception seen is
+//! a keyframe landing on a cut from a still scene, whose second H.265 ran up to
+//! 12% over. A quantizer floor
+//! (`MinAllowedFrameQP`) is the quality: a calm scene the floor already codes
+//! cleanly spends less, and a busy one gets a coarser quantizer up to the limit.
+//! Measured on an M4, the alternatives miss the cap: `Quality` is constant
+//! quality but ignores the limit and the average once set, `ConstantBitRate` and
+//! `VariableBitRate` with `VBVMaxBitRate` let a second run 15% over, and the
+//! low-latency rate control ignores `DataRateLimits`.
+//!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
 //! higher-level crate we trust. The backend is `!Send` and a direct `Encoder` is
 //! thread-bound with it; only the Apple `Sink::Inner` keeps the serialized
@@ -16,14 +28,15 @@ use std::collections::VecDeque;
 use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
 use std::slice;
+use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use moq_net::Timestamp;
 use objc2_core_foundation::{
-	CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse, kCFBooleanTrue,
+	CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse, kCFBooleanTrue,
 };
 use objc2_core_media::{
-	CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+	CMFormatDescription, CMSampleBuffer, CMTime, CMVideoCodecType, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
 	CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::CVImageBuffer;
@@ -35,8 +48,9 @@ use objc2_core_video::{
 	kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_2020,
 };
 use objc2_video_toolbox::{
-	VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering,
-	kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ColorPrimaries,
+	VTCompressionSession, VTEncodeInfoFlags, VTSessionCopySupportedPropertyDictionary, VTSessionSetProperty,
+	kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
+	kVTCompressionPropertyKey_ColorPrimaries, kVTCompressionPropertyKey_DataRateLimits,
 	kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
 	kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kVTCompressionPropertyKey_ProfileLevel,
 	kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_TransferFunction,
@@ -52,6 +66,30 @@ use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
+/// `kVTCompressionPropertyKey_MinAllowedFrameQP`, spelled out because the
+/// symbol is macOS 13 and iOS 16: linking it would stop the library loading on
+/// macOS 12.
+const MIN_QP: &str = "MinAllowedFrameQP";
+
+/// Frames in the limit's short window. With the one-second window alone, a
+/// keyframe landing on a cut from a still scene took most of the second and
+/// H.265 then dropped 20 frames to pay it back; five frames kept every frame and
+/// cost about 1% of the busy rate. VideoToolbox lets a keyframe past this window,
+/// so it damps the burst rather than bounding it.
+const BURST_FRAMES: u32 = 5;
+
+/// The quantizer floor for each codec: the coarsest that kept a 720p30 talking
+/// head at VMAF 95, the usual mark for transparent, on an M4. H.264 under a 4
+/// Mbit/s cap: 95.5 at 1.74 Mbit/s against 96.1 at 4.0 with no floor or limit,
+/// and 26 fell to 94.8. H.265 under 2.8 Mbit/s: 95.2 at 1.52 against 96.4 at
+/// 2.8, and 24 fell to 94.9.
+fn min_qp(codec: Codec) -> i32 {
+	match codec {
+		Codec::H264 => 25,
+		Codec::H265 => 23,
+	}
+}
+
 /// Where the C output callback queues finished frames, popped by `receive`.
 /// Lives behind a `Box` so its address is stable for the lifetime of the
 /// session that holds it as a refcon.
@@ -64,13 +102,73 @@ struct Sink {
 	error: Option<i32>,
 }
 
-pub(crate) struct VideoToolbox {
-	session: CFRetained<VTCompressionSession>,
+/// A compression session and the [`Sink`] its output callback writes to,
+/// owned together so the session is invalidated before the sink is freed on
+/// every path, an `open` that fails halfway included.
+struct Session {
+	raw: CFRetained<VTCompressionSession>,
 	sink: Box<Sink>,
+}
+
+impl Session {
+	fn new(config: &Config, codec_type: CMVideoCodecType) -> Result<Self, Error> {
+		let mut sink = Box::new(Sink {
+			codec: config.codec,
+			timestamp: Timestamp::ZERO,
+			ready: VecDeque::new(),
+			error: None,
+		});
+		let refcon = (&mut *sink as *mut Sink).cast::<c_void>();
+		let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
+		let status = unsafe {
+			VTCompressionSession::create(
+				None,
+				config.width as i32,
+				config.height as i32,
+				codec_type,
+				None,
+				None,
+				None,
+				Some(output_callback),
+				refcon,
+				NonNull::new(&mut session_ptr).unwrap(),
+			)
+		};
+		let raw = NonNull::new(session_ptr)
+			.filter(|_| status == 0)
+			.map(|p| unsafe { CFRetained::from_raw(p) })
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
+		Ok(Self { raw, sink })
+	}
+}
+
+impl std::ops::Deref for Session {
+	type Target = VTCompressionSession;
+
+	fn deref(&self) -> &VTCompressionSession {
+		&self.raw
+	}
+}
+
+impl Drop for Session {
+	/// Finish every frame in flight, then invalidate: a release alone leaves
+	/// VideoToolbox free to call back into the sink after it is freed.
+	fn drop(&mut self) {
+		unsafe {
+			self.raw.complete_frames(kCMTimeInvalid);
+			self.raw.invalidate();
+		}
+	}
+}
+
+pub(crate) struct VideoToolbox {
+	session: Session,
 	/// `{ ForceKeyFrame: true }`, built once and reused for forced IDRs.
 	force_keyframe: CFRetained<CFDictionary>,
 	framerate_numerator: i32,
 	framerate_denominator: i64,
+	/// The limit's short window, [`BURST_FRAMES`] at the frame rate.
+	burst: Duration,
 	frame_index: i64,
 	/// A cut whose frame VideoToolbox dropped, carried to the next frame so the
 	/// group it asked for still opens.
@@ -91,35 +189,9 @@ impl VideoToolbox {
 			Codec::H265 => kCMVideoCodecType_HEVC,
 		};
 
-		let mut sink = Box::new(Sink {
-			codec: config.codec,
-			timestamp: Timestamp::ZERO,
-			ready: VecDeque::new(),
-			error: None,
-		});
-		let refcon = (&mut *sink as *mut Sink).cast::<c_void>();
-
 		let mut preset = config.preset;
-		let (session, applied) = loop {
-			let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
-			let status = unsafe {
-				VTCompressionSession::create(
-					None,
-					config.width as i32,
-					config.height as i32,
-					codec_type,
-					None,
-					None,
-					None,
-					Some(output_callback),
-					refcon,
-					NonNull::new(&mut session_ptr).unwrap(),
-				)
-			};
-			let session = NonNull::new(session_ptr)
-				.filter(|_| status == 0)
-				.map(|p| unsafe { CFRetained::from_raw(p) })
-				.ok_or_else(|| Error::codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
+		let (session, controls) = loop {
+			let session = Session::new(config, codec_type)?;
 
 			// Every preset forbids reordering. A failure here cannot be fixed by downgrading.
 			set_bool(
@@ -128,7 +200,7 @@ impl VideoToolbox {
 				false,
 			)?;
 			match apply_preset(&session, preset) {
-				Ok(applied) => break (session, applied),
+				Ok(controls) => break (session, controls),
 				Err(error) => {
 					preset = match preset {
 						Preset::Quality => Preset::Balanced,
@@ -147,11 +219,17 @@ impl VideoToolbox {
 			}
 		};
 		set_property(&session, unsafe { kVTCompressionPropertyKey_ProfileLevel }, profile)?;
-		set_number(
-			&session,
-			unsafe { kVTCompressionPropertyKey_AverageBitRate },
-			clamp_i32(config.resolved_bitrate().as_bps()),
-		)?;
+		let burst = Duration::from_secs_f64(
+			f64::from(BURST_FRAMES) * f64::from(config.framerate.denominator())
+				/ f64::from(config.framerate.numerator()),
+		);
+		set_rate(&session, config.resolved_bitrate().as_bps(), burst)?;
+		// The floor is the quality; without one (before macOS 13 and iOS 16) the
+		// limit alone holds the rate, still never past the bitrate.
+		let rate = match set_floor(&session, config.codec)? {
+			Some(qp) => format!("QP floor {qp} under a {BURST_FRAMES}-frame and 1 s limit at the bitrate"),
+			None => format!("{BURST_FRAMES}-frame and 1 s limit at the bitrate"),
+		};
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_MaxKeyFrameInterval },
@@ -209,24 +287,24 @@ impl VideoToolbox {
 			.map_err(|_| Error::codec(anyhow::anyhow!("VideoToolbox frame-rate numerator exceeds i32")))?;
 		Ok(Self {
 			session,
-			sink,
 			force_keyframe,
 			framerate_numerator,
 			framerate_denominator: i64::from(config.framerate.denominator()),
+			burst,
 			frame_index: 0,
 			keyframe_pending: false,
-			applied,
+			applied: Applied::new(preset, format!("{controls}, {rate}")),
 		})
 	}
 }
 
 impl Backend for VideoToolbox {
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
-		self.sink.error = None;
+		self.session.sink.error = None;
 		// `complete_frames` below forces this frame out before returning, so every
 		// access unit the callback sees until then came from it.
-		self.sink.timestamp = frame.timestamp;
-		let before = self.sink.ready.len();
+		self.session.sink.timestamp = frame.timestamp;
+		let before = self.session.sink.ready.len();
 
 		// Zero-copy when the capture handed us a surface; otherwise upload I420.
 		let pixel_buffer = match &frame.surface {
@@ -273,18 +351,18 @@ impl Backend for VideoToolbox {
 			)));
 		}
 
-		if let Some(status) = self.sink.error.take() {
+		if let Some(status) = self.session.sink.error.take() {
 			return Err(Error::codec(anyhow::anyhow!(
 				"VideoToolbox encode callback failed: {status}"
 			)));
 		}
 		// A dropped frame comes back with no packet and no error.
-		self.keyframe_pending = cut && self.sink.ready.len() == before;
+		self.keyframe_pending = cut && self.session.sink.ready.len() == before;
 		Ok(())
 	}
 
 	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
-		Ok(self.sink.ready.pop_front())
+		Ok(self.session.sink.ready.pop_front())
 	}
 
 	fn flush(&mut self) -> Result<(), Error> {
@@ -293,13 +371,9 @@ impl Backend for VideoToolbox {
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
-		// AverageBitRate is settable on a live session and takes effect without
+		// Both rate keys are settable on a live session and take effect without
 		// an IDR, which is exactly what the rate control loop wants.
-		set_number(
-			&self.session,
-			unsafe { kVTCompressionPropertyKey_AverageBitRate },
-			clamp_i32(bitrate),
-		)
+		set_rate(&self.session, bitrate, self.burst)
 	}
 
 	fn can_cut(&self) -> bool {
@@ -315,7 +389,52 @@ impl Backend for VideoToolbox {
 	}
 }
 
-fn apply_preset(session: &VTCompressionSession, preset: Preset) -> Result<Applied, Error> {
+/// Hold every second of output, and every `burst`, to `bitrate`, the average
+/// aimed at too, as Apple asks alongside a limit (VideoToolbox still aims about
+/// 30% below the limit).
+fn set_rate(session: &VTCompressionSession, bitrate: u64, burst: Duration) -> Result<(), Error> {
+	set_number(
+		session,
+		unsafe { kVTCompressionPropertyKey_AverageBitRate },
+		clamp_i32(bitrate),
+	)?;
+	let bytes = |window: Duration| CFNumber::new_f64(bitrate as f64 / 8.0 * window.as_secs_f64());
+	let limits = [burst, Duration::from_secs(1)].map(|window| [bytes(window), CFNumber::new_f64(window.as_secs_f64())]);
+	let limits: Vec<&CFNumber> = limits.iter().flatten().map(|number| &**number).collect();
+	set_property(
+		session,
+		unsafe { kVTCompressionPropertyKey_DataRateLimits },
+		&CFArray::from_objects(&limits),
+	)
+}
+
+/// Set the codec's quantizer floor when the session offers one, returning it.
+fn set_floor(session: &VTCompressionSession, codec: Codec) -> Result<Option<i32>, Error> {
+	let key = CFString::from_static_str(MIN_QP);
+	if !supports(session, &key)? {
+		return Ok(None);
+	}
+	let qp = min_qp(codec);
+	set_number(session, &key, qp)?;
+	Ok(Some(qp))
+}
+
+/// Whether the session lists `key` among the properties it supports.
+fn supports(session: &VTCompressionSession, key: &CFString) -> Result<bool, Error> {
+	let mut supported: *const CFDictionary = ptr::null();
+	let status = unsafe { VTSessionCopySupportedPropertyDictionary(session, NonNull::from(&mut supported)) };
+	let supported = NonNull::new(supported.cast_mut())
+		.filter(|_| status == 0)
+		.map(|p| unsafe { CFRetained::from_raw(p) })
+		.ok_or_else(|| {
+			Error::codec(anyhow::anyhow!(
+				"VTSessionCopySupportedPropertyDictionary failed: {status}"
+			))
+		})?;
+	Ok(unsafe { supported.contains_ptr_key((key as *const CFString).cast()) })
+}
+
+fn apply_preset(session: &VTCompressionSession, preset: Preset) -> Result<&'static str, Error> {
 	set_bool(
 		session,
 		unsafe { kVTCompressionPropertyKey_RealTime },
@@ -335,7 +454,7 @@ fn apply_preset(session: &VTCompressionSession, preset: Preset) -> Result<Applie
 			}
 		}
 	};
-	Ok(Applied::new(preset, controls))
+	Ok(controls)
 }
 
 /// C callback VideoToolbox invokes (synchronously, from `complete_frames`) for
@@ -551,6 +670,57 @@ mod tests {
 		let no = unsafe { kCFBooleanFalse }.unwrap();
 		assert!(&*value == yes.as_ref() || &*value == no.as_ref());
 		&*value == yes.as_ref()
+	}
+
+	#[test]
+	fn min_qp_names_the_sdk_key() {
+		let key = unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_MinAllowedFrameQP };
+		assert_eq!(&*CFString::from_static_str(MIN_QP), key);
+	}
+
+	/// A calm scene spends well under a generous cap, held there by the
+	/// quantizer floor; a busy one is held under its cap, and under a lower one
+	/// once `set_bitrate` moves the limit. One opening keyframe, so the seconds
+	/// measured are rate control's alone.
+	#[test]
+	fn quality_under_a_cap() {
+		use super::super::test_util::{Scene, spend};
+
+		for codec in [Codec::H264, Codec::H265] {
+			let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
+			config.kind = crate::encode::Kind::Named(NAME.into());
+			config.codec = codec;
+			config.join = std::time::Duration::from_secs(10);
+			let at = |bps: u64| Config {
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(bps)),
+				..config.clone()
+			};
+
+			let calm = spend(&at(4_000_000), Scene::Calm, None).unwrap();
+			// An M4 spent 35-50 kbit/s here, and 340 with no floor or limit.
+			assert!(calm.mean < 150_000, "{codec:?}: a calm scene filled the cap: {calm:?}");
+
+			let busy = spend(&at(4_000_000), Scene::Busy, None).unwrap();
+			// VideoToolbox aims about 30% under its limit, and an M4 coded noise at
+			// 53-57% of this one.
+			assert!(
+				busy.mean > 1_500_000,
+				"{codec:?}: a busy scene fell short of the cap: {busy:?}"
+			);
+			assert!(
+				busy.peak <= 4_000_000,
+				"{codec:?}: a busy scene broke the cap: {busy:?}"
+			);
+
+			// Under a cap this tight noise is incompressible: VideoToolbox drops
+			// frames rather than break the limit (an average alone ran to 720
+			// kbit/s), so only the peak is checked.
+			let moved = spend(&at(4_000_000), Scene::Busy, Some(250_000)).unwrap();
+			assert!(
+				moved.peak <= 250_000,
+				"{codec:?}: the limit did not follow set_bitrate: {moved:?}"
+			);
+		}
 	}
 
 	#[test]

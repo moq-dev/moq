@@ -10,9 +10,11 @@ use support::AppendNext;
 use support::harness::{MockConnectOptions, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]
@@ -59,7 +61,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 					b"payload".as_ref(),
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			for (i, (_, _, remote)) in viewers.iter().enumerate() {
 				let mut group = remote.track("video").unwrap().fetch_group(key, None).await.unwrap();
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"payload");

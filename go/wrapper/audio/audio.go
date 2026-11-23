@@ -53,7 +53,7 @@ type DecoderOutput struct {
 	Channels   *uint32
 	// Delay.Min is the jitter buffer to hold ahead of the playhead, and where a cold join starts;
 	// Delay.Max bounds how stale a group may get before it is skipped, and adds no buffering. The
-	// zero Delay is zero for both.
+	// zero Delay leaves Min unstated, which the decoder starts as zero, and Max zero.
 	Delay moq.Delay
 	// Estimate measures the playout delay from arrival timing, never below Delay.Min; false holds
 	// exactly Delay.Min. nil estimates.
@@ -177,6 +177,15 @@ func (p *Producer) Reservation() *moq.Reservation {
 		return nil
 	}
 	return bridge.Reservation(*raw).(*moq.Reservation)
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (p *Producer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return p.inner.AbortUnwanted(errorCode)
 }
 
 // Finish flushes pending samples and ends the track.

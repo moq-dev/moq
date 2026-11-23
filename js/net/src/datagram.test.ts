@@ -7,12 +7,12 @@ const seq = (sequence: bigint) => Timestamp.unscaled(sequence);
 
 test("a broadcast keeps same-name datagram and stream tracks independent", async () => {
 	const broadcast = new Broadcast.Producer();
-	const streams = broadcast.createTrack("audio");
-	const datagrams = broadcast.createDatagrams("audio");
+	const streams = defined(broadcast.createTrack("audio"));
+	const datagrams = defined(broadcast.createDatagrams("audio"));
 	const reader = broadcast.consume().datagrams("audio");
-	expect(streams.appendGroup().sequence).toBe(0n);
+	expect(hooks.appendNext(streams).start).toBe(0n);
 	expect(datagrams.append(seq(0n), new Uint8Array([1]))).toBe(0n);
-	expect(streams.appendGroup().sequence).toBe(1n);
+	expect(hooks.appendNext(streams).start).toBe(1n);
 	expect((await reader.recv())?.sequence).toBe(0n);
 	reader.close();
 	datagrams.finish();
@@ -21,6 +21,7 @@ test("a broadcast keeps same-name datagram and stream tracks independent", async
 });
 
 import * as Datagram from "./datagram.ts";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError, TimestampMismatch } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { wireOf } from "./wire.ts";
@@ -183,7 +184,7 @@ test("creating a datagram track in the turn its queued request closes serves the
 	void wireOf(consumer).requestedDatagrams();
 	const left = consumer.datagrams("test");
 	left.close();
-	const track = broadcast.createDatagrams("test");
+	const track = defined(broadcast.createDatagrams("test"));
 	const next = consumer.datagrams("test");
 	track.append(seq(0n), new Uint8Array([2]));
 	expect((await next.recv())?.payload).toEqual(new Uint8Array([2]));

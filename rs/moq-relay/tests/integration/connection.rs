@@ -17,13 +17,19 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 async fn largest_quic_sequence_reaches_the_subscriber() {
 	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-22"] {
 		let version = alpn.parse().unwrap();
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 		let cluster = memory::cluster();
 		let publisher = sim::origin();
 		let broadcast = publisher
 			.route("ladder", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+		// moq-transport carries a frame's time as its Group ID, which a sequence past a
+		// timestamp's range can't be, so that track is untimed.
+		let untimed = alpn.starts_with("moq-transport");
+		let info = match untimed {
+			true => moq_net::track::Info::default(),
+			false => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO),
+		};
 		let track = broadcast.broadcast().create_track("data", info).unwrap();
 		broadcast.announce().unwrap();
 		let _publisher = connect(
@@ -54,10 +60,13 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 			// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
-			let timestamp = moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
+			let timestamp = match untimed {
+				true => moq_net::Timestamp::unscaled(sequence),
+				false => moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap(),
+			};
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			let mut got = kio::clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.unwrap_or_else(|_| panic!("{alpn} sequence={sequence} hung"))
@@ -91,12 +100,12 @@ fn publish(
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let track = broadcast.broadcast().create_track("video", info).expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), name.as_bytes())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 	(origin, broadcast, track)
 }
 
@@ -135,27 +144,31 @@ async fn assert_refused(result: Result<moq_net::Session, moq_net::Error>) {
 	assert_eq!(moq_net::SessionError::from(&err), moq_net::SessionError::Unauthorized);
 }
 
-/// A session declaring the relay's own identity (its Hop ID, or its Node ID from
-/// lite-07) is the relay reaching itself, so it is refused instead of served with
-/// every route it sends dropped as reflected. A session declaring any other is served.
+/// A session declaring the relay's own Hop ID is the relay reaching itself, so it is
+/// refused instead of served with every route it sends dropped as reflected. A session
+/// declaring any other is served. From lite-07 a session that only publishes forwards
+/// nothing and declares no identity; `a_relay_dialing_itself_on_lite07_is_refused` covers
+/// the relay that dials itself as a peer.
 #[kio::test]
 async fn a_session_declaring_the_relays_own_hop_is_refused() {
 	for alpn in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
-		let version = alpn.parse().unwrap();
-		let auth = memory::public(&["**"], &[], &[]);
+		let version: moq_net::Version = alpn.parse().unwrap();
+		let auth = memory::public(&[""], &[], &[]);
 		let cluster = memory::cluster();
-		let client = moq_net::Client::new().with_publisher(cluster.origin.consume());
-		let err = match connect(client, version, &cluster, &auth).await {
-			Ok(session) => kio::clock::timeout(TIMEOUT, session.closed())
-				.await
-				.expect("the relay must close a session declaring its own identity"),
-			Err(err) => err,
-		};
-		assert_eq!(
-			moq_net::SessionError::from(&err),
-			moq_net::SessionError::Internal,
-			"{alpn}"
-		);
+		if alpn != "moq-lite-07-wip" {
+			let client = moq_net::Client::new().with_publisher(cluster.origin.consume());
+			let err = match connect(client, version, &cluster, &auth).await {
+				Ok(session) => kio::clock::timeout(TIMEOUT, session.closed())
+					.await
+					.expect("the relay must close a session declaring its own identity"),
+				Err(err) => err,
+			};
+			assert_eq!(
+				moq_net::SessionError::from(&err),
+				moq_net::SessionError::Internal,
+				"{alpn}"
+			);
+		}
 
 		let client = moq_net::Client::new().with_publisher(sim::origin().consume());
 		let session = connect(client, version, &cluster, &auth)
@@ -180,7 +193,7 @@ async fn a_relay_dialing_itself_on_lite07_is_refused_inner() {
 	use futures::StreamExt;
 
 	let net = sim::Net::new();
-	let auth = memory::public(&["**"], &[], &[]);
+	let auth = memory::public(&[""], &[], &[]);
 	let cluster = memory::spawn_cluster(net.options("self", &["self"]));
 	let (_trigger, shutdown) = moq_relay::shutdown::Observer::new(TIMEOUT);
 	let mut accepts = net.relay("self", &cluster, &auth, &shutdown);
@@ -201,7 +214,7 @@ async fn a_relay_dialing_itself_on_lite07_is_refused_inner() {
 /// says it publishes.
 #[kio::test]
 async fn subscribe_only_public_rejects_publisher_role() {
-	let auth = memory::public(&[], &[], &["**"]);
+	let auth = memory::public(&[], &[], &[""]);
 	let (origin, _broadcast, _track) = publish("cam");
 	let client = moq_net::Client::new().with_publisher(origin.consume());
 	assert_refused(connect(client, newest(), &memory::cluster(), &auth).await).await;
@@ -210,7 +223,7 @@ async fn subscribe_only_public_rejects_publisher_role() {
 /// The same grant keeps a subscriber: the role gate refuses only the mismatched direction.
 #[kio::test]
 async fn subscribe_only_public_accepts_subscriber_role() {
-	let auth = memory::public(&[], &[], &["**"]);
+	let auth = memory::public(&[], &[], &[""]);
 	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	let session = connect(client, newest(), &memory::cluster(), &auth)
 		.await
@@ -224,7 +237,7 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 /// The mirror: a subscriber whose grant covers only publishing is refused.
 #[kio::test]
 async fn publish_only_public_rejects_subscriber_role() {
-	let auth = memory::public(&[], &["**"], &[]);
+	let auth = memory::public(&[], &[""], &[]);
 	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	assert_refused(connect(client, newest(), &memory::cluster(), &auth).await).await;
 }
@@ -233,7 +246,7 @@ async fn publish_only_public_rejects_subscriber_role() {
 /// neither tears the other down.
 #[kio::test]
 async fn two_publish_only_clients_coexist() {
-	let auth = memory::public(&["**"], &[], &[]);
+	let auth = memory::public(&[""], &[], &[]);
 	let cluster = memory::cluster();
 
 	let (alpha, _alpha_broadcast, _alpha_track) = publish("alpha");
@@ -281,7 +294,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 		let mut seen = Vec::new();
 		while let Some(admission) = admissions.next().await {
 			seen.push(admission.request.clone());
-			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let all = moq_auth::Prefixes::all();
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
 			if seen.len() == 2 {
 				return seen;
@@ -358,7 +371,7 @@ async fn stats_count_admitted_and_refused_sessions() {
 			.find(|(tier, _)| *tier == stats::Tier::default())
 			.map_or(stats::Presence::default(), |(_, presence)| presence)
 	};
-	let auth = memory::public(&[], &[], &["**"]);
+	let auth = memory::public(&[], &[], &[""]);
 
 	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	let session = connect(client, newest(), &cluster, &auth)

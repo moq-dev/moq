@@ -22,11 +22,8 @@ import "@moq/publish/ui"; // defines <moq-publish-ui>
 import { Duration, now } from "@moq/clock";
 import { type Audio, Net, Signals, Source, type Video } from "@moq/publish";
 import type MoqPublish from "@moq/publish/element";
-import MoqPublishSupport from "@moq/publish/support/element";
+import "@moq/publish/support/element"; // defines <moq-publish-support>
 import { formatBitrate, formatFps, graph } from "./viz";
-
-/** Re-exported so bundlers keep the `<moq-publish-support>` element registration. */
-export { MoqPublishSupport };
 
 // Injected by Vite (see justfile). Defaults to the local relay.
 const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
@@ -396,7 +393,7 @@ let activeMeta: Json.Snapshot.Producer<unknown> | undefined;
 
 const setMeta = (value: unknown) => {
 	currentMeta = value;
-	activeMeta?.update({ value, at: Net.Time.Timestamp.now() });
+	activeMeta?.update(value, Net.Time.Timestamp.now());
 };
 
 const meta = new Signals.Effect();
@@ -410,13 +407,14 @@ meta.run((effect) => {
 		timescale: Net.Time.Timescale.MILLI,
 		maxAge: Duration.millis(86_400_000),
 	});
+	if (!track) throw new Error("the track already exists");
 	effect.cleanup(() => {
 		track.finish();
 		track.close();
 	});
 
 	const producer = new Json.Snapshot.Producer<unknown>({ track });
-	producer.update({ value: currentMeta, at: Net.Time.Timestamp.now() });
+	producer.update(currentMeta, Net.Time.Timestamp.now());
 	activeMeta = producer;
 	effect.cleanup(() => {
 		if (activeMeta === producer) activeMeta = undefined;

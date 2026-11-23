@@ -9,7 +9,6 @@ import { $strip } from "zod/v4/core";
 import { Net } from "@moq/hang";
 import { ZodMiniBase64 } from "zod/mini";
 import { ZodMiniBoolean } from "zod/mini";
-import { ZodMiniCatch } from "zod/mini";
 import { ZodMiniCustom } from "zod/mini";
 import { ZodMiniDefault } from "zod/mini";
 import { ZodMiniDiscriminatedUnion } from "zod/mini";
@@ -234,12 +233,6 @@ export const IncludeSchema: ZodMiniObject<{
 
 export const InstanceSchema: ZodMiniType<ReferenceInstance, string>;
 
-export type Join = infer<typeof JoinSchema>;
-
-export const JoinSchema: ZodMiniObject<{
-	interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-}, $strip>;
-
 export type Json = infer<typeof JsonSchema>;
 
 export type JsonConfig = infer<typeof JsonConfigSchema>;
@@ -273,21 +266,15 @@ export type KnownMode = "snapshot" | "stream";
 
 export const MOQ_EPOCH_UNIX_MILLIS: 1577836800000;
 
-export type Media = infer<typeof MediaSchema>;
-
-export const MediaSchema: ZodMiniObject<{
-	clock: ZodMiniOptional<ZodMiniObject<{
-		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
-		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-	}, $strip>>;
-	join: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-		interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-	}, $strip>>>;
-}, $strip>;
-
 export type Mode = infer<typeof ModeSchema>;
 
 export const ModeSchema: ZodMiniString<string>;
+
+export const Orientation: {
+	of: (width: number, height: number) => "landscape" | "portrait" | undefined;
+};
+
+export type Orientation = NonNullable<ReturnType<typeof Orientation.__type.of.__type>>;
 
 export const PRIORITY: {
 	readonly audio: 80;
@@ -361,7 +348,7 @@ export const RootSchema: ZodMiniObject<{
 			warmup?: number & $brand<"u53"> | undefined;
 		}>, Record<string, unknown>>>;
 	}, $strip>>;
-	binary: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	binary: ZodMiniOptional<ZodMiniObject<{
 		tracks: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			[x: string]: unknown;
 			bitrate?: number & $brand<"u53"> | undefined;
@@ -373,15 +360,15 @@ export const RootSchema: ZodMiniObject<{
 			mode: string;
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	echo: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	}, $strip>>;
+	echo: ZodMiniOptional<ZodMiniObject<{
 		path: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
+	}, $strip>>;
 	include: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 		broadcast: RelativeBroadcast;
 		instance?: ReferenceInstance | undefined;
 	}>, Record<string, unknown>>>>;
-	json: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	json: ZodMiniOptional<ZodMiniObject<{
 		tracks: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			[x: string]: unknown;
 			bitrate?: number & $brand<"u53"> | undefined;
@@ -393,20 +380,18 @@ export const RootSchema: ZodMiniObject<{
 			schema?: string | undefined;
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	media: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	}, $strip>>;
+	stats: ZodMiniOptional<ZodMiniObject<{
+		track: ZodMiniString<string>;
+	}, $strip>>;
+	sync: ZodMiniOptional<ZodMiniObject<{
 		clock: ZodMiniOptional<ZodMiniObject<{
 			timescale: ZodMiniDefault<ZodMiniNumber<number>>;
 			wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 		}, $strip>>;
-		join: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-			interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-		}, $strip>>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	stats: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
-		track: ZodMiniString<string>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	text: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+		interval: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+	}, $strip>>;
+	text: ZodMiniOptional<ZodMiniObject<{
 		renditions: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			broadcast?: RelativeBroadcast | undefined;
 			container: {
@@ -432,7 +417,7 @@ export const RootSchema: ZodMiniObject<{
 			role: string;
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
+	}, $strip>>;
 	version: ZodMiniOptional<ZodMiniNumber<number>>;
 	video: ZodMiniOptional<ZodMiniObject<{
 		display: ZodMiniOptional<ZodMiniObject<{
@@ -517,11 +502,20 @@ export const RootSchema: ZodMiniObject<{
 			reorder?: number & $brand<"u8"> | undefined;
 			stereo?: string | undefined;
 			track?: string | undefined;
-			warmup?: number & $brand<"u53"> | undefined;
 		}>, Record<string, unknown>>>;
 		rotation: ZodMiniOptional<ZodMiniNumber<number>>;
 	}, $strip>>;
 }, $loose>;
+
+export interface Skipped {
+	audio: Record<string, number>;
+	binary: Record<string, number>;
+	include: Record<string, number>;
+	json: Record<string, number>;
+	text: Record<string, number>;
+	version: number;
+	video: Record<string, number>;
+}
 
 export type Stats = infer<typeof StatsSchema>;
 
@@ -600,6 +594,16 @@ export const TextSchema: ZodMiniObject<{
 	}>, Record<string, unknown>>>;
 }, $strip>;
 
+export type Timeline = infer<typeof TimelineSchema>;
+
+export const TimelineSchema: ZodMiniObject<{
+	clock: ZodMiniOptional<ZodMiniObject<{
+		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
+		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+	}, $strip>>;
+	interval: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+}, $strip>;
+
 export type Track = infer<typeof TrackSchema>;
 
 export const TrackSchema: ZodMiniObject<{
@@ -631,6 +635,92 @@ export class UnsupportedVersion extends Error {
 export const VERSION: 4;
 
 export const Video: {
+	orientation: (section: {
+		display?: {
+			height: number & $brand<"u53">;
+			width: number & $brand<"u53">;
+		};
+		flip?: boolean;
+		renditions: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
+			bitrate?: number & $brand<"u53"> | undefined;
+			broadcast?: RelativeBroadcast | undefined;
+			codec: string;
+			codedHeight?: number & $brand<"u53"> | undefined;
+			codedWidth?: number & $brand<"u53"> | undefined;
+			color?: {
+				contentLight?: {
+					maxCll: number;
+					maxFall: number;
+				} | undefined;
+				mastering?: {
+					blue: {
+						x: number;
+						y: number;
+					};
+					green: {
+						x: number;
+						y: number;
+					};
+					maxLuminance: number;
+					minLuminance: number;
+					red: {
+						x: number;
+						y: number;
+					};
+					white: {
+						x: number;
+						y: number;
+					};
+				} | undefined;
+				matrix?: number & $brand<"u8"> | undefined;
+				primaries?: number & $brand<"u8"> | undefined;
+				range?: "full" | "limited" | undefined;
+				transfer?: number & $brand<"u8"> | undefined;
+			} | undefined;
+			container: {
+				kind: "legacy";
+			} | {
+				init: string;
+				kind: "cmaf";
+			} | {
+				kind: "loc";
+			} | {
+				kind: "unknown";
+				raw: {
+					[x: string]: unknown;
+					kind: string;
+				};
+			};
+			delay?: number & $brand<"u53"> | undefined;
+			description?: string | undefined;
+			displayAspectHeight?: number & $brand<"u53"> | undefined;
+			displayAspectWidth?: number & $brand<"u53"> | undefined;
+			enabled?: boolean | undefined;
+			framerate?: number | undefined;
+			instance?: ReferenceInstance | undefined;
+			interlaced?: boolean | undefined;
+			jitter?: number & $brand<"u53"> | undefined;
+			label?: string | undefined;
+			optimizeForLatency?: boolean | undefined;
+			preference?: number | undefined;
+			projection?: {
+				kind: "rectilinear";
+			} | {
+				fov?: number | undefined;
+				kind: "equirectangular";
+			} | {
+				kind: "unknown";
+				raw: {
+					[x: string]: unknown;
+					kind: string;
+				};
+			} | undefined;
+			reorder?: number & $brand<"u8"> | undefined;
+			stereo?: string | undefined;
+			track?: string | undefined;
+		}>, Record<string, unknown>>>;
+		rotation?: number;
+	}, config: VideoConfig) => "landscape" | "portrait" | undefined;
 	ranked: (renditions: Record<string, VideoConfig>) => [string, VideoConfig][];
 };
 
@@ -728,7 +818,6 @@ export const VideoConfigSchema: ZodMiniObject<{
 	reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
 	stereo: ZodMiniOptional<ZodMiniString<string>>;
 	track: ZodMiniOptional<ZodMiniString<string>>;
-	warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 }, $strip>;
 
 export const VideoSchema: ZodMiniObject<{
@@ -814,10 +903,13 @@ export const VideoSchema: ZodMiniObject<{
 		reorder?: number & $brand<"u8"> | undefined;
 		stereo?: string | undefined;
 		track?: string | undefined;
-		warmup?: number & $brand<"u53"> | undefined;
 	}>, Record<string, unknown>>>;
 	rotation: ZodMiniOptional<ZodMiniNumber<number>>;
 }, $strip>;
+
+export type WatchConfig = {
+	delay?: Net.Clock.Duration;
+};
 
 export function checkRenditions(root: Root): Root;
 
@@ -835,6 +927,8 @@ export function modeSupported(mode: Mode): mode is KnownMode;
 
 export const nonzeroU53Schema: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 
+export function skipped(root: Root): Skipped | undefined;
+
 export function track(id: string, config: {
 	track?: string;
 }): string;
@@ -849,5 +943,5 @@ export const u8Schema: $ZodBranded<ZodMiniNumber<number>, "u8", "out">;
 
 export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date;
 
-export function watch(broadcast: Net.Broadcast.Consumer): AsyncIterable<Root>;
+export function watch(broadcast: Net.Broadcast.Consumer, config?: WatchConfig): AsyncIterable<Net.Timed<Root>>;
 ```

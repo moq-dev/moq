@@ -16,10 +16,11 @@ use support::harness::{MockConnectOptions, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn write_group(track: &mut moq_net::track::Producer, key: u64) {
@@ -29,7 +30,7 @@ fn write_group(track: &mut moq_net::track::Producer, key: u64) {
 	for frame in 0..2u64 {
 		group.write_frame(at, payload(key, frame)).unwrap();
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 fn payload(key: u64, frame: u64) -> Vec<u8> {

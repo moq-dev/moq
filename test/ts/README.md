@@ -53,6 +53,7 @@ just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
 just test ts --passthrough      # carry the multiplex whole, grade it packet by packet
 just test ts --passthrough --mpts # the same with two programs on their own clocks
+just test ts --passthrough --restart 10 # SIGKILL the import 10 s in, restart it, grade the gap
 just test ts-passthrough-capture # the same over an in-repo capture the T-STD model passes
 ```
 
@@ -694,7 +695,7 @@ The default queue is twice the export's delay, so a sender that kept it full
 would make every unit late. The delay-based default (BBRv3) does not: it keeps
 about a round trip queued, so the backlog lands at the relay, which ages groups out
 (`Old`), and the queue itself overflows only when it is about a round trip deep.
-The loss-based `MOQ_QUIC_CONGESTION_CONTROL=loss` (CUBIC) fills it, latency
+The loss-based CUBIC (`MOQ_QUIC_CONGESTION_CONTROL=cubic`) fills it, latency
 outgrows the delay, and the export refuses the run as a clock drift.
 
 So the queue's own tail drop runs as a lane of its own: CUBIC behind a 250 ms
@@ -703,7 +704,7 @@ retransmit behind a full queue (about twice 300 ms) still lands inside the 1 s
 delay. A loss-based run fails unless the queue overflowed.
 
 ```bash
-MOQ_QUIC_CONGESTION_CONTROL=loss just test ts --headroom --rate 7000000 --queue 250ms
+MOQ_QUIC_CONGESTION_CONTROL=cubic just test ts --headroom --rate 7000000 --queue 250ms
 ```
 
 Measured on 2026-10-18 and 2026-10-19 with other test runs sharing the host:
@@ -802,6 +803,21 @@ access points, mostly open mid-GOP for program 2. The capture is still the
 source in place: a group boundary promises no immediate decode for every
 program, and passthrough neither inserts tables nor extracts a program.
 
+`--restart <s>` plays the source live into a local UDP port, read by
+`tsp -I ip` into the import, and SIGKILLs the import `<s>` seconds in. It
+restarts 0.5 s after it exits, a new publisher instance, while the export
+(`--stitch`) runs on. `passthrough.py --restart` places each import's input in
+the source and allows the capture one gap, no longer in seconds of the clip
+than the import's downtime plus the restarted import's first group. The
+downtime runs from the killed import's last PCR, where the object it held
+began, to the restarted import's first packet. The first group runs from the
+first random access point after the restarted import has seen the PMT and a
+PCR to the next one. The arm reports both, the gap, and whether the export
+resumed without being restarted. TSDuck ends a UDP input only on a receive
+timeout of whole seconds, and the importer holds its last object until its
+input ends, so the export runs at `--delay 2s` unless one is given: delay is
+buffer, not loss, so the bound does not move with it.
+
 A gap fails the run, `--loss` included, since QUIC retransmits what the path
 drops. A path that loses content, as `--rate` does, runs the grader with
 `--loss-ok`: gaps are reported and the checks run on the capture alone, since a
@@ -811,6 +827,7 @@ the source's last packet, which a stall or a growing latency loses.
 
 ```bash
 ./passthrough.py source.ts capture.ts [--loss-ok]
+./passthrough.py source.ts capture.ts --restart import-1.ts import-2.ts
 ```
 
 Release timing is the Rust tests' job
@@ -966,14 +983,14 @@ browser interop. It runs nightly on `main`, and release PRs touching a workspace
 crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
 toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion, MPTS and a restarted import), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,
 `just test ts --live --duration 120`, `just test ts --headroom --rate 7000000 --duration 120`,
-the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=loss`,
+the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=cubic`,
 and `just test ts --passthrough --rate 7000000 --queue 250ms --duration 120`
-with `MOQ_QUIC_CONGESTION_CONTROL=loss`, and `just rs ts-recovery`.
+with `MOQ_QUIC_CONGESTION_CONTROL=cubic`, and `just rs ts-recovery`.
 The pair exercises late-joining subscribers; the live window distinguishes ongoing
 clock drift from initial buffer filling; the congested paths judge what the export
 does when the path cannot carry the media.

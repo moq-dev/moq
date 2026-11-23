@@ -127,7 +127,7 @@ rust() {
         jq -r '.packages[] | select(.publish != []) |
             "\(.name) \([.targets[].kind[]] | unique | join(",")) \([.targets[] | select(.kind | index("lib") or index("rlib")) | .name][0] // "-") \(.id)"')
     while read -r name kinds lib id; do
-        # A binary or a C library has no Rust API; moq-c and moq-ffi are diffed as FFI.
+        # A binary or a C library has no Rust API; libmoq and moq-ffi are diffed as FFI.
         [[ ",$kinds," == *,lib,* || ",$kinds," == *,rlib,* ]] || continue
         # The sparse index shards names by length: 3/k/kio, ha/ng/hang.
         case ${#name} in
@@ -216,7 +216,7 @@ js() {
         echo "api-diff: $base does not exist; fetch it or set API_DIFF_BASE" >&2
         exit 1
     }
-    local manifest dir name version file entry surface
+    local manifest dir name file entry surface
     # The renderer imports TypeDoc from this checkout's install, which a fresh runner lacks. The
     # current checkout uses the coordinated full install shared with other readers.
     uv run --no-project python sh/js/install.py frozen >&2
@@ -228,18 +228,34 @@ js() {
     bun js/common/api.ts baseline "$checkout" "$out/js/baseline"
     git worktree remove --force "$checkout"
     trap - EXIT
+    # A package published at either end is compared, so one deleted or made private since the
+    # baseline reads as removed instead of dropping out of the loop.
+    local -A js_dirs=() js_versions=()
+    local published='.scripts.release and (.private | not)' manifests
     for manifest in js/*/package.json; do
-        jq -e .scripts.release "$manifest" >/dev/null || continue
-        dir=${manifest%/package.json}
+        jq -e "$published" "$manifest" >/dev/null || continue
         name=$(jq -r .name "$manifest")
-        version=$(git show "$base:$manifest" 2>/dev/null | jq -r .version) || version=-
+        js_dirs[$name]=${manifest%/package.json}
+        js_versions[$name]=-
+    done
+    # Captured first, since a process substitution's failure would not stop the run.
+    manifests=$(git ls-tree -r --name-only "$base" -- js | grep -E '^js/[^/]+/package\.json$' || true)
+    while read -r manifest; do
+        [[ -n "$manifest" ]] || continue
+        entry=$(git show "$base:$manifest")
+        jq -e "$published" <<<"$entry" >/dev/null || continue
+        js_versions[$(jq -r .name <<<"$entry")]=$(jq -r .version <<<"$entry")
+    done <<<"$manifests"
+    # Sorted, since an associative array iterates in hash order and the report's rows should not shuffle.
+    while read -r name; do
+        dir=${js_dirs[$name]:-/nonexistent}
         while read -r file; do
             entry=${file%.api.md}
             surface=$name/$entry
             [[ "$entry" != index ]] || surface=$name
-            compare "$surface" "$version" "$out/js/baseline/$name/$file" "$dir/api/$file"
+            compare "$surface" "${js_versions[$name]}" "$out/js/baseline/$name/$file" "$dir/api/$file"
         done < <(find "$out/js/baseline/$name" "$dir/api" -name '*.api.md' -printf '%f\n' 2>/dev/null | sort -u)
-    done
+    done < <(printf '%s\n' "${!js_versions[@]}" | LC_ALL=C sort)
 }
 
 ffi() {

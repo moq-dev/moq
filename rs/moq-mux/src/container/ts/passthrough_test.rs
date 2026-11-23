@@ -11,6 +11,7 @@ use bytes::Bytes;
 
 use super::fixture::{ACCESS, Flags, MS, Mux, WRAP, paced, program};
 use super::passthrough::{GROUP_BYTES_MAX, GROUP_OBJECTS_MAX, Passthrough};
+use super::{Ext, PassthroughTrack};
 
 /// A delay budget no test timeline comes close to, so the reader sees every group.
 const RECORDING_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -27,7 +28,7 @@ struct Object {
 }
 
 struct Imported {
-	catalog: hang::catalog::Catalog,
+	catalog: hang::catalog::Catalog<Ext>,
 	objects: Vec<Object>,
 	/// The start of each break marker: a group of one object with no bytes.
 	markers: Vec<u64>,
@@ -46,8 +47,13 @@ impl Imported {
 		bytes
 	}
 
-	fn section(&self) -> &hang::catalog::M2ts {
-		self.catalog.m2ts.as_ref().expect("an m2ts section")
+	fn section(&self) -> &PassthroughTrack {
+		self.catalog
+			.ext
+			.mpegts
+			.passthrough
+			.as_ref()
+			.expect("a passthrough track")
 	}
 
 	/// Each group's objects.
@@ -63,21 +69,26 @@ impl Imported {
 	}
 }
 
+/// A catalog carrying the `mpegts` section a passthrough lists its track in.
+fn config() -> crate::catalog::Config<Ext> {
+	crate::catalog::Config::default().with_catalog(hang::catalog::Catalog::<Ext>::default())
+}
+
 /// Import `data` in chunks of `chunk` bytes and read back every object.
-async fn import(data: &[u8], chunk: usize, pcr_pid: Option<u16>) -> anyhow::Result<Imported> {
+async fn import(data: &[u8], chunk: usize, pcr_pid: Option<u16>) -> crate::Result<Imported> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default())?;
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config())?;
 	import_onto(broadcast, catalog, data, chunk, pcr_pid).await
 }
 
 /// [`import`] onto an existing `catalog` of `broadcast`.
 async fn import_onto(
 	broadcast: moq_net::broadcast::Producer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<Ext>,
 	data: &[u8],
 	chunk: usize,
 	pcr_pid: Option<u16>,
-) -> anyhow::Result<Imported> {
+) -> crate::Result<Imported> {
 	let consumer = broadcast.consume();
 	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve())?;
 	if let Some(pid) = pcr_pid {
@@ -95,11 +106,15 @@ async fn import_onto(
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY)),
 		)
-		.await?;
+		.await?
+		.ordered();
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();
 	let mut starts = Vec::new();
-	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group()).await?? {
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
+		.await
+		.expect("the track stalled")?
+	{
 		starts.push(group.start);
 		while let Some(frame) = group.read_frame().await? {
 			if frame.payload.is_empty() {
@@ -254,7 +269,7 @@ async fn objects_do_not_depend_on_how_the_input_is_chunked() {
 	for chunk in [7, 188, 1316, 65_536] {
 		let chunked = import(KYRION_H264, chunk, None).await.unwrap();
 		assert_eq!(chunked.objects, whole.objects, "chunks of {chunk}");
-		assert_eq!(chunked.catalog.m2ts, whole.catalog.m2ts, "chunks of {chunk}");
+		assert_eq!(chunked.catalog.ext, whole.catalog.ext, "chunks of {chunk}");
 	}
 }
 
@@ -268,7 +283,7 @@ async fn leading_junk_does_not_hide_the_grid() {
 	for chunk in [7, 188, 1316, 65_536, data.len()] {
 		let imported = import(&data, chunk, None).await.unwrap();
 		assert_eq!(imported.objects, clean.objects, "chunks of {chunk}");
-		assert_eq!(imported.catalog.m2ts, clean.catalog.m2ts, "chunks of {chunk}");
+		assert_eq!(imported.catalog.ext, clean.catalog.ext, "chunks of {chunk}");
 	}
 }
 
@@ -313,7 +328,7 @@ async fn a_scrambled_twin_groups_and_paces_the_same() {
 			.collect::<Vec<_>>()
 	};
 	assert_eq!(shape(&twin), shape(&clear));
-	assert_eq!(twin.catalog.m2ts, clear.catalog.m2ts);
+	assert_eq!(twin.catalog.ext, clear.catalog.ext);
 }
 
 #[tokio::test(start_paused = true)]
@@ -510,23 +525,37 @@ async fn objects_after_the_last_pcr_extrapolate_its_rate() {
 	}
 }
 
+/// A catalog without the `mpegts` section has nowhere to list the track.
+#[test]
+fn a_catalog_without_the_section_is_refused() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	assert!(
+		Passthrough::new(broadcast, catalog.reserve()).is_err(),
+		"a catalog without the mpegts section must be refused"
+	);
+}
+
 /// The section describes the track for as long as the importer lives, however the track ends.
 #[tokio::test(start_paused = true)]
 async fn the_section_goes_with_the_importer() {
 	for abort in [false, true] {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 		let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
 		passthrough.decode(KYRION_H264).unwrap();
-		assert!(catalog.snapshot().m2ts.is_some(), "abort {abort}");
+		assert!(catalog.snapshot().ext.mpegts.passthrough.is_some(), "abort {abort}");
 		if abort {
 			passthrough.abort(moq_net::Error::Cancel);
 		} else {
 			let passthrough = passthrough.finish().unwrap();
-			assert!(catalog.snapshot().m2ts.is_some(), "a finished track is still described");
+			assert!(
+				catalog.snapshot().ext.mpegts.passthrough.is_some(),
+				"a finished track is still described"
+			);
 			drop(passthrough);
 		}
-		assert!(catalog.snapshot().m2ts.is_none(), "abort {abort}");
+		assert!(catalog.snapshot().ext.mpegts.passthrough.is_none(), "abort {abort}");
 	}
 }
 
@@ -616,9 +645,9 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let verbatim = import(&data, data.len(), None).await.unwrap();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	let clock = catalog.clock();
-	let fixed = catalog.snapshot().media.clock;
+	let fixed = catalog.snapshot().sync.clock;
 	tokio::time::advance(Duration::from_secs(5)).await;
 	let before = clock.now().as_micros().unwrap() as u64;
 	let shifted = import_onto(broadcast, catalog.clone(), &data, data.len(), None)
@@ -626,11 +655,7 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 		.unwrap();
 	let after = clock.now().as_micros().unwrap() as u64;
 
-	assert_eq!(
-		catalog.snapshot().media.clock,
-		fixed,
-		"the import never moves the clock"
-	);
+	assert_eq!(catalog.snapshot().sync.clock, fixed, "the import never moves the clock");
 	let first = shifted.objects[0].micros;
 	assert!(
 		(before..=after).contains(&first),
@@ -660,23 +685,132 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	assert_eq!(markers, [offset], "the break moves with the timeline");
 }
 
-/// A flagged step back is a restart: new content, which a timeline cannot step back into.
+/// The clock steps that are not elapsed time: back with or without the flag, and forward more
+/// than ten seconds without it.
+const SPLICES: [(&str, u64, bool); 3] = [
+	("unflagged back", 2_000 * MS, false),
+	("flagged back", 2_000 * MS, true),
+	("unflagged leap", 60_000 * MS, false),
+];
+
+/// A step that is not elapsed time, as a switch between two unlocked encoders makes, is spliced:
+/// the import carries on, the count resumes where the rate before the step puts it, and the next
+/// group starts behind a break marker, whether the step lands on a random access point or not.
 #[tokio::test(start_paused = true)]
-async fn a_flagged_step_back_is_a_restart() {
+async fn a_step_that_is_not_elapsed_time_is_spliced() {
+	for (name, to, flagged) in SPLICES {
+		for mid_gop in [false, true] {
+			let mut mux = Mux::default();
+			program(&mut mux, 0x100);
+			paced(&mut mux, 0x100, 10_000 * MS, if mid_gop { 25 } else { 30 }, 10, 2);
+			let mut step = Flags::pcr(to);
+			step.random_access = !mid_gop;
+			if flagged {
+				step = step.discontinuity();
+			}
+			mux.packet(0x100, step);
+			mux.fill(0x101, 2);
+			paced(&mut mux, 0x100, to + 40 * MS, 30, 10, 2);
+			let data = mux.bytes();
+			let case = format!("{name}, mid-GOP {mid_gop}");
+
+			let imported = import(&data, 188 * 7, None).await.expect(&case);
+			assert_suffix(&data, &imported);
+			let micros: Vec<u64> = imported.objects.iter().map(|object| object.micros).collect();
+			assert!(micros.windows(2).all(|pair| pair[0] <= pair[1]), "{case}: {micros:?}");
+
+			let groups = imported.groups();
+			let jump = groups
+				.iter()
+				.position(|group| header(&group[0].payload).pcr == Some(to))
+				.unwrap_or_else(|| panic!("{case}: the step starts a group"));
+			let before = groups[jump - 1].last().unwrap().micros;
+			let after = groups[jump][0].micros;
+			assert!(
+				(before..before + 50_000).contains(&after),
+				"{case}: the count carries on past the step: {before} {after}"
+			);
+			// Everything after carries on at the source's pace from there.
+			let last = imported.objects.last().unwrap().micros;
+			assert!(
+				(after + 1_150_000..after + 1_250_000).contains(&last),
+				"{case}: {after} {last}"
+			);
+			let [marker] = imported.markers[..] else {
+				panic!("{case}: one marker: {:?}", imported.markers);
+			};
+			assert!(
+				groups[jump - 1][0].group < marker && marker < groups[jump][0].group,
+				"{case}: a marker group between them declares the break"
+			);
+			assert_eq!(imported.holes, [], "{case}");
+			assert_eq!(imported.section().random_access, !mid_gop, "{case}");
+		}
+	}
+}
+
+/// An unflagged step forward of up to ten seconds is elapsed time, such as a stall at the source:
+/// the count takes the step and no break is declared.
+#[tokio::test(start_paused = true)]
+async fn an_unflagged_step_within_ten_seconds_is_elapsed_time() {
 	let mut mux = Mux::default();
 	program(&mut mux, 0x100);
 	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
-	mux.packet(0x100, Flags::pcr(2_000 * MS).discontinuity());
+	paced(&mut mux, 0x100, 20_000 * MS, 30, 10, 2);
 	let data = mux.bytes();
-	let err = match import(&data, data.len(), None).await {
-		Ok(_) => panic!("a restart was carried on one timeline"),
-		Err(err) => err,
+	let imported = import(&data, data.len(), None).await.unwrap();
+	assert_suffix(&data, &imported);
+	assert_eq!(imported.markers, Vec::<u64>::new());
+	let last = imported.objects.last().unwrap().micros;
+	assert!((21_150_000..21_200_000).contains(&last), "{last}");
+}
+
+/// One corrupt PCR costs two splices, out to its value and back from it, rather than the import.
+#[tokio::test(start_paused = true)]
+async fn a_lone_corrupt_pcr_splices_twice() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
+	mux.packet(0x100, Flags::pcr(40_000_000 * MS));
+	mux.fill(0x101, 2);
+	paced(&mut mux, 0x100, 11_240 * MS, 30, 10, 2);
+	let data = mux.bytes();
+	let imported = import(&data, data.len(), None).await.unwrap();
+	assert_suffix(&data, &imported);
+	assert_eq!(imported.markers.len(), 2, "{:?}", imported.markers);
+	let micros: Vec<u64> = imported.objects.iter().map(|object| object.micros).collect();
+	assert!(micros.windows(2).all(|pair| pair[0] <= pair[1]), "{micros:?}");
+	let last = *micros.last().unwrap();
+	assert!((12_300_000..12_450_000).contains(&last), "{last}");
+}
+
+/// A repeated PCR gives the interval before a step no rate, so the splice resumes on the last
+/// object's microsecond, where the marker sits: the group behind it still starts past it.
+#[tokio::test(start_paused = true)]
+async fn a_splice_after_a_repeated_pcr_starts_past_the_marker() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
+	mux.packet(0x100, Flags::pcr(11_160 * MS));
+	mux.fill(0x101, 2);
+	mux.packet(0x100, Flags::pcr(2_000 * MS));
+	mux.fill(0x101, 2);
+	paced(&mut mux, 0x100, 2_040 * MS, 30, 10, 2);
+	let data = mux.bytes();
+	let imported = import(&data, data.len(), None).await.unwrap();
+	assert_suffix(&data, &imported);
+	let [marker] = imported.markers[..] else {
+		panic!("one marker: {:?}", imported.markers);
 	};
-	let restart = err.downcast_ref::<crate::Error>();
-	assert!(
-		matches!(restart, Some(crate::Error::PcrRestart { pid: 0x100, to, .. }) if *to == 2_000 * MS),
-		"{err:?}"
-	);
+	let groups = imported.groups();
+	let jump = groups
+		.iter()
+		.position(|group| header(&group[0].payload).pcr == Some(2_000 * MS))
+		.expect("the step starts a group");
+	let before = groups[jump - 1].last().unwrap().micros;
+	let after = groups[jump][0].micros;
+	assert!(groups[jump - 1][0].group < marker && marker < groups[jump][0].group);
+	assert!(before < after && after < before + 50_000, "{before} {after}");
 }
 
 /// A break before any group has started is no group start, so the first group still waits for a
@@ -693,24 +827,6 @@ async fn a_break_before_the_first_group_does_not_start_it() {
 	let imported = import(&data, data.len(), None).await.unwrap();
 	assert!(header(&imported.objects[0].payload).random_access);
 	assert!(imported.section().random_access);
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_unflagged_rewind_is_refused() {
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
-	mux.packet(0x100, Flags::pcr(9_000 * MS));
-	let data = mux.bytes();
-	let err = match import(&data, data.len(), None).await {
-		Ok(_) => panic!("a rewind was accepted"),
-		Err(err) => err,
-	};
-	let rewind = err.downcast_ref::<crate::Error>();
-	assert!(
-		matches!(rewind, Some(crate::Error::PcrRewind { pid: 0x100, to, .. }) if *to == 9_000 * MS),
-		"{err:?}"
-	);
 }
 
 #[tokio::test(start_paused = true)]
@@ -788,13 +904,7 @@ async fn a_clock_that_stops_is_refused_once_a_group_would_overflow() {
 		Ok(_) => panic!("an untimed run was accepted"),
 		Err(err) => err,
 	};
-	assert!(
-		matches!(
-			err.downcast_ref::<crate::Error>(),
-			Some(crate::Error::PcrGap { pid: 0x100, .. })
-		),
-		"{err:?}"
-	);
+	assert!(matches!(err, crate::Error::PcrGap { pid: 0x100, .. }), "{err:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -831,10 +941,7 @@ async fn a_192_or_204_byte_source_is_refused() {
 			Ok(_) => panic!("{size}-byte packets were accepted"),
 			Err(err) => err,
 		};
-		assert!(
-			matches!(err.downcast_ref::<crate::Error>(), Some(crate::Error::TsPacketSize(got)) if *got == size),
-			"{err:?}"
-		);
+		assert!(matches!(err, crate::Error::TsPacketSize(got) if got == size), "{err:?}");
 	}
 }
 
@@ -842,8 +949,56 @@ async fn a_192_or_204_byte_source_is_refused() {
 async fn a_cbr_source_records_its_mux_rate() {
 	let data = include_bytes!("test_data/bbb_cbr.ts");
 	let imported = import(data, data.len(), None).await.unwrap();
-	let rate = imported.section().mux_rate.expect("a CBR source records its mux rate");
+	let rate = imported
+		.catalog
+		.ext
+		.mpegts
+		.mux_rate
+		.expect("a CBR source records its mux rate");
 	assert!(rate.abs_diff(400_000) * 1000 <= 400_000, "{rate}");
+	assert_suffix(data, &imported);
+}
+
+/// The demultiplexing lane of the same source may record the rate first; a passthrough that has
+/// measured none keeps it.
+#[tokio::test(start_paused = true)]
+async fn a_passthrough_without_a_rate_keeps_the_recorded_one() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 0, 50, 10, 4);
+	let data = mux.bytes();
+	let alone = import(&data, data.len(), None).await.unwrap();
+	assert_eq!(alone.catalog.ext.mpegts.mux_rate, None, "too short to measure");
+	assert!(!alone.objects.is_empty());
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
+	catalog
+		.mutate(
+			|catalog| catalog.ext.mpegts.mux_rate = Some(400_000),
+			catalog.next_timestamp(),
+		)
+		.unwrap();
+	let imported = import_onto(broadcast, catalog, &data, data.len(), None).await.unwrap();
+	assert!(imported.catalog.ext.mpegts.passthrough.is_some());
+	assert_eq!(imported.catalog.ext.mpegts.mux_rate, Some(400_000));
+}
+
+/// A rate recorded before the passthrough started is one it measures again, and a variable-rate
+/// multiplex clears it.
+#[tokio::test(start_paused = true)]
+async fn a_vbr_passthrough_clears_a_recorded_rate() {
+	let data = include_bytes!("test_data/scte35/bbb5s.ts");
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
+	catalog
+		.mutate(
+			|catalog| catalog.ext.mpegts.mux_rate = Some(400_000),
+			catalog.next_timestamp(),
+		)
+		.unwrap();
+	let imported = import_onto(broadcast, catalog, data, data.len(), None).await.unwrap();
+	assert_eq!(imported.catalog.ext.mpegts.mux_rate, None);
 	assert_suffix(data, &imported);
 }
 

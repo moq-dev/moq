@@ -121,7 +121,7 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
-	media: Option<hang::catalog::Media>,
+	sync: Option<hang::catalog::Timeline>,
 	/// The catalog's confirmed end, distinct from dropping its watcher.
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
@@ -293,7 +293,7 @@ impl Producer {
 	#[cfg(feature = "server")]
 	pub fn poll_get(&self, waiter: &kio::Waiter, kind: Kind, name: &str) -> Poll<Option<Arc<Rendition>>> {
 		match self.state.poll_ref(waiter, |state| {
-			if state.media.is_some() {
+			if state.sync.is_some() {
 				Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned())
 			} else {
 				Poll::Pending
@@ -359,6 +359,7 @@ impl Producer {
 		if let Ok(mut current) = self.state.write() {
 			current.renditions.clear();
 			current.audio.clear();
+			current.waiting.clear();
 		}
 	}
 
@@ -381,6 +382,8 @@ impl Producer {
 			});
 		}
 		state.finished = Some(result);
+		// No catalog follows to declare an interval, so nothing measures one from the held media.
+		state.waiting.clear();
 		drop(state);
 		self.close();
 	}
@@ -394,6 +397,7 @@ impl Producer {
 	pub fn cut(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.finished.get_or_insert(Ok(()));
+			state.waiting.clear();
 		}
 		self.close();
 		self.fanout.cut();
@@ -551,7 +555,7 @@ impl Producer {
 	pub(crate) fn poll_catalogued(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
 			.poll_ref(waiter, |current| {
-				if current.media.is_some() {
+				if current.sync.is_some() {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
@@ -670,7 +674,7 @@ impl Producer {
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
 	/// measured bitrate, jitter, or framerate moves.
 	///
-	/// Renditions join the set only once the catalog declares `media.join.interval`, which a
+	/// Renditions join the set only once the catalog declares `sync.interval`, which a
 	/// publisher measures over its first second or group when it knows no GOP: without that grid
 	/// nothing numbers their segments, so none is listed or reported as [`Event::Added`]. The
 	/// interval is fixed for a broadcast instance; should it change anyway, every rendition is
@@ -723,13 +727,13 @@ impl Producer {
 	}
 
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
-		let clock = catalog.media.clock;
-		let interval = catalog.media.interval();
+		let clock = catalog.sync.clock;
+		let interval = catalog.sync.interval;
 
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
-		current.media = Some(catalog.media);
+		current.sync = Some(catalog.sync);
 
 		// Renditions the catalog dropped or reconfigured. Retire each as it goes so any cursor
 		// over it drains and ends, instead of parking on a window that never finishes -- the
@@ -955,6 +959,29 @@ mod tests {
 		let mut cursor = producer.subscribe();
 		drop(producer);
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+	}
+
+	/// The tracks held subscribed while a catalog has no join interval are released once the set
+	/// ends, however it ends, rather than staying subscribed while a consumer holds the set.
+	#[tokio::test(start_paused = true)]
+	async fn an_ended_set_releases_its_held_tracks() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let mut catalog = Catalog::default();
+		let video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let ends: [fn(&Producer); 3] = [|set| set.finish(Ok(())), |set| set.cut(), |set| set.clear()];
+		for end in ends {
+			let producer = Producer::spawned(Duration::from_secs(30));
+			let _cursor = producer.subscribe();
+			producer.sync(&source, &catalog);
+			assert_eq!(producer.state.read().waiting.len(), 1, "the track was not held");
+			end(&producer);
+			assert!(producer.state.read().waiting.is_empty(), "the hold outlived the set");
+		}
 	}
 
 	#[test]

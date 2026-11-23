@@ -158,7 +158,8 @@ int main()
 		CHECK(settings.default_ints["quic_idle_timeout_ms"] == Ms(*library.quic.idle_timeout));
 		CHECK(!library.quic.keep_alive);
 		CHECK(settings.default_ints["quic_keep_alive_ms"] == 0);
-		CHECK(settings.default_ints["backoff_timeout_ms"] == Ms(*library.backoff.timeout));
+		CHECK(!library.backoff.timeout);
+		CHECK(settings.default_ints["backoff_timeout_ms"] == 0);
 		CHECK(settings.default_bools["websocket_enabled"] == *library.websocket.enabled);
 		CHECK(settings.default_strings["quic_gso"].empty());
 
@@ -179,7 +180,7 @@ int main()
 		settings.ints["connect_timeout_ms"] = 7000;
 		settings.ints["failover_delay_ms"] = 80;
 		settings.strings["tls_host_name"] = "relay.example";
-		settings.strings["quic_congestion_control"] = "loss";
+		settings.strings["quic_congestion_control"] = "cubic";
 		settings.ints["quic_idle_timeout_ms"] = 9000;
 		settings.ints["quic_keep_alive_ms"] = 0;
 		settings.strings["quic_gso"] = "off";
@@ -192,7 +193,7 @@ int main()
 		CHECK(config.race == std::chrono::milliseconds(80));
 		CHECK(config.tls.host_name == std::string("relay.example"));
 		CHECK(config.quic.congestion_control);
-		CHECK(config.quic.congestion_control->eq(moq::CongestionControl::loss()));
+		CHECK(config.quic.congestion_control->eq(moq::CongestionControl::cubic()));
 		CHECK(config.quic.idle_timeout == std::chrono::milliseconds(9000));
 		CHECK(config.quic.keep_alive == std::chrono::nanoseconds::zero());
 		CHECK(config.quic.gso == false);
@@ -233,14 +234,17 @@ int main()
 	}
 	printf("key log is opt-in: ok\n");
 
-	// A hand-edited scene collection naming an unknown family refuses rather than ignores it.
-	{
+	// A hand-edited scene collection naming an unknown algorithm, or one saved with a
+	// released family name, refuses rather than ignores it.
+	for (const char *algorithm : {"fast", "delay", "loss"}) {
 		obs_data settings;
 		MoQSettings::Defaults(&settings);
 		settings.bools["advanced"] = true;
-		settings.strings["quic_congestion_control"] = "fast";
+		settings.strings["quic_congestion_control"] = algorithm;
 		moq::ClientConfig config;
-		CHECK(MoQSettings::Configure(&settings, config).find("congestion") != std::string::npos);
+		const std::string refused = MoQSettings::Configure(&settings, config);
+		CHECK(refused.find(algorithm) != std::string::npos);
+		CHECK(refused.find("pick BBR or CUBIC") != std::string::npos);
 	}
 	printf("unknown congestion control refused: ok\n");
 

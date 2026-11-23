@@ -17,10 +17,11 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 const VERSIONS: &[&str] = &["moq-lite-01", "moq-lite-02", "moq-lite-03", "moq-lite-04"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 struct Relay {
@@ -37,7 +38,7 @@ fn write(track: &moq_net::track::Producer, payload: &'static [u8]) {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// A publisher on `version` with group 0 of an untimed track written, and the relay's view of it.
@@ -165,7 +166,7 @@ async fn an_unfed_fetch_is_a_miss() {
 		skipped
 			.write_frame(moq_net::Timestamp::unscaled(skipped.start), &b"3"[..])
 			.unwrap();
-		skipped.close().unwrap();
+		skipped.finish().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")

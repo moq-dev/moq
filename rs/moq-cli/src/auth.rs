@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::{io, path::PathBuf};
 
 use moq_auth::serve::{Keys, Policy};
-use moq_auth::{Algorithm, Pattern, Permissions};
+use moq_auth::{Algorithm, Permissions, Prefix};
 
 /// Generate, sign, and verify the JWT tokens a relay authenticates with.
 #[derive(usage_rs::Args, Clone, Debug)]
@@ -70,9 +70,9 @@ impl Args {
 
 				if let Some(dir) = public_dir {
 					let path = dir.join(format!("{id}.jwk"));
-					write_key(&key.to_public()?, &path)?;
+					write_key(&key.public()?, &path)?;
 				} else if let Some(path) = public {
-					write_key(&key.to_public()?, &path)?;
+					write_key(&key.public()?, &path)?;
 				}
 
 				if let Some(dir) = out_dir {
@@ -95,6 +95,7 @@ impl Args {
 				ttl,
 				unbounded,
 				issued,
+				id,
 			} => {
 				let key = read_key(&key)?;
 				let expires = match (unbounded, expires) {
@@ -112,7 +113,8 @@ impl Args {
 					.with_publish(publish)
 					.with_subscribe(subscribe)
 					.with_expires(expires)
-					.with_issued(issued.map(Into::into));
+					.with_issued(issued.map(Into::into))
+					.with_id(id.as_deref().map(moq_auth::TokenId::decode).transpose()?);
 
 				let token = key.sign(&payload)?;
 				println!("{token}");
@@ -172,13 +174,13 @@ enum Command {
 		#[usage(long, default = "")]
 		root: String,
 
-		/// Publish patterns the key may grant (repeatable); `foo/**` for a subtree.
+		/// Publish prefixes the key may grant (repeatable); each covers its path and everything beneath it, `""` everything.
 		#[usage(long)]
-		publish: Vec<Pattern>,
+		publish: Vec<Prefix>,
 
-		/// Subscribe patterns the key may grant (repeatable); `foo/**` for a subtree.
+		/// Subscribe prefixes the key may grant (repeatable); each covers its path and everything beneath it, `""` everything.
 		#[usage(long)]
-		subscribe: Vec<Pattern>,
+		subscribe: Vec<Prefix>,
 	},
 
 	/// Sign a token, writing it to stdout.
@@ -191,13 +193,13 @@ enum Command {
 		#[usage(long, default = "")]
 		root: String,
 
-		/// Patterns the user can publish (repeatable); `foo/**` for a subtree.
+		/// Prefixes the user can publish (repeatable); each covers its path and everything beneath it, `""` everything.
 		#[usage(long)]
-		publish: Vec<Pattern>,
+		publish: Vec<Prefix>,
 
-		/// Patterns the user can subscribe to (repeatable); `foo/**` for a subtree.
+		/// Prefixes the user can subscribe to (repeatable); each covers its path and everything beneath it, `""` everything.
 		#[usage(long)]
-		subscribe: Vec<Pattern>,
+		subscribe: Vec<Prefix>,
 
 		/// Expiration time as a unix timestamp, instead of `--ttl` from now.
 		#[usage(long, conflicts("--ttl", "--unbounded"))]
@@ -214,6 +216,10 @@ enum Command {
 		/// Issued-at time as a unix timestamp.
 		#[usage(long)]
 		issued: Option<UnixTimestamp>,
+
+		/// The token ID, written as its `jti`, such as one you record to revoke it. None unless given.
+		#[usage(long)]
+		id: Option<String>,
 	},
 
 	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
@@ -432,7 +438,7 @@ pub struct Serve {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	tier: Option<String>,
 
-	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
+	/// How often the relay re-checks each grant, at least 1s. Off by default; needs `--expires`.
 	#[usage(long, setting = "revalidate")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	revalidate: Option<moq_tokio::cli::Duration>,
@@ -452,13 +458,13 @@ pub struct Serve {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 struct PublicRules {
-	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
+	/// Prefixes an anonymous session may publish, rooted at `/` (repeatable); each covers its path and everything beneath it.
 	#[usage(name = "public-publish", long = "public-publish", setting = "public.publish")]
-	publish: Vec<Pattern>,
+	publish: Vec<Prefix>,
 
-	/// Patterns an anonymous session may subscribe to, rooted at `/` (repeatable).
+	/// Prefixes an anonymous session may subscribe to, rooted at `/` (repeatable).
 	#[usage(name = "public-subscribe", long = "public-subscribe", setting = "public.subscribe")]
-	subscribe: Vec<Pattern>,
+	subscribe: Vec<Prefix>,
 }
 
 /// What a session presenting a verified certificate may do.
@@ -466,13 +472,13 @@ struct PublicRules {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 struct MtlsRules {
-	/// Patterns a session with a verified certificate may publish, rooted at `/` (repeatable). Empty refuses certificates no rule names.
+	/// Prefixes a session with a verified certificate may publish, rooted at `/` (repeatable). Empty refuses certificates no rule names.
 	#[usage(name = "mtls-publish", long = "mtls-publish", setting = "mtls.publish")]
-	publish: Vec<Pattern>,
+	publish: Vec<Prefix>,
 
-	/// Patterns a session with a verified certificate may subscribe to, rooted at `/` (repeatable).
+	/// Prefixes a session with a verified certificate may subscribe to, rooted at `/` (repeatable).
 	#[usage(name = "mtls-subscribe", long = "mtls-subscribe", setting = "mtls.subscribe")]
-	subscribe: Vec<Pattern>,
+	subscribe: Vec<Prefix>,
 
 	/// The role verified certificates have on cluster links: peer or upstream.
 	#[usage(
@@ -482,7 +488,7 @@ struct MtlsRules {
 		setting = "mtls.link"
 	)]
 	#[serde(skip_serializing_if = "Option::is_none")]
-	link: Option<moq_auth::serve::Link>,
+	link: Option<moq_auth::Link>,
 
 	/// Rules for particular certificates, keyed by the SHA-256 of a leaf or of a
 	/// certificate it was issued under.
@@ -608,13 +614,10 @@ impl Serve {
 		Ok(merged)
 	}
 
-	/// The policy these settings describe, refusing a cadence the relay would spin on.
+	/// The policy these settings describe.
 	fn policy(&self) -> anyhow::Result<Policy> {
 		let revalidate = self.revalidate.map(std::time::Duration::from);
 		let expires = self.expires.map(Into::into);
-		if revalidate.is_some_and(|cadence| cadence.is_zero()) {
-			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
-		}
 		if revalidate.is_some() && expires.is_none() {
 			anyhow::bail!("--revalidate needs --expires, so a grant re-checked through an outage still has a bound");
 		}
@@ -635,38 +638,10 @@ impl Serve {
 			anyhow::bail!("--key, --key-dir, and --key-set conflict; pick one");
 		}
 
-		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
-		// broadcast `anon`, so either silent reading would mislead someone upgrading.
-		let mut flags = vec![
-			(
-				"--public-publish".to_string(),
-				self.public.publish.iter().collect::<Vec<_>>(),
-			),
-			("--public-subscribe".to_string(), self.public.subscribe.iter().collect()),
-			("--mtls-publish".to_string(), mtls.publish.iter().collect()),
-			("--mtls-subscribe".to_string(), mtls.subscribe.iter().collect()),
-		];
-		for (hash, rule) in &mtls.certificates {
-			for (direction, patterns) in [("publish", &rule.publish), ("subscribe", &rule.subscribe)] {
-				let patterns = patterns.iter().flat_map(|patterns| patterns.iter()).collect();
-				flags.push((format!("mtls.certificates.{hash}.{direction}"), patterns));
-			}
-		}
-		for (flag, patterns) in flags {
-			for pattern in patterns.into_iter().filter(|pattern| pattern.is_literal()) {
-				// A literal at the maximum depth is already its own subtree.
-				let subtree = Pattern::subtree(pattern.as_str())?;
-				if subtree != *pattern {
-					anyhow::bail!(
-						"{flag} `{pattern}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
-					);
-				}
-			}
-		}
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
+		let rules = |publish: &[Prefix], subscribe: &[Prefix]| {
 			Permissions::new(
-				publish.iter().cloned().collect::<moq_auth::Patterns>(),
-				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
+				publish.iter().cloned().collect::<moq_auth::Prefixes>(),
+				subscribe.iter().cloned().collect::<moq_auth::Prefixes>(),
 			)
 		};
 		let mut policy = Policy::default();
@@ -1060,11 +1035,11 @@ mod tests {
 			"--key-dir",
 			"/keys",
 			"--public-subscribe",
-			"anon/**",
+			"anon",
 			"--mtls-publish",
-			"**",
+			"",
 			"--mtls-subscribe",
-			"**",
+			"",
 			"--mtls-link",
 			"upstream",
 			"--tier",
@@ -1081,13 +1056,10 @@ mod tests {
 		.policy()
 		.unwrap();
 		assert!(matches!(&policy.keys, Some(Keys::Dir(dir)) if dir == std::path::Path::new("/keys")));
-		assert_eq!(
-			policy.public.subscribe,
-			["anon/**".parse().unwrap()].into_iter().collect()
-		);
+		assert_eq!(policy.public.subscribe, ["anon".parse().unwrap()].into_iter().collect());
 		assert!(policy.public.publish.is_empty());
-		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
-		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Upstream));
+		assert_eq!(policy.mtls.publish, ["".parse().unwrap()].into_iter().collect());
+		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Upstream));
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
@@ -1110,10 +1082,8 @@ mod tests {
 		assert_eq!(bare.expires, None);
 
 		for (args, needs) in [
-			// A zero cadence would have every client re-check in a tight loop.
-			(&["--revalidate", "0s", "--expires", "1h"][..], "longer than 0s"),
 			// The contract refuses a cadence without a bound.
-			(&["--revalidate", "1m"], "--revalidate needs --expires"),
+			(&["--revalidate", "1m"][..], "--revalidate needs --expires"),
 			// Only a re-check keeps a slot alive.
 			(&["--limit-token", "3"], "need --revalidate"),
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
@@ -1126,6 +1096,14 @@ mod tests {
 		}
 		let expiring = serve(&["moq", "auth", "serve", "--expires", "1h"]).policy().unwrap();
 		assert_eq!(expiring.revalidate, None);
+
+		// The server refuses a cadence the grant can't write, so the flag needs no check of its own.
+		let args = ["moq", "auth", "serve", "--revalidate", "999ms", "--expires", "1h"];
+		let short = serve(&args).policy().unwrap();
+		assert!(matches!(
+			moq_auth::serve::Server::new(short),
+			Err(moq_auth::Error::ShortRevalidate)
+		));
 	}
 
 	#[test]
@@ -1153,13 +1131,12 @@ revalidate = "30s"
 expires = "2h"
 
 [mtls]
-subscribe = ["**"]
+subscribe = [""]
 link = "peer"
 
 [mtls.certificates.{leaf}]
-publish = ["alice/**"]
+publish = {{ path = ["alice"], rate = 1000000 }}
 link = "none"
-publish_rate = 1000000
 "#
 			),
 		)
@@ -1175,22 +1152,23 @@ publish_rate = 1000000
 		let policy = serve.policy().unwrap();
 		assert_eq!(policy.tier.as_deref(), Some("from-flag"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
-		assert_eq!(policy.mtls.subscribe, ["**".parse().unwrap()].into_iter().collect());
-		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Peer));
+		assert_eq!(policy.mtls.subscribe, ["".parse().unwrap()].into_iter().collect());
+		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Peer));
 		let rule = &policy.certificates[&leaf.parse().unwrap()];
-		assert_eq!(rule.publish, Some(["alice/**".parse().unwrap()].into_iter().collect()));
+		let publish = rule.publish.as_ref().expect("the rule names publish");
+		assert_eq!(publish.path, ["alice".parse().unwrap()].into_iter().collect());
+		assert_eq!(publish.rate, moq_auth::Rate::from_bps(1_000_000).ok());
 		assert_eq!(rule.subscribe, None);
 		assert_eq!(rule.link, Some(moq_auth::serve::RuleLink::None));
-		assert_eq!(rule.publish_rate, moq_auth::Rate::from_bps(1_000_000).ok());
 
 		// A flag replaces the file's list rather than adding to it.
-		let (serve, _) = merged(&["moq", "auth", "serve", path, "--mtls-subscribe", "room/**"]).unwrap();
-		assert_eq!(serve.mtls.subscribe, vec!["room/**".parse::<Pattern>().unwrap()]);
+		let (serve, _) = merged(&["moq", "auth", "serve", path, "--mtls-subscribe", "room"]).unwrap();
+		assert_eq!(serve.mtls.subscribe, vec!["room".parse::<Prefix>().unwrap()]);
 
 		for (body, needs) in [
 			("lisen = \"127.0.0.1:1\"", "lisen"),
-			("[mtls.certificates.nothex]\npublish = [\"**\"]", "SHA-256"),
-			(&format!("[mtls.certificates.{leaf}]\npublsh = [\"**\"]"), "publsh"),
+			("[mtls.certificates.nothex]\npublish = [\"\"]", "SHA-256"),
+			(&format!("[mtls.certificates.{leaf}]\npublsh = [\"\"]"), "publsh"),
 			(&format!("[mtls.certificates.{leaf}]\nlink = \"sideways\""), "sideways"),
 		] {
 			std::fs::write(&file, body).unwrap();
@@ -1207,11 +1185,8 @@ publish_rate = 1000000
 		let err = serve.policy().unwrap_err().to_string();
 		assert!(err.contains("conflict"), "{err}");
 		let (serve, _) = merged(&["moq", "auth", "serve", path]).unwrap();
-		let err = serve.policy().unwrap_err().to_string();
-		assert!(
-			err.contains(&format!("mtls.certificates.{leaf}.publish `alice`")),
-			"{err}"
-		);
+		// The literal `alice` names one broadcast, so the rule is valid.
+		serve.policy().unwrap();
 	}
 
 	/// A file edit narrows or revokes at the next re-check, and an edit that does not
@@ -1222,7 +1197,7 @@ publish_rate = 1000000
 		let file = dir.path().join("auth.toml");
 		let leaf = "ab".repeat(32);
 		let write = |body: &str| std::fs::write(&file, body).unwrap();
-		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"**\"]"));
+		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"\"]"));
 		// Reloads start from the command line, never from a merge that already holds the file.
 		let (serve, cli) = parsed(&["moq", "auth", "serve", file.to_str().unwrap()]);
 		let env = usage_rs::config::EnvLayer::new([]);
@@ -1236,21 +1211,21 @@ publish_rate = 1000000
 			expires: None,
 			issuer: "CN=affiliates".into(),
 		});
-		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish;
+		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish.path;
 		assert_eq!(
 			publish(server.answer(&session).await.unwrap()),
-			["**".parse().unwrap()].into_iter().collect()
+			["".parse().unwrap()].into_iter().collect()
 		);
 
 		session.event = moq_auth::Event::Revalidate;
-		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"alice/**\"]"));
+		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"alice\"]"));
 		serve.apply(&server, &cli, &env).unwrap();
-		let narrowed = ["alice/**".parse().unwrap()].into_iter().collect();
+		let narrowed = ["alice".parse().unwrap()].into_iter().collect();
 		assert_eq!(publish(server.answer(&session).await.unwrap()), narrowed);
 
 		for broken in [
-			format!("[mtls.certificates.{leaf}]\npublish = [\"alice/**\""),
-			format!("[mtls.certificates.{leaf}]\npublish = [\"alice/**\"]\ntier = \"not a tier\""),
+			format!("[mtls.certificates.{leaf}]\npublish = [\"alice\""),
+			format!("[mtls.certificates.{leaf}]\npublish = [\"alice\"]\ntier = \"not a tier\""),
 			"revalidate = \"1m\"".to_string(),
 		] {
 			write(&broken);
@@ -1263,41 +1238,35 @@ publish_rate = 1000000
 		assert!(server.answer(&session).await.is_err(), "deleting the rule revokes it");
 	}
 
-	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
-	/// wildcard-free rule refuses to start rather than pick silently.
+	/// A rule is a prefix, covering its path and everything beneath it.
 	#[test]
-	fn serve_refuses_a_rule_without_a_wildcard() {
-		for (flag, rule, hint) in [
-			("--public-publish", "anon", "anon/**"),
-			("--public-subscribe", "event/cam1.hang", "event/cam1.hang/**"),
-			("--mtls-publish", "", "**"),
-			("--mtls-subscribe", "origin", "origin/**"),
+	fn serve_accepts_prefix_rules() {
+		for (flag, rule) in [
+			("--public-publish", "anon"),
+			("--public-subscribe", "event/cam1.hang"),
+			("--mtls-publish", ""),
+			("--mtls-subscribe", "origin"),
 		] {
-			let err = serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap_err();
-			let err = err.to_string();
-			assert!(err.contains(flag) && err.contains(&format!("`{hint}`")), "{err}");
+			serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap();
 		}
-		assert!(
-			serve(&[
-				"moq",
-				"auth",
-				"serve",
-				"--public-subscribe",
-				"*/chat",
-				"--mtls-publish",
-				"origin/*"
-			])
+		let policy = serve(&["moq", "auth", "serve", "--public-publish", "anon"])
 			.policy()
-			.is_ok()
+			.unwrap();
+		assert_eq!(
+			policy.public.publish,
+			["anon".parse::<Prefix>().unwrap()].into_iter().collect()
 		);
+	}
 
-		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
-		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert!(
-			serve(&["moq", "auth", "serve", "--public-subscribe", &deepest])
-				.policy()
-				.is_ok()
-		);
+	/// A wildcard rule is refused where it is parsed, naming the prefix to write instead.
+	#[test]
+	fn serve_refuses_a_wildcard_rule() {
+		for rule in ["anon/**", "**", "*", "*/chat", "cam-*.hang"] {
+			let err = parse(&["moq", "auth", "serve", "--public-publish", rule]).unwrap_err();
+			assert!(format!("{err:#}").contains("wildcard"), "{rule}: {err:#}");
+		}
+		let err = parse(&["moq", "auth", "serve", "--public-publish", "anon/**"]).unwrap_err();
+		assert!(format!("{err:#}").contains("`anon` covers `anon`"), "{err:#}");
 	}
 
 	#[cfg(unix)]
@@ -1351,7 +1320,7 @@ publish_rate = 1000000
 			"--root",
 			"demo",
 			"--publish",
-			"alice/**",
+			"alice",
 			"--issued",
 			"1700000000",
 			"--expires",
@@ -1368,7 +1337,7 @@ publish_rate = 1000000
 			.sign(
 				&moq_auth::Claims::default()
 					.with_root("demo")
-					.with_publish(["alice/**".parse().unwrap()]),
+					.with_publish(["alice".parse().unwrap()]),
 			)
 			.unwrap();
 		let path = dir.path().join("alice.jwt");

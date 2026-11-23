@@ -1,8 +1,8 @@
 // Replays rs/moq-auth/tests/corpus.json, which the Rust crate replays too, so the two
-// parsers cannot disagree on a token, key, key set, or grant without both failing.
+// parsers cannot disagree on a token, key, key set, grant, or signable root without both failing.
 import { describe, expect, test } from "bun:test";
 import * as jose from "jose";
-import { type Claims, patterns } from "./claims.ts";
+import { type Access, type Claims, prefixes } from "./claims.ts";
 import { GrantSchema } from "./contract.ts";
 import { Key } from "./key.ts";
 import { KeySet } from "./set.ts";
@@ -15,20 +15,24 @@ const corpus = (await Bun.file(new URL("../../../rs/moq-auth/tests/corpus.json",
 	jwk: Case[];
 	sets: Case[];
 	grants: Case[];
+	roots: { root: string; signable: boolean }[];
 };
 
-// The claims as the corpus writes them: patterns reduced, absent roles empty, and rates
-// and times only when present.
+// The claims as the corpus writes them: prefixes reduced, absent roles empty, a capped role
+// as its wire object, and times and the token ID only when present.
 function canonical(claims: Claims): unknown {
+	const role = (access: Access | undefined) =>
+		access === undefined || Array.isArray(access)
+			? prefixes(access).toJSON()
+			: { path: prefixes(access.path).toJSON(), rate: access.rate };
 	return {
 		root: claims.root,
-		publish: patterns(claims.publish).toJSON(),
-		subscribe: patterns(claims.subscribe).toJSON(),
-		...(claims.publish_rate !== undefined && { publish_rate: claims.publish_rate }),
-		...(claims.subscribe_rate !== undefined && { subscribe_rate: claims.subscribe_rate }),
-		...(claims.exp !== undefined && { exp: claims.exp }),
-		...(claims.iat !== undefined && { iat: claims.iat }),
-		...(claims.nbf !== undefined && { nbf: claims.nbf }),
+		publish: role(claims.publish),
+		subscribe: role(claims.subscribe),
+		...(claims.expires !== undefined && { exp: claims.expires }),
+		...(claims.issued !== undefined && { iat: claims.issued }),
+		...(claims.notBefore !== undefined && { nbf: claims.notBefore }),
+		...(claims.id !== undefined && { jti: claims.id }),
 	};
 }
 
@@ -74,3 +78,15 @@ for (const [section, cases, parse] of sections) {
 		}
 	});
 }
+
+// A token is minted for a root exactly when `@moq/net`'s `Path.from` accepts it.
+describe("roots", () => {
+	const key = Key.parse(JSON.stringify(corpus.keys.hs256));
+	for (const { root, signable } of corpus.roots) {
+		test(JSON.stringify(root), async () => {
+			const signed = Key.sign(key, { root, publish: [""] });
+			if (signable) await signed;
+			else await expect(signed).rejects.toThrow();
+		});
+	}
+});

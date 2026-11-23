@@ -1,7 +1,7 @@
 //! Preallocated handoff from the microphone callback to the async capture loop.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use moq_net::time::Instant;
@@ -59,6 +59,7 @@ pub(super) fn channel(
 		recycle,
 		free,
 		pending_gap: false,
+		lost: Gap::default(),
 		dropped: dropped.clone(),
 		channels,
 		sample_rate,
@@ -118,12 +119,25 @@ struct RecycleSlot {
 	recycled: HeapCons<Vec<f32>>,
 }
 
+/// Audio the device lost outside the callback, such as an overrun the host recovered from,
+/// reported from its error callback so the next buffer carries a gap.
+#[derive(Clone, Default)]
+pub(super) struct Gap(Arc<AtomicBool>);
+
+impl Gap {
+	/// The device lost audio before its next callback.
+	pub(super) fn mark(&self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
+}
+
 /// The callback-owned half of the pool.
 pub(super) struct Writer {
 	filled: HeapProd<Filled>,
 	recycle: Vec<RecycleSlot>,
 	free: Vec<Buffer>,
 	pending_gap: bool,
+	lost: Gap,
 	dropped: Arc<AtomicU64>,
 	channels: usize,
 	sample_rate: u32,
@@ -134,6 +148,11 @@ pub(super) struct Writer {
 }
 
 impl Writer {
+	/// The handle the stream's error callback marks lost audio through.
+	pub(super) fn gap(&self) -> Gap {
+		self.lost.clone()
+	}
+
 	/// Copy native `f32` samples into preallocated buffers.
 	///
 	/// `captured` is the instant of `input`'s first sample. Each chunk keeps its
@@ -157,6 +176,13 @@ impl Writer {
 
 	/// Convert and submit one host callback without touching the allocator.
 	fn write<T: Copy>(&mut self, input: &[T], convert: impl Fn(T) -> f32) {
+		if self.lost.0.swap(false, Ordering::Relaxed) {
+			self.pending_gap = true;
+			#[cfg(all(feature = "capture", feature = "playback"))]
+			if let Some(aec) = &self.aec {
+				aec.mark_discontinuous();
+			}
+		}
 		let chunk_samples = CHUNK_FRAMES * self.channels;
 		let complete = input.len() - input.len() % self.channels;
 

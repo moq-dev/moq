@@ -1,47 +1,46 @@
 import { race } from "@moq/signals";
 import { FrameTooLarge, StreamCode, StreamError } from "../error.ts";
-import type { Producer as FrameProducer } from "../frame.ts";
 import type * as netGroup from "../group.ts";
 import { hooks } from "../internal.ts";
-import { decodePayload, fillFrame, receiveFrame, skipPayload, type WirePayload } from "../payload.ts";
+import { decodePayload, receiveFrame, type WirePayload } from "../payload.ts";
 import type { Cursor, Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
+import { RESERVED } from "../util/key.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, type Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
-	sequence: bigint;
+	key: bigint;
 
 	/**
 	 * The index of the first frame on this stream within the group.
 	 *
 	 * 0 (the common case) means the stream carries the group from its beginning. A
-	 * higher value means the leading frames are not here, either because the
-	 * subscription started partway into the group or because the publisher only holds
-	 * the tail. Lite-06+; older versions always start at 0.
+	 * higher value means the leading frames are not here, because the subscription started
+	 * partway into the group. Lite-06+ only; older versions always start at 0.
 	 */
 	frameStart: number;
 
 	constructor({
 		subscribe,
-		sequence,
+		key: sequence,
 		frameStart = 0,
 	}: {
 		subscribe: bigint;
-		sequence: bigint;
+		key: bigint;
 		frameStart?: number;
 	}) {
 		this.subscribe = subscribe;
-		this.sequence = sequence;
+		this.key = sequence;
 		this.frameStart = frameStart;
 	}
 
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.subscribe);
-		await w.u62(this.sequence);
+		await w.u62(this.key);
 		if (hasFrameBounds(version)) {
 			await w.u53(this.frameStart);
 		} else if (this.frameStart !== 0) {
@@ -52,9 +51,9 @@ export class Group {
 
 	static async #decode(r: Reader, version: Version): Promise<Group> {
 		const subscribe = await r.u62();
-		const sequence = await r.u62();
+		const key = await r.u62();
 		const frameStart = hasFrameBounds(version) ? await r.u53() : 0;
-		return new Group({ subscribe, sequence, frameStart });
+		return new Group({ subscribe, key: key, frameStart });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -89,10 +88,21 @@ export interface WireFrame extends WirePayload {
 	inflated?: number;
 }
 
+/** Lite-07 GROUP_END: the group is whole, ending at `end` in the track's timescale. */
+export interface GroupEnd {
+	end: bigint;
+}
+
 /** How {@link frameDecoder} reads each frame's optional fields. */
 export interface FrameFormat {
 	/** The wire timescale; non-zero means every frame carries a zigzag-delta timestamp. */
 	scale: number;
+	/**
+	 * The group's start, which a lite-07 stream's first timestamp delta counts from and a
+	 * GROUP_END's End counts from when the stream carries no timestamp. Before lite-07 the first
+	 * delta counts from 0.
+	 */
+	start?: bigint;
 	/** Whether every frame declares its plain size ahead of a stored slice. */
 	compress?: boolean;
 	/**
@@ -103,128 +113,84 @@ export interface FrameFormat {
 }
 
 /**
- * Decode one frame, with timestamp deltas when scaled and declared plain sizes when compressed.
- * Lite-07 leads with the size plus one, where stream end ends the group; before it the size ends
- * the header, and stream end at the frame's first field ends the group.
+ * Decode one frame, with timestamp deltas when stamped and declared plain sizes when compressed,
+ * or a lite-07 GROUP_END. Lite-07 leads with the size plus one, 0 for GROUP_END, where stream end
+ * closes the group; before it the size ends the header, and stream end at the frame's first field
+ * ends the group.
+ *
+ * On lite-07 the first delta counts from the group's `start`, whatever frame the stream starts at,
+ * and GROUP_END's End counts from the highest timestamp the stream carried (B-frames go
+ * backwards), or from `start` when it carried none. Mirrors the Rust `FrameIngest`.
  */
-export function frameDecoder({ scale, compress = false, lengthFirst = false }: FrameFormat): (c: Cursor) => WireFrame {
+export function frameDecoder({
+	scale,
+	start = 0n,
+	compress = false,
+	lengthFirst = false,
+}: FrameFormat): (c: Cursor) => WireFrame | GroupEnd {
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
-	let prevTs = 0n;
+	let prevTs = lengthFirst ? start : 0n;
+	// The highest timestamp decoded so far, which a GROUP_END's End counts from.
+	let highest: bigint | undefined;
 	return (c) => {
 		let size = 0;
 		if (lengthFirst) {
 			const length = c.u53();
-			// 0 is reserved for GROUP_END, which no version defines yet.
-			if (length === 0) throw malformed("FRAME payload length of 0");
+			if (length === 0) {
+				const end = (highest ?? start) + c.u62();
+				if (end > RESERVED) throw malformed(`GROUP_END at ${end}, past the largest group end`);
+				return { end };
+			}
 			size = length - 1;
 		}
-		const delta = timescale === undefined ? 0n : unzigzag(c.u62());
+		const delta = timescale !== undefined ? unzigzag(c.u62()) : 0n;
 		const inflated = compress ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
-		// A compressed frame is stored whole; a plain one past a segment streams in after this.
+		// A compressed frame is stored whole; a plain one past a segment streams in after this,
+		// and `decodePayload` caps its size.
 		if (compress && (size > MAX_FRAME_BYTES || (inflated ?? 0) > MAX_FRAME_BYTES)) throw new FrameTooLarge();
 		const payload = compress ? c.read(size) : decodePayload(c, size);
 		// Commit the delta only after the last read: an incomplete decode gets retried.
+		if (timescale === undefined) return { size, payload, inflated };
 		prevTs += delta;
-		const timestamp = timescale === undefined ? undefined : new Time.Timestamp(toNumber(prevTs), timescale);
-		return { size, payload, inflated, timestamp };
+		if (highest === undefined || prevTs > highest) highest = prevTs;
+		return { size, payload, inflated, timestamp: new Time.Timestamp(toNumber(prevTs), timescale) };
 	};
 }
 
 /**
- * Where a lite-07 Group Stream is in its group, which a YIELDED reset pauses and a later stream
- * continues: frames the group holds already are skipped, and the frame the reset cut short is
- * completed. Mirrors the Rust `FrameIngest` on a yielding stream.
- *
- * @internal
- */
-export interface Ingest {
-	/** The group index of the next frame on the stream, counted from its `Frame Start`. */
-	index: number;
-	/**
-	 * The frame a YIELDED reset cut short, holding the group's writer: kept on a pause, and
-	 * completed by the continuation.
-	 */
-	partial?: FrameProducer;
-}
-
-/**
  * Write a group stream's frames into `producer` until the stream ends or the producer closes.
- *
- * With `ingest`, a stream continuing a paused group skips the frames the group holds, and
- * completes the one a YIELDED reset cut short; ending before completing it is malformed.
+ * Resolves with where a lite-07 GROUP_END said the group ends, or undefined when the stream ended
+ * without one: the caller finishes the group at that end, and a bare FIN only closes it. Anything
+ * after GROUP_END is malformed.
  */
 export async function readFrames(
 	stream: Reader,
 	producer: netGroup.Producer,
 	format: FrameFormat,
-	ingest?: Ingest,
-): Promise<void> {
-	const decode = frameDecoder(format);
+): Promise<bigint | undefined> {
+	const decode = frameDecoder({ ...format, start: producer.start });
 
 	for (;;) {
 		// Every frame already buffered is written without an await, so the reader wakes once
 		// per batch rather than once per frame. Only the group's own stream ends it: a track
 		// that closes first has already closed (or aborted) this group through its cache.
 		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
-		if (frame === undefined && ingest?.partial)
-			throw malformed("a continuation ended before completing the frame it resumed");
-		if (!frame || frame instanceof Error) return;
-		if (ingest) {
-			const index = ingest.index++;
-			const held = hooks.groupFrameCount(producer);
-			if (index < held) {
-				if (!(await skipHeld(stream, producer, frame, ingest, index + 1 === held))) return;
-				continue;
-			}
+		if (!frame || frame instanceof Error) return undefined;
+		if ("end" in frame) {
+			// The FIN may never come, so the group's own close, such as an abort or eviction, still
+			// ends the wait.
+			const done = await race([stream.done(), producer.closed]);
+			if (done === false) throw malformed("bytes after GROUP_END");
+			if (done !== true) return undefined;
+			return frame.end;
 		}
 		if (frame.payload)
 			hooks.writeGroupFrame(
 				producer,
-				{ payload: frame.payload, timestamp: Time.received(frame.timestamp, producer.sequence) },
+				{ payload: frame.payload, timestamp: Time.received(frame.timestamp, producer.start) },
 				frame.inflated,
 			);
-		else if (ingest) {
-			const timestamp = Time.received(frame.timestamp, producer.sequence);
-			const open = producer.createFrame({ size: frame.size, timestamp });
-			// Kept until it completes, so a YIELDED reset cutting it short leaves it for the continuation.
-			ingest.partial = open;
-			if (!(await fillFrame(stream, producer, open))) return;
-			ingest.partial = undefined;
-		} else if (!(await receiveFrame(stream, producer, frame))) return;
+		else if (!(await receiveFrame(stream, producer, frame))) return;
 	}
-}
-
-// A continuation re-sending a frame the group holds: discard it, or for the frame a YIELDED reset
-// cut short (the `last` one held), discard the bytes held and complete it. Resolves false if the
-// group closed first.
-async function skipHeld(
-	stream: Reader,
-	producer: netGroup.Producer,
-	frame: WireFrame,
-	ingest: Ingest,
-	last: boolean,
-): Promise<boolean> {
-	const partial = last ? ingest.partial : undefined;
-	if (!partial) return frame.payload !== undefined || (await skipUnlessClosed(stream, producer, frame.size));
-	// The same frame, so the same size: a publisher reusing the group's identity is refused
-	// rather than written past.
-	if (partial.size !== frame.size) throw malformed("a continuation resent a frame at another size");
-	const skip = partial.size - partial.remaining;
-	if (frame.payload) {
-		partial.write(frame.payload.subarray(skip));
-		partial.finish();
-	} else {
-		if (!(await skipUnlessClosed(stream, producer, skip))) return false;
-		if (!(await fillFrame(stream, producer, partial))) return false;
-	}
-	ingest.partial = undefined;
-	return true;
-}
-
-// Read past `size` bytes of a held payload, as `fillFrame` reads one in: resolves false if the group
-// closed first, so a peer that stops sending holds neither the stream nor its task.
-async function skipUnlessClosed(stream: Reader, producer: netGroup.Producer, size: number): Promise<boolean> {
-	await race([skipPayload(stream, size), producer.closed]);
-	return producer.closed.peek() === undefined;
 }

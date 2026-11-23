@@ -23,11 +23,8 @@ export const GroupOrder = {
 	Descending: 0x02,
 } as const;
 
-/** A GROUP_ORDER wire value. */
-export type GroupOrder = (typeof GroupOrder)[keyof typeof GroupOrder];
-
 /** The GROUP_ORDER byte for a model {@link Order}. */
-function encodeGroupOrder(order: Order): GroupOrder {
+function encodeGroupOrder(order: Order): number {
 	return order === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
 }
 
@@ -76,8 +73,6 @@ export class Subscribe {
 	trackNamespace: Path.Valid;
 	trackName: string;
 	subscriberPriority: number;
-	/** Subscriber max age in milliseconds (MoQ Timestamp), if negotiated. */
-	maxAge?: number;
 
 	/** The order the publisher is asked to deliver groups in (GROUP_ORDER). Defaults to descending. */
 	groupOrder: Order;
@@ -105,7 +100,6 @@ export class Subscribe {
 		trackNamespace,
 		trackName,
 		subscriberPriority,
-		maxAge,
 		groupOrder,
 		filter,
 		fill,
@@ -118,7 +112,6 @@ export class Subscribe {
 		trackNamespace: Path.Valid;
 		trackName: string;
 		subscriberPriority: number;
-		maxAge?: number;
 		groupOrder?: Order;
 		filter?: Filter.Filter;
 		fill?: Filter.Fill;
@@ -131,7 +124,6 @@ export class Subscribe {
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.subscriberPriority = subscriberPriority;
-		this.maxAge = maxAge;
 		this.groupOrder = groupOrder ?? "descending";
 		this.filter = filter ?? { kind: "unfiltered" };
 		this.fill = fill;
@@ -147,7 +139,6 @@ export class Subscribe {
 
 		const params = new Parameters();
 		params.subscriberPriority = this.subscriberPriority;
-		params.maxAge = this.maxAge;
 		params.groupOrder = encodeGroupOrder(this.groupOrder);
 		params.forward = this.forward;
 		// Unfiltered is the absent parameter, which a publisher reads as a live join.
@@ -208,7 +199,6 @@ export class Subscribe {
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 
 		return new Subscribe({
-			maxAge: params.maxAge,
 			requestId,
 			trackNamespace,
 			trackName,
@@ -240,8 +230,8 @@ export class SubscribeOk {
 	 * The Track Properties to send: the track's Timescale and our group order.
 	 *
 	 * Empty opts the response out of properties entirely, which is what a peer that sent
-	 * INCLUDE_PROPERTIES=0 asked for; declaring no Timescale also opts the track out of
-	 * timestamps, so the subscriber times objects by arrival.
+	 * INCLUDE_PROPERTIES=0 asked for; declaring no Timescale leaves the track untimed, its
+	 * Group IDs in no units.
 	 */
 	properties: Properties.Properties;
 

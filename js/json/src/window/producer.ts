@@ -1,11 +1,8 @@
 import type * as Moq from "@moq/net";
-import type { Time, Timed } from "@moq/net";
+import type { Time } from "@moq/net";
 
-import { frameTime, openGroup, startsPast } from "../time.ts";
-import { type Config, type Encoded, Encoder } from "./encoder.ts";
-
-/** Window producer options, including the destination track. */
-export type ProducerConfig = Config & { track: Moq.Track.Producer };
+import { frameTime, startsPast } from "../time.ts";
+import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
 /**
  * A window its producer finished: its records can still be read, but not edited.
@@ -19,7 +16,10 @@ export interface Finished<T> {
 	readonly window: T[];
 	/** Absolute index of the oldest retained record; see {@link Producer.offset}. */
 	readonly offset: number;
-	/** Abort the track with an error; see {@link Producer.abort}. */
+	/**
+	 * Mirrors the Rust `window::Finished::abort`, and like it changes nothing a reader sees: every group
+	 * finished, so readers still draining get the rest of the window and its clean end, not `err`.
+	 */
 	abort(err: Error): void;
 }
 
@@ -30,11 +30,12 @@ export interface Finished<T> {
  * the encoder emits a header. When something else already owns the track, use the {@link Encoder}
  * directly.
  *
- * A group of ops runs until a joiner wants a fresh one: once the ops outweigh the track's `refresh`
- * ratio times the header, a join asks for a group past the largest, and the producer restates the
- * window there at the newest timestamp written. On a scale-less track that timestamp names the
- * group, so while it is the newest group's own key the refresh waits for a later edit, since two
- * groups never share a key. Set the ratio when creating the track, or joins never ask.
+ * A group of ops runs until a reader asks for a fresh one, judged by the track's `refresh` (a join
+ * once the ops outweigh its ratio times the header, or a subscriber's `refresh()`, each waiting out
+ * its interval), and the producer restates the window there at the newest timestamp written. On a
+ * scale-less track that timestamp names the group, so while it is the newest group's own key the
+ * refresh waits for a later edit, since two groups never share a key. Set `refresh` when creating
+ * the track, or readers never ask.
  *
  * @public
  */
@@ -46,7 +47,7 @@ export class Producer<T> {
 	// The group an op would be appended to, open after a header.
 	#group?: Moq.Group.Producer;
 
-	// The sequence of the newest group written, which a joiner's wanted group has to pass.
+	// The sequence of the newest group written; nothing is restated before one.
 	#largest?: bigint;
 	// The newest timestamp written, which a refresh restates the window at. An edit may carry an
 	// older timestamp than its group's first frame, and a new group may not start before that one.
@@ -58,20 +59,20 @@ export class Producer<T> {
 	#deferred = false;
 
 	/** Wrap a track to publish a window into it. */
-	constructor(config: ProducerConfig) {
+	constructor(config: Producer.Config) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 
 		// With ops off every group holds one frame, so no join ever asks for a fresh one.
 		if (config.ops !== false) {
-			this.#unwatch = this.#track.demand().wanted.subscribe((wanted) => this.#refresh(wanted));
+			this.#unwatch = this.#track.demand().refresh.subscribe((asked) => this.#refresh(asked));
 		}
 	}
 
-	// Restate the window in a new group once a joiner wants one past the largest written.
-	#refresh(wanted: bigint | undefined): void {
+	// Restate the window in a new group once a reader asks for one past the largest written.
+	#refresh(asked: boolean): void {
 		this.#deferred = false;
-		if (this.#finished || wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
+		if (this.#finished || !asked || this.#largest === undefined) return;
 		// Two groups never share a key, so a scale-less refresh at the newest group's own key waits for
 		// a later write. Checked before encoding, since a header dropped unwritten resets the encoder.
 		const at = this.#at;
@@ -106,7 +107,7 @@ export class Producer<T> {
 	 * is {@link Time.Timestamp.unscaled} at a group key instead: a header opens its group there, which
 	 * must pass every group the track holds, and an op carries the open group's key.
 	 */
-	push({ value, at }: Timed<T>): void {
+	push(value: T, at: Time.Timestamp): void {
 		this.#assertOpen();
 		this.#write(this.#encoder.push(value), at);
 		this.#advance(at);
@@ -132,7 +133,7 @@ export class Producer<T> {
 	// unblock: a scale-less refresh waits for a key past the open group's.
 	#advance(at: Time.Timestamp): void {
 		if (this.#at === undefined || this.#at.isBefore(at)) this.#at = at;
-		if (this.#deferred) this.#refresh(this.#track.demand().wanted.peek());
+		if (this.#deferred) this.#refresh(this.#track.demand().refresh.peek());
 	}
 
 	#assertOpen(): void {
@@ -145,8 +146,8 @@ export class Producer<T> {
 		if (encoded.keyframe) {
 			// Opened before the previous group finishes, so a key at or before the newest group's is
 			// refused with the previous group still open.
-			const group = openGroup(this.#track, at);
-			this.#largest = group.sequence;
+			const group = this.#track.appendGroup(at);
+			this.#largest = group.start;
 
 			// The previous group is complete; no more frames will be appended to it.
 			this.#group?.finish();
@@ -194,7 +195,10 @@ export class Producer<T> {
 		return this;
 	}
 
-	/** Abort the track with `err`, so readers see the cause rather than a complete window. Idempotent. */
+	/**
+	 * Abort the track with `err`, so readers see the cause rather than a complete window. Idempotent,
+	 * and a no-op after {@link finish}: the window is already complete.
+	 */
 	abort(err: Error): void {
 		this.#close(err);
 	}
@@ -215,4 +219,10 @@ export class Producer<T> {
 			this.#track.close();
 		}
 	}
+}
+
+/** Types for {@link Producer}. */
+export namespace Producer {
+	/** Window producer options, including the destination track. */
+	export type Config = CodecConfig & { track: Moq.Track.Producer };
 }

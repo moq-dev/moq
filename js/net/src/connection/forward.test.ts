@@ -69,9 +69,6 @@ class FakeSession {
 	/** Called as the forwarder closes a request, before its stream can wind down. */
 	onClose?: () => void;
 
-	/** Whether a lite-07 claim of `node` at `at` serves `path` beneath it: the session's floors. */
-	covering?: (node: bigint, at: Path.Valid, path: Path.Valid) => boolean;
-
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
 
@@ -79,10 +76,9 @@ class FakeSession {
 	constructor({ exclusive = false } = {}) {
 		registerWire(this, {
 			consume: (path, instance) => this.consume(path, instance),
-			covers: (node, at, path) => this.covering?.(node, at, path) ?? true,
 			exclusive,
 			leave: () => {},
-			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
+			auth: new AuthSession({ peerGrant: { publish: new Path.Prefixes(), subscribe: new Path.Prefixes() } }),
 		});
 		this.closed = new Promise((resolve) => {
 			this.#die = resolve;
@@ -181,10 +177,10 @@ test("a request through a received route consumes that route's instance", async 
 	origin.close();
 });
 
-// A lite-07 stream reports each origin node's claim at a path as its own route, so the origin
-// holds every candidate: an unpinned request spreads by node as Rust's does, and one pinned to
-// the claim that does not win still resolves.
-test("the origin holds each origin node's claim at a prefix", async () => {
+// A lite-07 stream reports each instance's claim at a path as its own route, so the origin holds
+// every candidate: an unpinned request spreads by instance, and one pinned to the claim that
+// does not win still resolves.
+test("the origin holds each instance's claim at a prefix", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
@@ -193,12 +189,12 @@ test("the origin holds each origin node's claim at a prefix", async () => {
 	const watch = origin.routes(Path.Pattern.subtree(Path.from("pool")));
 	await settle();
 	expect(session.requests[0]).toMatchObject({ claims: true });
-	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: a, node: 0x7an });
-	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: b, node: 0x8bn });
+	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: a, claimed: true });
+	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: b, claimed: true });
 	session.stream("pool/**").synced();
 	await settle();
 
-	// 0x8b's rendezvous hash wins `pool/job`; see `lite07_ties_match_js` in rs/moq-net.
+	// `b`'s rendezvous hash wins `pool/job`; see `lite07_ties_match_js` in rs/moq-net.
 	const job = Path.from("pool/job");
 	const unpinned = origin.request(job);
 	await settle();
@@ -212,43 +208,6 @@ test("the origin holds each origin node's claim at a prefix", async () => {
 	unpinned.close();
 	pinned.close();
 	watch.close();
-	session.die();
-	origin.close();
-});
-
-// Two streams carry a lite-07 node's claims, and the newer floor, on the narrower one, presents
-// nothing at live/x: the node's claim at live is older knowledge there. A request for live/x skips
-// it, per request, for another node's claim at live of another instance. Mirrors `covering` in
-// rs/moq-net.
-test("the origin skips a claim above a newer floor's region", async () => {
-	const origin = new OriginProducer();
-	const session = new FakeSession();
-	forwardAnnounced(session.session, origin);
-	const a = Instance.parse("a");
-	const b = Instance.parse("b");
-	const NODE_A = 0x7an;
-	const NODE_B = 0x8bn;
-	const live = origin.routes(Path.Pattern.subtree(Path.from("live")));
-	await settle();
-	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: a, node: NODE_A });
-	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: b, node: NODE_B, cost: 5n });
-	session.stream("live/**").synced();
-	await settle();
-	const x = Path.from("live/x");
-	session.covering = (node, at, path) => !(node === NODE_A && at === Path.from("live") && Path.hasPrefix(x, path));
-
-	const request = origin.request(x);
-	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(session.pins).toEqual([b]);
-	// Elsewhere under live the cheaper claim still serves.
-	const y = origin.request(Path.from("live/y"));
-	await settle();
-	expect(session.pins).toEqual([b, a]);
-
-	request.close();
-	y.close();
-	live.close();
 	session.die();
 	origin.close();
 });
@@ -731,12 +690,9 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 	origin.close();
 });
 
-test("a scoped origin narrows a root watch to its disjoint literal heads", async () => {
+test("a scoped origin narrows a root watch to its prefixes", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(
-		Path.empty(),
-		new Path.Patterns(["room/*/chat", "room/nested/**", "other/**"].map(Path.Pattern.parse)),
-	);
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["room", "room/nested", "other"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 
@@ -745,14 +701,14 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 	expect(session.open()).toEqual(["other/**", "room/**"]);
 	all.close();
 
-	// A watch inside a head rides the head's open request, and one outside the scope asks for
-	// nothing.
+	// A watch inside a prefix rides the prefix's open request, and one outside the scope asks
+	// for nothing.
 	let inside = origin.routes(Path.Pattern.subtree(Path.from("room/alice/chat")));
 	const outside = origin.routes(Path.Pattern.subtree(Path.from("elsewhere")));
 	await advance(LINGER);
 	expect(session.open()).toEqual(["room/**"]);
 
-	// With nothing open above it, a watch inside a head asks for itself.
+	// With nothing open above it, a watch inside a prefix asks for itself.
 	inside.close();
 	await advance(LINGER);
 	expect(session.open()).toEqual([]);
@@ -768,17 +724,17 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 
 test("a scoped session filters discovered routes and requests under its root", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room/alice/chat", "room/bob/chat"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 
 	const all = origin.routes();
 	const events = record(all);
 	await settle();
-	// Session-relative: the scope's root is the session's.
-	expect(session.open()).toEqual(["room/**"]);
-	for (const prefix of ["room/alice/video", "room/alice/chat", "room/bob/chat"])
-		start(session.stream("room/**"), prefix);
+	// Session-relative: the scope's root is the session's, and it asks for each prefix.
+	expect(session.open()).toEqual(["room/alice/chat/**", "room/bob/chat/**"]);
+	start(session.stream("room/alice/chat/**"), "room/alice/chat");
+	start(session.stream("room/bob/chat/**"), "room/bob/chat");
 
 	const allowed = origin.request(Path.from("tenant/room/bob/chat"));
 	const denied = origin.request(Path.from("tenant/room/bob/video"));
@@ -892,7 +848,7 @@ test("a request synced as it opens releases the watcher", async () => {
 
 test("a scoped session refuses blind requests outside its allowed paths", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room/bob/chat"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 	const allowed = origin.request(Path.from("tenant/room/bob/chat"));

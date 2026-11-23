@@ -44,7 +44,7 @@ jobs:
 
       - uses: ./.github/actions/nix
 
-      # The relay, cli, moq-ffi, and moq-c all build from source. The nightly
+      # The relay, cli, moq-ffi, and libmoq all build from source. The nightly
       # run publishes them for the pull requests that touch the harness.
       - name: Rust cache
         id: rust-cache
@@ -124,9 +124,9 @@ jobs:
           # A release PR fails, rather than skips, a browser the lite-07 cut waits on to prove its route key.
           CI_STRICT: ${{ github.event_name == 'pull_request' && '1' || '' }}
 
-      # The same matrix with every client pinned to one moq-transport draft per pass. A release
-      # PR runs the oldest and newest even draft between Rust and native JS; nightly and manual
-      # runs cover every even draft and every client.
+      # The same matrix with every client pinned to one moq-transport draft per pass. A backport
+      # PR into release runs the oldest and newest even draft between Rust and native JS; the cut
+      # PR (head `main`), nightly, and manual runs cover every even draft and every client.
       - name: Interop (moq-transport)
         id: interop-ietf
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -135,15 +135,16 @@ jobs:
           nix develop --command just test interop "${args[@]}"
         shell: bash -leo pipefail {0}
         env:
-          INTEROP_ARGS: ${{ github.event_name == 'pull_request' && '--publishers rust --subscribers rust,js-native-node,js-native-bun --versions moq-transport-18,moq-transport-22' || '--all --versions ietf' }}
+          INTEROP_ARGS: ${{ github.event_name == 'pull_request' && github.head_ref != 'main' && '--publishers rust --subscribers rust,js-native-node,js-native-bun --versions moq-transport-18,moq-transport-22' || '--all --versions ietf' }}
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
-      # Registry installs and the release matrix run only on main, nightly or
-      # on demand: a break only needs catching before the next release.
+      # Registry installs and the release matrix run on main (nightly or on demand)
+      # and on the cut PR, whose head is `main`: the last chance to catch a break
+      # against the published versions before it ships. Backports skip it.
       - name: Released wire compatibility
         id: wire-compat
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && ((github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || (github.event_name == 'pull_request' && github.head_ref == 'main')) }}
         run: nix develop --command just test wire-compat
         shell: bash -leo pipefail {0}
         env:

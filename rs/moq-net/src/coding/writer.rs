@@ -308,11 +308,6 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		Poll::Ready(res)
 	}
 
-	/// The stream, until the writer finishes, aborts, or closes it.
-	pub(crate) fn stream(&self) -> Option<&S> {
-		self.stream.as_ref()
-	}
-
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
 	///
 	/// Streams with HIGHER values are transmitted first. This is the transport trait's
@@ -339,8 +334,9 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	}
 }
 
-/// A stream's payload billed as the transport acknowledges it, through offsets the writer asks
-/// [`poll_acked`](crate::transport::poll::SendStream::poll_acked) about.
+/// A stream's payload billed as the transport acknowledges it, or a reliable link takes it,
+/// through offsets the writer asks [`poll_acked`](crate::transport::poll::SendStream::poll_acked)
+/// about.
 struct Billing<O> {
 	delivery: crate::stats::Delivery,
 	ack: Ack<O>,
@@ -355,8 +351,6 @@ enum Ack<O> {
 	/// when no offset is outstanding, so they never outnumber the frames waiting plus one. A reset
 	/// then bills every frame acknowledged before it.
 	Asking(std::collections::VecDeque<(O, u64)>),
-	/// The transport cannot see acknowledgments, so the bytes the stream took bill instead.
-	Unsupported,
 	/// The transport will acknowledge no more, as after a reset, so nothing more bills.
 	Ended,
 }
@@ -398,29 +392,18 @@ impl<O> Billing<O> {
 		written: u64,
 		waiter: &kio::Waiter,
 	) {
-		use crate::transport::poll::Acked;
-
 		loop {
-			let asked = match &mut self.ack {
-				Ack::Asking(asked) => asked,
-				Ack::Unsupported => {
-					self.delivery.deliver(written);
-					return;
-				}
-				Ack::Ended => return,
+			let Ack::Asking(asked) = &mut self.ack else {
+				return;
 			};
 			// The oldest first: a transport acknowledges a prefix, so the rest wait behind a
 			// pending one.
 			while let Some((offset, through)) = asked.front() {
 				match stream.poll_acked(waiter, offset) {
 					Poll::Pending => break,
-					Poll::Ready(Ok(Acked::Delivered)) => {
+					Poll::Ready(Ok(())) => {
 						self.delivery.deliver(*through);
 						asked.pop_front();
-					}
-					Poll::Ready(Ok(_)) => {
-						self.ack = Ack::Unsupported;
-						break;
 					}
 					Poll::Ready(Err(_)) => {
 						self.ack = Ack::Ended;
@@ -567,11 +550,11 @@ mod tests {
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(
-				crate::Version::Ietf(crate::ietf::Version::Draft22),
+				crate::Version::ietf(crate::ietf::Version::Draft22),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
 			(
-				crate::Version::Lite(crate::lite::Version::Lite05),
+				crate::Version::lite(crate::lite::Version::Lite05),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
 		] {
@@ -667,15 +650,11 @@ mod tests {
 			self.0.lock().unwrap().written
 		}
 
-		fn poll_acked(
-			&self,
-			_: &kio::Waiter,
-			offset: &u64,
-		) -> Poll<Result<crate::transport::poll::Acked, Self::Error>> {
+		fn poll_acked(&self, _: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
 			let mut state = self.0.lock().unwrap();
 			match () {
-				_ if state.unsupported => Poll::Ready(Ok(crate::transport::poll::Acked::Unsupported)),
-				_ if *offset <= state.acked => Poll::Ready(Ok(crate::transport::poll::Acked::Delivered)),
+				// As the trait's default answers.
+				_ if state.unsupported || *offset <= state.acked => Poll::Ready(Ok(())),
 				_ if state.reset => Poll::Ready(Err(Stopped(0))),
 				_ => {
 					state.waits += 1;
@@ -878,8 +857,7 @@ mod tests {
 			.buffer(&lite::Track {
 				broadcast: crate::Path::from_static("test"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				track: "video".into(),
 			})
 			.unwrap();
@@ -908,7 +886,7 @@ mod tests {
 				starts: vec![Some(3)],
 			})
 			.unwrap();
-		writer.buffer(&lite::AnnounceBroadcast::Synced).unwrap();
+		writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 }).unwrap();
 		assert_eq!(
 			stats.snapshot().control().len(),
 			4,

@@ -102,7 +102,7 @@ jobs:
         with:
           node-version: "22"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: "21"
@@ -187,13 +187,13 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" \
             | sudo tee /etc/apt/sources.list.d/moq.list
           sudo apt-get update
-          sudo apt-get install -y moq-relay moq-cli
+          sudo apt-get install -y moq-relay moq
 
       - name: Install moq Rust packages (brew)
         if: matrix.channel == 'brew'
         run: |
           brew tap moq-dev/tap
-          brew install moq-dev/tap/moq-relay moq-dev/tap/moq-cli
+          brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 
       # Trusts the moq flake's nixConfig, which names the nix.moq.dev cache.
       - name: Install Nix (nix channel)
@@ -248,6 +248,8 @@ jobs:
       # Fail loudly if we've drifted off "latest": a committed lock file, a moq
       # package that stopped being requested at latest, or a stale playwright pin.
       - name: Freshness
+        env:
+          SMOKE_CHANNEL: ${{ matrix.channel }}
         run: just freshness
 
       # ── run the full interop matrix ────────────────────────────────────
@@ -343,7 +345,7 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" \
             | sudo tee /etc/apt/sources.list.d/moq.list
           sudo apt-get update
-          sudo apt-get install -y moq-cli
+          sudo apt-get install -y moq
 
       - name: Playwright system deps
         run: just playwright-deps

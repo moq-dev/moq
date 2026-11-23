@@ -31,10 +31,11 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Publish a finished group 5 (three frames) then an open group 6 (two frames), optionally
@@ -136,7 +137,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..])
 			.unwrap();
 	}
-	old.close().unwrap();
+	old.finish().unwrap();
 	let mut live = track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 	for _ in 0..2 {
 		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..])
@@ -257,7 +258,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..])
 			.unwrap();
 	}
-	old.close().unwrap();
+	old.finish().unwrap();
 	let mut live = track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 	for _ in 0..2 {
 		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..])

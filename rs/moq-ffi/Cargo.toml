@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 version = "0.4.12"
 edition = "2024"
+rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
@@ -36,7 +37,7 @@ moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true }
-# `nvidia` and `vaapi` back on, matching rs/moq-c: the workspace turns
+# `nvidia` and `vaapi` back on, matching rs/libmoq: the workspace turns
 # moq-video's defaults off for `capture` (device code the bindings don't
 # expose), and the codecs are collateral rather than the goal. Nothing is paid for them off Linux, since
 # cudarc / moq-nvenc / libloading / moq-vaapi sit behind
@@ -61,7 +62,11 @@ url = { workspace = true }
 jni = { workspace = true }
 
 [dev-dependencies]
+# The runtime's manual clock, for a test that owns the runtime: nextest runs each in its own process.
+kio = { workspace = true, features = ["manual"] }
 moq-shaper = { path = "../moq-shaper" }
+# A peer without MoQ Solicit.
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["test-support"] }
 # The video tests encode with OpenH264, the one encoder a GPU-less host has, so
 # they turn it on without the `openh264` feature.
 moq-video = { path = "../moq-video", features = ["openh264"] }

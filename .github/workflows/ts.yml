@@ -138,6 +138,16 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # The import killed 10 s into a live UDP feed and restarted 0.5 s later, a new instance,
+      # under a running `export ts --passthrough --stitch`: one gap, no longer than the
+      # downtime plus the restarted import's first group.
+      - name: TS passthrough across a restarted import
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --restart 10
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
       # so the export has to spread it over the slots before its DTS and still keep
       # the constant-rate schedule.
@@ -244,7 +254,7 @@ jobs:
         run: nix develop --command just test ts --headroom --rate 7000000 --queue 250ms --duration 120
         env:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_QUIC_CONGESTION_CONTROL: loss
+          MOQ_QUIC_CONGESTION_CONTROL: cubic
 
       # Passthrough over the overflowing path, under its 10 Mb/s multiplex: what arrives must be
       # the source's packets in place, through the source's last packet.
@@ -253,7 +263,7 @@ jobs:
         run: nix develop --command just test ts --passthrough --rate 7000000 --queue 250ms --duration 120
         env:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_QUIC_CONGESTION_CONTROL: loss
+          MOQ_QUIC_CONGESTION_CONTROL: cubic
 
       # Two minutes of MoQ content faults and a congested bottleneck, on a paused clock: each
       # recovery graded against what was delivered and decoded, and the latency must not drift.

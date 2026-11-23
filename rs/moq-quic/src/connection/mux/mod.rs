@@ -287,12 +287,7 @@ impl Connection {
 		if let Err(err) = self.process(payload, now) {
 			self.fail(err);
 		}
-	}
-
-	/// The transport refused an incoming record larger than `max_record_size`, or a draft-00
-	/// frame larger than `max_frame_size`, rather than read it into memory
-	pub fn handle_oversized(&mut self) {
-		self.fail(self.oversized());
+		self.observe_credit(now);
 	}
 
 	/// The transport found the peer violating its framing, such as overrunning a buffer it
@@ -384,6 +379,8 @@ impl Connection {
 
 	/// The next record to write, if any, its stream data waiting on [`Self::transmitted`]
 	fn take(&mut self, now: Instant) -> Option<Bytes> {
+		// A write that blocked on the peer's credit woke this call: date its wait from here.
+		self.observe_credit(now);
 		if let Some((frame, streams)) = self.queued.pop_front() {
 			self.unconfirmed.push_back(streams);
 			return Some(frame);
@@ -423,6 +420,13 @@ impl Connection {
 		} else if due.ping {
 			self.ping_request = true;
 		}
+		self.observe_credit(now);
+	}
+
+	/// Accrue a writer's wait on the peer's credit, and a hold on the spent receive window, up to `now`
+	fn observe_credit(&mut self, now: Instant) {
+		let closed = self.is_closed();
+		self.streams.observe_credit(now, closed);
 	}
 
 	/// Open and accept streams
@@ -464,6 +468,11 @@ impl Connection {
 	/// Receive flow control as the receiver sees it, evictions included
 	pub fn credit_stats(&self) -> super::CreditStats {
 		self.streams.credit_stats()
+	}
+
+	/// Send flow control: how long writers waited on the peer's `MAX_DATA`
+	pub fn send_credit_stats(&self) -> super::SendCreditStats {
+		self.streams.send_credit_stats()
 	}
 
 	/// Change the windows and stream counts `limits` sets, leaving the others as they are
@@ -650,12 +659,15 @@ impl Connection {
 
 	fn process(&mut self, mut payload: Bytes, now: Instant) -> Result<(), TransportError> {
 		let size = payload.len();
-		let limit = match self.config.version.uses_records() {
-			true => self.config.max_record_size.into_inner(),
-			false => MAX_FRAME_SIZE as u64,
+		let (limit, oversized) = match self.config.version.uses_records() {
+			true => (
+				self.config.max_record_size.into_inner(),
+				"record exceeds max_record_size",
+			),
+			false => (MAX_FRAME_SIZE as u64, "frame exceeds max_frame_size"),
 		};
 		if size as u64 > limit {
-			return Err(self.oversized());
+			return Err(TransportError::FRAME_ENCODING_ERROR(oversized));
 		}
 		// What the record keeps allocated while a stream holds a slice of it, which bounds how
 		// much memory the peer's buffered data pins. A transport may slice records out of a
@@ -691,14 +703,6 @@ impl Connection {
 		}
 		self.streams.queue_max_stream_id(&mut self.pending);
 		Ok(())
-	}
-
-	/// The error for a record or draft-00 frame over its size limit
-	fn oversized(&self) -> TransportError {
-		match self.config.version.uses_records() {
-			true => TransportError::FRAME_ENCODING_ERROR("record exceeds max_record_size"),
-			false => TransportError::FRAME_ENCODING_ERROR("frame exceeds max_frame_size"),
-		}
 	}
 
 	/// End the connection over a violation, telling the peer with a CONNECTION_CLOSE, unless it

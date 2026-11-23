@@ -48,11 +48,15 @@ pub enum Error {
 	#[error("cmaf: {0}")]
 	Cmaf(#[from] crate::container::fmp4::Error),
 
+	/// Error importing or exporting MPEG-TS.
+	#[error("ts: {0}")]
+	Ts(crate::container::ts::Error),
+
 	/// Error parsing or building MKV / WebM streams.
 	#[error("mkv: {0}")]
 	Mkv(#[from] crate::container::mkv::Error),
 
-	/// An FLV export error.
+	/// Error importing or exporting FLV.
 	#[error("flv: {0}")]
 	Flv(#[from] crate::container::flv::Error),
 
@@ -120,10 +124,6 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
 
-	/// URL parse error.
-	#[error("url: {0}")]
-	Url(String),
-
 	/// Unknown media format.
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
@@ -150,6 +150,23 @@ pub enum Error {
 		wanted: &'static str,
 	},
 
+	/// Video does not fit the reorder depth it declares.
+	#[error("{0}")]
+	Reorder(#[from] crate::container::ReorderError),
+
+	/// An export's source clock runs further off the output's than the output may follow.
+	#[error("the source's clock runs {ppm:+.1} ppm off ours, past the {limit:.0} ppm the output's may follow")]
+	Drift {
+		/// How far off the source's clock runs, in parts per million.
+		ppm: f64,
+		/// The most the output's clock follows, in parts per million.
+		limit: f64,
+	},
+
+	/// A publisher an export handed off from queued media after its handoff deadline.
+	#[error("a retired publisher queued after its handoff deadline")]
+	Retired,
+
 	/// A non-keyframe frame was received before any keyframe opened a group.
 	/// A track joining mid-stream should skip frames until the first keyframe.
 	#[error("{0}")]
@@ -175,11 +192,6 @@ pub enum Error {
 		/// The signed FLV composition-time offset in milliseconds.
 		composition_time_ms: i32,
 	},
-
-	/// Error from a muxer/demuxer that reports via `anyhow` (currently the MPEG-TS demuxer).
-	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
-	#[error("{0}")]
-	Other(std::sync::Arc<anyhow::Error>),
 
 	/// A timestamp cannot be mapped between the broadcast clock and the wall: PTS zero would land
 	/// before the moq epoch (2020) or after now, the host's wall clock was unset so the clock has no
@@ -232,6 +244,11 @@ pub enum Error {
 	#[error("capture time is outside the broadcast clock")]
 	InvalidCapture,
 
+	/// A transport stream passthrough's catalog extension carries no `mpegts` section to list its
+	/// track in.
+	#[error("a passthrough lists its track in the `mpegts` section, which the catalog extension does not carry")]
+	NoMpegtsSection,
+
 	/// A transport stream passthrough was fed packets other than 188 bytes.
 	///
 	/// A 192-byte source (BDAV M2TS, a four-byte timestamp before each packet) or a 204-byte one
@@ -239,34 +256,6 @@ pub enum Error {
 	/// would break the byte identity passthrough exists for.
 	#[error("transport stream uses {0}-byte packets; passthrough carries 188-byte packets only")]
 	TsPacketSize(usize),
-
-	/// The clock PID's PCR went backwards without `discontinuity_indicator`.
-	///
-	/// The source broke its own timebase without saying so, which leaves no timestamp that both
-	/// follows the PCR and stays on one timeline.
-	#[error("PCR on PID {pid} went back from {from} to {to} without a discontinuity_indicator")]
-	PcrRewind {
-		/// The clock PID.
-		pid: u16,
-		/// The previous PCR, raw 27 MHz ticks.
-		from: u64,
-		/// The PCR that stepped back, raw 27 MHz ticks.
-		to: u64,
-	},
-
-	/// The clock PID's PCR went backwards with `discontinuity_indicator`: the source restarted.
-	///
-	/// What follows is new content, which belongs in a new broadcast rather than on a timeline that
-	/// steps back, so the import ends here.
-	#[error("PCR on PID {pid} restarted from {from} back to {to}; a restart needs a new broadcast")]
-	PcrRestart {
-		/// The clock PID.
-		pid: u16,
-		/// The previous PCR, raw 27 MHz ticks.
-		from: u64,
-		/// The flagged PCR, raw 27 MHz ticks.
-		to: u64,
-	},
 
 	/// The clock PID carried no PCR across more bytes than a group may hold.
 	///
@@ -321,9 +310,28 @@ impl Error {
 	}
 }
 
-impl From<anyhow::Error> for Error {
-	fn from(err: anyhow::Error) -> Self {
-		Error::Other(std::sync::Arc::new(err))
+impl From<crate::jitter::Error> for Error {
+	fn from(err: crate::jitter::Error) -> Self {
+		match err {
+			crate::jitter::Error::Drift { ppm, limit } => Self::Drift { ppm, limit },
+			crate::jitter::Error::Retired => Self::Retired,
+		}
+	}
+}
+
+impl From<crate::codec::aac::adts::Error> for Error {
+	fn from(err: crate::codec::aac::adts::Error) -> Self {
+		Self::Aac(err.into())
+	}
+}
+
+impl From<crate::container::ts::Error> for Error {
+	/// A TS error wrapping one of these unwraps to it, so neither nests in the other.
+	fn from(err: crate::container::ts::Error) -> Self {
+		match err {
+			crate::container::ts::Error::Mux(err) => *err,
+			err => Self::Ts(err),
+		}
 	}
 }
 
@@ -331,13 +339,6 @@ impl Error {
 	/// An mp4 atom error, kept opaque so an mp4-atom bump is no moq-mux break.
 	pub(crate) fn mp4(err: mp4_atom::Error) -> Self {
 		Error::Mp4(std::sync::Arc::new(err))
-	}
-}
-
-// Flattened to its message so `url` stays out of this crate's public API.
-impl From<url::ParseError> for Error {
-	fn from(err: url::ParseError) -> Self {
-		Error::Url(message(err))
 	}
 }
 

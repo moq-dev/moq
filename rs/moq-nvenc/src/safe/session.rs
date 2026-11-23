@@ -5,7 +5,7 @@
 //! frames. The [`Session`] also stores some information such as the encode
 //! width and height so that you do not have to keep repeating it each time.
 
-use std::{fmt::Debug, sync::Arc};
+use std::{error::Error, fmt, fmt::Debug, sync::Arc};
 
 use super::{
 	encoder::Encoder,
@@ -13,8 +13,9 @@ use super::{
 };
 use crate::{
 	sys::nvEncodeAPI::{
-		GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CONFIG, NV_ENC_INITIALIZE_PARAMS, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS,
-		NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_RECONFIGURE_PARAMS, NV_ENC_RECONFIGURE_PARAMS_VER,
+		GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CONFIG, NV_ENC_INITIALIZE_PARAMS, NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_FLAGS,
+		NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_RECONFIGURE_PARAMS,
+		NV_ENC_RECONFIGURE_PARAMS_VER,
 	},
 	Bitstream, EncoderInput,
 };
@@ -24,6 +25,14 @@ use crate::{
 /// You need to call [`Encoder::start_session`] before you can
 /// encode frames using the session. On drop, the session will automatically
 /// send an empty EOS frame to flush the encoder.
+///
+/// The driver session is not thread-safe, so a `Session` cannot leave its
+/// thread, and submitting to it takes `&mut self`:
+///
+/// ```compile_fail,E0277
+/// fn is_send<T: Send>() {}
+/// is_send::<moq_nvenc::Session>();
+/// ```
 pub struct Session {
 	pub(crate) encoder: Arc<Encoder>,
 	pub(crate) width: u32,
@@ -43,6 +52,10 @@ pub struct Session {
 	/// the caller supplied no config (NVENC then uses preset defaults, which we
 	/// can't resubmit because we never saw them).
 	pub(crate) config: Option<Box<NV_ENC_CONFIG>>,
+
+	/// Set once [`end_of_stream`](Self::end_of_stream) is accepted: the driver
+	/// takes no pictures after it.
+	pub(crate) ended: bool,
 }
 
 // Hand-written because the retained bindgen params are plain C structs with no
@@ -101,8 +114,10 @@ impl Session {
 		&self.encoder
 	}
 
-	/// Change the average bitrate (bits per second) of the running session,
-	/// taking effect from roughly the next frame.
+	/// Change the bitrate (bits per second) the running session is held to, taking
+	/// effect from roughly the next frame: the peak of a VBR config that set one,
+	/// else the average (CBR ignores the peak). The other rates and the VBV the
+	/// config set keep their ratio to it.
 	///
 	/// The encoder keeps running: no IDR is forced and no state is reset, so
 	/// this is safe to call as often as a congestion controller updates. That is
@@ -115,8 +130,8 @@ impl Session {
 	///
 	/// Returns [`ErrorKind::InvalidParam`] when the session was started without
 	/// an encode config, since there is then no config to resubmit, when
-	/// `bitrate` is zero, when a nonzero VBV would scale to zero, or when the
-	/// proportionally scaled VBV overflows.
+	/// `bitrate` is zero, or when a nonzero rate or VBV would scale to zero or
+	/// overflow.
 	/// Otherwise returns whatever `NvEncReconfigureEncoder` reports, e.g.
 	/// [`ErrorKind::UnsupportedParam`] if the driver rejects the rate change.
 	/// After any error the session keeps its last accepted rate settings.
@@ -148,7 +163,11 @@ impl Session {
 	/// Could error if the encode picture parameters were invalid or otherwise
 	/// incorrect, or if we run out memory.
 	///
-	/// An encoder-busy result is returned as an error so the caller can retry.
+	/// A refused picture hands both buffers back in [`Rejected`], so the caller
+	/// can retry after [`ErrorKind::EncoderBusy`](super::ErrorKind::EncoderBusy)
+	/// without recreating them. Once [`end_of_stream`](Self::end_of_stream) has
+	/// been accepted, every picture is refused with
+	/// [`ErrorKind::InvalidCall`](super::ErrorKind::InvalidCall).
 	/// A need-more-input result is instead represented by the returned
 	/// [`Submission`], which retains both buffers until completion.
 	/// [`Encoder::start_session`] refuses lookahead and B-frames, which are what
@@ -157,9 +176,9 @@ impl Session {
 	/// Safe code cannot release the input while it is in flight because the
 	/// submission owns it:
 	///
-	/// ```compile_fail
+	/// ```compile_fail,E0382
 	/// # use moq_nvenc::{Bitstream, Buffer, EncodePictureParams, Session};
-	/// fn submit(session: &Session, input: Buffer, output: Bitstream) {
+	/// fn submit(session: &mut Session, input: Buffer, output: Bitstream) {
 	///     let pending = session.encode_picture(input, output, EncodePictureParams::default()).unwrap();
 	///     drop(input);
 	///     drop(pending);
@@ -205,7 +224,7 @@ impl Session {
 	/// initialize_params.display_aspect_ratio(16, 9)
 	///     .framerate(30, 1)
 	///     .enable_picture_type_decision();
-	/// let session = encoder.start_session(
+	/// let mut session = encoder.start_session(
 	///     buffer_format,
 	///     initialize_params,
 	/// ).unwrap();
@@ -232,16 +251,22 @@ impl Session {
 	/// let (data, _input_buffer, _output_bitstream) = submission.finish().unwrap();
 	/// ```
 	pub fn encode_picture<I: EncoderInput>(
-		&self,
+		&mut self,
 		mut input_buffer: I,
 		output_bitstream: Bitstream,
 		params: EncodePictureParams,
-	) -> Result<Submission<I>, EncodeError> {
+	) -> Result<Submission<I>, Rejected<I>> {
+		let reject = |error, input, output| Rejected { error, input, output };
+		if self.ended {
+			let error = EncodeError::new(ErrorKind::InvalidCall, Some("the stream already ended".into()));
+			return Err(reject(error, input_buffer, output_bitstream));
+		}
 		if !same_session(input_buffer.encoder(), &output_bitstream.encoder, &self.encoder) {
-			return Err(EncodeError::new(
+			let error = EncodeError::new(
 				ErrorKind::InvalidParam,
 				Some("input and output must belong to this session".into()),
-			));
+			);
+			return Err(reject(error, input_buffer, output_bitstream));
 		}
 		let mut encode_pic_params = NV_ENC_PIC_PARAMS {
 			version: NV_ENC_PIC_PARAMS_VER,
@@ -272,7 +297,7 @@ impl Session {
 			Err(error) if error.kind() == ErrorKind::NeedMoreInput => {
 				Ok(Submission::new(input_buffer, output_bitstream))
 			}
-			Err(error) => Err(error),
+			Err(error) => Err(reject(error, input_buffer, output_bitstream)),
 		}
 	}
 
@@ -280,6 +305,8 @@ impl Session {
 	///
 	/// This function is called automatically on drop, but if you wish to
 	/// get the data after flushing, you should call this function yourself.
+	/// The session takes no more pictures once it is accepted, and a second call
+	/// errors with [`ErrorKind::InvalidCall`](super::ErrorKind::InvalidCall).
 	///
 	/// # Errors
 	///
@@ -288,16 +315,51 @@ impl Session {
 	/// If this returns an error with
 	/// [`ErrorKind::EncoderBusy`](super::ErrorKind::EncoderBusy) then you
 	/// should retry after a few milliseconds.
-	pub fn end_of_stream(&self) -> Result<(), EncodeError> {
+	pub fn end_of_stream(&mut self) -> Result<(), EncodeError> {
+		if self.ended {
+			return Err(EncodeError::new(
+				ErrorKind::InvalidCall,
+				Some("the stream already ended".into()),
+			));
+		}
 		let mut encode_pic_params = NV_ENC_PIC_PARAMS::end_of_stream();
-		unsafe { (self.encoder.api.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)
+		unsafe { (self.encoder.api.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)?;
+		// Only after the driver accepts it: a busy or failed EOS may be retried.
+		self.ended = true;
+		Ok(())
 	}
 }
 
 /// Send an EOS notifications on drop to flush the encoder.
 impl Drop for Session {
 	fn drop(&mut self) {
-		let _ = self.end_of_stream();
+		if !self.ended {
+			let _ = self.end_of_stream();
+		}
+	}
+}
+
+/// A picture [`Session::encode_picture`] refused, with the buffers it was given:
+/// the driver never took them, so they are free to reuse.
+#[derive(Debug)]
+pub struct Rejected<I> {
+	/// Why the picture was refused.
+	pub error: EncodeError,
+	/// The input, untouched by the driver.
+	pub input: I,
+	/// The output, untouched by the driver.
+	pub output: Bitstream,
+}
+
+impl<I> fmt::Display for Rejected<I> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		fmt::Display::fmt(&self.error, f)
+	}
+}
+
+impl<I: Debug> Error for Rejected<I> {
+	fn source(&self) -> Option<&(dyn Error + 'static)> {
+		Some(&self.error)
 	}
 }
 
@@ -363,24 +425,37 @@ fn retune(
 
 	let mut candidate = *config;
 	let rc = &mut candidate.rcParams;
-	// Keep a caller-sized VBV proportional to the rate, so a buffer sized to
-	// one frame at open stays one frame: left alone it would loosen the
-	// keyframe cap as the bitrate falls, right when the link can least afford it.
-	if rc.vbvBufferSize != 0 && rc.averageBitRate != 0 {
-		let basis = u64::from(rc.averageBitRate);
+	// The rate the session is held to: the peak of a VBR session that sets one,
+	// else the average (CBR ignores the peak). Every other rate the caller set
+	// keeps its ratio to it, so a VBV sized to one frame at open stays one frame,
+	// and an average below the peak stays the same share of it. Left alone, a VBV
+	// would loosen the keyframe cap as the bitrate falls, right when the link can
+	// least afford it.
+	let peaked = rc.rateControlMode == NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_VBR && rc.maxBitRate != 0;
+	let basis = match peaked {
+		true => rc.maxBitRate,
+		false => rc.averageBitRate,
+	};
+	if basis == 0 {
+		// Nothing set yet, so there is nothing to keep in proportion.
+		rc.averageBitRate = bitrate;
+	} else {
 		let scale = |v: u32| {
-			let scaled = u64::from(v) * u64::from(bitrate) / basis;
-			// Rounding a nonzero VBV to zero is the same dead end as a zero rate:
-			// the next retune would skip this branch and could never restore it.
+			let scaled = u64::from(v) * u64::from(bitrate) / u64::from(basis);
+			// Rounding a nonzero rate to zero is the same dead end as a zero rate:
+			// the next retune would skip it and could never restore it.
 			if v != 0 && scaled == 0 {
-				return Err(invalid("scaled VBV must be nonzero"));
+				return Err(invalid("a scaled rate or VBV must be nonzero"));
 			}
-			u32::try_from(scaled).map_err(|_| invalid("scaled VBV exceeds u32"))
+			u32::try_from(scaled).map_err(|_| invalid("a scaled rate or VBV exceeds u32"))
 		};
+		rc.averageBitRate = scale(rc.averageBitRate)?;
+		if peaked {
+			rc.maxBitRate = scale(rc.maxBitRate)?;
+		}
 		rc.vbvBufferSize = scale(rc.vbvBufferSize)?;
 		rc.vbvInitialDelay = scale(rc.vbvInitialDelay)?;
 	}
-	rc.averageBitRate = bitrate;
 
 	// NVENC copies the config during the call, so pointing it at the local
 	// candidate is sound; `init` keeps pointing at the committed copy.
@@ -598,6 +673,35 @@ mod tests {
 		assert_eq!(rates(&config), (2_000_000, 200_000, 200_000));
 	}
 
+	/// A VBR config moves its peak, and the average, if any, and the VBV keep
+	/// their share of it. A CBR config moves its average, whatever its peak.
+	#[test]
+	fn peak_is_the_rate_a_vbr_session_moves() {
+		let init = NV_ENC_INITIALIZE_PARAMS::default();
+		let peak = |average: u32| {
+			let mut config = rate_config(average, 133_333);
+			config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_VBR;
+			config.rcParams.maxBitRate = 4_000_000;
+			config
+		};
+		let held = |config: &NV_ENC_CONFIG| (config.rcParams.maxBitRate, rates(config));
+
+		// Constant quality: no average, only the peak.
+		let mut config = peak(0);
+		retune(&init, &mut config, 2_000_000, |_| Ok(())).unwrap();
+		assert_eq!(held(&config), (2_000_000, (0, 66_666, 66_666)));
+
+		let mut config = peak(3_000_000);
+		retune(&init, &mut config, 2_000_000, |_| Ok(())).unwrap();
+		assert_eq!(held(&config), (2_000_000, (1_500_000, 66_666, 66_666)));
+
+		// CBR ignores the peak, so the average is what moves, to the rate asked.
+		let mut config = peak(2_000_000);
+		config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
+		retune(&init, &mut config, 1_000_000, |_| Ok(())).unwrap();
+		assert_eq!(held(&config), (4_000_000, (1_000_000, 66_666, 66_666)));
+	}
+
 	#[test]
 	fn rate_that_zeroes_a_nonzero_vbv_is_refused_before_the_driver() {
 		let init = NV_ENC_INITIALIZE_PARAMS::default();
@@ -709,7 +813,7 @@ mod tests {
 		refuse_explicit(|config| config.rcParams.set_enableExtLookahead(1));
 		refuse_explicit(|config| config.frameIntervalP = 2);
 
-		let session = low_latency_session().expect("NVENC device disappeared");
+		let mut session = low_latency_session().expect("NVENC device disappeared");
 		let input = session.create_input_buffer().unwrap();
 		let output = session.create_output_bitstream().unwrap();
 		session
@@ -757,5 +861,29 @@ mod tests {
 
 		drop(session);
 		assert!(encoder.upgrade().is_none(), "failed submissions kept the session open");
+	}
+
+	/// The driver takes no picture after end-of-stream, so the session refuses
+	/// it before the driver does and hands the buffers back unused.
+	#[test]
+	fn pictures_after_end_of_stream_are_rejected_with_their_buffers() {
+		let Some(mut session) = low_latency_session() else {
+			return;
+		};
+		let input = session.create_input_buffer().unwrap();
+		let output = session.create_output_bitstream().unwrap();
+
+		session.end_of_stream().expect("end of stream was refused");
+		let error = session
+			.end_of_stream()
+			.expect_err("a second end of stream was accepted");
+		assert_eq!(error.kind(), ErrorKind::InvalidCall);
+
+		let rejected = session
+			.encode_picture(input, output, EncodePictureParams::default())
+			.expect_err("a picture after end of stream was accepted");
+		assert_eq!(rejected.error.kind(), ErrorKind::InvalidCall);
+		// The buffers are intact and still destroy cleanly.
+		drop((rejected.input, rejected.output));
 	}
 }

@@ -13,7 +13,7 @@ payload stalls is never recovered
 ## Plan
 
 Decided 2026-11-15 (maintainer, /quest-plan): ✅ planned again, in m3, as the
-secondary route of [cache-aware multicast](/quest/m2/multicast/README.md)
+secondary route of [cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md)
 (requirement 13: "don't rely on QUIC keep-alives for fast failovers"). The
 first epic was deleted 2026-11-09 for want of a consumer
 ([moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)); read it with
@@ -65,9 +65,9 @@ New on 2026-11-15, from the prior art this is closest to:
 - A relay stops asking its standby when the standby is the only thing it
   serves that track to, so two relays never keep each other alive (the same
   RFC's rule for its secondary).
-- The answer to a metadata-only subscription is also where a neighbour says
-  whether it carries the Instance, if
-  [warmth](/quest/m2/multicast/warmth.md) picks that.
+- The answer to a metadata-only subscription carries the neighbour's offer
+  and data path for the Instance, as every subscribe answer does under
+  [cache-aware routing](/quest/m3/cache-routing/select.md).
 
 This README's own work, once its children land: end-to-end validation across
 a multi-hop relay network. Stalled video moves while healthy audio stays, a

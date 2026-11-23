@@ -2,8 +2,9 @@ import Foundation
 import MoqFFI
 
 /// What the peer lets this side do, in this side's own paths: the broadcast
-/// patterns it may publish and subscribe to, and `expires` until it lapses.
-/// An empty pattern list grants nothing in that direction; `**` grants everything.
+/// prefixes it may publish and subscribe to, and `expires` until it lapses. Each
+/// prefix covers its path and everything beneath it. An empty list grants nothing
+/// in that direction; the empty prefix `""` grants everything.
 public typealias Grant = MoqFFI.MoqGrant
 
 /// Follows the grant a session's peer gave it. Iterate directly:
@@ -77,7 +78,6 @@ public final class Tokens: Sendable {
     /// each other one widens the grant over in-band AUTH. The next dial presents them,
     /// and a live session with in-band AUTH presents them at once, withdrawing each
     /// replaced token once its replacements are answered, even when one is refused.
-    /// After an authorization refusal the session redials only if they changed.
     /// - Throws: `MoqError.Config` for an empty token.
     public func set(_ tokens: [String]) throws {
         try ffi.set(tokens: tokens)

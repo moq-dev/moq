@@ -11,9 +11,11 @@ use moq_net::{Instance, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
@@ -145,7 +147,7 @@ async fn next_hop_lost(version: &str) {
 	let _second_hop = link(
 		version,
 		&standby,
-		&relay.clone().with_preference(origin::Preference::new(-1)),
+		&relay.clone().with_priority(origin::Priority::new(-1)),
 	)
 	.await;
 	if let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
@@ -156,12 +158,16 @@ async fn next_hop_lost(version: &str) {
 	first_hop.client.abort(moq_net::Error::Cancel);
 	let event = kio::clock::timeout(Duration::from_secs(10), announced.next()).await;
 	match version.to_string().as_str() {
-		// The relay already serves the claim through every feasible route, so the
-		// standby carries on with nothing to announce.
+		// The relay already serves the claim through both neighbors, so the standby
+		// carries on: the route moves in place, under the same instance.
 		"moq-lite-07-wip" => {
-			if let Ok(event) = event {
-				panic!("{version}: expected the same stream to continue, got {event:?}");
-			}
+			let event = event.expect("announce hung").expect("announce ended");
+			assert_eq!(event.kind, origin::RouteKind::Update, "{version}: {event:?}");
+			assert_eq!(
+				event.announce.route.instance(),
+				&first,
+				"{version}: expected the same stream to continue"
+			);
 			kio::clock::timeout(Duration::from_secs(10), relay.consume().request("job", None))
 				.await
 				.expect("request hung")

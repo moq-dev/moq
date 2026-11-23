@@ -1,5 +1,6 @@
 //! Replays `tests/corpus.json`, which `js/auth/src/corpus.test.ts` replays too, so the
-//! two parsers cannot disagree on a token, key, key set, or grant without both failing.
+//! two parsers cannot disagree on a token, key, key set, grant, or signable root without
+//! both failing.
 
 use crate::{Claims, Grant, Key, KeySet};
 use kio::clock::Wall;
@@ -16,6 +17,16 @@ struct Corpus {
 	jwk: Vec<Case>,
 	sets: Vec<Case>,
 	grants: Vec<Case>,
+	roots: Vec<RootCase>,
+}
+
+/// A root, and whether a token or key scope may be minted for it: exactly when
+/// `moq_net::Path::new` accepts it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootCase {
+	root: String,
+	signable: bool,
 }
 
 /// A token, given signed or as a payload the case's key signs here, and the claims it
@@ -45,8 +56,8 @@ fn corpus() -> Corpus {
 	serde_json::from_str(include_str!("../tests/corpus.json")).unwrap()
 }
 
-/// The claims as the corpus writes them: patterns reduced, absent roles empty, and
-/// rates and times only when present.
+/// The claims as the corpus writes them: patterns reduced, absent roles empty, a capped
+/// role as its wire object, and times and the token ID only when present.
 fn canonical(claims: &Claims) -> Value {
 	let seconds = |wall: Wall| wall.checked_duration_since(Wall::UNIX_EPOCH).unwrap().as_secs();
 	let mut out = json!({
@@ -55,8 +66,6 @@ fn canonical(claims: &Claims) -> Value {
 		"subscribe": claims.subscribe,
 	});
 	let fields = [
-		("publish_rate", claims.publish_rate.map(u64::from)),
-		("subscribe_rate", claims.subscribe_rate.map(u64::from)),
 		("exp", claims.expires.map(seconds)),
 		("iat", claims.issued.map(seconds)),
 		("nbf", claims.not_before.map(seconds)),
@@ -65,6 +74,9 @@ fn canonical(claims: &Claims) -> Value {
 		if let Some(value) = value {
 			out[field] = value.into();
 		}
+	}
+	if let Some(id) = &claims.id {
+		out["jti"] = id.encode().into();
 	}
 	out
 }
@@ -131,5 +143,23 @@ fn documents() {
 				_ => {}
 			}
 		}
+	}
+}
+
+#[test]
+fn roots() {
+	let corpus = corpus();
+	let key: Key = serde_json::from_value(corpus.keys["hs256"].clone()).unwrap();
+	let all = crate::Prefixes::all();
+	for case in corpus.roots {
+		let claims = Claims::default().with_root(&case.root).with_publish(all.clone());
+		let scope = crate::Scope {
+			root: case.root.clone(),
+			publish: all.clone(),
+			subscribe: Default::default(),
+		};
+		let signed = key.sign(&claims).is_ok();
+		let scoped = key.clone().with_scope(scope).is_ok();
+		assert_eq!((signed, scoped), (case.signable, case.signable), "{:?}", case.root);
 	}
 }

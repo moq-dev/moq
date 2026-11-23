@@ -54,9 +54,11 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn millis(ms: u64) -> Timestamp {
@@ -123,11 +125,11 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Timestamp, track::I
 	match timed {
 		true => producer.write_frame(millis(7), &b"frame"[..]).unwrap(),
 		false => {
-			let mut group = producer.append_group(7).unwrap();
+			let mut group = producer.append_group(Timestamp::unscaled(7)).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"frame"[..])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	}
 	let received = next_frame(&mut subscriber).await;
@@ -205,7 +207,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 			group
 				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"untimed"[..])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		kio::clock::sleep(Duration::from_secs(1)).await;
 
@@ -302,14 +304,14 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(3, timed()).unwrap();
+		let mut group = request.accept(3, timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(
 				moq_net::Timestamp::unscaled(group.start),
 				Bytes::from_static(b"segment"),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut fetched = waiting.await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().unwrap();

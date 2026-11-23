@@ -54,11 +54,11 @@ use prometheus_client::{
 /// list is always empty there and the renderer skips itself, rather than
 /// `cfg`-ing the two fields, the two struct literals that fill them, and the
 /// renderer's signature separately.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 type UringWorker = moq_uring::metrics::Metrics;
 
 /// One io_uring worker's counters. See the io_uring build's alias.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(uring))]
 type UringWorker = std::convert::Infallible;
 
 /// Configuration for the internal (ops) listener.
@@ -229,7 +229,7 @@ impl Internal {
 	/// Register them before the threads start, so a worker that never came up
 	/// (or has died) still has a series that has stopped moving rather than no
 	/// series at all.
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	pub(crate) fn with_uring(mut self, workers: impl IntoIterator<Item = UringWorker>) -> Self {
 		self.uring.extend(workers);
 		self
@@ -737,6 +737,80 @@ impl Scrape {
 		Ok(())
 	}
 
+	/// The per-tier route-layer counters of lite-07 sessions.
+	fn encode_routes(
+		&self,
+		encoder: &mut DescriptorEncoder,
+		sessions: &[(moq_net::stats::Tier, moq_net::stats::Presence)],
+	) -> std::fmt::Result {
+		use moq_net::stats::{RouteClose, RouteRefusal, Withdrawal};
+
+		counter(
+			encoder,
+			"moq_relay_route_changes",
+			"Changes to a relay's route that a peer caused.",
+			sessions
+				.iter()
+				.map(|(tier, presence)| ([("tier", tier.as_str())], presence.routes.changed)),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_route_rewrites",
+			"Broadcasts rewritten into the origin behind route changes.",
+			sessions
+				.iter()
+				.map(|(tier, presence)| ([("tier", tier.as_str())], presence.routes.rewritten)),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_route_withdrawals",
+			"Route withdrawals sent and received, by kind.",
+			sessions.iter().flat_map(|(tier, presence)| {
+				let routes = &presence.routes;
+				[("sent", routes.sent), ("received", routes.received)]
+					.into_iter()
+					.flat_map(move |(direction, counts)| {
+						Withdrawal::ALL.iter().map(move |&kind| {
+							(
+								[
+									("tier", tier.as_str()),
+									("direction", direction),
+									("kind", kind.as_str()),
+								],
+								counts.count(kind),
+							)
+						})
+					})
+			}),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_route_refusals",
+			"Routes and claims a peer forwarded that the relay refused, keeping the session, by reason.",
+			sessions.iter().flat_map(|(tier, presence)| {
+				RouteRefusal::ALL.iter().map(|&reason| {
+					(
+						[("tier", tier.as_str()), ("reason", reason.as_str())],
+						presence.routes.refused.count(reason),
+					)
+				})
+			}),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_route_sessions_closed",
+			"Sessions closed for their route layer, by kind.",
+			sessions.iter().flat_map(|(tier, presence)| {
+				RouteClose::ALL.iter().map(|&kind| {
+					(
+						[("tier", tier.as_str()), ("kind", kind.as_str())],
+						presence.routes.closed.count(kind),
+					)
+				})
+			}),
+		)
+	}
+
 	/// The per-tier session counters, plus control bytes and messages split by message class.
 	fn encode_sessions(&self, encoder: &mut DescriptorEncoder) -> std::fmt::Result {
 		use moq_net::stats::{Presence, Totals};
@@ -752,6 +826,26 @@ impl Scrape {
 				"moq_relay_wire_rx_bytes",
 				"Transport bytes received, including framing, excluding IP, UDP, and TCP headers.",
 				|p| p.wire_rx,
+			),
+			(
+				"moq_relay_credit_stalls",
+				"Times a connection's write blocked with all the peer's connection-level credit (MAX_DATA) spent.",
+				|p| p.credit_stalls,
+			),
+			(
+				"moq_relay_credit_stalled_microseconds",
+				"Time connections spent with a write blocked on the peer's connection-level credit (MAX_DATA).",
+				|p| p.credit_stalled_us,
+			),
+			(
+				"moq_relay_credit_held_readers_microseconds",
+				"Time peers had a connection's whole receive window spent while a reader behind held eviction off.",
+				|p| p.credit_held_readers_us,
+			),
+			(
+				"moq_relay_credit_held_evicted_microseconds",
+				"Time peers had a connection's whole receive window spent while an evicted reader had yet to stop its stream.",
+				|p| p.credit_held_evicted_us,
 			),
 			("moq_relay_requests", "Admitted request/response exchanges.", |p| {
 				p.requests
@@ -798,6 +892,8 @@ impl Scrape {
 				})
 			}),
 		)?;
+
+		self.encode_routes(encoder, &sessions)?;
 
 		let control = self.stats.control();
 		for (name, help, field) in [
@@ -883,7 +979,7 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 /// exists for. The pool gauges are the buffer space each worker has allocated,
 /// which stays at its high-water mark after a burst; only the pages datagrams
 /// have touched count toward RSS.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std::fmt::Result {
 	use moq_uring::metrics::Snapshot;
 
@@ -1046,17 +1142,17 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 
 /// Off the io_uring path there are no workers to describe, and [`UringWorker`]
 /// is uninhabited, so the list handed here is always empty.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(uring))]
 fn encode_uring(_encoder: &mut DescriptorEncoder, _workers: &[UringWorker]) -> std::fmt::Result {
 	Ok(())
 }
 
 /// An io_uring worker's histogram, whose cumulative buckets the encoder takes as
 /// per-bucket counts.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 struct Distribution(moq_uring::metrics::Histogram);
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 impl EncodeMetric for Distribution {
 	fn encode(&self, mut encoder: prometheus_client::encoding::MetricEncoder) -> std::fmt::Result {
 		let mut below = 0;
@@ -1409,7 +1505,7 @@ mod tests {
 	/// yet is empty rather than zero, so an alert on a worker whose receive pool
 	/// has started running dry is unwritable until it has already happened. A
 	/// worker that never started has to publish stuck zeros, not nothing.
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	#[test]
 	fn uring_metrics_list_every_worker_from_zero() {
 		let workers = vec![
@@ -1490,7 +1586,7 @@ mod tests {
 	}
 
 	/// A worker's cumulative buckets come out cumulative again, not summed twice.
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	#[test]
 	fn uring_histograms_keep_cumulative_buckets() {
 		let histogram = moq_uring::metrics::Histogram {
@@ -1650,7 +1746,7 @@ mod tests {
 		drop(
 			stats
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
-				.request(moq_net::Path::from_static("root")),
+				.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))),
 		);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1669,7 +1765,7 @@ mod tests {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let request = stats
 			.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("http")))
-			.request(moq_net::Path::from_static("root"));
+			.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root")));
 		drop(request);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(body.contains("# TYPE moq_relay_requests counter"), "{body}");
@@ -1817,7 +1913,10 @@ mod tests {
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track
-				.append_group(pub_track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(pub_track.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
 				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 12])
@@ -1825,16 +1924,18 @@ mod tests {
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 34])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		{
 			let mut group = pub_track
-				.append_group(pub_track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					Timestamp::from_millis(pub_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
 				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(10_000).unwrap(), vec![0u8; 1234])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut group = egress_sub.recv_group().await.unwrap().unwrap();
 		while group.read_frame().await.unwrap().is_some() {}
@@ -1842,12 +1943,15 @@ mod tests {
 		// Write 56 ingress bytes into the regional-tier broadcast.
 		{
 			let mut group = sub_track
-				.append_group(sub_track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(sub_track.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
 				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 56])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
@@ -1908,12 +2012,14 @@ mod tests {
 			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
 		}
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		for reader in &mut readers {
 			let mut group = reader.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, payload.as_bytes());
@@ -2001,7 +2107,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn()
 			.with_stats(edge.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let _broadcast = origin.route("demo", moq_net::origin::RouteOptions::default()).unwrap();
-		drop(edge.request(moq_net::Path::from_static("root")));
+		drop(edge.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let refusals = crate::refusals::Refusals::default();
 		refusals.record(crate::refusals::RefusalKind::Unavailable);
 		let (_trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(1));
@@ -2012,9 +2118,9 @@ mod tests {
 			refusals: Some(refusals),
 			sessions: crate::session::Registry::new(),
 			listeners: vec![moq_tokio::accept::Health::new("tcp")],
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			uring: vec![moq_uring::metrics::Metrics::default()],
-			#[cfg(not(target_os = "linux"))]
+			#[cfg(not(uring))]
 			uring: Vec::new(),
 			demux: Some(moq_tokio::quic::demux::Counters::default()),
 			shutdown: Some(shutdown),
@@ -2032,7 +2138,7 @@ mod tests {
 		actual.remove(panics);
 
 		let mut expected: Vec<String> = EXPECTED_SERIES.trim().lines().map(str::to_string).collect();
-		#[cfg(target_os = "linux")]
+		#[cfg(uring)]
 		expected.extend(EXPECTED_URING_SERIES.trim().lines().map(str::to_string));
 		expected.extend(EXPECTED_DEMUX_SERIES.trim().lines().map(str::to_string));
 		expected.sort();
@@ -2049,6 +2155,10 @@ mod tests {
 # TYPE moq_relay_control_rx_messages_total counter
 # TYPE moq_relay_control_tx_bytes_total counter
 # TYPE moq_relay_control_tx_messages_total counter
+# TYPE moq_relay_credit_held_evicted_microseconds_total counter
+# TYPE moq_relay_credit_held_readers_microseconds_total counter
+# TYPE moq_relay_credit_stalled_microseconds_total counter
+# TYPE moq_relay_credit_stalls_total counter
 # TYPE moq_relay_datagrams_total counter
 # TYPE moq_relay_draining_sessions gauge
 # TYPE moq_relay_fetches_total counter
@@ -2057,6 +2167,11 @@ mod tests {
 # TYPE moq_relay_inflated_bytes_total counter
 # TYPE moq_relay_panics_total counter
 # TYPE moq_relay_requests_total counter
+# TYPE moq_relay_route_changes_total counter
+# TYPE moq_relay_route_refusals_total counter
+# TYPE moq_relay_route_rewrites_total counter
+# TYPE moq_relay_route_sessions_closed_total counter
+# TYPE moq_relay_route_withdrawals_total counter
 # TYPE moq_relay_sessions_closed_total counter
 # TYPE moq_relay_sessions_connected gauge
 # TYPE moq_relay_sessions_failed_total counter
@@ -2080,6 +2195,10 @@ counter moq_relay_announces_started_total{role="publisher",tier="edge"} 0
 counter moq_relay_announces_started_total{role="subscriber",tier="edge"} 1
 counter moq_relay_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_bytes_total{role="subscriber",tier="edge"} 0
+counter moq_relay_credit_held_evicted_microseconds_total{tier="edge"} 0
+counter moq_relay_credit_held_readers_microseconds_total{tier="edge"} 0
+counter moq_relay_credit_stalled_microseconds_total{tier="edge"} 0
+counter moq_relay_credit_stalls_total{tier="edge"} 0
 counter moq_relay_datagrams_total{role="publisher",tier="edge"} 0
 counter moq_relay_datagrams_total{role="subscriber",tier="edge"} 0
 counter moq_relay_fetches_total{role="publisher",tier="edge"} 0
@@ -2091,6 +2210,22 @@ counter moq_relay_groups_total{role="subscriber",tier="edge"} 0
 counter moq_relay_inflated_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_inflated_bytes_total{role="subscriber",tier="edge"} 0
 counter moq_relay_requests_total{tier="edge"} 1
+counter moq_relay_route_changes_total{tier="edge"} 0
+counter moq_relay_route_refusals_total{reason="looped",tier="edge"} 0
+counter moq_relay_route_refusals_total{reason="path",tier="edge"} 0
+counter moq_relay_route_refusals_total{reason="scope",tier="edge"} 0
+counter moq_relay_route_rewrites_total{tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="malformed",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="other",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="overrun",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="regressed",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="role",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="stalled",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="unasked",tier="edge"} 0
+counter moq_relay_route_withdrawals_total{direction="received",kind="dead",tier="edge"} 0
+counter moq_relay_route_withdrawals_total{direction="received",kind="drain",tier="edge"} 0
+counter moq_relay_route_withdrawals_total{direction="sent",kind="dead",tier="edge"} 0
+counter moq_relay_route_withdrawals_total{direction="sent",kind="drain",tier="edge"} 0
 counter moq_relay_sessions_closed_total{tier="edge"} 0
 counter moq_relay_sessions_failed_total{kind="application",tier="edge"} 0
 counter moq_relay_sessions_failed_total{kind="expired",tier="edge"} 0
@@ -2125,7 +2260,7 @@ gauge moq_relay_sessions_connected{state="active",tier="edge"} 0
 gauge moq_relay_sessions_connected{state="idle",tier="edge"} 1
 "#;
 
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	const EXPECTED_URING_SERIES: &str = r#"
 # TYPE moq_relay_uring_completions_total counter
 # TYPE moq_relay_uring_cqes_per_enter histogram

@@ -18,7 +18,7 @@ use crate::Result;
 /// Which programs of a multi-program MPEG-TS an ingest publishes.
 ///
 /// Without one, an ingest whose PAT lists more than one program fails with
-/// [`ts::MultipleProgramsError`] rather than merging unrelated clocks onto one broadcast.
+/// [`ts::Error::MultiplePrograms`] rather than merging unrelated clocks onto one broadcast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Program {
 	/// Only the program with this PAT program number, on the ingest's path.
@@ -217,7 +217,7 @@ pub(crate) struct Options {
 /// publisher instance returning within the follow window continues the stream, and a replacement either
 /// ends it with [`moq_mux::Error::Replaced`] or, with `stitch`, switches the program.
 pub struct Subscriber {
-	follower: ts::Follower<ts::Ext>,
+	follower: ts::Follower<ts::Export<moq_mux::catalog::Consumer<ts::Ext>>>,
 }
 
 impl Subscriber {
@@ -225,7 +225,7 @@ impl Subscriber {
 	///
 	/// `options.latency` is the muxer's delay, but no less than [`MIN_DELAY`]: the output runs
 	/// that far behind the source, a frame arriving later is dropped, and a stalled group is
-	/// skipped after half of it. We reuse the locally configured SRT receive latency for
+	/// skipped once it falls that far behind the newest content. We reuse the locally configured SRT receive latency for
 	/// it, the same budget an SRT hop gives a packet. It's the configured value,
 	/// not the handshake result (srt-tokio doesn't expose the negotiated latency),
 	/// so a peer that requests a higher receive latency gets a larger actual
@@ -603,11 +603,10 @@ mod tests {
 		let origin = produce_origin();
 		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
 		let err = publisher.feed(two_programs()).unwrap_err();
-		let crate::Error::Mux(moq_mux::Error::Other(inner)) = &err else {
-			panic!("a demux error: {err}");
+		let crate::Error::Mux(moq_mux::Error::Ts(ts::Error::MultiplePrograms { programs })) = &err else {
+			panic!("a multiplex refusal: {err}");
 		};
-		let refused = inner.downcast_ref::<ts::MultipleProgramsError>();
-		assert_eq!(refused.map(|refused| refused.programs.as_slice()), Some(&[1, 2][..]));
+		assert_eq!(programs, &[1, 2]);
 	}
 
 	/// A caller reconnecting under the same stream id while its stale connection is
@@ -733,7 +732,8 @@ mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		let (name, _) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let info = broadcast.track(name.as_str()).unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));

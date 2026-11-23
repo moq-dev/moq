@@ -118,7 +118,14 @@ T until(moq::Future<T> future, Clock::time_point deadline, const char *what) {
 std::string patterns(const std::vector<std::string> &list) {
     std::string out = "[";
     for (size_t i = 0; i < list.size(); i++) {
-        out += (i == 0 ? "\"" : ", \"") + list[i] + "\"";
+        out += i == 0 ? "\"" : ", \"";
+        for (char c : list[i]) {
+            if (c == '"' || c == '\\') {
+                out += '\\';
+            }
+            out += c;
+        }
+        out += "\"";
     }
     return out + "]";
 }
@@ -209,7 +216,7 @@ int publish(
     auto broadcast = route->broadcast();
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
-        moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
+        moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::h264(), {}}),
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
@@ -385,7 +392,7 @@ int subscribe(
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce a rendition in a later update rather than the first snapshot, so
     // wait for a catalog that has both video and audio. A finished fixture has video only.
-    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer), read_deadline, "catalog consumer");
+    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer, {}), read_deadline, "catalog consumer");
     std::optional<moq::Catalog> catalog;
     while (!catalog || catalog->video.empty() || (!finish && catalog->audio.empty())) {
         catalog = until(catalogs->next(), read_deadline, "catalog");
@@ -396,6 +403,8 @@ int subscribe(
     const auto &[id, video] = *catalog->video.begin();
 
     auto subscription = moq::subscription_defaults();
+    // A video reader that plays nothing out states no min, so a hole is waited for the max.
+    subscription.delay.min = std::nullopt;
     subscription.delay.max =
         finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(

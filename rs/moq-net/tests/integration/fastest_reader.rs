@@ -26,9 +26,11 @@ fn uncapped() -> ReceiveWindow {
 }
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// A publisher's track and a relay's subscription to it, over one peering.
@@ -113,7 +115,7 @@ async fn idle_reader(version: &str, window: ReceiveWindow, expected: std::ops::R
 	for _ in 1..30 {
 		group.write_frame(group.at_start(), payload.clone()).unwrap();
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	// Simulated time moves only once every task is parked: the relay's ingest stopped.
 	kio::clock::sleep(Duration::from_secs(1)).await;
@@ -194,7 +196,7 @@ async fn a_large_frame_sheds_nothing_an_idle_reader_wants() {
 		group
 			.write_frame(group.at_start(), Bytes::from(vec![7u8; 20 * MB]))
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(
@@ -235,7 +237,7 @@ async fn a_session_past_its_credit_cap_reads_on() {
 		for _ in 1..30 {
 			group.write_frame(group.at_start(), payload.clone()).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let held = reader.frame_count();
@@ -270,7 +272,7 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 				.expect("a frame");
 			assert_eq!(frame.payload.len(), MB, "{version}: frame {index}");
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let fell = kio::clock::timeout(TIMEOUT, slow.read_frame())
 			.await
@@ -344,7 +346,7 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 				group.write_frame(group.at_start(), payload).unwrap();
 				progress.store(index + 1, std::sync::atomic::Ordering::Relaxed);
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		});
 		let mut reader = subscriber.recv_group().await.unwrap().unwrap();
 		// Simulated time advances only once all drivers and the paced writer park.

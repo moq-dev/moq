@@ -40,6 +40,29 @@ Decided 2026-11-05 (maintainer, /quest-import):
 - ✅ The docs change shows publishing several audio languages and a text
   track with `broadcast.text(name)`, which the reporter couldn't find.
 
+Decided 2026-11-18 (maintainer, on the reporter's
+[follow-up](https://github.com/moq-dev/moq/issues/7945#issuecomment-6975233746)
+asking for a command-line demo):
+
+- ✅ This quest also adds a CLI demo: a `just pub` recipe and a snippet in
+  `doc/bin/cli.md` publishing video, two audio languages, and a WebVTT track
+  through `moq import fmp4` (rejected: a separate quest, which would ship
+  before audio `lang` and be rewritten here; no demo).
+
+Tested 2026-11-18 against a local relay, the recipe the reply on #7945 gave:
+ffmpeg encodes video plus two AAC tracks to MP4, then
+`gpac -i av.mp4:alltk -i subs.vtt:#Language=en reframer:rt=on -o stdout:ext=mp4:frag:cmaf=cmf2:cdur=1`
+pipes into `moq import fmp4`, which published `1.mp4-a`, `2.mp4-a`, and a
+`vtt` text rendition whose cues arrived one group each, on time. GPAC is
+needed because ffmpeg cannot write WebVTT into MP4, and ffmpeg's TTML is
+either one document for the whole file or (fragmented) rejected by the
+importer, which [the TTML fix](/quest/m3/fmp4-text-zero-duration.md) owns.
+`:alltk` keeps the second audio track, which ffmpeg marks disabled. Generate
+the VTT file in the recipe, since ffmpeg and GPAC can't loop one. Imported
+audio carries no `lang` until
+[the import mapping](/quest/m3/import-lang-iso639.md) lands, so the doc
+shows the catalog after it, or notes the gap.
+
 Public API: additive `lang` on the audio catalog types and the audio target.
 Wire: an optional catalog field; MSF `altGroup` changes for multi-language
 audio.

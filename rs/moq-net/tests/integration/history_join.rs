@@ -14,9 +14,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 fn origin(hop: u64) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// Every viewer that joins reads the group the relay holds. Each join subscribes upstream
@@ -43,7 +44,7 @@ async fn each_joining_viewer_reads_the_held_group() {
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), &b"x"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		for join in 0..3 {
 			let viewer = origin(3 + join);

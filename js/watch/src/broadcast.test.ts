@@ -10,6 +10,7 @@ import { key } from "../../json/src/key.test-util.ts";
 import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
+import { defined } from "./defined.test-util.ts";
 
 function publish(origin: Origin.Producer, path: Path.Valid) {
 	return origin.route(path).broadcast;
@@ -111,19 +112,19 @@ describe("unsupported catalog", () => {
 			const owner = new Origin.Producer();
 			const name = Path.from("room/live.hang");
 			const published = publish(owner, name);
-			const track = published.createTrack(Catalog.TRACK, { compression: compress ? "deflate" : "none" });
+			const track = defined(published.createTrack(Catalog.TRACK, { compression: compress ? "deflate" : "none" }));
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 			const enabled = new Signal(true);
 			const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled });
 			try {
 				const ready = source.out.catalog.changed();
-				producer.update({ value: {}, at: key() });
+				producer.update({}, key());
 				await ready;
 				expect(source.out.status.peek()).toBe("live");
 
 				const rejected = source.out.status.changed();
 				const cleared = source.out.catalog.changed();
-				producer.update({ value: { version: Catalog.VERSION + 1 }, at: key() });
+				producer.update({ version: Catalog.VERSION + 1 }, key());
 				await rejected;
 				await cleared;
 				expect(source.out.status.peek()).toBe("unsupported");
@@ -156,7 +157,7 @@ for (const driven of [true, false]) {
 		const name = Path.from("room/live.hang");
 		const published = publish(owner, name);
 		const producer = new Json.Snapshot.Producer<Catalog.Root>({
-			track: published.createTrack(Catalog.TRACK),
+			track: defined(published.createTrack(Catalog.TRACK)),
 			deltas: false,
 		});
 		const tail = new Signal(true);
@@ -169,7 +170,7 @@ for (const driven of [true, false]) {
 		});
 		try {
 			const ready = source.out.catalog.changed();
-			producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } }, at: key() });
+			producer.update({ video: { renditions: { hd: video("avc1.640028") } } }, key());
 			await ready;
 			expect(source.out.status.peek()).toBe("live");
 
@@ -207,7 +208,7 @@ it("reports a catalog that ends empty as offline", async () => {
 	const name = Path.from("room/live.hang");
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
-		track: published.createTrack(Catalog.TRACK),
+		track: defined(published.createTrack(Catalog.TRACK)),
 		deltas: false,
 	});
 	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
@@ -771,7 +772,7 @@ describe("refusal", () => {
 
 	it("refuses a name outside the origin's scope", async () => {
 		const owner = new Origin.Producer();
-		const scoped = owner.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
+		const scoped = owner.scope(Path.empty(), Path.Prefixes.parse(["room"]));
 		const source = new Broadcast({
 			origin: scoped,
 			name: Path.from("lobby/live.hang"),
@@ -892,9 +893,9 @@ describe("cross-broadcast renditions", () => {
 		const owner = new Origin.Producer();
 		const scopes: string[] = [];
 		const announced = owner.announced.bind(owner);
-		owner.announced = (scope, options) => {
-			scopes.push(scope?.text ?? "**");
-			return announced(scope, options);
+		owner.announced = (filter, options) => {
+			scopes.push(filter?.text ?? "**");
+			return announced(filter, options);
 		};
 		const source = new Broadcast({
 			origin: owner,
@@ -1171,13 +1172,15 @@ it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
 	const owner = new Origin.Producer();
 	const catalogBroadcast = publish(owner, Path.from("room/catalog.msf"));
 	const referenced = publish(owner, Path.from("room/left"));
-	catalogBroadcast
-		.createTrack("video")
-		.writeFrame({ payload: new Uint8Array([1]), timestamp: Moq.Time.Timestamp.unscaled(0n) });
-	referenced
-		.createTrack("video")
-		.writeFrame({ payload: new Uint8Array([2]), timestamp: Moq.Time.Timestamp.unscaled(0n) });
-	catalogBroadcast.createTrack("catalog").writeFrame({
+	defined(catalogBroadcast.createTrack("video")).writeFrame({
+		payload: new Uint8Array([1]),
+		timestamp: Moq.Time.Timestamp.unscaled(0n),
+	});
+	defined(referenced.createTrack("video")).writeFrame({
+		payload: new Uint8Array([2]),
+		timestamp: Moq.Time.Timestamp.unscaled(0n),
+	});
+	defined(catalogBroadcast.createTrack("catalog")).writeFrame({
 		payload: Msf.encode({
 			tracks: [
 				{

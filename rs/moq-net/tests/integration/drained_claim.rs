@@ -26,9 +26,11 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes, over a link priced at `cost`.
@@ -66,7 +68,7 @@ impl Worker {
 				let track = prepared.broadcast().create_track("video", timed()).unwrap();
 				let mut group = track.append_next().unwrap();
 				group.write_frame(group.at_start(), name.as_bytes().to_vec()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
 			}
@@ -117,7 +119,7 @@ async fn drained_claim(version: &str) {
 		.borrow()
 		.iter()
 		.for_each(|(output, _)| output.broadcast().close());
-	a_link.server.drain().send(Goaway::new()).unwrap();
+	a_link.server.goaway(Goaway::new()).unwrap();
 	// Past the linger, which is as long as the cache window, nothing reads the relay's
 	// front for the path.
 	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;

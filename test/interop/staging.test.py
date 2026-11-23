@@ -45,7 +45,6 @@ class Staging(unittest.TestCase):
             self.tools / "cargo",
             """
 case "$1" in
-    tree) echo "moq-net v0.1.0" ;;
     metadata) printf '{"target_directory":"%s"}\n' "$FIXTURE_TARGET" ;;
     install)
         while [[ "$1" != --root ]]; do shift; done
@@ -58,8 +57,8 @@ case "$1" in
             while [[ "$1" != --target-dir ]]; do shift; done
             mkdir -p "$2/debug"
             cp "$FIXTURE_TARGET/adapter" "$2/debug/compat-container"
-        elif [[ "$*" == *'-p moq-c'* ]]; then
-            printf '{"reason":"build-script-executed","package_id":"/moq-c#0.0.0","out_dir":"%s/header"}\n' \
+        elif [[ "$*" == *'-p libmoq'* ]]; then
+            printf '{"reason":"build-script-executed","package_id":"/libmoq#0.0.0","out_dir":"%s/header"}\n' \
                 "$FIXTURE_TARGET"
         fi
         ;;
@@ -81,10 +80,10 @@ esac
         source = (ROOT / "test/interop/interop.sh").read_text()
         setup, runtime = source.split("# ── setup", 1)
         setup = re.sub(r"^INTEROP_DIR=.*$", "INTEROP_DIR=" + shlex.quote(str(ROOT / "test/interop")), setup, flags=re.M)
-        # Stage every example the build list names, including those only helper scripts run.
-        built = re.search(r"examples=\(([^)]*)\)", source).group(1).split()
+        # Stage every Rust client the build list names, including those only helper scripts run.
+        built = re.search(r"clients=\(([^)]*)\)", source).group(1).split()
         for name in set(built) | set(re.findall(r"\$EXAMPLES/(interop-[\w-]+)", runtime)):
-            executable(self.profile / "examples" / name, "echo owned-example\n")
+            executable(self.profile / name, "echo owned-example\n")
         # Exercise dereferencing, including a symlink to a cache outside target.
         cached = self.root / "cache"
         cached.mkdir()
@@ -107,6 +106,7 @@ esac
         # A stray shared moq library must never win over the staged staticlib.
         (self.profile / f"libmoq.{extension}").write_text("invalid shared library")
         executable(self.tools / "gst-launch-1.0", "exit 0\n")
+        executable(self.tools / "pkg-config", "exit 0\n")
         executable(
             self.tools / "gst-inspect-1.0",
             """
@@ -127,15 +127,15 @@ printf '  moqsink: fixture\n  moqsrc: fixture\n'
         # Preserve the actual consumer expressions, so a leftover target path fails.
         late_examples = "\n".join(
             '"' + path + '"'
-            for path in sorted(
-                set(re.findall(r"\$(?:EXAMPLES|TARGET_BASE/\$PROFILE/examples)/interop-[\w-]+", runtime))
-            )
+            for path in sorted(set(re.findall(r"\$(?:EXAMPLES|TARGET_BASE/\$PROFILE)/interop-[\w-]+", runtime)))
         )
         self.run_script(
             setup
             + f"""
 require_tools
-build_relay_cli
+# The C and GStreamer clients join the one cargo build only when a list names them.
+SUB_LIST=(rust c gst)
+build_cargo
 prepare_gst
 CLIENTS={shlex.quote(str(clients.parent))}
 prepare_c
@@ -165,13 +165,37 @@ GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" gst-inspect-1.0 moq
             source
             + """
 require_tools
-build_relay_cli
+build_cargo
 rm -rf "$TARGET_BASE"
 "$RELAY"
 "$MOQ"
 "$INTEROP_SUB_MOQ"
 """
         )
+
+    def test_gst_without_development_files_is_unavailable(self):
+        source = (ROOT / "test/interop/interop.sh").read_text().split("# ── setup", 1)[0]
+        source = re.sub(
+            r"^INTEROP_DIR=.*$", "INTEROP_DIR=" + shlex.quote(str(ROOT / "test/interop")), source, flags=re.M
+        )
+        self.env.update(RELAY_BIN=str(self.profile / "moq-relay"), CLI_BIN=str(self.profile / "moq"))
+        for tool in ("gst-launch-1.0", "gst-inspect-1.0"):
+            executable(self.tools / tool, "exit 0\n")
+        executable(self.tools / "pkg-config", "exit 1\n")
+        # moq-gst must stay out of the shared build, which would abort the whole run.
+        stub = self.tools / "cargo"
+        stub.write_text(stub.read_text().replace("    build)", "    build) exit 1 ;;\n    unused)"))
+        result = self.run_script(
+            source
+            + """
+require_tools
+SUB_LIST=(gst)
+build_cargo
+prepare_gst
+[[ "$BROKEN_LANGS" == " gst" ]]
+"""
+        )
+        self.assertIn("GStreamer development files", result.stdout)
 
     def test_wire_compat_adapters_and_current_binaries_are_owned(self):
         executable(self.tools / "gh", "exit 1\n")
@@ -189,7 +213,6 @@ fi
 case "$1" in
     encode) echo catalog >"$2"; echo frame >"$3" ;;
     decode) [[ "$(cat "$2")" == catalog && "$(cat "$3")" == frame ]] ;;
-    fetch-supported) echo false ;;
     *) exit 2 ;;
 esac
 """,
@@ -210,7 +233,6 @@ rm -rf "$TARGET"
 "$HARNESS_RUN/current/moq-relay" --help
 for source in current released; do
     "$HARNESS_RUN/hang-$source/compat-container" decode "$HARNESS_RUN/current.catalog" "$HARNESS_RUN/current.frame"
-    [[ "$("$HARNESS_RUN/hang-$source/compat-container" fetch-supported moq-lite-07)" == false ]]
 done
 """
         )

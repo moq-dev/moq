@@ -40,13 +40,36 @@ build with the `v4l2` feature keeps every `Auto` or `Hardware` selection to its
 GOP, whichever encoder it lands on, since a V4L2 driver may refuse the request.
 Backends that can
 change bitrate live follow the connection's send estimate while someone
-watches, and return to the configured bitrate while nobody does. Where the platform
+watches, and return to the configured bitrate while nobody does.
+`encode::Capture::renditions` adds smaller simulcast renditions, each an
+`encode::Rendition` named `video/<name>` and scaled from the captured frame,
+chained through `Options::lower` below the captured one and encoded only while
+watched.
+
+To publish frames from your own source, `encode::Producer` takes raw frames,
+owns the encoder, and follows the same send estimate between frames, like
+`moq_audio::encode::Producer`, once `Options::bandwidth` carries the
+connection's allocator; the default holds the configured bitrate. Chain renditions through `Options::lower` for
+simulcast: a higher rung stops encoding and advertises itself disabled while the
+connection cannot fund it, then resumes on a keyframe. `encode::Publisher` is
+the layer below, for frames you encoded yourself. Where the platform
 allows it, frames stay on the GPU between capture, decode, encode, and render.
 
 Opt-in features: `capture`, `pipewire` (Linux portal capture and PipeWire
 cameras; links libpipewire), and `vpx` (links libvpx). `vaapi` (Intel and AMD on
 Linux), `v4l2` (ARM SoC codecs such as a Raspberry Pi's), and `nvidia` are on by
 default, since none needs anything on the build host.
+
+Every config that opens hardware (`encode::Config`, `decode::Config`,
+`resize::Config`, `encode::Capture`) has a `device` field, on every platform
+and feature set. `Device::Auto`, the default, lets each backend choose.
+`Device::Render(path)` names a DRM render node: VA-API opens it, and NVENC and
+NVDEC open the NVIDIA GPU behind it, so a host with several GPUs places each
+codec on the one it names. `Device::Video(path)` names a V4L2 codec node. A
+named node steers automatic backend selection to the backends that drive it,
+and one that fails to open is an error rather than a search for another.
+macOS, Windows, and Android pick their own device and ignore the field.
+`capture::Config::cursor` is `Cursor::Drawn` (the default) or `Cursor::Hidden`.
 
 On Wayland, the `pipewire` feature lets Rust callers request a screen or
 window through the system picker with `capture::Source::Portal`. Keep the

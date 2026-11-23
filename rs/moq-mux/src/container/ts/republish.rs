@@ -1,8 +1,8 @@
 //! One program of a multiplex, republished on its path whenever the source changes.
 
-use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 
+use super::error::{Error, Result};
 use super::{Ext, Import, Step, stats};
 use crate::catalog;
 
@@ -49,11 +49,8 @@ struct Target {
 impl Target {
 	/// Open an instance with `options`, its catalog recording `mux_rate` when the multiplex was
 	/// measured already.
-	fn open(&self, options: moq_net::origin::RouteOptions, mux_rate: Option<u64>) -> anyhow::Result<Instance> {
-		let route = self
-			.origin
-			.route(self.name.as_str(), options)
-			.with_context(|| format!("failed to create broadcast {}", self.name))?;
+	fn open(&self, options: moq_net::origin::RouteOptions, mux_rate: Option<u64>) -> Result<Instance> {
+		let route = self.origin.route(self.name.as_str(), options)?;
 		// TS carries undecoded elementary streams verbatim, so the catalog carries the `mpegts`
 		// extension.
 		let mut initial = catalog::hang::Catalog::<Ext>::default();
@@ -86,7 +83,7 @@ struct Instance {
 
 impl Instance {
 	/// Announce the broadcast once its catalog has gone out, returning whether it has.
-	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
+	fn announce_if_listed(&mut self) -> Result<bool> {
 		listed(&mut self.pending, &self.route)
 	}
 
@@ -96,7 +93,7 @@ impl Instance {
 	/// The `last` instance announces if its drain released the first catalog, and fails when the
 	/// input declared no track. One a step ended is withdrawn as it drops, so it does neither: a
 	/// source can step before its first catalog goes out, such as within the mux rate's window.
-	fn finish(mut self, last: bool) -> anyhow::Result<Finished> {
+	fn finish(mut self, last: bool) -> Result<Finished> {
 		let import = match self.import.finish() {
 			Ok(import) => import,
 			Err(err) => {
@@ -107,9 +104,9 @@ impl Instance {
 		// The drain at end of input can release the first catalog. Without one the input declared
 		// no track, and announcing would only advertise an empty broadcast.
 		let declared = match last {
-			true => listed(&mut self.pending, &self.route).and_then(|declared| {
-				anyhow::ensure!(declared, "input ended before it declared a track");
-				Ok(())
+			true => listed(&mut self.pending, &self.route).and_then(|declared| match declared {
+				true => Ok(()),
+				false => Err(Error::Empty("it declared a track")),
 			}),
 			false => Ok(()),
 		};
@@ -140,7 +137,7 @@ impl Republish {
 		name: impl Into<moq_net::Path>,
 		instance: moq_net::Instance,
 		config: catalog::Config,
-	) -> anyhow::Result<Self> {
+	) -> Result<Self> {
 		let target = Target {
 			origin,
 			name: name.into(),
@@ -187,7 +184,7 @@ impl Republish {
 	/// the start of the next call. Call again, with no data if there is none, until it returns
 	/// `None`. A failure to finish the instance before the step returns that failure, with the
 	/// next instance current.
-	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<Option<Republished>> {
+	pub fn decode(&mut self, data: &[u8]) -> Result<Option<Republished>> {
 		if !self.held.is_empty() {
 			let held = std::mem::take(&mut self.held);
 			if let Some(republished) = self.feed(&held)? {
@@ -203,20 +200,35 @@ impl Republish {
 	}
 
 	/// Demux `data` into the current instance, or republish at the step it reaches.
-	fn feed(&mut self, data: &[u8]) -> anyhow::Result<Option<Republished>> {
+	fn feed(&mut self, data: &[u8]) -> Result<Option<Republished>> {
 		let Some(restart) = self.instance.import.decode_or_restart(data)? else {
 			self.instance.announce_if_listed()?;
 			return Ok(None);
 		};
+		self.republish(restart).map(Some)
+	}
+
+	/// No input follows: read what the current instance held while judging a step, and
+	/// republish at a step it reaches.
+	fn settle(&mut self) -> Result<Option<Republished>> {
+		match self.instance.import.settle()? {
+			Some(restart) => self.republish(restart).map(Some),
+			None => Ok(None),
+		}
+	}
+
+	/// Finish the current instance before `restart`'s step and open the next, holding the input
+	/// from the step on for it.
+	fn republish(&mut self, restart: super::Restart) -> Result<Republished> {
 		let mux_rate = self.instance.catalog.snapshot().ext.mpegts.mux_rate;
 		let next = self.target.open(moq_net::origin::RouteOptions::hidden(), mux_rate)?;
 		self.held = restart.remainder;
 		// The finished instance ends as it drops, withdrawing its announcement.
 		let finished = std::mem::replace(&mut self.instance, next).finish(false)?;
-		Ok(Some(Republished {
+		Ok(Republished {
 			step: restart.step,
 			stats: finished.stats(),
-		}))
+		})
 	}
 
 	/// What every elementary stream of the current instance has delivered; see [`Import::stats`].
@@ -227,12 +239,17 @@ impl Republish {
 	/// Finish the current instance's media tracks, then its catalog while it still lists them,
 	/// and return the [`Finished`] broadcast.
 	///
-	/// Input still held after a [`Republished`] is read first, republishing again at any step in
-	/// it. Fails when the input ended before the instance declared a track, so nothing was
-	/// announced. A finish that fails aborts every track with the cause.
-	pub fn finish(mut self) -> anyhow::Result<Finished> {
+	/// Input still held after a [`Republished`], or while a step was judged, is read first,
+	/// republishing again at any step in it. Fails when the input ended before the instance
+	/// declared a track, so nothing was announced. A finish that fails aborts every track with
+	/// the cause.
+	pub fn finish(mut self) -> Result<Finished> {
 		loop {
-			match self.decode(&[]) {
+			let next = match self.decode(&[]) {
+				Ok(None) => self.settle(),
+				next => next,
+			};
+			match next {
 				Ok(Some(republished)) => {
 					tracing::warn!(step = %republished.step, "the source changed at end of input; republishing")
 				}
@@ -254,10 +271,7 @@ impl Republish {
 }
 
 /// Announce `route` once the catalog track `pending` has a group, returning whether it has.
-pub(super) fn listed(
-	pending: &mut Option<moq_net::track::Consumer>,
-	route: &moq_net::origin::Route,
-) -> anyhow::Result<bool> {
+pub(super) fn listed(pending: &mut Option<moq_net::track::Consumer>, route: &moq_net::origin::Route) -> Result<bool> {
 	let Some(listed) = pending else {
 		return Ok(true);
 	};
@@ -267,7 +281,7 @@ pub(super) fn listed(
 	) {
 		return Ok(false);
 	}
-	route.announce().context("failed to announce broadcast")?;
+	route.announce()?;
 	*pending = None;
 	Ok(true)
 }
@@ -292,7 +306,8 @@ impl Finished {
 		self.import.stats()
 	}
 
-	/// Release every track's cache, reporting `err` to readers that have not drained it.
+	/// Abort every track with `err`. Readers still draining a track get its clean end instead once
+	/// every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.import.abort(err);
 	}
@@ -300,7 +315,7 @@ impl Finished {
 
 #[cfg(test)]
 mod tests {
-	use super::super::step_test::{SWITCH, shift};
+	use super::super::step_test::{SWITCH, flagged_switch, shift};
 	use super::*;
 
 	/// 5 s of H.264 and AAC at a constant 400 kb/s, so the first instance measures a rate.
@@ -399,6 +414,29 @@ mod tests {
 		assert!(delivered(&finished.stats()));
 	}
 
+	/// A switch the input ends while judging is found by `finish`, which republishes the
+	/// broadcast after it rather than drop it.
+	#[test]
+	fn a_switch_found_at_the_end_republishes() {
+		let origin = crate::source::produce_origin();
+		let mut republish = Republish::new(
+			origin,
+			moq_net::Path::from_static("demo"),
+			moq_net::Instance::random(),
+			catalog::Config::default(),
+		)
+		.unwrap();
+		let first = republish.instance();
+		let decoded = republish.decode(&flagged_switch()).unwrap();
+		assert!(decoded.is_none(), "the switch is still judged: {decoded:?}");
+		let finished = republish.finish().unwrap();
+		assert_ne!(finished.route.instance(), first, "the finish republished");
+		assert!(
+			delivered(&finished.stats()),
+			"the next instance read the input after the step"
+		);
+	}
+
 	/// Held input that fails to decode at the finish aborts the instance reading it, so its
 	/// readers get the cause rather than a clean end.
 	#[tokio::test(start_paused = true)]
@@ -432,10 +470,7 @@ mod tests {
 			.await
 			.unwrap();
 		let err = republish.finish().err().expect("two programs");
-		assert!(
-			err.downcast_ref::<super::super::MultipleProgramsError>().is_some(),
-			"{err:#}"
-		);
+		assert!(matches!(err, Error::MultiplePrograms { .. }), "{err}");
 		let ended = kio::clock::timeout(std::time::Duration::from_secs(1), async {
 			loop {
 				if let Err(err) = catalog.recv_group().await.transpose()? {
@@ -461,7 +496,7 @@ mod tests {
 		.unwrap();
 		let route = republish.instance.route.clone();
 		let err = republish.finish().err().expect("nothing was declared");
-		assert!(err.to_string().contains("declared"), "{err:#}");
+		assert!(matches!(err, Error::Empty("it declared a track")), "{err}");
 		assert!(!route.is_announced());
 	}
 }

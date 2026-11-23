@@ -1,6 +1,6 @@
 //! Graceful shutdown coordination: the first shutdown signal fires a broadcast
 //! that every accepted session observes, draining it with a GOAWAY before the
-//! process exits.
+//! process exits. The cluster links the relay dialed drain the same way.
 //!
 //! The drain has one deadline, fixed when it starts. A session accepted after
 //! that (a cached DNS resolve, a pool alias) is sent a GOAWAY at once, carrying
@@ -120,7 +120,7 @@ impl Signals {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Tally {
-	/// Served sessions whose closure has not yet been observed by supervision.
+	/// Served sessions, and dialed cluster links, whose closure has not yet been observed.
 	pub open: usize,
 	/// Closed sessions still reporting their end.
 	pub ending: usize,
@@ -130,7 +130,8 @@ pub struct Tally {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Drained {
-	/// Sessions still open at the deadline that were force-closed.
+	/// Sessions still open at the deadline that were force-closed, including cluster
+	/// links the relay dialed that a reader still read through.
 	pub forced: usize,
 	/// Sessions closed strictly before the deadline and still reporting their end at it.
 	pub ending: usize,
@@ -147,6 +148,8 @@ struct State {
 	forced: usize,
 	/// Sessions already closed before the deadline but still reporting at it.
 	ending: usize,
+	/// Dialed cluster links in `tally.open`, so the rest are accepted sessions.
+	links: usize,
 	/// The most recent counted session finished reporting.
 	last_left: Option<Instant>,
 }
@@ -273,10 +276,24 @@ impl Observer {
 	///
 	/// One served after the deadline is closed at once and not counted: arrivals
 	/// a listener still lets through must not hold a drain that is past it.
+	///
+	/// A cluster link the relay dials is counted the same way, from before its first dial.
 	pub fn serve(&self) -> Serving {
+		self.serve_as(false)
+	}
+
+	/// Count a cluster link this relay dials, as [`serve`](Self::serve) does a session.
+	pub(crate) fn serve_link(&self) -> Serving {
+		self.serve_as(true)
+	}
+
+	fn serve_as(&self, link: bool) -> Serving {
 		let counted = self.deadline().is_none_or(|deadline| Instant::now() < deadline);
 		if counted {
-			self.state.send_modify(|state| state.tally.open += 1);
+			self.state.send_modify(|state| {
+				state.tally.open += 1;
+				state.links += usize::from(link);
+			});
 		}
 		Serving {
 			_active: self.admission.enter(),
@@ -284,8 +301,16 @@ impl Observer {
 				true => Count::Open,
 				false => Count::Uncounted,
 			},
+			link,
 			shutdown: self.clone(),
 		}
+	}
+
+	/// Resolve once every accepted session has closed, leaving only dialed links open.
+	async fn accepted_left(&self) {
+		let mut state = self.state.subscribe();
+		// The sender lives in `self`, so this cannot close.
+		let _ = state.wait_for(|state| state.tally.open == state.links).await;
 	}
 
 	/// The sessions counted so far.
@@ -373,7 +398,8 @@ impl Observer {
 	/// and no grace.
 	///
 	/// With no time left (a zero [`drain_timeout`](Self::drain_timeout), or a
-	/// session accepted after the deadline) the session is closed at once.
+	/// session accepted after the deadline) the GOAWAY's zero timeout closes the
+	/// session at once with `GoawayTimeout`, likely before the GOAWAY is written.
 	pub async fn drain_session(&self, session: &moq_net::Session) {
 		self.drain(session, true).await;
 	}
@@ -386,21 +412,10 @@ impl Observer {
 		// first), so the count holds whichever way the session goes.
 		let _draining = counted.then(|| self.draining(deadline));
 
-		// No grace left, so there is nothing to drain. Close now rather than send a
-		// GOAWAY: the peer would have no time to act on it, and a zero timeout means
-		// "no deadline" on the wire, which is the opposite of what was asked for.
-		if remaining.is_zero() {
-			session.abort(moq_net::Error::GoingAway);
-			return;
-		}
-
 		// "Reconnect to me": the relay is restarting, not moving. An empty URI is
 		// legal from either side and this runs once per session, so neither error
 		// is reachable; the deadline closes the session regardless.
-		if let Err(err) = session
-			.drain()
-			.send(moq_net::goaway::Goaway::new().with_timeout(remaining))
-		{
+		if let Err(err) = session.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(remaining))) {
 			tracing::warn!(%err, "failed to drain session");
 		}
 
@@ -413,6 +428,33 @@ impl Observer {
 		session.abort(moq_net::Error::GoawayTimeout);
 		session.closed().await;
 	}
+
+	/// Drain a cluster link this relay dialed as [`drain`](Self::drain) does an
+	/// accepted session: it stops redialing and sends a GOAWAY. A neighbour never
+	/// leaves such a link, so it closes once every accepted session has left and
+	/// nothing reads through it, or at the deadline. Until then it keeps announcing
+	/// the broadcasts of publishers still moving off this relay, so a neighbour whose
+	/// only route is this link never sees them withdrawn mid-handover. The GOAWAY
+	/// meanwhile moves the neighbour's readers to other routes.
+	async fn drain_link(&self, link: moq_tokio::Connection, counted: bool) {
+		let now = Instant::now();
+		let deadline = self.deadline().unwrap_or(now.saturating_add(self.drain_timeout));
+		let _draining = counted.then(|| self.draining(deadline));
+		let hold = link.hold();
+		let drain = link.drain(deadline.saturating_duration_since(now));
+		tokio::pin!(drain);
+		let res = tokio::select! {
+			biased;
+			res = &mut drain => res,
+			() = self.accepted_left() => {
+				drop(hold);
+				drain.await
+			}
+		};
+		if let Err(err) = res {
+			tracing::debug!(%err, "dialed link did not leave before the drain deadline");
+		}
+	}
 }
 
 /// A session the drain waits on, from [`Observer::serve`].
@@ -422,6 +464,8 @@ pub struct Serving {
 	// admission prevents while it is held before the SETUP reply.
 	_active: Option<moq_net::server::Admitted>,
 	count: Count,
+	/// A cluster link this relay dialed, counted in [`State::links`] while open.
+	link: bool,
 	pub(crate) shutdown: Observer,
 }
 
@@ -442,15 +486,23 @@ impl Serving {
 		self.shutdown.drain(session, counted).await;
 	}
 
+	/// Drain a cluster link this relay dialed; see [`Observer::drain_link`].
+	pub(crate) async fn drain_link(&self, link: moq_tokio::Connection) {
+		let counted = !matches!(self.count, Count::Uncounted);
+		self.shutdown.drain_link(link, counted).await;
+	}
+
 	/// The session closed: count it as ending until this drops. Only the first call counts.
 	pub(crate) fn closed(&mut self) {
 		if !matches!(self.count, Count::Open) {
 			return;
 		}
 		self.count = Count::Ending(Instant::now());
+		let link = self.link;
 		self.shutdown.state.send_modify(|state| {
 			state.tally.open -= 1;
 			state.tally.ending += 1;
+			state.links -= usize::from(link);
 		});
 	}
 }
@@ -469,7 +521,10 @@ impl Drop for Serving {
 		self.shutdown.state.send_modify(|state| {
 			match closed {
 				Some(_) => state.tally.ending -= 1,
-				None => state.tally.open -= 1,
+				None => {
+					state.tally.open -= 1;
+					state.links -= usize::from(self.link);
+				}
 			}
 			state.ending += usize::from(ending);
 			state.last_left = Some(state.last_left.map_or(now, |last| last.max(now)));
@@ -480,6 +535,7 @@ impl Drop for Serving {
 /// A session sent a GOAWAY; see [`Observer::draining`].
 struct Draining {
 	state: watch::Sender<State>,
+	/// When the session counts as forced.
 	deadline: Instant,
 }
 
@@ -571,7 +627,7 @@ mod tests {
 		config.listen.tls.generate = vec!["localhost".into()];
 		config.web.ws = true;
 		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.auth.public = vec![moq_auth::Prefix::all()];
 		config.drain_timeout = Some((window).into());
 		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let addr = relay.web_addrs().http.unwrap();
@@ -663,8 +719,8 @@ mod tests {
 			.await
 			.expect("the admission outlived the drain deadline");
 		running.await.unwrap().unwrap();
-		// The client may already count the session established (SETUP precedes
-		// auth); either way the refusal ends it.
+		// The paused clock may carry the session past the healthy bar before the admission
+		// ends, which establishes it; either way the refusal ends it.
 		if let Ok(connection) = connecting.await.unwrap() {
 			assert!(connection.closed().await.is_err(), "an abandoned admission is refused");
 		}
@@ -690,13 +746,12 @@ mod tests {
 		});
 		let admission = admissions.next().await.unwrap();
 		trigger.start();
-		let all = moq_auth::Pattern::all;
+		let all = moq_auth::Prefix::all;
 		let (_lease, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 		admission.grant(consumer);
+		// The relay accepts the session and drains it at once, so the one-shot loop may already
+		// be over: only a GOAWAY ends it cleanly, where a refusal or a close is an error.
 		let connection = connecting.await.unwrap().unwrap();
-		let draining = connection.draining().unwrap();
-		let goaway = kio::wait(|waiter| draining.poll(waiter)).await.unwrap();
-		assert_eq!(goaway.uri(), "");
 		connection.closed().await.unwrap();
 		running.await.unwrap().unwrap();
 	}

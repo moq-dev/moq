@@ -14,9 +14,11 @@ use moq_net::{
 };
 
 fn origin() -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(Default::default());
+	let mut config = origin::Config::default();
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]
@@ -58,7 +60,7 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		group
 			.write_frame(group.at_start(), bytes::Bytes::from(vec![7; 64 * 1024]))
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 64 * 1024);
 		let rows = registry.snapshot().control();
@@ -99,7 +101,7 @@ async fn setup_counts_under_the_admitted_stats() {
 			session
 		};
 		let server = async {
-			let request = server.accept_request(now(), server_transport).await.unwrap();
+			let request = server.handshake(now(), server_transport).await.unwrap();
 			let (session, driver) = request.with_stats(stats).ok().await.unwrap();
 			spawn(driver);
 			session

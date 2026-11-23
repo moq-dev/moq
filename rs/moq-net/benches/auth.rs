@@ -55,7 +55,7 @@ async fn pair(origins: Option<Origins<'_>>) -> Pair {
 		if let Some(origins) = &origins {
 			config = config.with_subscriber(origins.subscribe.clone());
 		}
-		let mut request = config.accept_request(harness::now(), server).await.unwrap();
+		let mut request = config.handshake(harness::now(), server).await.unwrap();
 		let requests = request.requests();
 		let (session, driver) = request.ok().await.unwrap();
 		harness::spawn(driver);
@@ -123,9 +123,8 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
 	let (client, server) = create_mock_session_pair(mock);
-	// Tokens ride requests alone, and the client announces with PUBLISH_NAMESPACE.
-	let mut server_extensions = moq_net::setup::Extensions::default();
-	server_extensions.solicit = false;
+	// Tokens ride requests alone, and the client announces with PUBLISH_NAMESPACE, as to a
+	// peer without MoQ Solicit.
 	let (subscribe, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	harness::spawn(driver);
 	let client = async {
@@ -141,9 +140,9 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	let server = async {
 		let mut request = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_extensions(server_extensions)
+			.with_solicit(false)
 			.with_subscriber(subscribe.clone())
-			.accept_request(harness::now(), server)
+			.handshake(harness::now(), server)
 			.await
 			.unwrap();
 		let requests = request.requests();
@@ -175,8 +174,8 @@ fn renewal(c: &mut Criterion) {
 					|b, &(sessions, routes)| {
 						let _guard = runtime.enter();
 						// No hold, so an iteration times the renewal rather than the origin batching it.
-						let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
-						config.update_hold = Duration::ZERO;
+						let config =
+							origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
 						let (origin, driver) = origin::Producer::new(config);
 						harness::spawn(driver);
 						let mut publishers = runtime.block_on(join_all((0..sessions).map(|_| publisher(&origin))));
@@ -249,8 +248,8 @@ fn waiting(c: &mut Criterion) {
 				&(tokens, paths),
 				|b, &(tokens, paths)| {
 					let _guard = runtime.enter();
-					let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
-					config.update_hold = Duration::ZERO;
+					let config =
+						origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
 					let (publish, driver) = origin::Producer::new(config);
 					harness::spawn(driver);
 					let (receive, driver) =
@@ -342,8 +341,8 @@ fn shared_requests(c: &mut Criterion) {
 				&(tokens, requests),
 				|b, &(tokens, requests)| {
 					let _guard = runtime.enter();
-					let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
-					config.update_hold = Duration::ZERO;
+					let config =
+						origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
 					let (origin, driver) = origin::Producer::new(config);
 					harness::spawn(driver);
 					let (client, _server, mut pending, receive) = runtime.block_on(publisher(&origin));

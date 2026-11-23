@@ -4,5 +4,5 @@
  * @module
  */
 
-export * from "./decode";
-export { Format } from "./format";
+export * from "./decode.ts";
+export { Format } from "./format.ts";

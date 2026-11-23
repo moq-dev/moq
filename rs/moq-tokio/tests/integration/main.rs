@@ -30,13 +30,13 @@ mod worker;
 
 /// Wait until some subscriber wants the track.
 async fn wanted(mut demand: moq_net::track::Demand) -> moq_net::Result<()> {
-	while demand.wanted_changed().await?.is_none() {}
+	while !demand.wanted_changed().await? {}
 	Ok(())
 }
 
 /// Wait until no subscriber wants the track.
 async fn unwanted(mut demand: moq_net::track::Demand) -> moq_net::Result<()> {
-	while demand.wanted_changed().await?.is_some() {}
+	while demand.wanted_changed().await? {}
 	Ok(())
 }
 

@@ -15,8 +15,8 @@ and records the artifact versions and results.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, replacing
 2026-10-25's "the hand-written `moq-c` ships at the next cut"): the
-hand-written API ships at the cut as `libmoq` 0.22, its final line
-([the C crate's name](/quest/m2/libmoq-name.md)), and `moq-c` stays
+hand-written API ships at the cut as `libmoq` 0.22, its final line, and
+`moq-c` stays
 unpublished until this quest. So this is the first `moq-c` anyone can
 install: it supersedes no published `moq-c`, and the published package it
 replaces for C users is `libmoq`, whose source stays until

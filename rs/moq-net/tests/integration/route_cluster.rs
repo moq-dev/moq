@@ -11,7 +11,7 @@
 //! overlapping claims, restarts, and a grant union crossing a scoped boundary. Last, a
 //! client listing one prefix of a relay holds routes only to the origins meeting it.
 
-use crate::path_routes::{DOUBT, HOLD, land, lite07, quiesce};
+use crate::path_routes::{DEBOUNCE, HOLD, land, lite07, quiesce};
 use crate::route_change::{Delivery, produce_origin, read, timed};
 use crate::support;
 
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
 use moq_net::stats::{Message, Registry, SessionInfo, Tier};
-use moq_net::{Error, Instance, Pattern, Patterns, Timestamp, auth, origin, track};
+use moq_net::{Error, Instance, Prefix, Prefixes, Timestamp, auth, origin, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, now, spawn};
 
@@ -46,7 +46,7 @@ async fn join(
 	let acceptor = acceptor.clone().with_link(origin::Link::Peer);
 	let mut options = MockConnectOptions::new(lite07());
 	options.client_publish = Some(dialer.consume().with_hidden(true));
-	options.client_subscribe = Some(dialer.with_preference(origin::Preference::new(preference)));
+	options.client_subscribe = Some(dialer.with_priority(origin::Priority::new(preference)));
 	options.server_publish = Some(acceptor.consume().with_hidden(true));
 	options.server_subscribe = Some(acceptor);
 	options.cost = Some(cost);
@@ -78,12 +78,12 @@ impl Links {
 		preference: i8,
 	) {
 		let pair = join(dialer, link, acceptor, cost, preference).await;
-		self.0.push((dialer.hop().get(), acceptor.hop().get(), pair));
+		self.0.push((dialer.node().get(), acceptor.node().get(), pair));
 	}
 
 	/// Close the session between `a` and `b`, and forget it.
 	fn cut(&mut self, a: &origin::Producer, b: &origin::Producer) {
-		let (a, b) = (a.hop().get(), b.hop().get());
+		let (a, b) = (a.node().get(), b.node().get());
 		let between = |(x, y, _): &(u64, u64, MockPair)| (*x, *y) == (a, b) || (*x, *y) == (b, a);
 		let (_, _, pair) = self.0.iter().find(|link| between(link)).expect("no such link");
 		cut(pair);
@@ -92,7 +92,7 @@ impl Links {
 
 	/// `node` dies: every session it holds closes.
 	fn kill(&mut self, node: &origin::Producer) {
-		let hop = node.hop().get();
+		let hop = node.node().get();
 		let touches = |(x, y, _): &(u64, u64, MockPair)| *x == hop || *y == hop;
 		self.0
 			.iter()
@@ -240,7 +240,7 @@ impl Publisher {
 			let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 			group.write_frame(timestamp, tagged(self.name, key, frame)).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 }
 
@@ -328,7 +328,7 @@ async fn a_far_edge_reads_a_claim_and_sees_its_withdrawal_once() {
 	quiesce().await;
 	for (relay, watch) in regions.relays().zip(&mut watched) {
 		let seen = watch.seen();
-		assert_eq!(kinds(&seen), [Kind::End], "relay {}: {seen:?}", relay.hop());
+		assert_eq!(kinds(&seen), [Kind::End], "relay {}: {seen:?}", relay.node());
 	}
 }
 
@@ -462,14 +462,11 @@ impl Lan {
 /// moves back onto the LAN in place once it heals. Meanwhile `cdn[1]` reaches the CDN
 /// publisher only over the CDN's own expensive link, never through the LAN.
 ///
-/// PINNED, contradicting the contract ("a node ... holds ... showing the announcements as
-/// unavailable"; "the reader's announcement stays, unavailable"): at the cut `lan[0]`'s
-/// router holds the route through the doubt on `lan[1]`, but its origin shows the
-/// broadcast Offline, then Start through the CDN once the doubt and the origin's
-/// two-second retraction quarantine pass. The held claim's only home was the closed LAN
-/// session's stream, which `route::Node::close` drops, and nothing re-homes it. The
-/// reader's track ends with the error either way, as a held route ends a forwarded
-/// subscription, so a fresh one reads on through the CDN.
+/// At the cut `lan[0]` moves onto the route through the CDN at once: its reader's
+/// announcement stays. `cdn[0]` reached the local broadcast through `lan[0]`, so it offered
+/// it nothing until the cut, and `lan[0]` shows it unavailable until that route lands, here
+/// in the same instant. The subscription the closed session carried reads on through the
+/// CDN.
 #[kio::test]
 async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let mut lan = Lan::new().await;
@@ -503,29 +500,21 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let partitioned = island.seen();
 	// The local publisher's push, `lan[1]`'s uplink, the CDN's link, and `lan[0]`'s uplink.
 	let through_cdn = 1 + 1 + CDN_INTERNAL + 1;
-	let [offline, back] = partitioned.as_slice() else {
-		panic!("the island let go and came back: {partitioned:?}");
+	let [lost, moved] = partitioned.as_slice() else {
+		panic!("the island moved once: {partitioned:?}");
 	};
 	assert!(
-		offline.kind == Kind::Offline && offline.at == cut_at,
-		"PINNED: let go at the cut, not held: {partitioned:?}"
+		lost.kind == Kind::Update && !lost.available && lost.instance == instance && lost.at == cut_at,
+		"unavailable until the CDN's route lands: {partitioned:?}"
 	);
 	assert!(
-		back.kind == Kind::Start
-			&& back.available
-			&& back.cost == through_cdn
-			&& back.instance == instance
-			&& back.at.saturating_duration_since(cut_at) >= DOUBT,
-		"through the CDN once the doubt lifts: {partitioned:?}"
+		moved.kind == Kind::Update
+			&& moved.available
+			&& moved.cost == through_cdn
+			&& moved.instance == instance
+			&& moved.at.saturating_duration_since(cut_at) < DEBOUNCE,
+		"through the CDN at once: {partitioned:?}"
 	);
-	let ended = kio::clock::timeout(Duration::from_secs(1), rx.next()).await;
-	assert!(
-		matches!(ended, Ok(Some((_, Err(_))))),
-		"the held route ended the track: {ended:?}"
-	);
-	// A fresh subscription joins at the latest group, the one already read.
-	let (_broadcast, mut rx) = subscribe(&lan.lan[0], "local").await;
-	read_group(&mut rx, "O", 0).await;
 	local.group(1);
 	read_group(&mut rx, "O", 1).await;
 
@@ -556,8 +545,8 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 
 /// The CDN's own link costs more than a detour through the LAN, but every route the LAN
 /// learned from the CDN is down-only, so `cdn[1]` reaches the CDN publisher over that
-/// link, and once it closes lets the broadcast go rather than reaching `cdn[0]` through
-/// the LAN. The control leaves the LAN's uplinks unmarked: `cdn[1]` then takes the LAN
+/// link, and once it closes shows the broadcast unavailable and lets it go rather than
+/// reaching `cdn[0]` through the LAN. The control leaves the LAN's uplinks unmarked: `cdn[1]` then takes the LAN
 /// from the start and keeps it when the link closes.
 #[kio::test]
 async fn the_cdn_never_reaches_itself_through_the_lan() {
@@ -583,8 +572,9 @@ async fn the_cdn_never_reaches_itself_through_the_lan() {
 		lan.links.cut(&cdn0, &cdn1);
 		quiesce().await;
 		let seen = watch.seen();
-		let expected: &[Kind] = if marked { &[Kind::Offline] } else { &[] };
+		let expected: &[Kind] = if marked { &[Kind::Update, Kind::Offline] } else { &[] };
 		assert_eq!(kinds(&seen), expected, "marked {marked}: {seen:?}");
+		assert!(seen.iter().all(|seen| !seen.available), "marked {marked}: {seen:?}");
 	}
 }
 
@@ -620,7 +610,7 @@ async fn overlapping_wildcards_resolve_to_the_most_specific_claim_everywhere() {
 	let mut subscribing = Vec::new();
 	for relay in lan.relays() {
 		for (under, instance) in [("a", &narrow_instance), ("b", &wide_instance)] {
-			let path = format!("live/{under}/{}", relay.hop());
+			let path = format!("live/{under}/{}", relay.node());
 			let broadcast = relay.consume().request(path.as_str(), None).await.unwrap();
 			assert_eq!(broadcast.info().instance.as_ref(), Some(instance), "{path}");
 			// Reading a track sends the request on to the claim.
@@ -637,7 +627,7 @@ async fn overlapping_wildcards_resolve_to_the_most_specific_claim_everywhere() {
 	narrow_paths.sort();
 	let expected = |under: &str| {
 		let mut paths: Vec<_> = (lan.relays())
-			.map(|relay| format!("live/{under}/{}", relay.hop()))
+			.map(|relay| format!("live/{under}/{}", relay.node()))
 			.collect();
 		paths.sort();
 		paths
@@ -700,7 +690,7 @@ async fn an_epochless_replacement_restarts_everywhere() {
 		assert!(
 			matches!(start.as_slice(), [Seen { kind: Kind::Start, .. }]),
 			"relay {}: {start:?}",
-			relay.hop()
+			relay.node()
 		);
 		watched.push((watch, start[0].instance.clone()));
 	}
@@ -709,7 +699,7 @@ async fn an_epochless_replacement_restarts_everywhere() {
 	quiesce().await;
 	for (relay, (watch, before)) in lan.relays().zip(&mut watched) {
 		let seen = watch.seen();
-		let hop = relay.hop();
+		let hop = relay.node();
 		assert!(
 			seen.iter()
 				.all(|seen| seen.kind != Kind::End && seen.kind != Kind::Offline),
@@ -741,7 +731,9 @@ async fn tokened_uplink(dialer: &origin::Producer, acceptor: &origin::Producer) 
 	transport.protocol = Some(version.alpn().to_string());
 	let (client_transport, server_transport) = support::mock::create_mock_session_pair(transport);
 	let dialer = dialer.clone().with_link(origin::Link::Upstream);
-	let acceptor = acceptor.clone().with_link(origin::Link::Peer);
+	// The acceptor confines the dialer to part of the tree, so it declares no Node ID:
+	// the session carries claims, and no routes.
+	let acceptor = acceptor.clone();
 	let client = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_publisher(dialer.consume().with_hidden(true))
@@ -756,7 +748,7 @@ async fn tokened_uplink(dialer: &origin::Producer, acceptor: &origin::Producer) 
 		session
 	};
 	let server_fut = async {
-		let mut handshake = (server.accept_request(now(), server_transport.clone()).await).expect("server handshake");
+		let mut handshake = (server.handshake(now(), server_transport.clone()).await).expect("server handshake");
 		let requests = handshake.requests();
 		let (session, driver) = handshake.ok().await.expect("server accept");
 		spawn(driver);
@@ -773,16 +765,12 @@ async fn tokened_uplink(dialer: &origin::Producer, acceptor: &origin::Producer) 
 	(pair, requests)
 }
 
-/// A grant of the `publish` subtrees, or of everything for `**`, subscribing to
-/// everything and lapsing at `expires`.
+/// A grant of the `publish` prefixes, subscribing to everything and lapsing at `expires`.
 fn grant(publish: &[&str], expires: Option<kio::clock::Instant>) -> auth::Grant {
 	let mut grant = auth::Grant::all();
 	grant.publish = (publish.iter())
-		.map(|prefix| match *prefix {
-			"**" => Pattern::all(),
-			prefix => Pattern::subtree(prefix).unwrap(),
-		})
-		.collect::<Patterns>();
+		.map(|prefix| Prefix::try_from(*prefix).unwrap())
+		.collect::<Prefixes>();
 	grant.expires = expires;
 	grant
 }
@@ -818,7 +806,7 @@ async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
 		while let Some(request) = requests.next().await {
 			match request.token().as_ref() {
 				b"wide" => {
-					let issued = request.accept(grant(&["**"], Some(wide_expires)));
+					let issued = request.accept(grant(&[""], Some(wide_expires)));
 					// Revoking a token's grant once it expires is the acceptor's job.
 					kio::clock::sim::spawn(async move {
 						kio::clock::sleep_until(wide_expires).await;
@@ -877,14 +865,16 @@ async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
 		);
 	}
 
-	// The narrowed floor certifies nothing outside `local`, so `other/z` is let go
-	// (Offline), not ended: its publisher never withdrew it.
+	// Outside `local` again, `other/z` is let go, unavailable and then Offline, not
+	// ended: its publisher never withdrew it.
 	kio::clock::sleep_until(wide_expires).await;
 	quiesce().await;
 	for (inside, outside) in &mut watched {
-		let (inside, outside) = (inside.seen(), kinds(&outside.seen()));
+		let (inside, outside) = (inside.seen(), outside.seen());
+		let let_go = (outside.split_last())
+			.is_some_and(|(last, held)| last.kind == Kind::Offline && held.iter().all(|seen| !seen.available));
 		assert!(
-			moved(&inside) && outside == [Kind::Offline],
+			moved(&inside) && let_go,
 			"expired: inside {inside:?} outside {outside:?}"
 		);
 	}
@@ -940,12 +930,10 @@ struct Listing {
 
 impl Listing {
 	async fn new(node: &origin::Producer, prefix: &str) -> Self {
-		let routes = (node.consume().scope(prefix, &Patterns::from(Pattern::all())))
-			.unwrap()
-			.routes();
+		let routes = (node.consume().scope(prefix, &Prefixes::all())).unwrap().routes();
 		let listing = Self { routes };
 		// The request, its answer, and the initial set.
-		kio::clock::sleep(DOUBT).await;
+		kio::clock::sleep(DEBOUNCE).await;
 		listing
 	}
 
@@ -992,9 +980,9 @@ impl Origin {
 		for _ in 0..3 {
 			let route = self.node.route(path, origin::RouteOptions::hidden()).unwrap();
 			route.announce().unwrap();
-			kio::clock::sleep(DOUBT).await;
+			kio::clock::sleep(DEBOUNCE).await;
 			route.withdraw();
-			kio::clock::sleep(DOUBT).await;
+			kio::clock::sleep(DEBOUNCE).await;
 		}
 	}
 }
@@ -1003,8 +991,8 @@ impl Origin {
 /// over its own session. A client lists only `live`. It holds `L`'s route and never `V`'s:
 /// `V` churning costs the client no byte. A request outside that interest still resolves
 /// through the relay. A Rust client's request discovers its own path, so it names `V`'s
-/// node; Node ID 0, the publisher selecting, comes only from other implementations and
-/// is covered at the publisher (`an_answered_track_stream_holds_the_track_until_the_requester_closes`).
+/// node; Node ID 0, the publisher selecting, comes only from other implementations: the
+/// native JS claims lanes of `just test interop` cover a relay answering it.
 #[kio::test]
 async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
 	let relay = produce_origin(1);
@@ -1034,17 +1022,18 @@ async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
 
 /// `L` claims `live/a` and `vod/l` at a relay whose client lists `live`, then withdraws
 /// `live/a`, its last claim there. Its route to the client ends behind that batch, closed
-/// by its floor: the client sees `live/a` End where the relay certifies the request, and
-/// Offline where the relay's grant to `L` (`live/a` and `vod`) knows only part of it.
-/// Either way `L`'s later churn under `vod` costs the client nothing, so the route is gone.
+/// by its floor: the client sees `live/a` End, even where the relay's grant to `L` covers
+/// only `live/a` and `vod`, since the relay asks `L` for everything and refuses only what
+/// the grant does not cover, so `L`'s floor certifies the withdrawal. Either way `L`'s
+/// later churn under `vod` costs the client nothing, so the route is gone.
 #[kio::test]
 async fn an_origin_leaving_the_interest_ends_its_route_by_its_floor() {
-	for (scoped, gone) in [(false, Kind::End), (true, Kind::Offline)] {
+	for (scoped, gone) in [(false, Kind::End), (true, Kind::End)] {
 		let relay = produce_origin(1);
 		let l = Origin::new(2, &["live/a", "vod/l"], &relay).await;
 		if scoped {
 			let mut grant = auth::Grant::default();
-			grant.publish = [Pattern::subtree("live/a").unwrap(), Pattern::subtree("vod").unwrap()]
+			grant.publish = [Prefix::try_from("live/a").unwrap(), Prefix::try_from("vod").unwrap()]
 				.into_iter()
 				.collect();
 			l.link.server.auth().authorize(&grant);
@@ -1056,7 +1045,7 @@ async fn an_origin_leaving_the_interest_ends_its_route_by_its_floor() {
 		assert_eq!(live.seen(), [("a".to_string(), Kind::Start)], "scoped {scoped}");
 
 		l.routes[0].withdraw();
-		kio::clock::sleep(DOUBT).await;
+		kio::clock::sleep(DEBOUNCE).await;
 		assert_eq!(live.seen(), [("a".to_string(), gone)], "scoped {scoped}");
 
 		let before = counted.announced();
