@@ -368,8 +368,9 @@ test("fill: a held answer that fails keeps its frames and its failure", async ()
 });
 
 // A reader judges each sequence once, so one it judged held and then lost is judged again: a fill
-// answer that fails after a probe saw it is asked once more. Mirrors the Rust `Misses` inbox.
-test("fill: an answer withheld after a probe judged it is asked again", async () => {
+// answer that fails after a probe saw it is given up, never asked again, since a source failing
+// for good would fail every retry. Mirrors the Rust `Misses::next_filled`.
+test("fill: an answer that fails after a probe judged it is given up", async () => {
 	const { broadcast, track } = resumed(4n);
 	const requests = track.requests();
 	const reader = track.subscribe({
@@ -394,9 +395,9 @@ test("fill: an answer withheld after a probe judged it is asked again", async ()
 
 	const third = ordered.nextGroup();
 	const again = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
-	expect(again && [again.start, again.end]).toEqual([2n, 3n]);
-	if (again) serve(again, new Map([[2n, ["again"]]]));
-	expect((await third)?.start).toBe(2n);
+	expect(again && [again.start, again.end]).toBeUndefined();
+	defined(fill.accept(3n)).finish();
+	expect((await third)?.start).toBe(3n);
 
 	fill.close();
 	reader.close();

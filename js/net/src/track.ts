@@ -4548,10 +4548,9 @@ export class Subscriber {
 	// never asked, and again what was asked but is missed again.
 	#askMiss(start: bigint, end: bigint, drift: Drift, asker: Asker): void {
 		if (start >= end || this.#staleAt(end - 1n, drift)) return;
-		const fills = fillsOf(this.#state.producer as Producer);
-		// Asked before and missed again, unless a fill still brings it: its answer was evicted
-		// before this reader took it, so it is asked again however often, as the Rust `Misses`
-		// asks a refill evicted again.
+		const producer = this.#state.producer as Producer;
+		const fills = fillsOf(producer);
+		// Asked before and missed again, unless a fill still brings it.
 		const again = intersect(this.#asked, start, end).flatMap((run) =>
 			runGaps([...fills.covered(run.start, run.end, asker)], run.start, run.end),
 		);
@@ -4560,7 +4559,21 @@ export class Subscriber {
 		for (const gap of runGaps(this.#asked, start, end)) {
 			for (const run of fills.ask(gap.start, gap.end, asker)) insertRun(this.#asked, run.start, run.end);
 		}
-		for (const run of again) fills.ask(run.start, run.end, asker);
+		// An answer that failed is still cached, failed, and given up: asking again would repeat a
+		// source's failure without end. One evicted before this reader took it is asked again however
+		// often. Mirrors the Rust `Misses::next_filled`.
+		const failed: Run[] = [];
+		for (const run of again) {
+			for (const key of cachedIn(producer, run.start, run.end)) {
+				if (!cachedHolds(producer, key)) insertRun(failed, key, key + 1n);
+			}
+			for (const lost of runGaps(failed, run.start, run.end)) fills.ask(lost.start, lost.end, asker);
+		}
+		for (const run of failed) {
+			insertRun(this.#givenUp, run.start, run.end);
+			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "fill answer failed" }));
+		}
+		if (failed.length > 0) this.#fillsMoved(failed);
 	}
 
 	// Whether `group` is one this reader hands out only from its first frame, which it lacks: the
