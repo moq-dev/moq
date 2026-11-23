@@ -32465,6 +32465,39 @@ mod test {
 		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
 	}
 
+	/// A read that ended once a fill refused its kept-out keys stays ended: polled again, it
+	/// asks nothing.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_kept_out_key_a_fill_refused_stays_given_up_once_the_read_ends() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 6);
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..7));
+		assert_eq!(drain_groups(&mut subscriber), [0, 6]);
+		let mut subscriber = subscriber.with_range(6..7);
+		let waiter = kio::Waiter::noop();
+		producer.skip_groups(3..6);
+		elapse(&producer, Duration::from_secs(60));
+		pool.sweep();
+		producer.skip_groups(1..3);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the forgotten skip is asked of a fill");
+		};
+		fill.reject_groups(3..6, Error::NotFound);
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"nothing is asked again"
+		);
+	}
+
 	/// A forgotten kept-out run spanning a history range and a live join is judged per budget:
 	/// the live part gone stale is given up, while the history part, which never goes stale,
 	/// stays asked.
