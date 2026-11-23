@@ -1119,9 +1119,11 @@ test("a skip starting a gap the local floor keeps out ends the read", async () =
 	ta.write(3n);
 	const front = new Front();
 	front.serve(a.consume());
+	// A live join reaching back to the oldest group, so the reader's budget bounds how long a replaced
+	// copy is waited on.
 	const sub = front.consumer
 		.track("seq")
-		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 4n }] }));
+		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ end: 4n }] }));
 	try {
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([0n, 3n]);
@@ -1164,9 +1166,11 @@ test("a skip split between a replaced and the serving copy ends the read", async
 	ta.write(4n);
 	const front = new Front();
 	front.serve(a.consume());
+	// A live join reaching back to the oldest group, so the reader's budget bounds how long a replaced
+	// copy is waited on.
 	const sub = front.consumer
 		.track("seq")
-		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 5n }] }));
+		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ end: 5n }] }));
 	try {
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([0n, 4n]);
