@@ -2168,12 +2168,8 @@ impl Connection {
 				recovered.extend(mem::take(&mut packet.retransmits.get_or_create().crypto));
 			}
 		}
-		// Ahead of any flight not yet sent, as a lost packet's CRYPTO goes: the peer buffers only
-		// so far past the offset it is missing
 		let any = !recovered.is_empty();
-		for crypto in recovered.into_iter().rev() {
-			space.pending.crypto.push_front(crypto);
-		}
+		spaces::queue_crypto(&mut space.pending.crypto, recovered);
 		any
 	}
 
