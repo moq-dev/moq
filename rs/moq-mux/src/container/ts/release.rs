@@ -72,11 +72,24 @@ pub struct Release {
 	restarts: u64,
 	gaps: u64,
 	delay: Duration,
-	jitter: jitter::Buffer<(), Frame>,
+	jitter: jitter::Buffer<(), Held>,
+	/// The path lost something since the last object read: a group cut short or skipped, an
+	/// object dropped late, or a switch of track, so the next one read is no successor to spread
+	/// up to.
+	lost: bool,
+	/// The track's gaps when the last object was read.
+	skipped: u64,
 	/// The object going out, a run at a time.
 	spread: Option<Spread>,
 	timer: Option<Pin<Box<Sleep>>>,
 	replay: bool,
+}
+
+/// An object waiting in the jitter buffer.
+struct Held {
+	frame: Frame,
+	/// It follows a loss, so the object before it on the wire is not its predecessor.
+	after_loss: bool,
 }
 
 /// An object's runs, each due at its first byte's time on the way from the object's time to the next's.
@@ -187,6 +200,8 @@ impl Release {
 			gaps: 0,
 			delay,
 			jitter,
+			lost: false,
+			skipped: 0,
 			spread: None,
 			timer: None,
 			replay: false,
@@ -204,7 +219,7 @@ impl Release {
 	}
 
 	#[cfg(test)]
-	fn jitter(&self) -> jitter::Buffer<(), Frame> {
+	fn jitter(&self) -> jitter::Buffer<(), Held> {
 		let mut jitter = jitter::Buffer::new(self.delay);
 		#[cfg(test)]
 		if self.replay {
@@ -272,7 +287,11 @@ impl Release {
 				}
 				let (frame, arrived) = match track.poll_event(waiter) {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => (frame, arrived),
-					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }))) => continue,
+					Poll::Ready(Ok(Some(Event::Cut { .. }))) => {
+						self.lost = true;
+						continue;
+					}
+					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. }))) => continue,
 					Poll::Ready(Ok(None)) => {
 						self.finished = true;
 						break;
@@ -283,6 +302,9 @@ impl Release {
 					}
 					Poll::Pending => break,
 				};
+				let skipped = track.skips() - track.markers();
+				let after_loss = std::mem::take(&mut self.lost) || skipped != self.skipped;
+				self.skipped = skipped;
 				// Judged on when the object landed, so a sink that leaves arrived objects unread
 				// does not make them late, and a stall of the whole path does not hide that they are.
 				let arrival = Arrival {
@@ -295,9 +317,10 @@ impl Release {
 					sync: frame.keyframe || self.released,
 					leading: false,
 					bytes: frame.payload.len(),
-					item: frame,
+					item: Held { frame, after_loss },
 				};
 				if self.jitter.push((), arrival)? == Push::Late {
+					self.lost = true;
 					tracing::warn!(track = %name, dropped = self.jitter.dropped(), "object missed its deadline; dropped");
 				}
 			}
@@ -307,17 +330,21 @@ impl Release {
 			&& let Poll::Ready(ready) = self.jitter.poll_next(waiter)
 		{
 			self.released = true;
-			// No delay releases an object as it arrives, ahead of its deadline.
+			// No delay releases an object as it arrives, ahead of its deadline, and none is spread
+			// up to an object that follows a loss, whose interval the source spent elsewhere.
 			let (start, next) = match self.delay.is_zero() {
 				true => (kio::clock::now(), None),
 				false => (
 					ready.deadline,
-					self.jitter
-						.front_deadline()
-						.zip(self.jitter.peek(&()).map(|frame| frame.timestamp)),
+					self.jitter.front_deadline().zip(
+						self.jitter
+							.peek(&())
+							.filter(|held| !held.after_loss)
+							.map(|held| held.frame.timestamp),
+					),
 				),
 			};
-			self.spread = Some(Spread::new(ready.item, start, next));
+			self.spread = Some(Spread::new(ready.item.frame, start, next));
 		}
 		if let Some(spread) = self.spread.as_mut() {
 			loop {
@@ -439,6 +466,9 @@ impl super::follower::sealed::Followed for Release {
 			self.gaps += track.skips() - track.markers();
 			self.restarts += track.markers();
 		}
+		// The next track's counts start over, and its first object follows whatever the switch lost.
+		self.skipped = 0;
+		self.lost = true;
 		if same {
 			self.source.pin(broadcast);
 			// A track never read has no cursor, but an earlier one still might.

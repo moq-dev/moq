@@ -88,7 +88,8 @@ impl<'a> Admitted<'a> {
 	/// position after that in order, whole, its first run stamped as published. Each run must be
 	/// stamped, and written on the clock its first object set, within `tolerance` of its first
 	/// byte's time: the object's PCR time, and for a later run the share of the way to the next
-	/// object written that its bytes before it are of the object's.
+	/// object that its bytes before it are of the object's. Only an object whose source successor
+	/// is written next may be spread.
 	pub fn grade(&self, released: &[(Instant, Frame)], tolerance: Duration) -> Loss {
 		let Some((start, opened)) = released.first() else {
 			panic!("the release wrote nothing");
@@ -150,10 +151,13 @@ impl<'a> Admitted<'a> {
 			let object = &self.objects[j];
 			let mut due = object.micros as i128;
 			if offset > 0 {
-				let Some(&next) = matched.get(m + 1) else {
-					panic!("released run {i} spreads object {j}, which no object follows");
-				};
-				let span = self.objects[next].micros as i128 - due;
+				// Only up to the source's next object: past a loss, the interval to the next one
+				// written is the source's time for what was lost, not for this object.
+				assert!(
+					matched.get(m + 1) == Some(&(j + 1)),
+					"released run {i} spreads object {j}, which its source successor does not follow"
+				);
+				let span = self.objects[j + 1].micros as i128 - due;
 				due += span * offset as i128 / object.payload.len() as i128;
 			}
 			let stamp = frame.timestamp.as_micros().unwrap() as i128 - due;

@@ -668,6 +668,35 @@ async fn a_group_cut_short_loses_only_its_tail() {
 	assert_eq!(release.stats().gaps, 1, "the source skipped once");
 }
 
+/// An object is never spread across a loss: with a group's last object lost, the one before it
+/// goes out on its own interval, not stretched over the lost one's.
+#[tokio::test(start_paused = true)]
+async fn an_object_is_not_spread_across_a_loss() {
+	const RUN: usize = 7 * 188;
+	let objects = import(KYRION).await.objects;
+	// A group whose last object a spread would otherwise cross: the one before it is over a run
+	// and the next group's first is within 100 ms of it.
+	let lost = (2..objects.len())
+		.find(|&i| {
+			objects[i].group != objects[i - 1].group
+				&& objects[i - 1].group == objects[i - 2].group
+				&& objects[i - 2].payload.len() > RUN
+				&& objects[i].micros - objects[i - 2].micros <= 100_000
+		})
+		.map(|i| i - 1)
+		.expect("a group to cut its last object from");
+	let cut = objects[lost].group;
+	let (loss, release) = release_omitting(&[cut], |i, _| i == lost).await;
+	assert_eq!(
+		loss,
+		Loss {
+			first: 0,
+			missing: vec![lost]
+		}
+	);
+	assert_eq!(release.stats().gaps, 1, "the source skipped once");
+}
+
 /// What the captures don't carry goes out at its exact position too: null packets, tables, a PID
 /// no table lists, adaptation stuffing, a PES split across objects, the clock's wrap, and an MPTS
 /// whose programs keep clocks and random access points of their own.
