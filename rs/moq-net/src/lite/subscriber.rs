@@ -4177,7 +4177,7 @@ mod tests {
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
 
-	/// A lite-07 range an update adds owes nothing known until SUBSCRIBE_STARTED says where it
+	/// A lite-07 range an update adds owes nothing known until SUBSCRIBE_START says where it
 	/// starts, and then owes from there; one retired since owes nothing.
 	#[kio::test]
 	#[expect(
@@ -5161,7 +5161,7 @@ mod tests {
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only
-	/// duplicates the cache, but lite-07's SUBSCRIBE_FINISH still counts it, so the tail must
+	/// duplicates the cache, but lite-07's SUBSCRIBE_END still counts it, so the tail must
 	/// too, or the subscription waits out the grace before it ends.
 	#[kio::test]
 	async fn a_duplicate_group_stream_still_counts_toward_the_end() {
@@ -5223,7 +5223,7 @@ mod tests {
 		assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
 		drop(group);
 
-		// SUBSCRIBE_FINISH counted one stream: the tail settles without the clock moving.
+		// SUBSCRIBE_END counted one stream: the tail settles without the clock moving.
 		let mut settle = Settle::new(&clock, tail.consume());
 		assert!(settle.poll(&kio::Waiter::noop(), |tail| tail.streams() >= 1).is_ready());
 	}
@@ -5515,7 +5515,7 @@ mod tests {
 		}
 	}
 
-	/// A SUBSCRIBE_FINISH below a group already received contradicts that group. lite-05
+	/// A SUBSCRIBE_END below a group already received contradicts that group. lite-05
 	/// specified an inclusive end, and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it only
 	/// costs the early boundary; later drafts abort the track.
 	#[kio::test]
@@ -5761,7 +5761,7 @@ mod tests {
 		};
 		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
-		// Recorded as ended, so a relay serving this copy says so in its own SUBSCRIBE_OK.
+		// Recorded as ended, so a relay serving this copy says so in its own SUBSCRIBE_START.
 		assert!(reader.largest_finished(largest));
 		assert_eq!(reader.largest().await, Some(largest));
 		assert_eq!(reader.largest().await, None, "the stream ends with the aborted track");
@@ -6372,7 +6372,7 @@ mod tests {
 		}
 	}
 
-	/// SUBSCRIBE_START at group 0 and SUBSCRIBE_FINISH at 1: the publisher ended the track
+	/// SUBSCRIBE_START at group 0 and SUBSCRIBE_END at 1: the publisher ended the track
 	/// owing group 0.
 	fn owed_responses(version: Version) -> Vec<u8> {
 		let mut responses = Vec::new();
@@ -8054,7 +8054,7 @@ mod tests {
 
 	/// A session that dies before a tail settles hands the track back with the session's error,
 	/// even one the publisher ended, and the abort `TrackServeRun` commits then ends readers
-	/// cleanly only if the declared end settled: SUBSCRIBE_FINISH on lite-05+, the FIN before it.
+	/// cleanly only if the declared end settled: SUBSCRIBE_END on lite-05+, the FIN before it.
 	#[kio::test]
 	async fn internal_session_end_aborts_an_unsettled_tail() {
 		use crate::transport::poll::Session as _;
@@ -10428,14 +10428,14 @@ struct SubStream {
 	/// The first group the publisher serves, once SUBSCRIBE_START says: `Some(None)` when it
 	/// starts no range.
 	started: Option<Option<u64>>,
-	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_FINISH: once it
+	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_END: once it
 	/// settles the copy finishes and FINs, while demand and responses keep flowing meanwhile.
 	finishing: Option<Settle>,
 	/// A pipelined subscription's group streams stay parked until the responses that beat the
 	/// accept are read, as they would have been without the wait: a SUBSCRIBE_START says where
 	/// the feed starts before its first group does.
 	parked: bool,
-	/// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range's delivery starts, by
+	/// Where each live range's SUBSCRIBE_START says its delivery starts, by
 	/// Range ID, `None` for one with nothing to deliver.
 	starts: std::collections::BTreeMap<u64, Option<u64>>,
 	/// The tick the copy recorded each live join range's answer at, by Range ID (see
@@ -10444,7 +10444,7 @@ struct SubStream {
 	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
 	/// again: each declaration restarts the grace of the gaps above it.
 	declared: Option<(Option<u64>, bool)>,
-	/// The track's exclusive end (SUBSCRIBE_FINISH), once declared.
+	/// The track's exclusive end (SUBSCRIBE_END), once declared.
 	end: Option<lite::SubscribeEnd>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
 	wanted: Option<u64>,
@@ -10465,7 +10465,7 @@ impl SubStream {
 
 	/// Lite-07's declaration of where the live feed starts: the lowest start the demand's live
 	/// ranges report, or the requested floor, pending, while SUBSCRIBE_START or a range's
-	/// SUBSCRIBE_STARTED has yet to say where one starts. `None` before lite-07, whose one start
+	/// SUBSCRIBE_START has yet to say where one starts. `None` before lite-07, whose one start
 	/// describes only the SUBSCRIBE's demand, and while the ranges ask only for fills.
 	fn feed_start(&self) -> Option<(Option<u64>, bool)> {
 		if !self.live.reports_starts() || self.demand.is_none() {
@@ -10566,7 +10566,7 @@ impl SubStream {
 	/// for a range with no group to deliver.
 	///
 	/// Lite-07 reports every range's start: SUBSCRIBE_START the SUBSCRIBE's, and
-	/// SUBSCRIBE_STARTED each one an update added. Before it, the one start describes the
+	/// SUBSCRIBE_START each one an update added. Before it, the one start describes the
 	/// SUBSCRIBE's range, so a range an update replaced it with delivers from its absolute
 	/// start, or else from where delivery started.
 	fn range_start(&self, id: u64, range: &lite::Range) -> Option<Option<u64>> {
@@ -10602,8 +10602,8 @@ impl SubStream {
 	/// The groups the publisher still owes once it has ended the subscription, one run per
 	/// range: the publisher accounts for nothing between disjoint ranges.
 	///
-	/// `None` when nothing says which: drafts before SUBSCRIBE_FINISH only have the FIN, and a
-	/// lite-07 range an update added owes nothing known until SUBSCRIBE_STARTED says where it
+	/// `None` when nothing says which: drafts before SUBSCRIBE_END only have the FIN, and a
+	/// lite-07 range an update added owes nothing known until SUBSCRIBE_START says where it
 	/// starts. Without a SUBSCRIBE_START the publisher served no group at all. Each range is
 	/// owed from its reported start (see [`Self::range_start`]), which accounts for a skipped
 	/// prefix and resolves a relative or time start. The groups the SUBSCRIBE asked for below
@@ -11447,7 +11447,7 @@ impl TrackServe {
 							// start returns to the demand that produced it (see
 							// `SubStream::requested`).
 							// Lite-07 declares from each live range's reported start instead, pending
-							// while a range the update adds awaits SUBSCRIBE_STARTED.
+							// while a range the update adds awaits SUBSCRIBE_START.
 							if active.live.reports_starts() {
 								active.declare(producer);
 							} else if start_moved {
@@ -13190,7 +13190,7 @@ impl ServeLoop {
 			return Ok(());
 		};
 		match &msg {
-			// SUBSCRIBE_FINISH declares the track's exclusive final
+			// SUBSCRIBE_END declares the track's exclusive final
 			// key, which may arrive while trailing groups are
 			// still in flight. Record it on this segment's producer so
 			// consumers learn the boundary early; the tail then waits for
@@ -13367,7 +13367,7 @@ impl ServeLoop {
 	fn settle(serve: &TrackServe, serving: &track::Producer, active: &SubStream) -> Settle {
 		let budget = serving.subscription().map(|sub| sub.budget());
 		if let Ok(mut tail) = active.tail.write() {
-			// Lite-05+ declared the end with SUBSCRIBE_FINISH instead.
+			// Lite-05+ declared the end with SUBSCRIBE_END instead.
 			if !serve.subscriber.version.has_track_stream() {
 				tail.end();
 			}
@@ -13743,7 +13743,7 @@ impl ServeLoop {
 										break;
 									};
 									// The publisher ends the subscription only once it declared the
-									// track's end: with SUBSCRIBE_FINISH from lite-05, which lite-07
+									// track's end: with SUBSCRIBE_END from lite-05, which lite-07
 									// reads into the tail without a FIN.
 									if serve.subscriber.version.has_track_stream() && active.end.is_none() {
 										return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));

@@ -245,8 +245,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	// QUIC does not order streams, so a lower group's stream can land after a higher one and
-	// after SUBSCRIBE_FINISH. The reader receives it before its end, which then comes at once.
-	test("a lower group that lands after SUBSCRIBE_FINISH reaches the reader", async () => {
+	// after SUBSCRIBE_END. The reader receives it before its end, which then comes at once.
+	test("a lower group that lands after SUBSCRIBE_END reaches the reader", async () => {
 		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000));
 		await respond({ start: answer(version, 0n) });
 		const high = groupStream(subscriber, 1n);
@@ -318,7 +318,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		subscriber.close();
 	});
 
-	test("a subscription that served nothing ends at SUBSCRIBE_FINISH", async () => {
+	test("a subscription that served nothing ends at SUBSCRIBE_END", async () => {
 		using clock = manual();
 		const { reader, respond, fin } = await subscribed(version, Duration.millis(60_000));
 		await respond({ end: new SubscribeEnd(0n) });
@@ -330,7 +330,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	// lite-05 specified an inclusive end, so there the group costs only its own stream.
-	test(`a group at or past SUBSCRIBE_FINISH ${version === Version.DRAFT_05 ? "is dropped" : "aborts the track"}`, async () => {
+	test(`a group at or past SUBSCRIBE_END ${version === Version.DRAFT_05 ? "is dropped" : "aborts the track"}`, async () => {
 		using clock = manual();
 		const { subscriber, reader, respond } = await subscribed(version);
 		await respond({ start: answer(version, 0n) });
@@ -387,7 +387,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			.consume(Path.from("room"))
 			.track("video")
 			.subscribe({ delay: { max: maxDelay }, ranges: [{ start: 1n }] });
-		// Lite-07 retires the range and adds the lowered one, whose start SUBSCRIBE_STARTED reports.
+		// Lite-07 retires the range and adds the lowered one, whose start SUBSCRIBE_START reports.
 		const lowered = await update();
 		if (hasRanges(version)) {
 			// A group key goes out as the time it starts at.
@@ -420,7 +420,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 	// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so there an end
 	// below a received group only costs the early boundary.
-	test(`a SUBSCRIBE_FINISH below a group already received ${version === Version.DRAFT_05 ? "finishes clean" : "aborts the track"}`, async () => {
+	test(`a SUBSCRIBE_END below a group already received ${version === Version.DRAFT_05 ? "finishes clean" : "aborts the track"}`, async () => {
 		using clock = manual();
 		const { subscriber, reader, respond, fin } = await subscribed(version);
 		await respond({ start: answer(version, 0n) });
@@ -509,7 +509,7 @@ test("lite-07 FIN waits for the skipped and reset final range to settle", async 
 	const ack = subscriberFin().then(() => {
 		finished = true;
 	});
-	// Wait for SUBSCRIBE_FINISH to be decoded without advancing any timers.
+	// Wait for SUBSCRIBE_END to be decoded without advancing any timers.
 	while (hooks.subscriberEnd(reader)?.group !== 3n) await Promise.resolve();
 	expect(finished).toBe(false);
 	last.reset();

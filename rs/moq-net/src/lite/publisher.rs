@@ -2344,7 +2344,7 @@ enum SubscribeServe {
 		priority: i8,
 		/// Set once the track's info is known.
 		send: Option<DatagramSend>,
-		/// One past the highest key served, which SUBSCRIBE_FINISH declares as the end.
+		/// One past the highest key served, which SUBSCRIBE_END declares as the end.
 		end: u64,
 	},
 	/// The track finished: draining the in-flight group streams before the FIN.
@@ -2563,7 +2563,7 @@ impl Request for SubscribeServe {
 						},
 						None => false,
 					};
-					// The live edge reached the boundary, so SUBSCRIBE_FINISH was already sent (or
+					// The live edge reached the boundary, so SUBSCRIBE_END was already sent (or
 					// the version predates the track stream). Drain the in-flight group
 					// machines, then FIN. Lite-07 never gets here: the subscriber's FIN ends it.
 					match run.poll_step(writer, waiter) {
@@ -2616,7 +2616,7 @@ impl Request for SubscribeServe {
 						}
 						None => {
 							// A lite-05/06 subscriber reads a FIN as the end only after
-							// SUBSCRIBE_FINISH declared it, as a stream track's does.
+							// SUBSCRIBE_END declared it, as a stream track's does.
 							writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd {
 								group: *end,
 								error: None,
@@ -4738,7 +4738,7 @@ enum Recv {
 	Finished,
 }
 
-/// The group boundary SUBSCRIBE_FINISH carries. Lite cannot name a frame, so a mid-group end
+/// The group boundary SUBSCRIBE_END carries. Lite cannot name a frame, so a mid-group end
 /// rounds up past its group, whose own stream FIN says where it stops.
 fn final_key(end: track::Position) -> u64 {
 	end.final_key().unwrap_or(u64::MAX)
@@ -4760,7 +4760,7 @@ const ALL: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
 ///
 /// When `emit_boundary` is set, a declared-but-not-yet-reached final key surfaces as
 /// [`Recv::Boundary`] in an idle moment (after groups), so the caller can send
-/// SUBSCRIBE_FINISH as soon as the ending is known rather than waiting for the live edge to reach
+/// SUBSCRIBE_END as soon as the ending is known rather than waiting for the live edge to reach
 /// it. The caller clears `emit_boundary` after the first boundary so it fires once.
 ///
 /// When `end_error` is set, the boundary carries the error an errored end has, and reaching
@@ -5344,7 +5344,7 @@ struct TrackRun {
 	start: Start,
 	end_sent: bool,
 	// Lite-05/06: the track's end, declared while the start was still unresolved. Their
-	// SUBSCRIBE_START is the first message, and a SUBSCRIBE_FINISH ahead of it says no group
+	// SUBSCRIBE_START is the first message, and a SUBSCRIBE_END ahead of it says no group
 	// was served, so the end waits for the start, or goes out alone once none can arrive.
 	held_end: Option<lite::SubscribeEnd>,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
@@ -6097,7 +6097,7 @@ impl TrackRun {
 						}
 						return Poll::Ready(Ok(ControlFlow::Break(())));
 					}
-					// Lite-07 leaves the stream open past SUBSCRIBE_FINISH: an update may still
+					// Lite-07 leaves the stream open past SUBSCRIBE_END: an update may still
 					// ask for the ended track's history, and the subscriber FINs once it wants
 					// nothing more. Drops just buffered go out on the next pass.
 					if !dropped {
@@ -6258,7 +6258,7 @@ impl TrackRun {
 			return Ok(false);
 		};
 		let Poll::Ready(Ok(fin)) = self.track.poll_finished(&kio::Waiter::noop()) else {
-			// A track closed without a final key sent no SUBSCRIBE_FINISH, so the subscriber
+			// A track closed without a final key sent no SUBSCRIBE_END, so the subscriber
 			// owes itself no range either.
 			return Ok(false);
 		};
@@ -9190,7 +9190,7 @@ mod serve_group_test {
 	}
 
 	/// A live join added behind the SUBSCRIBE's start reports where it was placed, even when a
-	/// later update pins it there before its SUBSCRIBE_STARTED goes out: the report keeps that
+	/// later update pins it there before its SUBSCRIBE_START goes out: the report keeps that
 	/// it was added as a join.
 	#[kio::test]
 	async fn lite07_a_join_pinned_before_its_report_keeps_its_start() {
@@ -9216,7 +9216,7 @@ mod serve_group_test {
 			end: None,
 		};
 		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
-		// Before any SUBSCRIBE_STARTED, another update pins the join to the group it resolved to.
+		// Before any SUBSCRIBE_START, another update pins the join to the group it resolved to.
 		run.update(lite07_add(
 			&run,
 			&[(0, first), (1, back)],
@@ -9237,7 +9237,7 @@ mod serve_group_test {
 		assert_eq!(started, [Some(2000)]);
 	}
 
-	/// A range an update adds learns where it starts from SUBSCRIBE_STARTED, after
+	/// A range an update adds learns where it starts from SUBSCRIBE_START, after
 	/// SUBSCRIBE_START, and keeps that start however many later updates leave it live.
 	#[kio::test]
 	async fn lite07_an_added_range_reports_its_start_and_keeps_it() {
@@ -9488,7 +9488,7 @@ mod serve_group_test {
 		assert!(served.contains(&4000), "served {served:?}");
 	}
 
-	/// A range retired before SUBSCRIBE_STARTED reported it gets none, and one still waiting
+	/// A range retired before SUBSCRIBE_START reported it gets none, and one still waiting
 	/// once the track ends is reported with no start.
 	#[kio::test]
 	async fn lite07_a_retired_range_reports_no_start() {
@@ -9884,7 +9884,7 @@ mod serve_group_test {
 		);
 	}
 
-	/// SUBSCRIBE_OK says whether its largest group ended: one closed or finished here, or one
+	/// SUBSCRIBE_START says whether its largest group ended: one closed or finished here, or one
 	/// the source said ended, but not one still open.
 	#[kio::test]
 	async fn lite07_start_says_whether_the_largest_ended() {
@@ -11275,7 +11275,7 @@ mod serve_group_test {
 		assert_eq!(settle(&mut run), 2);
 	}
 
-	/// Lite-05/06 make SUBSCRIBE_START the first message, and a SUBSCRIBE_FINISH ahead of it
+	/// Lite-05/06 make SUBSCRIBE_START the first message, and a SUBSCRIBE_END ahead of it
 	/// says no group was served. A copy whose end lands before its first group, as a relay's can
 	/// when its source answered both, holds the end until that group resolves the start.
 	#[kio::test]

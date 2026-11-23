@@ -204,12 +204,12 @@ interface SubscribeEntry {
 	// The first group the SUBSCRIBE asked for, if any.
 	requested?: bigint;
 	// The first group the publisher serves, once SUBSCRIBE_START says: null when it starts no
-	// range. And the track's exclusive end, once SUBSCRIBE_FINISH declares it.
+	// range. And the track's exclusive end, once SUBSCRIBE_END declares it.
 	start?: bigint | null;
 	end?: bigint;
 	// The ranges on the wire by Range ID (lite-07), which each update edits.
 	live: LiveRanges;
-	// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range starts on lite-07, by Range
+	// Where each live range's SUBSCRIBE_START says it starts on lite-07, by Range
 	// ID, undefined for one with nothing to deliver.
 	starts: Map<bigint, bigint | undefined>;
 	// The tick the copy recorded each live join range's answer at, by Range ID (see
@@ -227,7 +227,7 @@ interface SubscribeEntry {
 	staleBudget: number;
 	// The subscribe stream, from the setup that registered this entry to its end.
 	stream: SubscribeStream;
-	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_FINISH waits a fresh
+	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_END waits a fresh
 	// grace for what one sent meanwhile asks for.
 	sent: number;
 	// The ranges the SUBSCRIBE asked for, as `wireRanges` gives them.
@@ -1515,7 +1515,7 @@ export class Subscriber {
 			else if (entry.stream.kind !== "fin") stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${producer.name}`);
 
-			// Only a received SUBSCRIBE_FINISH, or before lite-05 a FIN, declares the track's end: a
+			// Only a received SUBSCRIBE_END, or before lite-05 a FIN, declares the track's end: a
 			// subscription nobody wants anymore is a released copy, not finished content.
 			if (tailSettled && entry.stream.kind === "finished") producer.finish();
 			hooks.releaseTrack(producer);
@@ -2506,7 +2506,7 @@ export class Subscriber {
 	// accounted against: SUBSCRIBE_START/END/DROP on lite-05+, and any SUBSCRIBE_DROP after the
 	// OK before then, where the FIN itself ends the track. Reading to the FIN, rather than
 	// awaiting it, matters: a pull-driven transport stream closes only on a read.
-	// SUBSCRIBE_FINISH declares the track's end right away, so a consumer learns it before the
+	// SUBSCRIBE_END declares the track's end right away, so a consumer learns it before the
 	// last groups arrive. The publisher must declare the end before FIN unless we cancelled
 	// locally; resets and malformed responses reject.
 	private async runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
@@ -2645,7 +2645,7 @@ export class Subscriber {
 		}
 	}
 
-	// Settle a lite-07 tail past SUBSCRIBE_FINISH, then FIN. An update sent meanwhile asks for more,
+	// Settle a lite-07 tail past SUBSCRIBE_END, then FIN. An update sent meanwhile asks for more,
 	// which waits a fresh grace rather than one that may have passed while a stream was read.
 	async #finishTail(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
@@ -2679,15 +2679,15 @@ export class Subscriber {
 	// Whether the groups received and dropped account for every group the demand is owed once
 	// the publisher ended the subscription.
 	#covered(entry: SubscribeEntry): boolean {
-		// Without SUBSCRIBE_FINISH (older drafts) nothing says which groups are owed.
+		// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed.
 		if (entry.end === undefined) return false;
 		const ranges = wireRanges(hooks.requested(entry.track).peek()?.ranges ?? [{}]);
 		const end = min(entry.end, wireSpan(ranges).end ?? entry.end);
 		const floor = rangesStart(ranges);
 		// Lite-07 answers with SUBSCRIBE_OK once the track ends, unless nothing was asked below the
 		// end. Each range the publisher holds is then owed from the start SUBSCRIBE_OK or
-		// SUBSCRIBE_STARTED named, which accounts for a skipped prefix and resolves a live join or a
-		// time start; one whose SUBSCRIBE_STARTED is still on its way owes what nothing says yet.
+		// SUBSCRIBE_START named, which accounts for a skipped prefix and resolves a live join or a
+		// time start; one whose SUBSCRIBE_START is still on its way owes what nothing says yet.
 		if (hasRanges(this.version)) {
 			if (entry.start === undefined) return !(end > (floor ?? 0n));
 			const owed: track.Range[] = [];
@@ -2873,7 +2873,7 @@ export class Subscriber {
 						entry.tail.demand(gap.start, gap.end);
 				entry.fillGroups = fitted.fills;
 				entry.floor = span.start;
-				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.
+				// Pending while a range the update adds awaits SUBSCRIBE_START.
 				this.#declare(entry);
 			}
 			// Round-trip the other Subscribe parameters so the publisher doesn't
@@ -2900,7 +2900,7 @@ export class Subscriber {
 			}
 			if (refresh !== undefined) sentWanted = refresh;
 			entry.sent += 1;
-			// A tail settling past SUBSCRIBE_FINISH re-judges what the update now asks for.
+			// A tail settling past SUBSCRIBE_END re-judges what the update now asks for.
 			entry.tail.touch();
 			lastSent = { ...current };
 			sentFills = fillGroups;
@@ -2912,7 +2912,7 @@ export class Subscriber {
 	}
 
 	// Declare where a lite-07 feed starts: the lowest start the live ranges report, or the
-	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
+	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_START has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
 		// Where the publisher started each live range asked from a group's start, or from the oldest

@@ -950,7 +950,7 @@ export const hooks: {
 	servingStarts: (subscriber: Subscriber, from: bigint) => (bigint | undefined)[];
 	/**
 	 * Each of a subscriber's ranges as resolved where it is served, undefined for one whose start
-	 * still waits: what lite-07 SUBSCRIBE_STARTED answers. Assigned by `track.ts`.
+	 * still waits: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
 	 */
 	servingResolved: (subscriber: Subscriber) => (Resolved | undefined)[];
 	/**

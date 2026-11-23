@@ -1835,7 +1835,7 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
-		// SUBSCRIBE_FINISH starts the end's grace, and the update then widens the budget.
+		// SUBSCRIBE_END starts the end's grace, and the update then widens the budget.
 		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
 		await drainReactions();
 		track.update({ priority: 0, delay: { max: Duration.millis(60_000) } });
@@ -2728,7 +2728,7 @@ function drainReactions(): Promise<void> {
 	});
 }
 
-test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
+test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const responseTask = Promise.withResolvers<void>();
@@ -2975,7 +2975,7 @@ test("a lite-07 rewind is refused", async () => {
 	}
 });
 
-test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscription", async () => {
+test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2986,7 +2986,7 @@ test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscripti
 		await (await opened(1)).reading;
 		streams[1].inbound.close();
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
-		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_FINISH");
+		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
 	} finally {
@@ -3436,7 +3436,7 @@ test.each(
 
 // A session that dies once the publisher ended the track, but before the tail settled, cuts it
 // off: the track ends with the session's error unless the declared end settled first. That end
-// is SUBSCRIBE_FINISH on lite-05+, and the FIN before it.
+// is SUBSCRIBE_END on lite-05+, and the FIN before it.
 test.each([
 	["lite-03 ends clean with its last group finished", Version.DRAFT_03, true],
 	["lite-03 aborts with its last group still open", Version.DRAFT_03, false],

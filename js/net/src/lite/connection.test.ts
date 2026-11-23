@@ -405,7 +405,7 @@ for (const [alpn, version] of [
 		}
 	});
 
-	// A lite-07 subscriber FINs once it read the tail, which can land while SUBSCRIBE_FINISH's
+	// A lite-07 subscriber FINs once it read the tail, which can land while SUBSCRIBE_END's
 	// write still waits; the final group's FIN still holds the close.
 	if (keepsSubscribeOpen(version)) {
 		test(`a subscriber FIN during the end's write still drains the final group over ${versionName(version)}`, async () => {
@@ -644,9 +644,9 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 	producer.finish();
 	producer.close();
-	// SUBSCRIBE_FINISH, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
+	// SUBSCRIBE_END, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
 	if (keepsSubscribeOpen(version)) {
-		while (!("finish" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 	} else await subscriber.reader.readAll();
 
 	let closed = false;
@@ -666,7 +666,7 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 }
 
 // The publisher's FIN says nothing about whether the subscriber read the tail, and a receiver
-// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_FINISH lets the subscriber settle
+// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_END lets the subscriber settle
 // its tail at once, the subscriber's FIN says so, and close waits for it.
 for (const [alpn, version] of [
 	[ALPN_05, Version.DRAFT_05],
@@ -822,8 +822,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 		producer.finish();
 		producer.close();
-		// SUBSCRIBE_FINISH; lite-07 keeps the stream open past it.
-		while (!("finish" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+		// SUBSCRIBE_END; lite-07 keeps the stream open past it.
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 
 		// The withdrawal completes, but the subscription still waits for the subscriber's FIN.
 		fin.release();

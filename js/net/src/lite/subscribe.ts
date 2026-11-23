@@ -1028,7 +1028,7 @@ export class Subscribe {
  * Publisher's acknowledgement on the Subscribe Stream for drafts 01-04.
  *
  * Draft-05+ replaced this with implicit acceptance plus {@link SubscribeStart} /
- * {@link SubscribeFinish}; the immutable codec/timescale/cache moved to TRACK_INFO.
+ * {@link SubscribeEnd}; the immutable codec/timescale/cache moved to TRACK_INFO.
  */
 export class SubscribeOk {
 	priority: number;

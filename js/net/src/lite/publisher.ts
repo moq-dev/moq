@@ -1258,7 +1258,7 @@ export class Publisher {
 			if (hasTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
 				// properties live in TRACK_INFO), and the resolved range arrives as
-				// SUBSCRIBE_START / SUBSCRIBE_FINISH emitted from #runTrack.
+				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
 				//
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so

@@ -1197,10 +1197,10 @@ impl<'a> Message<'a> for SubscribeSkip {
 ///
 /// The discriminator is version-dependent:
 /// - Lite03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
-/// - Lite05+: `0x0` SUBSCRIBE_START (SUBSCRIBE_OK on lite-07), `0x1` SUBSCRIBE_FINISH
-///   (SUBSCRIBE_END before lite-07), `0x2` SUBSCRIBE_DROP
+/// - Lite05/06: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
 ///   (SUBSCRIBE_OK was removed; acceptance is implicit).
-/// - Lite07+: also `0x3` SUBSCRIBE_SKIP and `0x4` SUBSCRIBE_STARTED.
+/// - Lite07+: `0x4` SUBSCRIBE_START, one per range, replaces `0x0`, and `0x3`
+///   SUBSCRIBE_SKIP is added.
 #[derive(Clone, Debug)]
 pub enum SubscribeResponse {
 	Ok(SubscribeOk),

@@ -208,7 +208,7 @@ test.each([Version.DRAFT_06])("a republish restarts the advertisement (version %
 });
 
 // Delivers `sequences` in the given order, finishes the track (with `error`, if given), and
-// returns the SUBSCRIBE_FINISH the publisher put on the wire.
+// returns the SUBSCRIBE_END the publisher put on the wire.
 async function subscribeEnd(
 	keys: number[],
 	version: Version = Version.DRAFT_05,
@@ -1045,16 +1045,16 @@ test.each([
 		// Responses arrive in order, and nothing serves the group again.
 		sub.track.finish();
 		const after = await decodeSubscribeResponse(sub.client.reader, version);
-		expect(Object.keys(after)).toEqual(["finish"]);
+		expect(Object.keys(after)).toEqual(["end"]);
 		expect(lines(sub.quic).streams.list()).toEqual([]);
 	} finally {
 		await sub.close();
 	}
 });
 
-// A range an update adds learns where it starts from SUBSCRIBE_STARTED, and keeps that start however
+// A range an update adds learns where it starts from SUBSCRIBE_START, and keeps that start however
 // many later updates leave it live, rather than joining again from a newer live edge.
-test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later updates keep", async () => {
+test("lite-07 SUBSCRIBE_START reports an added range's start, which later updates keep", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
 		version,
@@ -1338,7 +1338,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 					if (!resp) break;
 					if ("drop" in resp) codes.push(resp.drop.error);
 					if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
-					// Lite-07 keeps the stream open past SUBSCRIBE_FINISH, after the sweep's drops.
+					// Lite-07 keeps the stream open past SUBSCRIBE_END, after the sweep's drops.
 					if ("end" in resp && keepsSubscribeOpen(version)) break;
 				}
 				if (version !== Version.DRAFT_07) {
@@ -1358,7 +1358,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 }
 
 // The SUBSCRIBE_SKIP and SUBSCRIBE_DROP ranges a lite-07 subscribe stream carried, in order, up to
-// SUBSCRIBE_FINISH, or the first `count` of them.
+// SUBSCRIBE_END, or the first `count` of them.
 async function holesToFinish(reader: Reader, count = Number.POSITIVE_INFINITY): Promise<[string, bigint, bigint][]> {
 	const holes: [string, bigint, bigint][] = [];
 	for (;;) {
@@ -1652,7 +1652,7 @@ test.each([
 	}
 });
 
-// The drops and skips on a lite-07 subscribe stream up to its SUBSCRIBE_FINISH.
+// The drops and skips on a lite-07 subscribe stream up to its SUBSCRIBE_END.
 async function holesToEnd(reader: Reader): Promise<unknown[]> {
 	const holes: unknown[] = [];
 	for (;;) {
@@ -1859,6 +1859,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 				// A lite-07 source reports where it started the time asked for.
 				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source, NO_MAX_DELAY]]);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
+				hooks.answerEdge(sub.track);
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
 				const response = await decodeSubscribeResponse(sub.client.reader, version);
@@ -1887,6 +1888,7 @@ test("lite draft-07: a time start a copy's oldest range covers waits for an answ
 		await flush();
 		hooks.timeStarts(sub.track, [[0n, 6n, NO_MAX_DELAY]]);
 		hooks.startTrack(sub.track, { start: 6n });
+		hooks.answerEdge(sub.track);
 		await flush();
 		expect(
 			hooks
@@ -1921,6 +1923,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			await flush();
 			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n, NO_MAX_DELAY]]);
 			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
+			hooks.answerEdge(sub.track);
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 			expect(response.start.start).toBe(3n);
@@ -2686,7 +2689,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 	}
 });
 
-// Before lite-07 an errored end goes out only as the reset at that end: a clean SUBSCRIBE_FINISH
+// Before lite-07 an errored end goes out only as the reset at that end: a clean SUBSCRIBE_END
 // sent early could let the subscriber settle before the reset arrives.
 test("lite draft-06: an errored end is not declared early", async () => {
 	using clock = manual();
@@ -2745,7 +2748,7 @@ test("lite draft-06: a subscription capped short of an errored end gets its boun
 });
 
 // Serves one group with its stream open held until `open(ok)`, and returns the pending
-// SUBSCRIBE_FINISH plus the call that lets the open succeed or fail.
+// SUBSCRIBE_END plus the call that lets the open succeed or fail.
 async function heldOpenEnd() {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
@@ -2924,7 +2927,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 		track.finish();
 		track.close();
 		let dropped = 0;
-		// Lite-07 keeps the stream open past SUBSCRIBE_FINISH, so read until every group is named.
+		// Lite-07 keeps the stream open past SUBSCRIBE_END, so read until every group is named.
 		while (dropped < 72) {
 			const response = await decodeSubscribeResponseMaybe(client.reader, Version.DRAFT_07);
 			if (!response) break;
@@ -2957,7 +2960,7 @@ type Served = {
 /**
  * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and
  * reports every group stream that reached the wire plus the resolved
- * SUBSCRIBE_START / SUBSCRIBE_FINISH range. A group in `received` arrived as a tail
+ * SUBSCRIBE_START / SUBSCRIBE_END range. A group in `received` arrived as a tail
  * starting at that frame.
  */
 async function serve(
@@ -3114,7 +3117,7 @@ test("lite draft-06: groups past the end group are not served", async () => {
 	expect(served.map((s) => s.key)).toEqual([1n, 2n]);
 });
 
-// SUBSCRIBE_FINISH names the track's exclusive final boundary, not the capped delivered
+// SUBSCRIBE_END names the track's exclusive final boundary, not the capped delivered
 // range: a Rust peer feeds it into finish_at, so a truncated value would silently drop
 // the held-back groups across languages.
 test("lite draft-06: a capped subscription still reports the track's final boundary", async () => {
@@ -3292,7 +3295,7 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 });
 
 // The publisher FINs the subscribe stream itself once a track ends, which must not be
-// mistaken for the subscriber leaving: SUBSCRIBE_FINISH counts those queued groups as
+// mistaken for the subscriber leaving: SUBSCRIBE_END counts those queued groups as
 // delivered, so dropping them here would strand the tail of every finite track. The FIN
 // tells the subscriber every group is accounted for, so it waits for the queued group.
 test("lite draft-05: a group waiting for a stream slot survives the track finishing", async () => {
@@ -3302,7 +3305,7 @@ test("lite draft-05: a group waiting for a stream slot survives the track finish
 	track.finish();
 	track.close();
 
-	// SUBSCRIBE_FINISH goes out while the group is still waiting for its slot.
+	// SUBSCRIBE_END goes out while the group is still waiting for its slot.
 	for (;;) {
 		const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_05);
 		if ("end" in resp) break;
@@ -3992,7 +3995,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	);
 	try {
 		const response = await decodeSubscribeResponse(client.reader, version);
-		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 		// Either time falls in group 0, the only group, which lite-07 starts at.
 		expect(response.start.start).toBe(0n);
 		// The group finished, so the answer says it ended.

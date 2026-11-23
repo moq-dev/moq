@@ -532,7 +532,7 @@ struct Recovery {
 
 enum RecoveryState {
 	Establish(Box<Establish>),
-	/// Open, recording its SUBSCRIBE_START and SUBSCRIBE_FINISH as a subscription does.
+	/// Open, recording its SUBSCRIBE_START and SUBSCRIBE_END as a subscription does.
 	Active {
 		sub: Box<SubStream>,
 		/// Whether our FIN went out.
@@ -701,7 +701,7 @@ impl Recovery {
 						Recv::Ended if *finished || active.end.is_some() => self.end(StreamError::NotFound),
 
 						Recv::Ended => {
-							tracing::warn!("recovery subscribe ended without SUBSCRIBE_FINISH");
+							tracing::warn!("recovery subscribe ended without SUBSCRIBE_END");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
 						// Malformed bytes are a violation, as on the subscription itself.

@@ -408,7 +408,7 @@ async fn lite06_shared_datagrams_end_with_their_subscription() {
 }
 
 /// A lite-05/06 subscriber reads a name as a stream track, as one predating datagram tracks
-/// does, so the datagram fallback ends with SUBSCRIBE_FINISH ahead of its FIN: a FIN alone
+/// does, so the datagram fallback ends with SUBSCRIBE_END ahead of its FIN: a FIN alone
 /// is a protocol violation there.
 #[kio::test]
 async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expects() {
