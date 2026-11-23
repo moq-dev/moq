@@ -768,6 +768,33 @@ mod tests {
 		});
 	}
 
+	/// A refusal is asked again once another handler at the same filing takes over, even when the
+	/// two announce alike.
+	#[kio::test]
+	async fn announced_retries_a_refusal_on_another_handler_announced_alike() {
+		let origin = Hop::new(1).unwrap().produce();
+		let instance = Instance::random();
+		let first = origin.claim("live", options(&instance)).unwrap();
+		let second = origin.claim("live", options(&instance)).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async {
+				requested(&second).await.reject(Error::Unroutable);
+			}
+		);
+		assert!(matches!(
+			result.expect("the refusal must answer"),
+			Err(Error::Unroutable)
+		));
+
+		drop(second);
+		let served = broadcast::Info::new().produce();
+		let (_again, ()) = futures::join!(available(&mut announced), async {
+			requested(&first).await.serve(&served);
+		});
+	}
+
 	/// A refusal is reported once, and the follower then waits for the serving route to change
 	/// rather than asking the refusing handler again.
 	#[kio::test]

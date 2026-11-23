@@ -4286,6 +4286,33 @@ test("a lite-07 stream reports each instance's claim with claims", async () => {
 	subscriber.close();
 });
 
+// An instance's newer epoch made at `x` supersedes its older one filed at `x/a` a segment above it,
+// so a reader of each instance's claim at `x/a` shows the epoch a consume pinned to it takes.
+test("a lite-07 reader of each instance's claim drops an epoch superseded across filings", async () => {
+	const { subscriber, announced, send, settled, another, trackRequest } = await routedStream();
+	const [x, xa] = [Path.from("x"), Path.from("x/a")];
+	const narrow = await another(Path.Pattern.subtree(xa), { claims: true });
+	const i = Instance.parse("i");
+	await send({ status: "start", suffix: xa, instance: i, claim: claimOf({ above: 1n, epoch: 1n }) });
+	await send({ status: "start", suffix: x, instance: i, claim: claimOf({ epoch: 2n }) });
+	await settled();
+	let shown: bigint | undefined;
+	for (;;) {
+		const next = await Promise.race([narrow.announced.next(), settled().then(() => undefined)]);
+		if (!next) break;
+		shown = next.route.epoch;
+	}
+	const consumed = await trackRequest(xa, 0);
+	expect(consumed.request).toMatchObject({ instance: i });
+	expect(shown).toBe(2n);
+
+	consumed.consumed.close();
+	narrow.announced.close();
+	announced.close();
+	subscriber.close();
+	await consumed.info;
+});
+
 test("a lite-07 reader below the request ranks a broader claim as above its prefix", async () => {
 	const { subscriber, announced, send, edits, settled, another } = await routedStream();
 	const [x, xa] = [Path.from("x"), Path.from("x/a")];

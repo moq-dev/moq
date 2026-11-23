@@ -144,7 +144,14 @@ export function presented(
 				if (!shows(candidate, prefix)) return;
 				// Hold the empty suffix's place in the order the table lists its first claim.
 				if (covering.length === 0) out.set(Path.empty(), candidate);
-				covering.push({ prefix: covered, depth, order, candidate, route: candidate.route });
+				covering.push({
+					prefix: covered,
+					depth,
+					order,
+					arrival: arrival(candidate.identity),
+					candidate,
+					route: candidate.route,
+				});
 			});
 			continue;
 		}
@@ -167,13 +174,35 @@ export function presented(
 	return out;
 }
 
-/** A candidate filed at `prefix`, `depth` segments deep, `order`th in its prefix's preference. */
+/**
+ * A candidate filed at `prefix`, `depth` segments deep, `order`th in its prefix's preference, and
+ * {@link arrival} `arrival`th.
+ */
 export interface Filed<T> {
 	readonly prefix: Path.Valid;
 	readonly depth: number;
 	readonly order: number;
+	readonly arrival: number;
 	readonly candidate: T;
 	readonly route: WireRoute;
+}
+
+// When each advertisement's identity was first received, across every filing.
+const receipts = new WeakMap<object, number>();
+let nextReceipt = 0;
+
+/**
+ * The order `identity` was received in, stamped now if it is new: a later one is larger, so a
+ * full tie goes to the most recently received claim wherever each is filed, as Rust's newest
+ * route entry. A new identity is stamped where it is made; an update keeps its identity's place.
+ */
+export function arrival(identity: object): number {
+	let order = receipts.get(identity);
+	if (order === undefined) {
+		order = nextReceipt++;
+		receipts.set(identity, order);
+	}
+	return order;
 }
 
 /**
@@ -181,7 +210,8 @@ export interface Filed<T> {
  * above its own prefix counts for the shallower prefix it is really at, and claims of one prefix
  * rank against each other wherever each is filed. Only an instance's highest epoch among them
  * (and `others`, of the same claim when `exact`) is eligible; `compare` ranks the rest, then the
- * deeper filing, then each prefix's own preference. Mirrors `RouteTable::best_route` in rs/moq-net.
+ * most recently {@link arrival}, then the deeper filing, then each prefix's own preference.
+ * Mirrors `RouteTable::best_route` in rs/moq-net.
  */
 export function bestOfTier<T>(
 	filed: readonly Filed<T>[],
@@ -202,7 +232,11 @@ export function bestOfTier<T>(
 			best = entry;
 			continue;
 		}
-		const order = compare(entry, best) || best.depth - entry.depth || entry.order - best.order;
+		const order =
+			compare(entry, best) ||
+			best.arrival - entry.arrival ||
+			best.depth - entry.depth ||
+			entry.order - best.order;
 		if (order < 0) best = entry;
 	}
 	return best;
@@ -1780,16 +1814,17 @@ export function chainHash(path: string, hops: readonly bigint[]): bigint {
  * most specific claims compete, a claim shown above its own prefix counting for the shallower
  * prefix it is really at, and they rank against each other wherever each is filed. Of those, only
  * an instance's highest epoch is eligible, an exact claim's `others` (which never win) included,
- * and the rest order by {@link compareTier}, then the deeper filing, then the newest, as Rust's
- * final `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or
- * epoch), and keeps its place through a re-price. `candidates` lists each covering prefix's,
- * newest first. Every selector ranks through this, so the announcements and the consumes of one
- * session never pick apart.
+ * and the rest order by {@link compareTier}, then the most recently {@link arrival} wherever
+ * each is filed, as Rust's final `Reverse(entry.id)`: a claim is new when it starts or restarts
+ * (another instance or epoch), and keeps its place through a re-price. `candidates` lists each
+ * covering prefix's, newest first, and `advertised` names each one's identity and route. Every
+ * selector ranks through this, so the announcements and the consumes of one session never pick
+ * apart.
  */
 export function mostSpecific<T>(
 	path: Path.Valid,
 	candidates: (prefix: Path.Valid) => Iterable<T>,
-	route: (candidate: T) => WireRoute,
+	advertised: (candidate: T) => Advertised,
 	others: readonly WireRoute[] = [],
 ): T | undefined {
 	const filed: Filed<T>[] = [];
@@ -1798,7 +1833,8 @@ export function mostSpecific<T>(
 	for (const prefix of coveringPrefixes(path)) {
 		let order = 0;
 		for (const candidate of candidates(prefix)) {
-			filed.push({ prefix, depth, order: order++, candidate, route: route(candidate) });
+			const { identity, route } = advertised(candidate);
+			filed.push({ prefix, depth, order: order++, arrival: arrival(identity), candidate, route });
 		}
 		depth--;
 	}

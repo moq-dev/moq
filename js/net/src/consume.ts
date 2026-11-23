@@ -2,7 +2,7 @@ import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { coveringPrefixes, mostSpecific } from "./internal.ts";
+import { arrival, coveringPrefixes, mostSpecific } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Served, sameInstance } from "./wire.ts";
 
@@ -74,6 +74,7 @@ export class BroadcastCache {
 		}
 		const previous = entries.get(owner);
 		const identity = (!restart && previous?.identity) || {};
+		arrival(identity);
 		// A new or restarted stream ranks as the newest, which wins a full tie; see mostSpecific.
 		if (!previous || restart) entries.delete(owner);
 		entries.set(owner, { identity, route });
@@ -93,7 +94,7 @@ export class BroadcastCache {
 		const best = mostSpecific(
 			path,
 			(prefix) => this.#eligible(prefix).reverse(),
-			(entry) => entry.route,
+			(entry) => entry,
 		);
 		if (best) {
 			const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
@@ -123,7 +124,7 @@ export class BroadcastCache {
 				this.#eligible(prefix)
 					.filter((entry) => entry.route.instance === instance)
 					.reverse(),
-			(entry) => entry.route,
+			(entry) => entry,
 		);
 		return best ?? { identity: {}, route: { instance } };
 	}

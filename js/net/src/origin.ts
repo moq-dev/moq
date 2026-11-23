@@ -19,6 +19,7 @@ import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, routesEqual, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import {
+	arrival,
 	bestOfTier,
 	compareRouteCandidates,
 	compareRoutes,
@@ -201,8 +202,8 @@ class Scope {
 		}
 		if (covering.length > 0) {
 			// The most specific claim first, as a request beneath the root resolves; claims of one
-			// prefix rank against each other wherever each is filed, then the deeper filing, then each
-			// filing's own order.
+			// prefix rank against each other wherever each is filed, then the most recently received,
+			// then the deeper filing, then each filing's own order.
 			const ranked = covering.flatMap(([path, visible], filing) =>
 				visible.map((value, order) => ({ value, path, depth: Path.parts(path).length, filing, order })),
 			);
@@ -212,6 +213,7 @@ class Scope {
 				(a, b) =>
 					Number((a.value.route.above ?? 0n) - (b.value.route.above ?? 0n)) ||
 					compareTier(this.root, tier(a), tier(b)) ||
+					arrival(b.value.identity) - arrival(a.value.identity) ||
 					b.depth - a.depth ||
 					a.filing - b.filing ||
 					a.order - b.order,
@@ -1141,7 +1143,7 @@ class OriginState {
 		return mostSpecific(
 			path,
 			(prefix) => (routes.get(prefix) ?? []).filter((entry) => admits(entry, path) && !skip?.(entry)),
-			(entry) => entry.route.peek(),
+			(entry) => ({ identity: entry.identity, route: entry.route.peek() }),
 			local ? [local] : [],
 		);
 	}
@@ -1641,6 +1643,7 @@ export class Producer implements Table {
 		// Filed where the scope lets it serve whole subtrees, each place as many segments above
 		// its path as the claim is broader: one claim, with one identity and one server.
 		const identity = {};
+		arrival(identity);
 		let current = route;
 		const lowered = (route: WireRoute, below: bigint): WireRoute =>
 			below === 0n ? route : { ...route, above: (route.above ?? 0n) + below };
@@ -2634,7 +2637,14 @@ export class Consumer implements Reader {
 					// Hold the empty path's place in the order the snapshot lists its first claim.
 					if (atRoot.length === 0) next.set(Path.empty(), present(path, candidate, scope.pattern));
 					const filed = { candidate, path, pattern: scope.pattern };
-					atRoot.push({ prefix: path, depth, order, candidate: filed, route: candidate.route });
+					atRoot.push({
+						prefix: path,
+						depth,
+						order,
+						arrival: arrival(candidate.identity),
+						candidate: filed,
+						route: candidate.route,
+					});
 				});
 				continue;
 			}

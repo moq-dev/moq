@@ -18,7 +18,7 @@ import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
 import { routesEqual, WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
-import { coveringPrefixes, hiddenBelow, mostSpecific, scopeCaptures, scopeOverlaps } from "../internal.ts";
+import { arrival, coveringPrefixes, hiddenBelow, mostSpecific, scopeCaptures, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { SlotMap, type Slots } from "../util/limits.ts";
 import {
@@ -90,6 +90,8 @@ interface Live {
 	taken: boolean;
 	/** Who the claim is filed under in the consume cache. */
 	owner: object;
+	/** What the claim is ranked as, renewed whenever the consume cache takes it as new. */
+	identity: object;
 }
 
 // The most a claim at `path` can be above it: a claim above the session's root covers the whole
@@ -98,6 +100,14 @@ const checkAbove = (path: Path.Valid, above: bigint) => {
 	if (above > BigInt(Path.parts(path).length))
 		throw new ProtocolViolation(`a claim at ${path} cannot be ${above} segments above it`);
 };
+
+/** A claim covering a reader's path: filed at `prefix`, and shown to the reader as `shown`. */
+interface Candidate {
+	readonly prefix: Path.Valid;
+	readonly identity: object;
+	readonly filed: WireRoute;
+	readonly shown: WireRoute;
+}
 
 /** The claims a lite-07 session's peer sends, shared by every reader of the session. */
 export class Routed {
@@ -345,7 +355,11 @@ export class Routed {
 			}
 			// A claim shown anew or restarted iterates last, as the newest; a re-price keeps its
 			// place, as the consume cache does. See mostSpecific.
-			if (!was || restart) ids.delete(id);
+			if (!was || restart) {
+				ids.delete(id);
+				live.identity = {};
+				arrival(live.identity);
+			}
 			ids.add(id);
 			consumes.announce(live.path, live.owner, this.#candidate(live, live.claim), restart);
 		} else if (was) {
@@ -372,8 +386,8 @@ export class Routed {
 	// those at the path itself, and at the reader's own prefix each claim at or above it, as the
 	// peer presents a claim covering more than a requested prefix: that many segments more above
 	// the path, so a claim exactly there still outranks it. Oldest first at each filing.
-	#candidates(reader: Reader, path: Path.Valid): { prefix: Path.Valid; filed: WireRoute; shown: WireRoute }[] {
-		const candidates: { prefix: Path.Valid; filed: WireRoute; shown: WireRoute }[] = [];
+	#candidates(reader: Reader, path: Path.Valid): Candidate[] {
+		const candidates: Candidate[] = [];
 		for (const at of path === reader.prefix ? coveringPrefixes(path) : [path]) {
 			const by = BigInt(Path.parts(path).length - Path.parts(at).length);
 			for (const id of this.#byPath.get(at) ?? []) {
@@ -381,6 +395,7 @@ export class Routed {
 				const shown = by === 0n ? live.claim : { ...live.claim, above: live.claim.above + by };
 				candidates.push({
 					prefix: at,
+					identity: live.identity,
 					filed: this.#candidate(live, live.claim),
 					shown: this.#candidate(live, shown),
 				});
@@ -399,20 +414,22 @@ export class Routed {
 		const now = new Map<Instance.Valid | undefined, WireRoute>();
 		if (visible(reader, path)) {
 			const candidates = this.#candidates(reader, path);
+			// The same pick a consume of `path` makes from the cache, ranked where each claim is
+			// filed, newest first at each filing.
+			const pick = (among: Candidate[]) =>
+				mostSpecific(
+					path,
+					(prefix) => among.filter((candidate) => candidate.prefix === prefix).reverse(),
+					(candidate) => ({ identity: candidate.identity, route: candidate.filed }),
+				);
 			if (reader.claims) {
-				// The closest claim of each instance.
-				for (const { shown: next } of candidates) {
-					const held = now.get(next.instance);
-					if (!held || (next.above ?? 0n) < (held.above ?? 0n)) now.set(next.instance, next);
+				// Each instance's pick, as a consume pinned to it makes.
+				for (const instance of new Set(candidates.map((candidate) => candidate.filed.instance))) {
+					const best = pick(candidates.filter((candidate) => candidate.filed.instance === instance));
+					if (best) now.set(instance, best.shown);
 				}
 			} else {
-				// The same pick a consume of `path` makes from the cache, ranked where each claim is
-				// filed, newest first at each filing.
-				const best = mostSpecific(
-					path,
-					(prefix) => candidates.filter((candidate) => candidate.prefix === prefix).reverse(),
-					(candidate) => candidate.filed,
-				);
+				const best = pick(candidates);
 				if (best) now.set(undefined, best.shown);
 			}
 		}
@@ -509,7 +526,14 @@ export class Routed {
 					if (this.#claim(other).instance === msg.instance)
 						throw new ProtocolViolation(`${path} claimed twice for one instance`);
 				}
-				const live: Live = { path, instance: msg.instance, claim: msg.claim, taken: false, owner: {} };
+				const live: Live = {
+					path,
+					instance: msg.instance,
+					claim: msg.claim,
+					taken: false,
+					owner: {},
+					identity: {},
+				};
 				this.#claims.set(id, live);
 				live.taken = !msg.claim.unavailable;
 				this.#serve(id, live, false, false, false);

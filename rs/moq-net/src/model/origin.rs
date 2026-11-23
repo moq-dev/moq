@@ -1837,6 +1837,8 @@ struct CursorRoute {
 	prefix: Path,
 	/// What the cursor's scope captured from `prefix`.
 	captures: Option<Vec<Pattern>>,
+	/// The route entry that won, which a lookup reports a change of.
+	id: u64,
 }
 
 impl WeakEntry for RemoteFront {
@@ -1887,9 +1889,10 @@ struct TableCursor {
 	/// Whether the cursor delivers each route's [`Standing`], and a change to it.
 	ranked: bool,
 	/// Whether the cursor serves a path lookup ([`Consumer::path_routes`]), which reads only
-	/// what serves its root: it reports no captures, so a claim filed above the root takes over
-	/// from one filed there in place, and it reports any change of the prefix serving the root,
-	/// which a refused request asks again.
+	/// what serves its root: the entry [`RouteTable::best_route`] picks for it, as a request
+	/// does. It reports no captures, so a claim filed above the root takes over from one filed
+	/// there in place, and it reports any change of the entry serving the root, which a refused
+	/// request asks again.
 	lookup: bool,
 }
 
@@ -1978,6 +1981,7 @@ impl TableCursor {
 		if previous.is_some_and(|previous| {
 			previous.instance == entry.instance
 				&& previous.prefix == entry.prefix
+				&& (!self.lookup || previous.id == entry.id)
 				&& previous.served == served
 				&& entry.delivers(&previous.meta, self.ranked)
 		}) {
@@ -1994,6 +1998,7 @@ impl TableCursor {
 				served,
 				prefix: entry.prefix.clone(),
 				captures: captures.clone(),
+				id: entry.id,
 			},
 		);
 		match previous {
@@ -2016,12 +2021,10 @@ impl TableCursor {
 			// between routes of one instance and epoch is invisible, which is the point).
 			// A servability flip is delivered: a request that failed Unroutable
 			// under an advertise-only route retries on the update, and hiding
-			// it would park that waiter forever. So is a lookup's serving prefix
-			// changing, for a refusal by the one before.
+			// it would park that waiter forever. So is another entry serving a
+			// lookup, which a refusal by the one before asks again.
 			Some(previous)
-				if previous.meta == meta
-					&& previous.served == served
-					&& !(self.lookup && previous.prefix != entry.prefix) => {}
+				if previous.meta == meta && previous.served == served && !(self.lookup && previous.id != entry.id) => {}
 			_ => {
 				if let Ok(mut state) = self.state.write() {
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
@@ -6886,6 +6889,10 @@ impl OriginState {
 		// longest prefix wins outright, so the metadata a cursor advertises
 		// matches what a request through it actually resolves.
 		let best = match presented.is_empty() {
+			true if cursor.lookup => {
+				let visible = |entry: &RouteEntry| cursor.visible(entry);
+				routes.best_route(&cursor.root, cursor.horizon, &HashSet::new(), visible)
+			}
 			true => cursor.best(&cursor.root, routes.covering(&cursor.root)),
 			false => {
 				let absolute = cursor.root.rejoin(presented);
@@ -7540,10 +7547,8 @@ impl Requesting {
 						})) => self.routed = false,
 						Poll::Ready(Some(RouteEvent {
 							kind: RouteKind::Start | RouteKind::Restart | RouteKind::Update,
-							announce,
-						})) => {
-							self.routed = self.instance.is_none() || announce.route.instance == self.instance;
-						}
+							..
+						})) => self.routed = true,
 						Poll::Ready(None) => return Poll::Ready(Err(Error::Closed)),
 						Poll::Pending => break,
 					}
@@ -7551,8 +7556,11 @@ impl Requesting {
 				// Sync is an event, not a deadline: sessions hold it from the moment the
 				// interest is created until the initial announcement set is delivered.
 				let synced = discovery.poll_synced(waiter).is_ready();
+				// The winner says nothing of a pinned instance, which follows its own routes: a pinned
+				// request concludes only from a lookup the routes have not moved since.
+				let absent = self.instance.is_none() && !self.routed;
 				if self.request.is_none()
-					&& synced && (!self.routed || self.watch.as_ref().is_some_and(|(watch, seen)| watch.seen() == *seen))
+					&& synced && (absent || self.watch.as_ref().is_some_and(|(watch, seen)| watch.seen() == *seen))
 				{
 					return Poll::Ready(Err(Error::Unroutable));
 				}
@@ -11394,6 +11402,101 @@ mod tests {
 		);
 		let _pending = consumer.request("src/a/b", None);
 		assert_eq!(queued(&made).await.path().as_str(), "src/a/b");
+	}
+
+	/// The instance a follower of `follow`'s path settles on, once it goes quiet.
+	#[cfg(feature = "async")]
+	async fn settled_on(follow: &mut Follow) -> Option<crate::Instance> {
+		let mut serving = None;
+		while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), follow.next()).await {
+			let event = event.expect("the origin is open");
+			serving = match event.kind {
+				RouteKind::End | RouteKind::Offline => None,
+				_ => event.announce.route.instance.clone(),
+			};
+		}
+		serving
+	}
+
+	fn claim_route(instance: &crate::Instance, node: u64, above: u8, cost: u64) -> RouteInfo {
+		RouteInfo::new()
+			.with_instance(instance.clone(), 0)
+			.with_hops(hops(&[node]))
+			.with_node(Some(node_id(node)))
+			.with_lane(Lane {
+				above,
+				..Lane::default()
+			})
+			.with_cost(cost)
+	}
+
+	/// A claim whose producer may not serve the path never wins a follower of it, however cheap,
+	/// as it never wins a request.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_follower_skips_a_claim_excluded_from_the_path() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let mut follow = consumer.path_routes("src/a/b").unwrap();
+		let (cheap, allowed) = (crate::Instance::random(), crate::Instance::random());
+		let excluded = producer.exclude("src/a/b").unwrap();
+		let _cheap = excluded.forward("src", claim_route(&cheap, 10, 0, 1)).unwrap();
+		let filed = producer.forward("src/a", claim_route(&allowed, 11, 1, 5)).unwrap();
+		assert_eq!(settled_on(&mut follow).await, Some(allowed));
+		let _pending = consumer.request("src/a/b", None);
+		assert_eq!(queued(&filed).await.path().as_str(), "src/a/b");
+	}
+
+	/// A broadcast published at a prefix serves only its own path, so a follower of a path beneath
+	/// it settles on the claim of the same tier that serves, as a request does.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_follower_skips_a_broadcast_that_cannot_serve_the_path() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let mut follow = consumer.path_routes("src/a/b").unwrap();
+		let (published, claimed) = (crate::Instance::random(), crate::Instance::random());
+		let _broadcast = producer
+			.route("src", RouteOptions::default().with_instance(published, 0))
+			.unwrap();
+		let filed = producer.forward("src/a", claim_route(&claimed, 10, 1, 0)).unwrap();
+		assert_eq!(settled_on(&mut follow).await, Some(claimed));
+		let _pending = consumer.request("src/a/b", None);
+		assert_eq!(queued(&filed).await.path().as_str(), "src/a/b");
+	}
+
+	/// A request pinned to an instance follows that instance's own routes, so a better claim of
+	/// another instance arriving with it, while discovery syncs, never ends the request.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_pinned_request_resolves_its_instance_under_a_better_claim() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let snapshot = producer.snapshot("src");
+		let (pinned, other) = (crate::Instance::random(), crate::Instance::random());
+		let pending = consumer.request("src/a/b", pinned.clone());
+		let filed = producer.forward("src/a", claim_route(&pinned, 10, 1, 5)).unwrap();
+		let _made = producer.forward("src", claim_route(&other, 11, 0, 1)).unwrap();
+		drop(snapshot);
+		let (result, request) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), pending),
+			kio::clock::timeout(Duration::from_secs(1), queued(&filed)),
+		);
+		let request =
+			request.unwrap_or_else(|_| panic!("the pinned instance was never asked: {:?}", result.map(|r| r.err())));
+		assert_eq!(request.path().as_str(), "src/a/b");
 	}
 
 	/// Claims of one tier filed at different depths that tie through every rank hash on the path
