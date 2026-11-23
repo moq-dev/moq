@@ -5741,6 +5741,29 @@ test("finishing returns handles that write nothing new but fill a late group", a
 	finished.close();
 });
 
+// A join already placed, as a route switch asks a new copy for one, settles nothing for a live join
+// beside it still waiting on its upstream's answer: where delivery starts waits on that answer, since
+// a publisher starting before it names no start for the join, for good. Mirrors the Rust
+// `a_placed_join_waits_on_an_unanswered_one_to_start`.
+test("track: a placed join waits on an unanswered one to start", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	const latest: Range = { start: { live: { min: Duration.ZERO, max: Duration.ZERO } } };
+	try {
+		putGroup(producer, 0n, 0);
+		const reader = producer.subscribe({ ranges: [latest, latest], placed: new Map([[1, 0n]]) });
+		const starts = () => hooks.servingResolved(reader).map((range) => range?.start);
+		expect(starts()).toEqual([undefined, 0n]);
+		expect(hooks.sourceStart(reader)).toBe("pending");
+
+		hooks.answerJoin(producer, 0, undefined, 0n, 0);
+		expect(hooks.sourceStart(reader)).not.toBe("pending");
+		expect(starts()).toEqual([0n, 0n]);
+	} finally {
+		producer.close();
+	}
+});
+
 // A received lite-07 copy places a live join only from its upstream's answer to that join recorded
 // after the reader began waiting: one answered for an earlier reader is stale, since the live edge
 // moved on, so the reader asks again and waits, however many groups the copy holds.

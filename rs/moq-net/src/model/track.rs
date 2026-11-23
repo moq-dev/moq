@@ -11789,7 +11789,9 @@ impl Subscriber {
 	///
 	/// Pending too while a time start waits on the groups held to place it, since where its
 	/// range starts is unknown until then, unless the floor sits at or past that time, as a
-	/// pre-lite-07 wire's start does: the group containing it is out of range then.
+	/// pre-lite-07 wire's start does: the group containing it is out of range then. Likewise
+	/// while a live join waits on its upstream's answer or a group starting to place it: a
+	/// start answered before then names none for it, for good.
 	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
 			Inner::Plain(cursor) => cursor,
@@ -11797,13 +11799,21 @@ impl Subscriber {
 		};
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
-		if cursor.filter.window.is_waiting_above(cursor.min_key) {
+		let floor = cursor.min_key;
+		let unplaced = |window: &Window| window.is_waiting_above(floor) || window.is_reaching();
+		if unplaced(&cursor.filter.window) {
 			// Registered before syncing again, so a change placing it after this wakes it, such
-			// as the upstream's answer to the range asked from its time. A closed track places
-			// it at once, since nothing more can arrive.
-			let closed = cursor.state.poll(waiter, |_| Poll::<()>::Pending).is_ready();
+			// as the upstream's answer to the range asked, or a live group starting. A closed
+			// track places it at once, since nothing more can arrive.
+			let closed = cursor
+				.state
+				.poll(waiter, |state| {
+					state.watch_starts(waiter);
+					Poll::<()>::Pending
+				})
+				.is_ready();
 			cursor.sync();
-			if !closed && cursor.filter.window.is_waiting_above(cursor.min_key) {
+			if !closed && unplaced(&cursor.filter.window) {
 				return Poll::Pending;
 			}
 		}
@@ -17723,6 +17733,41 @@ mod test {
 		assert_eq!(drain_groups(&mut reader), vec![0]);
 	}
 
+	/// A join already placed, as a route switch asks a new copy for one, settles nothing for
+	/// a live join beside it still waiting on its upstream's answer: where delivery starts
+	/// waits on that answer, since a publisher starting before it names no start for the
+	/// join, for good.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_placed_join_waits_on_an_unanswered_one_to_start() {
+		let mut both = Subscription::default().with_ranges([Range::from(Start::LATEST), Range::from(Start::LATEST)]);
+		both.placed = [(1, 0)].into();
+		let producer = track_producer("test", Info::default());
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(Timestamp::unscaled(0), &b"x"[..]).unwrap();
+		group.finish().unwrap();
+		let mut reader = producer.subscribe(both);
+		let starts = |reader: &mut Subscriber| -> Vec<Option<u64>> {
+			reader
+				.resolved_keys([0, 1])
+				.into_iter()
+				.map(|resolved| resolved.map(|resolved| resolved.start))
+				.collect()
+		};
+		assert_eq!(starts(&mut reader), vec![None, Some(0)]);
+		assert!(
+			reader.poll_start(&kio::Waiter::noop()).is_pending(),
+			"waits on the answer"
+		);
+
+		producer.answer_join(Duration::ZERO, None, Some(0), Duration::ZERO);
+		assert!(reader.poll_start(&kio::Waiter::noop()).is_ready());
+		assert_eq!(starts(&mut reader), vec![Some(0), Some(0)]);
+	}
+
 	/// A lite-07 copy whose end was declared before any answer, once every group below it
 	/// arrived, places a join past every group as a time start from 0, even while the last
 	/// group still fills: no answer comes, and its read ends with the feed.
@@ -17750,7 +17795,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_unanswered_copy_places_a_join_past_every_group_at_once() {
 		let past = Subscription::default().with_ranges([Range::from(Start::within(Duration::from_secs(1)))]);
-		let mut producer = track_producer("test", Info::default());
+		let producer = track_producer("test", Info::default());
 		producer.received();
 		producer.anchored();
 		let mut reader = producer.subscribe(past);

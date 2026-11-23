@@ -823,6 +823,14 @@ export class Window {
 	}
 
 	/**
+	 * Whether a live join's reach back waits on its upstream's answer or a group held starting. Mirrors
+	 * the Rust `Window::is_reaching`.
+	 */
+	get reaching(): boolean {
+		return this.#reaching.size > 0;
+	}
+
+	/**
 	 * The keys of the ranges still waiting on a live join or a time start. Mirrors the Rust
 	 * `Window::unsettled`.
 	 */

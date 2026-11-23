@@ -4680,6 +4680,10 @@ export class Subscriber {
 			// A live join still pending reads every group, so a fill asked below would claim
 			// the history it never names. Mirrors the Rust `cursor.sync()` in `poll_start`.
 			subscriber.#settle();
+			// A live join still waiting to be placed has no start yet, and a start answered before it
+			// names none for it for good. A closed track places it at once, as nothing more arrives.
+			// Mirrors the Rust `poll_start`.
+			if (subscriber.#window.reaching && subscriber.#state.closed.peek() === undefined) return "pending";
 			const producer = subscriber.#state.producer;
 			const start = producer && sourceStart(producer);
 			if (start === "pending") return start;
