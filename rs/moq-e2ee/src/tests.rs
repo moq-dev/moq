@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -342,9 +341,9 @@ fn consume(generation: &Producer) -> Consumer {
 	generation.credential().consume(generation.epoch().clone())
 }
 
+/// Every group the track holds, as history, so none goes stale and none waits on a live edge.
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)))
+	moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])
 }
 
 /// A track whose superseded groups stay fresh, so [`subscribe_all`] reads every group.

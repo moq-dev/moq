@@ -182,6 +182,8 @@ pub(super) struct Standing {
 pub(super) trait Beside {
 	/// How many runs it holds.
 	fn runs(&self) -> u64;
+	/// One past the run holding `key` that this reader gave up for good, if it did.
+	fn given_up_end(&self, key: u64) -> Option<u64>;
 	/// Forget every run within `folded`, which the record folded as settled.
 	fn forget(&mut self, folded: std::ops::Range<u64>);
 }
@@ -189,6 +191,10 @@ pub(super) trait Beside {
 impl Beside for () {
 	fn runs(&self) -> u64 {
 		0
+	}
+
+	fn given_up_end(&self, _key: u64) -> Option<u64> {
+		None
 	}
 
 	fn forget(&mut self, _folded: std::ops::Range<u64>) {}
@@ -236,7 +242,7 @@ impl Record {
 		if bill.debt() == 0 {
 			return Ok(());
 		}
-		for folded in self.fold(reader) {
+		for folded in self.fold(reader, &*beside) {
 			beside.forget(folded);
 		}
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
@@ -250,10 +256,10 @@ impl Record {
 	}
 
 	/// Raise the floor over the final prefix: each run from it up to the lowest one that is
-	/// not final. Final are the groups handed out, every report, and this reader's own stale
-	/// skips, which a wider budget would offer again only while the pool still held their
-	/// groups. Not final are the runs given up and not reported yet, and the keys nothing
-	/// settled.
+	/// not final. Final are the groups handed out, every report, and this reader's own
+	/// verdicts: its stale skips and what `beside` gave up, which a wider budget would offer
+	/// again only while they were held. Not final are the runs given up and not reported yet,
+	/// and the keys nothing settled.
 	///
 	/// A reader that started above its floor, as at a sparse-key track's live edge or its
 	/// oldest group, never settles the keys below its start, so the final stretch from its
@@ -261,7 +267,7 @@ impl Record {
 	/// the lowest key it settled when they name none or less. The keys below stay owed, should
 	/// a group arrive there or its ranges widen. Returns the runs it folded, below the floor
 	/// and the stretch.
-	fn fold(&mut self, reader: Standing) -> Vec<std::ops::Range<u64>> {
+	fn fold(&mut self, reader: Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
@@ -277,7 +283,7 @@ impl Record {
 			}
 			self.rescan = true;
 		}
-		let (floor, _) = self.final_end(self.floor, reader.handed);
+		let (floor, _) = self.final_end(self.floor, reader.handed, beside);
 		if floor > self.floor {
 			self.floor = floor;
 			self.delivered.forget_below(floor);
@@ -290,7 +296,7 @@ impl Record {
 		let from = reader.from.max(self.lowest_settled().unwrap_or(0));
 		if from > self.floor {
 			// Folded, the stretch costs two runs: only one spanning more is worth it.
-			let (end, runs) = self.final_end(from, reader.handed);
+			let (end, runs) = self.final_end(from, reader.handed, beside);
 			if runs > 2 {
 				let stretch = from..end;
 				self.delivered.insert_run(stretch.clone());
@@ -319,7 +325,7 @@ impl Record {
 
 	/// One past the final stretch starting at `start`, and how many runs it spans: `start`
 	/// itself when its key is not final, or is the group this read hands out.
-	fn final_end(&self, start: u64, handed: Option<u64>) -> (u64, usize) {
+	fn final_end(&self, start: u64, handed: Option<u64>, beside: &dyn Beside) -> (u64, usize) {
 		let mut end = start;
 		let mut runs = 0;
 		loop {
@@ -331,6 +337,7 @@ impl Record {
 						self.delivered.run_end(end),
 						self.written_off.get(&end).map(|run| run.end),
 						self.skipped.run_end(end),
+						beside.given_up_end(end),
 					];
 					let Some(run_end) = local.into_iter().flatten().max() else {
 						break;
@@ -511,6 +518,10 @@ mod test {
 			0
 		}
 
+		fn given_up_end(&self, _key: u64) -> Option<u64> {
+			None
+		}
+
 		fn forget(&mut self, folded: std::ops::Range<u64>) {
 			self.0.push(folded);
 		}
@@ -540,6 +551,37 @@ mod test {
 			.unwrap();
 		assert!(record.told(2), "the drops below it fold");
 		assert!(!record.told(3), "the handed group stays to be told");
+	}
+
+	/// A run the reader gave up beside its record, such as a drop it took from the track's drop
+	/// set, is its own final verdict: a debt folds the floor over it rather than stopping at
+	/// the gap, and forgets it below the floor.
+	#[test]
+	fn a_debt_folds_over_what_the_reader_gave_up_beside_it() {
+		struct GivenUp(Option<Range<u64>>);
+		impl Beside for GivenUp {
+			fn runs(&self) -> u64 {
+				u64::from(self.0.is_some())
+			}
+			fn given_up_end(&self, key: u64) -> Option<u64> {
+				self.0.as_ref().filter(|run| run.contains(&key)).map(|run| run.end)
+			}
+			fn forget(&mut self, folded: Range<u64>) {
+				self.0 = self.0.take().filter(|run| run.start >= folded.end || run.end <= folded.start);
+			}
+		}
+		let (pool, track) = account();
+		let mut record = Record::default();
+		let mut beside = GivenUp(Some(1..2));
+		record.delivered.insert(0);
+		record.delivered.insert(2);
+		record.reported.insert(4..5, Report::Dropped);
+		record.settle(|| track.clone(), &mut beside, Standing::default()).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut beside, Standing::default()).unwrap();
+		assert!(record.told(1) && record.told(2), "folded over the gap it gave up");
+		assert_eq!(beside.0, None, "and forgot it below the floor");
+		assert!(!record.told(3), "a key nothing settled stops the fold");
 	}
 
 	/// A debt that needs a run this reader was promised ends it with `TooFarBehind`: one given

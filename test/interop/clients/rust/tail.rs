@@ -261,10 +261,14 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			if late {
-				// No range: join the latest group as a player does, group 0, whose head predates
-				// the subscription.
-				let options = moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
+				// Join the latest group as a player does, group 0, whose head predates the
+				// subscription.
+				let options = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::ZERO,
+						max: Some(Duration::from_secs(5)),
+					},
+				)]);
 				let mut track = remote.subscribe(Some(options)).await?;
 				for sequence in 0..LATE_GROUPS {
 					let mut group = track.recv_group().await?.context("missing group")?;
@@ -282,7 +286,6 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			let options = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
 				.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
 			let mut track = remote.subscribe(Some(options)).await?;
 			if compress {

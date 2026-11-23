@@ -4052,7 +4052,6 @@ pub(super) fn asking(expiry: Option<&Arc<dyn Expiry>>) -> track::Asking {
 	expiry.map_or(
 		track::Asking {
 			priority: 0,
-			max_delay: None,
 			order: super::subscription::Order::Ascending,
 		},
 		|expiry| expiry.asking(),
@@ -4472,8 +4471,8 @@ impl Consumer {
 	/// once it does.
 	///
 	/// A publisher still writing the group polls this while it waits on its own transport,
-	/// which the group's reads cannot see: once the subscription's
-	/// [`Delay::max`](crate::track::Delay::max) expires the group, it abandons
+	/// which the group's reads cannot see: once the `max` of the live joins reaching it
+	/// ([`Start::Live`](crate::track::Start::Live)) expires the group, it abandons
 	/// the stream, even with every frame already read off. It abandons it too once
 	/// [`Self::poll_finished`] fails. Stays `true` once set.
 	#[cfg(any(feature = "async", test))]
@@ -5591,12 +5590,6 @@ pub struct Fetch {
 	/// Delivery priority for the fetched group's stream, higher first. Defaults to 0.
 	pub priority: i8,
 
-	/// Maximum age behind the live edge this caller accepts.
-	///
-	/// `None` applies only the publisher's max age. An explicit value can
-	/// tighten, but never relax, that bound.
-	pub max_delay: Option<std::time::Duration>,
-
 	/// Index of the first frame to fetch within the group. Defaults to 0, the whole group.
 	///
 	/// Only a route change sets it, filling the hole after a head another route already
@@ -5612,12 +5605,6 @@ impl Fetch {
 	/// Set the delivery priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
-		self
-	}
-
-	/// Limit how far behind the live edge the fetched group may fall.
-	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
-		self.max_delay = Some(max_delay);
 		self
 	}
 }
@@ -6107,10 +6094,8 @@ mod test {
 	fn draining_a_parked_group_does_not_lock_the_backlog() {
 		let broadcast = super::super::broadcast::Producer::new(Default::default());
 		let track = broadcast.create_track("parked", track::Info::timed()).unwrap();
-		let mut subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
-		);
+		let mut subscriber =
+			track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
 		let groups: Vec<_> = (0..3)
 			.map(|key| {
 				let mut group = track.create_group(Info { start: key }).unwrap();
@@ -8259,7 +8244,6 @@ mod test {
 		fn asking(&self) -> crate::model::track::Asking {
 			crate::model::track::Asking {
 				priority: 0,
-				max_delay: None,
 				order: crate::model::subscription::Order::Ascending,
 			}
 		}

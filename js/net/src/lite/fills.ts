@@ -50,7 +50,7 @@ export function refuseRun(runs: readonly Refused[], start: bigint, end: bigint, 
 }
 
 /**
- * A subscription asking again, with no max delay, for groups another one dropped as stale or
+ * A subscription asking again, as history that never goes stale, for groups another one dropped as stale or
  * already delivered, which a fill still owes: what the subscriber opens for a {@link RangeFills}.
  */
 export interface RecoveryHandle {
@@ -121,7 +121,7 @@ export interface FillAsk {
  * refuses a fill. A range start speaks only for its range: once the range retires, a later one
  * asking for the same groups may start lower. A group it drops as stale is officially dropped,
  * and one it already accounted for (delivered before and since evicted) it never sends again, so
- * a recovery asks for either on its own subscription with no max delay: a stale run once, and an
+ * a recovery asks for either on its own history subscription: a stale run once, and an
  * accounted group as often as it is evicted again before its fill answers. This cache evicts only
  * groups idle past their expiry, so each recovery lands a group its fill answers. Nothing newer
  * judges it stale there, so once every hop forgot a run, a narrow reader takes its stale groups.
@@ -260,7 +260,7 @@ export class RangeFills {
 						insertRun(this.#toRecover, owed.start, owed.end);
 			}
 		}
-		// Each stale run goes out on its own subscription with no max delay, once, with the priority
+		// Each stale run goes out on its own history subscription, once, with the priority
 		// of the fills held now: the last ask may predate them.
 		let priority = this.ask.priority;
 		for (const fill of this.#held) priority = Math.max(priority, fill.priority);

@@ -962,26 +962,21 @@ impl Finished {
 
 /// How far back a subscription wants retained audio replayed. A live join
 /// ([`Start::Live`](moq_net::track::Start::Live) with no end) starts its lag behind the live edge,
-/// which a player states as its playout delay plus the codec's warmup, so when every range is one
-/// the furthest bounds it within the max delay. Any other range, such as one from the oldest group
-/// (as moq-transport and moq-lite before 07 carry every join), wants all its max delay keeps;
-/// `None` leaves the retention.
+/// which a player states as its playout delay plus the codec's warmup, bounded by the join's own
+/// max, so when every range is one the furthest of those bounds it. Any other range is history,
+/// such as one from the oldest group (as moq-transport and moq-lite before 07 carry every join),
+/// which wants everything kept: `None` leaves the retention.
 #[cfg(any(feature = "capture", test))]
 fn replay_budget(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
 	let joins: Option<Vec<std::time::Duration>> = subscription
 		.ranges
 		.iter()
 		.map(|range| match (range.start, range.end) {
-			(moq_net::track::Start::Live(min), None) => Some(min),
+			(moq_net::track::Start::Live { min, max }, None) => Some(max.map_or(min, |max| min.min(max))),
 			_ => None,
 		})
 		.collect();
-	let max = subscription.delay.max;
-	match (joins.and_then(|joins| joins.into_iter().max()), max) {
-		(Some(min), Some(max)) => Some(min.min(max)),
-		(Some(min), None) => Some(min),
-		(None, max) => max,
-	}
+	joins?.into_iter().max()
 }
 
 #[cfg(test)]
@@ -1131,8 +1126,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(1),
+						max: Some(Duration::from_secs(1)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1172,38 +1171,17 @@ mod tests {
 	/// Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old:
 	/// a live viewer rejoining after seconds idle would otherwise receive all of them first. A live
 	/// join states how far back it plays as its lag, which bounds the replay however far its max
-	/// delay reaches; a range from the oldest group (an oldest reader, as moq-transport and
-	/// moq-lite before 07 carry) is bounded by its max alone, as is a reader asking for history
-	/// from a time.
+	/// reaches, and its max bounds the replay however far its lag reaches, as with a join a wire
+	/// before lite-07 makes of its one max age.
 	#[tokio::test(start_paused = true)]
-	async fn demand_replays_only_the_history_its_delay_wants() {
+	async fn demand_replays_only_the_history_its_live_join_wants() {
 		let budget = Duration::from_millis(130);
 		let long = Duration::from_secs(10);
-		let from = |start| vec![moq_net::track::Range::from(start)];
-		for (delay, ranges) in [
-			(
-				moq_net::track::Delay::default().with_max(long),
-				from(moq_net::track::Start::Live(budget)),
-			),
-			(
-				moq_net::track::Delay::default().with_max(budget),
-				from(moq_net::track::Start::Oldest),
-			),
-			(
-				moq_net::track::Delay::default().with_max(budget),
-				from(moq_net::track::Start::Live(long)),
-			),
-			// A reader reaching back for history from a time, such as an archive resuming, wants
-			// all its max delay keeps.
-			(
-				moq_net::track::Delay::default().with_max(budget),
-				from(moq_net::track::Start::Time(0)),
-			),
-		] {
+		for (min, max) in [(budget, long), (long, budget)] {
 			replays_from(
-				moq_net::track::Subscription::default()
-					.with_delay(delay)
-					.with_ranges(ranges),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live { min, max: Some(max) },
+				)]),
 			)
 			.await;
 		}
@@ -1306,8 +1284,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(60),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1352,8 +1334,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(60),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1585,8 +1571,12 @@ mod tests {
 					.track("audio")
 					.unwrap()
 					.subscribe(
-						moq_net::track::Subscription::default()
-							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Duration::from_secs(60),
+								max: Some(Duration::from_secs(60)),
+							},
+						)]),
 					)
 					.await
 					.unwrap();
@@ -1659,8 +1649,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Duration::from_secs(1),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap(),
@@ -1870,8 +1864,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(60),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2004,8 +2002,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(60),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2164,8 +2166,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Duration::from_secs(1),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2209,8 +2215,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Duration::from_secs(1),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2320,8 +2330,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Duration::from_secs(1),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2375,8 +2389,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Duration::from_secs(1),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2432,8 +2450,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(1),
+						max: Some(Duration::from_secs(1)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2493,8 +2515,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Duration::from_secs(1),
+						max: Some(Duration::from_secs(1)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();

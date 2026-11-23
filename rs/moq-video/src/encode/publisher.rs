@@ -365,9 +365,15 @@ mod tests {
 				catalog.track_info(hang::catalog::PRIORITY.video).with_max_age(replay),
 			)
 			.unwrap();
-		let consumer = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(replay)),
-		);
+		let consumer =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: replay,
+						max: Some(replay),
+					},
+				)]),
+			);
 
 		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;

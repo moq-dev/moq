@@ -13,8 +13,9 @@ import { type Duration, type Instant, now } from "@moq/clock";
  * A buffered subscription holds its head and releases it sorted. The head is complete once a newer
  * group than the first arrives, or once the first group alone runs past the floor: the ring could not
  * start playing before holding that much, so waiting for the head costs no startup latency. It is
- * also released once it spans the subscription's max delay, since nothing older is served, or once it
- * has waited that long, which bounds what it keeps by arrival time whatever the timestamps say. After
+ * also released once it spans the subscription's live join max, since nothing older is served, or
+ * once it has waited that long, which bounds what it keeps by arrival time whatever the timestamps
+ * say. After
  * that, and throughout when not holding, a frame older than one already decoded is not admitted.
  */
 export class Order<T extends { group: bigint; frame: { timestamp: Duration } }> {

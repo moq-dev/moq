@@ -4,11 +4,12 @@
 //! fetch, and a closed one without it. Lite-07 says which with GROUP_END; earlier versions
 //! end every group with a bare FIN, so each arrives closed.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Range, Subscription};
+use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -75,11 +76,10 @@ async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
 		.unwrap();
 	let mut subscriber = kio::clock::timeout(
 		TIMEOUT,
-		remote.track("video").unwrap().subscribe(
-			Subscription::default()
-				.with_delay(Delay::default().with_max(None))
-				.with_ranges([Range::default()]),
-		),
+		remote
+			.track("video")
+			.unwrap()
+			.subscribe(Subscription::default().with_ranges([Range::ALL]).with_max(None)),
 	)
 	.await
 	.expect("subscribe timeout")

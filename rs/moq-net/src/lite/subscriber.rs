@@ -3200,7 +3200,6 @@ mod tests {
 	use crate::coding::{Decode, Encode};
 	use crate::lite::test_transport::{Sent, SinkSession};
 	use crate::model::ProduceTest;
-	use crate::track::Delay;
 	use futures::FutureExt;
 
 	const VERSION: Version = Version::Lite05;
@@ -3235,7 +3234,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
@@ -3243,6 +3241,7 @@ mod tests {
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -3336,8 +3335,6 @@ mod tests {
 			],
 		);
 		active.starts = [(0, None), (1, None), (2, Some(66))].into();
-		// Asked with no limit, so an empty answer holds for every reader.
-		active.budgets = [(0, Duration::MAX), (1, Duration::MAX), (2, Duration::MAX)].into();
 		let info = track::Info::default().with_timescale(None).with_max_age(None);
 		let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 		serving.received();
@@ -3357,7 +3354,7 @@ mod tests {
 							start: crate::track::Start::Time(time),
 							end: None,
 						}])
-						.with_delay(Delay::default().with_max(None)),
+						.with_max(None),
 				)
 				.ordered();
 			match ordered.next_item().now_or_never() {
@@ -3369,6 +3366,62 @@ mod tests {
 		assert_eq!(read(10), Some(66), "its range reached 20, past it");
 		assert_eq!(read(15), None, "inside that range");
 		assert_eq!(read(30), None, "its range ended before it");
+	}
+
+	/// A placed join under a max age may be answered past groups the publisher still holds,
+	/// stale for it alone, so its answer places no history reader at its group; one with no
+	/// max age skips nothing, so it does, unless it was asked under one before a retune.
+	#[kio::test]
+	async fn only_an_unbounded_placed_join_answers_for_history() {
+		for (max, retuned_from, placed) in [
+			(Some(Duration::ZERO), None, None),
+			(None, None, Some(20)),
+			(None, Some(Duration::ZERO), None),
+		] {
+			let tail = kio::Producer::new(Tail::default());
+			let Sub::Active(mut active) = feed_sub(&tail).await else {
+				unreachable!("feed_sub is active")
+			};
+			active.live = lite::LiveRanges::new(
+				Version::Lite07,
+				&[lite::Range {
+					start: Some(lite::Anchor::Joined {
+						at: track::Position { group: 10, frame: 0 },
+						max,
+					}),
+					end: None,
+				}],
+			);
+			active.starts = [(0, Some(20))].into();
+			active.join_budgets = retuned_from.map(|asked| (0, asked)).into_iter().collect();
+			let info = track::Info::default().with_timescale(None).with_max_age(None);
+			let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+			serving.received();
+			serving.anchored();
+			serving
+				.create_group(group::Info { start: 20 })
+				.unwrap()
+				.finish()
+				.unwrap();
+			active.report_starts(&serving);
+
+			let mut ordered = serving
+				.subscribe(
+					track::Subscription::default()
+						.with_ranges([track::Range {
+							start: crate::track::Start::Time(10),
+							end: None,
+						}])
+						.with_max(None),
+				)
+				.ordered();
+			let read = match ordered.next_item().now_or_never() {
+				Some(Ok(Some(track::Item::Group(group)))) => Some(group.start),
+				None => None,
+				Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+			};
+			assert_eq!(read, placed, "max {max:?}, retuned from {retuned_from:?}");
+		}
 	}
 
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
@@ -3453,7 +3506,6 @@ mod tests {
 				demand: Some(Subscription::default()),
 				fill_ids: Default::default(),
 				probe_ids: Default::default(),
-				budgets: Default::default(),
 				fill_groups: Default::default(),
 				tail: Default::default(),
 				started: None,
@@ -3461,6 +3513,7 @@ mod tests {
 				parked: false,
 				starts: Default::default(),
 				join_ticks: Default::default(),
+				join_budgets: Default::default(),
 				declared: None,
 				end: None,
 				wanted: None,
@@ -3696,7 +3749,7 @@ mod tests {
 		let mut reader = track.subscribe(
 			Subscription::default()
 				.with_range(0..)
-				.with_delay(Delay::default().with_max(Duration::from_secs(30))),
+				.with_max(Duration::from_secs(30)),
 		);
 		track.start_at(WIDE).unwrap();
 		arrive(&track, &tail, WIDE, start);
@@ -3917,8 +3970,14 @@ mod tests {
 		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
-		let probe = join_probe(Duration::from_secs(1), None);
-		let mut sub = SubStream {
+		let join = track::JoinAsk {
+			min: Duration::from_secs(1),
+			end: None,
+			budget: Duration::from_secs(30),
+			since: 0,
+		};
+		let probe = join_probe(&join);
+		let sub = SubStream {
 			order: crate::track::Order::Ascending,
 			stream,
 			id: 0,
@@ -3931,7 +3990,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
@@ -3939,33 +3997,90 @@ mod tests {
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
 		};
-		let (id, _) = sub.live.iter().next().unwrap();
-		sub.budgets.insert(id, Duration::MAX);
-		let join = track::JoinAsk {
-			min: Duration::from_secs(1),
-			end: None,
-			budget: Duration::from_secs(30),
-			since: 0,
-		};
 
 		// Kept, the unanswered demand range still answers the join.
-		let (probes, _) = join_probes(Some(&sub), &[join], &[probe], Duration::MAX);
+		let (probes, _) = join_probes(Some(&sub), &[join], &[probe]);
 		assert_eq!(probes, [], "the kept demand range answers the join");
 
 		// Hidden by an oldest range, it is retired, so the join is asked by a probe.
-		let (probes, _) = join_probes(
-			Some(&sub),
-			&[join],
-			&[lite::Range { start: None, end: None }],
-			Duration::MAX,
-		);
+		let (probes, _) = join_probes(Some(&sub), &[join], &[lite::Range { start: None, end: None }]);
 		assert_eq!(probes, [probe], "the retired demand range answers nothing");
+	}
+
+	/// A probe answered before its reader began waiting again, under a narrower max than the
+	/// reader now waits with, is retired and asked afresh, not retuned in place: a retune keeps
+	/// the old answer, which places no reader that began after it, so the reader would wait on
+	/// it for good. A lite-06 viewer restating its max as its playout delay settles does this.
+	#[kio::test]
+	async fn a_probe_answered_before_a_restate_is_asked_afresh() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite07)
+			.await
+			.unwrap();
+		let join = |budget, since| track::JoinAsk {
+			min: Duration::from_secs(1),
+			end: None,
+			budget,
+			since,
+		};
+		let narrow = join(Duration::from_millis(120), 12);
+		// The demand range, then the probe asked for the reader at 120 ms, each answered.
+		let demand = join_probe(&narrow);
+		let mut sub = SubStream {
+			order: crate::track::Order::Ascending,
+			stream,
+			id: 0,
+			max_delay: None,
+			stale_budget: Duration::ZERO,
+			start: None,
+			priority: 0,
+			requested: None,
+			live: lite::LiveRanges::new(Version::Lite07, &[demand, join_probe(&narrow)]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			probe_ids: [1].into(),
+			fill_groups: Default::default(),
+			tail: Default::default(),
+			started: None,
+			finishing: None,
+			parked: false,
+			starts: [(0, Some(4000)), (1, Some(4000))].into(),
+			join_ticks: [(0, 13), (1, 14)].into(),
+			join_budgets: [(0, Duration::ZERO), (1, Duration::from_millis(120))].into(),
+			declared: None,
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+
+		// The reader restated at 300 ms after both answers landed.
+		let wide = join(Duration::from_millis(300), 15);
+		let ranges = [join_probe(&wide)];
+		let (probes, reasked) = join_probes(Some(&sub), &[wide], &ranges);
+		assert_eq!(probes, [join_probe(&wide)], "neither answer places the restated reader");
+		let reasked = fitted_reasks(Some(&sub), reasked, &probes);
+		assert_eq!(reasked, [1].into(), "the fresh probe asks the same join");
+
+		let wanted: Vec<_> = ranges.iter().chain(&probes).copied().collect();
+		let (edit, _) = sub.edit(&wanted, (probes.len(), 0), &reasked).unwrap();
+		let lite::RangeEdit::Edit { remove, add, retune } = edit else {
+			panic!("lite-07 edits its ranges");
+		};
+		assert_eq!(remove, [1], "the stale probe is retired");
+		assert_eq!(add, [join_probe(&wide)], "and asked afresh");
+		assert_eq!(
+			retune,
+			[(0, Some(Duration::from_millis(300)))],
+			"the demand range is retuned"
+		);
 	}
 
 	/// The owed groups start at the floor the demand last asked for, which an update can move
@@ -3993,7 +4108,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
@@ -4001,6 +4115,7 @@ mod tests {
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
@@ -4016,7 +4131,7 @@ mod tests {
 		// An update moves the floor and the ranges together, as `begin_subscription` does.
 		let update = |sub: &mut SubStream, start: Option<u64>, ranges: Vec<lite::Range>| {
 			sub.start = start;
-			sub.edit(&ranges, (0, 0), &Default::default(), Duration::MAX).unwrap();
+			sub.edit(&ranges, (0, 0), &Default::default()).unwrap();
 		};
 		sub.started = Some(None);
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
@@ -4034,7 +4149,6 @@ mod tests {
 			],
 			(0, 0),
 			&Default::default(),
-			Duration::MAX,
 		)
 		.unwrap();
 		assert_eq!(
@@ -4113,7 +4227,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
@@ -4121,6 +4234,7 @@ mod tests {
 			parked: false,
 			starts: [(0, Some(4))].into(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -4130,21 +4244,18 @@ mod tests {
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
 		// The same bounds again, as a fill.
-		sub.edit(&[demand, demand], (0, 1), &Default::default(), Duration::MAX)
-			.unwrap();
+		sub.edit(&[demand, demand], (0, 1), &Default::default()).unwrap();
 		assert_eq!(sub.fill_range(0), None, "the demand keeps its range");
 		assert_eq!(sub.fill_range(1), Some(4..8), "the copy the edit added is the fill");
 
 		// Another fill joins, and the first keeps its Range ID.
 		let other = groups(10..12);
-		sub.edit(&[demand, demand, other], (0, 2), &Default::default(), Duration::MAX)
-			.unwrap();
+		sub.edit(&[demand, demand, other], (0, 2), &Default::default()).unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 
 		// The demand moves away while the fill stays: the fill keeps Range ID 1.
 		let moved = lite::Range::span(Some(20), 0, None, None);
-		sub.edit(&[moved, demand, other], (0, 2), &Default::default(), Duration::MAX)
-			.unwrap();
+		sub.edit(&[moved, demand, other], (0, 2), &Default::default()).unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 		assert_eq!(sub.fill_range(1), Some(4..8));
 		assert_eq!(sub.fill_range(3), None, "the demand's new range is no fill");
@@ -4152,13 +4263,11 @@ mod tests {
 		// Before SUBSCRIBE_START, a fill an update retires keeps its Range ID, since the start
 		// still names it, and it must not count as the demand's.
 		sub.started = None;
-		sub.edit(&[moved, demand], (0, 1), &Default::default(), Duration::MAX)
-			.unwrap();
+		sub.edit(&[moved, demand], (0, 1), &Default::default()).unwrap();
 		assert_eq!(sub.fill_range(2), None, "retired");
 		assert!(sub.fill_ids.contains(&2), "still a fill's");
 		sub.started = Some(Some(4));
-		sub.edit(&[moved, demand], (0, 1), &Default::default(), Duration::MAX)
-			.unwrap();
+		sub.edit(&[moved, demand], (0, 1), &Default::default()).unwrap();
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
 
@@ -4188,7 +4297,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
@@ -4196,6 +4304,7 @@ mod tests {
 			parked: false,
 			starts: [(0, Some(4))].into(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
@@ -4206,18 +4315,20 @@ mod tests {
 
 		// A live join, which only the publisher can place.
 		let back = lite::Range {
-			start: Some(lite::Anchor::Live(Duration::ZERO)),
+			start: Some(lite::Anchor::Live {
+				min: Duration::ZERO,
+				max: None,
+			}),
 			end: None,
 		};
-		let (edit, changed) = sub
-			.edit(&[first, back], (0, 0), &Default::default(), Duration::MAX)
-			.unwrap();
+		let (edit, changed) = sub.edit(&[first, back], (0, 0), &Default::default()).unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
 			lite::RangeEdit::Edit {
 				remove: vec![],
-				add: vec![back]
+				add: vec![back],
+				retune: Vec::new(),
 			}
 		);
 		assert_eq!(sub.owed(None), None, "nothing says yet where it starts");
@@ -4225,18 +4336,19 @@ mod tests {
 		assert_eq!(sub.owed(None), Some(vec![4..10, 1..10]));
 
 		// Retiring the first range forgets its start.
-		sub.edit(&[back], (0, 0), &Default::default(), Duration::MAX).unwrap();
+		sub.edit(&[back], (0, 0), &Default::default()).unwrap();
 		assert_eq!(sub.starts.keys().copied().collect::<Vec<_>>(), [1]);
 		assert_eq!(sub.owed(Some(8)), Some(vec![1..8]));
 
 		// A join asked afresh is placed again, as a range of its own.
-		let (edit, changed) = sub.edit(&[back], (0, 0), &[1].into(), Duration::MAX).unwrap();
+		let (edit, changed) = sub.edit(&[back], (0, 0), &[1].into()).unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
 			lite::RangeEdit::Edit {
 				remove: vec![1],
-				add: vec![back]
+				add: vec![back],
+				retune: Vec::new(),
 			}
 		);
 		assert!(sub.starts.is_empty(), "the new range waits on its own start");
@@ -5133,7 +5245,7 @@ mod tests {
 			assert!(track.is_live(), "header first: {header_first}");
 
 			let subscription = crate::track::Subscription::default()
-				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+				.with_max(std::time::Duration::from_secs(10))
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription);
 			let mut keys = Vec::new();
@@ -5342,7 +5454,7 @@ mod tests {
 				crate::track::Info::timed(),
 			);
 			let subscription = crate::track::Subscription::default()
-				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+				.with_max(std::time::Duration::from_secs(10))
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription.clone());
 			// The original copy, still arriving: one frame in, no end yet.
@@ -5465,7 +5577,7 @@ mod tests {
 				crate::track::Info::timed(),
 			);
 			let subscription = crate::track::Subscription::default()
-				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+				.with_max(std::time::Duration::from_secs(10))
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription);
 			let tail = kio::Producer::new(Tail::default());
@@ -5806,7 +5918,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			probe_ids: Default::default(),
-			budgets: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
@@ -5814,6 +5925,7 @@ mod tests {
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -5888,11 +6000,7 @@ mod tests {
 			copy.evict(key);
 		}
 		let mut reader = copy
-			.subscribe(
-				crate::track::Subscription::default()
-					.with_delay(crate::track::Delay::default().with_max(None))
-					.with_range(0..4),
-			)
+			.subscribe(crate::track::Subscription::default().with_max(None).with_range(0..4))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..4 are owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
@@ -5942,7 +6050,6 @@ mod tests {
 		let mut reader = copy
 			.subscribe(
 				crate::track::Subscription::default()
-					.with_delay(crate::track::Delay::default().with_max(None))
 					.with_range(0..1),
 			)
 			.ordered();
@@ -6002,7 +6109,6 @@ mod tests {
 		let mut reader = copy
 			.subscribe(
 				crate::track::Subscription::default()
-					.with_delay(crate::track::Delay::default().with_max(None))
 					.with_range(0..2),
 			)
 			.ordered();
@@ -6109,11 +6215,7 @@ mod tests {
 			copy.evict(key);
 		}
 		let mut reader = copy
-			.subscribe(
-				crate::track::Subscription::default()
-					.with_delay(crate::track::Delay::default().with_max(None))
-					.with_range(missing.read),
-			)
+			.subscribe(crate::track::Subscription::default().with_range(missing.read))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "the read is owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
@@ -6221,11 +6323,19 @@ mod tests {
 		let version = Version::Lite07;
 		let budget = Duration::from_millis(500);
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
-		let mut reader = serving.serving.subscribe(
-			crate::track::Subscription::default()
-				.with_delay(crate::track::Delay::default().with_max(budget))
-				.with_ranges([crate::track::Range::groups(0..)]),
-		);
+		// A live join under the budget, which the upstream placed at group 0: a stale drop
+		// under that budget ends what it reads.
+		let lag = Duration::from_secs(10);
+		let mut reader =
+			serving.serving.subscribe(
+				crate::track::Subscription::default().with_ranges([crate::track::Range::from(
+					crate::track::Start::Live {
+						min: lag,
+						max: Some(budget),
+					},
+				)]),
+			);
+		serving.serving.answer_join(lag, None, Some(0), Duration::MAX);
 		let waiter = kio::Waiter::noop();
 		let old = |groups: std::ops::Range<u64>| {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &crate::StreamError::Old, version))
@@ -6243,8 +6353,15 @@ mod tests {
 			let Sub::Active(active) = &mut serving.sub else {
 				unreachable!("an active subscription");
 			};
-			active.max_delay = Some(Duration::from_secs(5));
-			let ranges = active.live.unchanged();
+			// A live join under a wider max age replaces the range.
+			let wider = lite::Range {
+				start: Some(lite::Anchor::Live {
+					min: Duration::ZERO,
+					max: Some(Duration::from_secs(5)),
+				}),
+				end: None,
+			};
+			let ranges = active.live.edit(&[wider]).unwrap();
 			buffer_update(active, ranges).unwrap();
 		}
 		assert!(covers(1..3), "still accounted for");
@@ -6483,11 +6600,13 @@ mod tests {
 			let producer = serving.serving.clone();
 			let mut arriving = serving.serving.create_group(group::Info { start: 2 }).unwrap();
 			arriving.write_frame(arriving.key_time(), b"2".as_slice()).unwrap();
+			// From the oldest group, which reads what the copy holds: a live join would wait on
+			// the upstream's answer for the live edge.
 			let mut reader = broadcast
 				.consume()
 				.track("video")
 				.unwrap()
-				.subscribe(None)
+				.subscribe(crate::track::Subscription::default().with_ranges([crate::track::Range::ALL]))
 				.await
 				.unwrap();
 			let mut group = reader.recv_group().await.unwrap().unwrap();
@@ -7328,18 +7447,63 @@ mod tests {
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![info, Vec::new()]);
 			let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
 			let wait = Duration::from_secs(10);
-			let (waiting, mut run) = subscribing(
-				&subscriber,
-				Subscription::default().with_delay(Delay::default().with_max(wait)),
-			);
+			let (waiting, mut run) = subscribing(&subscriber, Subscription::default().with_max(wait));
 			for _ in 0..4 {
 				let _ = kio::Task::poll(&mut run, &kio::Waiter::noop());
 			}
 			waiting.now_or_never().expect("accepted").unwrap();
 
 			let (msg, trailing) = sent_subscribe(&sent(&session.log, 1), version);
-			assert_eq!(msg.max_delay, Some(wait), "{version}: the subscriber's own max delay");
+			// Lite-07 carries it on the live join, an older wire as the subscription's.
+			let max = match version.has_ranges() {
+				true => match msg.ranges[..] {
+					[
+						lite::Range {
+							start: Some(lite::Anchor::Live { max, .. }),
+							..
+						},
+					] => max,
+					_ => panic!("{version}: one live join, got {:?}", msg.ranges),
+				},
+				false => msg.max_delay,
+			};
+			assert_eq!(max, Some(wait), "{version}: the subscriber's own max age");
 			assert!(!trailing, "{version}: a SUBSCRIBE_UPDATE followed the accept");
+		}
+	}
+
+	/// A wire before lite-07 carries the demand's widest live max as its one Subscriber Max
+	/// Age, even once its span narrows to a start, here the newest group an idle copy cached.
+	#[kio::test]
+	async fn a_span_narrowed_to_a_start_keeps_the_demands_max_age() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let mut h = Harness::new(version);
+			let mut cached = h.producer.create_group(group::Info { start: 3 }).unwrap();
+			cached.write_frame(cached.key_time(), &b"x"[..]).unwrap();
+			cached.finish().unwrap();
+			h.producer.set_idle();
+
+			let wait = Duration::from_secs(10);
+			let mut sub = Sub::None;
+			let demand = Subscription::default().with_max(wait);
+			h.serve
+				.handle_subscription(&mut h.producer, &mut sub, Some(demand), true)
+				.await
+				.unwrap();
+
+			let (msg, _) = sent_subscribe(&h.wire(), version);
+			assert!(
+				matches!(
+					msg.ranges[..],
+					[lite::Range {
+						start: Some(lite::Anchor::Absolute(position)),
+						..
+					}] if position.group == 3
+				),
+				"{version}: asked from the newest cached group, got {:?}",
+				msg.ranges
+			);
+			assert_eq!(msg.max_delay, Some(wait), "{version}: the demand's max age");
 		}
 	}
 
@@ -7412,7 +7576,7 @@ mod tests {
 		let every = Subscription::default()
 			.with_order(crate::track::Order::Ascending)
 			.with_start(0)
-			.with_delay(Delay::default().with_max(Duration::from_secs(60)));
+			.with_max(Duration::from_secs(60));
 		let mut consumer = track.consume().subscribe(every).await.unwrap();
 		let framing = lite::Framing::new(track.info(), version);
 		subscriber.subscribes.lock().get_mut(&0).unwrap().accept(
@@ -7474,7 +7638,7 @@ mod tests {
 				.with_timescale(Timescale::MILLI)
 				.with_max_age(None),
 		);
-		let live = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60)));
+		let live = Subscription::default().with_max(Duration::from_secs(60));
 		let mut consumer = track.consume().subscribe(live).await.unwrap();
 		let mut entry = TrackEntry::new(None, Default::default());
 		let framing = lite::Framing::new(track.info(), version);
@@ -7525,7 +7689,7 @@ mod tests {
 		let every = Subscription::default()
 			.with_order(crate::track::Order::Ascending)
 			.with_start(0)
-			.with_delay(Delay::default().with_max(Duration::from_secs(60)));
+			.with_max(Duration::from_secs(60));
 		let mut consumer = track.consume().subscribe(every).await.unwrap();
 		let framing = lite::Framing::new(track.info(), version);
 		entry.accept(
@@ -8009,6 +8173,7 @@ mod tests {
 			probes: 0,
 			reasked: Default::default(),
 			ranges: vec![lite::Range::OPEN],
+			max_age: None,
 		};
 		let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
 		serving.mode = ServeMode::Establish(establish);
@@ -8177,6 +8342,7 @@ mod tests {
 			probes: 0,
 			reasked: Default::default(),
 			ranges: vec![lite::Range::OPEN],
+			max_age: None,
 		};
 		let reader = serving.serving.subscribe(None);
 		serving.serving.seen_subscription(Some(Subscription::default()));
@@ -8244,6 +8410,7 @@ mod tests {
 				probes: 0,
 				reasked: Default::default(),
 				ranges: vec![lite::Range::OPEN],
+				max_age: None,
 			};
 			let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
 			serving.mode = ServeMode::Establish(establish);
@@ -8780,8 +8947,66 @@ mod tests {
 		}]);
 		assert_eq!(wire_ranges(&empty), None);
 
-		// No start goes out as none, for the max age to place upstream.
-		assert_eq!(wire_ranges(&Subscription::default()), Some(vec![lite::Range::OPEN]));
+		// The oldest group goes out as no start, and a live join as itself.
+		let all = Subscription::default().with_ranges([track::Range::ALL]);
+		assert_eq!(wire_ranges(&all), Some(vec![lite::Range::OPEN]));
+		assert_eq!(
+			wire_ranges(&Subscription::default()),
+			Some(vec![lite::Range {
+				start: Some(lite::Anchor::Live {
+					min: Duration::ZERO,
+					max: Some(Duration::ZERO)
+				}),
+				end: None,
+			}])
+		);
+	}
+
+	/// A live join already placed goes out as `Joined`, from the frame a switch resumes at,
+	/// on lite-07, and as a start at its group on a wire without ranges, whose one max age
+	/// still takes its `max`.
+	#[test]
+	fn a_placed_join_goes_out_joined() {
+		let max = Some(Duration::from_secs(2));
+		let join = track::Range::from(crate::track::Start::Live {
+			min: Duration::from_millis(40),
+			max,
+		});
+		let mut placed = Subscription {
+			ranges: vec![join, join],
+			placed: [(1, 5)].into(),
+			..Default::default()
+		};
+		let joined = |frame| lite::Range {
+			start: Some(lite::Anchor::Joined {
+				at: Position { group: 5, frame },
+				max,
+			}),
+			end: None,
+		};
+		let live = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Duration::from_millis(40),
+				max,
+			}),
+			end: None,
+		};
+		assert_eq!(wire_ranges(&placed), Some(vec![live, joined(0)]));
+		placed.resume = Some(Position::new(5, 2));
+		assert_eq!(wire_ranges(&placed), Some(vec![live, joined(2)]));
+
+		placed.ranges.remove(0);
+		placed.placed = [(0, 5)].into();
+		assert_eq!(placed.max_age(), max);
+		let span = wire_span(placed);
+		assert_eq!((span.start(), span.end()), (Some(5), None));
+		assert_eq!(
+			wire_ranges(&span),
+			Some(vec![lite::Range {
+				start: Some(lite::Anchor::Absolute(Position::new(5, 2))),
+				end: None,
+			}])
+		);
 	}
 
 	/// A wire without ranges has no Position end, so a switch's frame cap goes out as the whole
@@ -8816,7 +9041,7 @@ mod tests {
 	#[test]
 	fn wire_span_covers_mixed_starts_from_group_zero() {
 		let mixed = Subscription {
-			ranges: vec![track::Range::default(), track::Range::groups(5..6)],
+			ranges: vec![track::Range::ALL, track::Range::groups(5..6)],
 			..Default::default()
 		};
 		let span = wire_span(mixed);
@@ -10750,7 +10975,9 @@ mod tests {
 /// on every version: a time start as the start, from the frame it resumes at (see
 /// [`Subscription::resume`]), and a time end as the exclusive group past it, which lite-07
 /// carries as the inclusive time again (see [`lite::Anchor::Absolute`]), or before the frame
-/// it is capped at (see [`Subscription::cap`]).
+/// it is capped at (see [`Subscription::cap`]). A placed live join goes out as
+/// [`lite::Anchor::Joined`] from the frame it resumes at too, which only lite-07 carries: the
+/// narrowing below makes it a time start first on an older wire.
 /// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
@@ -10759,20 +10986,26 @@ mod tests {
 /// between two groups misses the one containing it there.
 fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 	let mut ranges = Vec::with_capacity(subscription.ranges.len());
-	for range in &subscription.ranges {
+	// A switch resumes the group it starts at past the frames the readers hold.
+	let resumed = |group| match subscription.resume {
+		Some(resume) if resume.group == group => resume,
+		_ => Position::group(group),
+	};
+	for (index, range) in (0..).zip(&subscription.ranges) {
 		if range.is_empty() {
 			continue;
 		}
-		// A switch resumes the group it starts at past the frames the readers hold. One from the
-		// oldest group goes upstream with no start, for the max age to place there, and a live
-		// join as itself, for the upstream to place behind its own live edge.
-		let start = match range.start {
-			track::Start::Oldest => None,
-			track::Start::Live(min) => Some(lite::Anchor::Live(min)),
-			track::Start::Time(time) => Some(lite::Anchor::Absolute(match subscription.resume {
-				Some(resume) if resume.group == time => resume,
-				_ => Position::group(time),
-			})),
+		// One from the oldest group goes upstream with no start, for the max age to place there,
+		// and a live join as itself, for the upstream to place behind its own live edge, or
+		// where it was already placed.
+		let start = match (range.start, subscription.placed.get(&index)) {
+			(track::Start::Live { max, .. }, Some(group)) => Some(lite::Anchor::Joined {
+				at: resumed(*group),
+				max,
+			}),
+			(track::Start::Oldest, _) => None,
+			(track::Start::Live { min, max }, None) => Some(lite::Anchor::Live { min, max }),
+			(track::Start::Time(time), _) => Some(lite::Anchor::Absolute(resumed(time))),
 		};
 		// A switch caps the copy it replaces where the new one resumes, before a frame of the
 		// group it ends at.
@@ -10789,9 +11022,11 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 /// subscribers' own reads narrow again.
 ///
 /// It starts at the lowest start. A subscription with only ranges without a start asks with
-/// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor.
-/// One mixing the two asks from group 0, since no single start covers both: the latest
-/// group may sit below the start.
+/// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor,
+/// under the widest max age among them, the one `Subscriber Max Age` the wire carries: a
+/// live join reaching back past every group (see [`track::Start::within`]), or none while a
+/// range from the oldest group asks for history. One mixing the two asks from group 0,
+/// history, since no single start covers both: the latest group may sit below the start.
 ///
 /// It ends at a group's end, never at a Position: a publisher without ranges caps its cursor
 /// there and FINs the group, which would read as the group finishing short. A copy a switch
@@ -10800,10 +11035,17 @@ fn wire_span(mut subscription: Subscription) -> Subscription {
 	subscription.cap = None;
 	let start = match subscription.start() {
 		Some(start) => Some(start),
-		None if subscription.ranges.iter().any(|range| range.time().is_some()) => Some(0),
+		None if subscription.times().any(|(_, time)| time.is_some()) => Some(0),
 		None => None,
 	};
-	subscription.with_start(start)
+	let max = subscription.max_age();
+	let mut span = subscription.with_start(start);
+	for range in &mut span.ranges {
+		if let (track::Start::Oldest, Some(max)) = (range.start, max) {
+			range.start = track::Start::within(max);
+		}
+	}
+	span
 }
 
 /// The at-most-one live upstream subscription: its control stream plus the params
@@ -10811,12 +11053,13 @@ fn wire_span(mut subscription: Subscription) -> Subscription {
 struct SubStream {
 	stream: Stream<Transport, Version>,
 	id: u64,
-	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
-	/// downstream aggregate changes.
+	/// The `Subscriber Max Age` a wire before lite-07 carries, echoed in every
+	/// SUBSCRIBE_UPDATE; refreshed as the downstream aggregate changes.
 	max_delay: Option<Duration>,
-	/// The narrowest max delay this subscription has asked, which a lite-07 stale drop is
-	/// recorded under: the wire does not say which update a drop crossed, so it may have been
-	/// judged under any budget asked before it arrived. Too narrow costs a wider reader a
+	/// The narrowest live join's max age this subscription has asked, which a lite-07 stale
+	/// drop is recorded under: the wire does not say which range or update a drop crossed, so
+	/// it may have been judged under any live join's asked before it arrived, or the
+	/// publisher's max age, which binds every reader alike. Too narrow costs a wider reader a
 	/// request of its own; too wide would settle it on a group it could still get.
 	stale_budget: Duration,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
@@ -10838,11 +11081,6 @@ struct SubStream {
 	/// [`Subscription::joins`]). Like a fill's, it says nothing of where the live feed is. Held
 	/// until SUBSCRIBE_START even once retired, as [`Self::fill_ids`] is.
 	probe_ids: std::collections::BTreeSet<u64>,
-	/// The narrowest max delay each live range was asked under, by Range ID, from when it was
-	/// added until its start was answered: the wire does not say which update the publisher
-	/// resolved it under. An answer with no group at or before its time holds only for a reader
-	/// within it.
-	budgets: std::collections::BTreeMap<u64, Duration>,
 	/// The groups the ranges ask for fills.
 	fill_groups: rangemap::RangeSet<u64>,
 	priority: i8,
@@ -10871,6 +11109,10 @@ struct SubStream {
 	/// The tick the copy recorded each live join range's answer at, by Range ID (see
 	/// [`track::Producer::answer_join`]): one with none is still unanswered.
 	join_ticks: std::collections::BTreeMap<u64, u64>,
+	/// The narrowest max age each live join range was asked under before its answer, or each
+	/// placed one ever, by Range ID, beside the one it asks now: its publisher starts it past the groups
+	/// that max expired, so the answer places only readers within it.
+	join_budgets: std::collections::BTreeMap<u64, Duration>,
 	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
 	/// again: each declaration restarts the grace of the gaps above it.
 	declared: Option<(Option<u64>, bool)>,
@@ -10914,9 +11156,9 @@ impl SubStream {
 	}
 
 	/// Tell the copy where the publisher started each live range: one asked from a group, or
-	/// from the oldest group as time 0, with the budget it was answered under, which a reader's
-	/// time start there resolves to when the copy can't place it among its groups; and one
-	/// asked as a live join, whose answer alone places that join for the copy's readers.
+	/// from the oldest group as time 0, which a reader's time start there resolves to when the
+	/// copy can't place it among its groups; and one asked as a live join, whose answer alone
+	/// places that join for the copy's readers, whatever max age each asks.
 	/// Lite-07 only, where each range's start is reported.
 	fn report_starts(&mut self, serving: &track::Producer) {
 		if !self.live.reports_starts() {
@@ -10927,14 +11169,25 @@ impl SubStream {
 			let Some(&start) = self.starts.get(&id) else {
 				continue;
 			};
-			let budget = self.budgets.get(&id).copied().unwrap_or(Duration::ZERO);
 			let asked = match range.start {
 				Some(lite::Anchor::Absolute(time)) => time.group,
+				// A max age, now or under a retune since, may start it past groups the publisher
+				// still holds, as stale for this join alone, so its answer proves nothing of history.
+				// Its readers are placed already.
+				Some(lite::Anchor::Joined { at, max }) => {
+					let asked = self.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
+					if asked.min(crate::track::budget(max)) < Duration::MAX {
+						continue;
+					}
+					at.group
+				}
 				None => 0,
-				Some(lite::Anchor::Live(min)) => {
+				Some(lite::Anchor::Live { min, max }) => {
 					// Recorded once, as it arrives: a reader that began waiting since takes only a
 					// newer answer.
 					if let std::collections::btree_map::Entry::Vacant(entry) = self.join_ticks.entry(id) {
+						let asked = self.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
+						let budget = asked.min(crate::track::budget(max));
 						entry.insert(serving.answer_join(min, through(range.end), start, budget));
 					}
 					continue;
@@ -10948,19 +11201,16 @@ impl SubStream {
 				Some(lite::Anchor::Absolute(end)) if end.frame == 0 => end.group > asked,
 				Some(lite::Anchor::Absolute(end)) => end.group >= asked,
 				Some(lite::Anchor::Time(end)) => end >= asked,
-				Some(lite::Anchor::Live(_)) | None => false,
+				Some(lite::Anchor::Live { .. } | lite::Anchor::Joined { .. }) | None => false,
 			};
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if start.is_some() || reaches {
-				times.push((asked, start, budget));
+				times.push((asked, start));
 			}
 		}
 		serving.time_starts(times);
 		let live = &self.live;
-		serving.retain_joins(|min, end| {
-			live.iter()
-				.any(|(_, range)| range.start == Some(lite::Anchor::Live(min)) && through(range.end) == end)
-		});
+		serving.retain_joins(|min, end| live.iter().any(|(_, range)| wire_join(range) == Some((min, end))));
 	}
 
 	/// Declare on the copy where the live feed starts, by [`Self::feed_start`], so a reader
@@ -11083,18 +11333,18 @@ impl SubStream {
 	/// Edit the live ranges into `ranges`, the demand's then `probes` probes, then the last
 	/// `fills` of which are the held fills', forgetting the starts of those retired. A fill or
 	/// probe asking for what a demand range does still takes a range of its own, so each Range
-	/// ID stays the demand's, a probe, or a fill's. `budget` is the max delay the edit goes out
-	/// under. Returns the edit, and whether it changed the demand's or the fills' ranges.
+	/// ID stays the demand's, a probe, or a fill's. A live join asked under another max age
+	/// alone is retuned in place, keeping its answer, and an unanswered one remembers the
+	/// narrowest it was asked under. Returns the edit, and whether it changed the demand's or
+	/// the fills' ranges.
 	///
-	/// `reasked` retires each of those live probes and adds it afresh: one answered under a
-	/// narrower budget than a reader waits with, or a live join answered before a reader began
-	/// waiting on it.
+	/// `reasked` retires each of those live probes and adds it afresh: a live join answered
+	/// before a reader began waiting on it.
 	fn edit(
 		&mut self,
 		ranges: &[lite::Range],
 		(probes, fills): (usize, usize),
 		reasked: &std::collections::BTreeSet<u64>,
-		budget: Duration,
 	) -> Result<(lite::RangeEdit, bool), Error> {
 		let before: Vec<_> = self
 			.live
@@ -11121,22 +11371,31 @@ impl SubStream {
 			(_, true) => Kind::Probe,
 			_ => Kind::Demand,
 		};
+		// Before a retune moves it: the publisher may answer under the max age asked until then.
+		for (id, range) in self.live.iter() {
+			let unanswered = match range.start {
+				Some(lite::Anchor::Live { max, .. }) if !self.join_ticks.contains_key(&id) => Some(max),
+				// Every max a placed join was ever asked under, answered or not: a retune keeps its
+				// answer, which proves history only if none was finite.
+				Some(lite::Anchor::Joined { max, .. }) => Some(max),
+				_ => None,
+			};
+			if let Some(max) = unanswered {
+				let asked = self.join_budgets.entry(id).or_insert(Duration::MAX);
+				*asked = (*asked).min(crate::track::budget(max));
+			}
+		}
 		let (edit, added) = self.live.edit_keyed(&keyed, |id| (kind_of(id), stale.contains(&id)))?;
 		let live = &self.live;
 		self.starts.retain(|id, _| live.get(*id).is_some());
 		self.join_ticks.retain(|id, _| live.get(*id).is_some());
-		self.budgets.retain(|id, _| live.get(*id).is_some());
+		self.join_budgets.retain(|id, _| live.get(*id).is_some());
 		if self.started.is_some() {
 			self.fill_ids.retain(|id| live.get(*id).is_some());
 			self.probe_ids.retain(|id| live.get(*id).is_some());
 		}
-		// A range still unanswered may be resolved under this budget as well.
-		let starts = &self.starts;
-		for (_, asked) in self.budgets.iter_mut().filter(|(id, _)| !starts.contains_key(id)) {
-			*asked = (*asked).min(budget);
-		}
+		self.stale_budget = self.stale_budget.min(narrowest(&self.live));
 		for (id, (kind, _)) in added {
-			self.budgets.insert(id, budget);
 			match kind {
 				Kind::Fill => _ = self.fill_ids.insert(id),
 				Kind::Probe => _ = self.probe_ids.insert(id),
@@ -11150,109 +11409,73 @@ impl SubStream {
 	}
 }
 
-/// The probes to ask for `asks`, each a time start the copy's readers wait on with the widest
-/// budget one waits under, beside the demand's `ranges` going out under `budget` on `active`,
-/// and the live probes to ask afresh: one answered under a narrower budget than its readers'.
-/// A demand range from the same time, asked under a budget as wide, answers it already.
-fn probes(
-	active: Option<&SubStream>,
-	asks: &[(u64, Duration)],
-	ranges: &[lite::Range],
-	budget: Duration,
-) -> (Vec<lite::Range>, std::collections::BTreeSet<u64>) {
+/// The probes to ask for `asks`, each a time start the copy's readers wait on, beside the
+/// demand's `ranges`: a demand range from the same time answers it already.
+fn probes(asks: &[u64], ranges: &[lite::Range]) -> Vec<lite::Range> {
 	if asks.is_empty() {
-		return (Vec::new(), std::collections::BTreeSet::new());
+		return Vec::new();
 	}
-	// Index live demand ranges by their widest recorded budget and live probes by range so
-	// checking every ask stays linear instead of scanning all live ranges per ask.
-	let mut live_demand: HashMap<lite::Range, Duration> = HashMap::new();
-	let mut live_probes: HashMap<lite::Range, Vec<(u64, Duration)>> = HashMap::new();
-	if let Some(active) = active {
-		for (id, live) in active.live.iter() {
-			if active.fill_ids.contains(&id) {
-				continue;
-			}
-			let asked = active.budgets.get(&id).copied().unwrap_or(Duration::ZERO);
-			if active.probe_ids.contains(&id) {
-				live_probes.entry(*live).or_default().push((id, asked));
-			} else {
-				live_demand
-					.entry(*live)
-					.and_modify(|max| *max = (*max).max(asked))
-					.or_insert(asked);
-			}
-		}
-	}
-	// Asked under this budget unless live already, under the one it was recorded with.
-	let mut answered: HashMap<u64, Duration> = HashMap::new();
-	for range in ranges {
-		let Some(lite::Anchor::Absolute(start)) = range.start else {
-			continue;
-		};
-		let asked = live_demand.get(range).copied().unwrap_or(budget);
-		answered
-			.entry(start.group)
-			.and_modify(|max| *max = (*max).max(asked))
-			.or_insert(asked);
-	}
-	let mut probes = Vec::new();
-	let mut reasked = std::collections::BTreeSet::new();
-	for &(time, wanted) in asks {
-		if answered.get(&time).is_some_and(|&asked| asked >= wanted) {
-			continue;
-		}
-		let probe = probe(time);
-		if let Some(entries) = live_probes.get(&probe) {
-			reasked.extend(entries.iter().filter(|(_, asked)| *asked < wanted).map(|(id, _)| *id));
-		}
-		probes.push(probe);
-	}
-	(probes, reasked)
+	let answered: std::collections::HashSet<u64> = (ranges.iter())
+		.filter_map(|range| match range.start {
+			Some(lite::Anchor::Absolute(start)) => Some(start.group),
+			_ => None,
+		})
+		.collect();
+	(asks.iter())
+		.filter(|time| !answered.contains(time))
+		.map(|&time| probe(time))
+		.collect()
 }
 
 /// The probes to ask for `joins`, each a live join the copy's readers wait on, beside the
-/// demand's `ranges` going out under `budget` on `active`, and the live probes to ask afresh:
-/// one answered before a reader began waiting, or under a narrower budget than its readers'.
+/// demand's `ranges` on `active`, and the live probes to ask afresh: one answered before a
+/// reader began waiting.
 ///
 /// A live range asking the join answers it when it is still unanswered, or was answered after
-/// every waiting reader began, under a budget as wide as theirs. So does a demand range asking
-/// it that this edit adds, which its answer comes after. A probe answering it stays until its
-/// readers stop waiting, so its answer outlives their placing.
+/// every waiting reader began, whatever max age it asks. So does a demand range asking it that
+/// this edit adds, which its answer comes after. A probe answering it stays until its readers
+/// stop waiting, so its answer outlives their placing, and asks the widest max age they wait
+/// with, retuned in place as that moves.
 fn join_probes(
 	active: Option<&SubStream>,
 	joins: &[track::JoinAsk],
 	ranges: &[lite::Range],
-	budget: Duration,
 ) -> (Vec<lite::Range>, std::collections::BTreeSet<u64>) {
 	let mut probes = Vec::new();
 	let mut reasked = std::collections::BTreeSet::new();
 	for join in joins {
-		let probe = join_probe(join.min, join.end);
-		// Each live range asking the join, with whether it is a probe and whether it answers.
+		let key = Some((join.min, join.end));
+		// Each live range asking the join, with whether it is a probe and whether it answers:
+		// answered after every waiting reader began, under a max age as wide as theirs, or still
+		// to answer under one.
 		let answers = |id: u64| {
 			let Some(active) = active else {
 				return false;
 			};
-			let asked = active.budgets.get(&id).copied().unwrap_or(Duration::ZERO);
-			let fresh = match active.join_ticks.get(&id) {
-				Some(tick) => *tick > join.since,
-				None => !active.starts.contains_key(&id),
+			let asked = active.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
+			let now = match active.live.get(id).and_then(|range| range.start) {
+				Some(lite::Anchor::Live { max, .. }) => crate::track::budget(max),
+				_ => Duration::ZERO,
 			};
-			fresh && asked >= join.budget
+			let wide = asked.min(now) >= join.budget;
+			match active.join_ticks.get(&id) {
+				Some(tick) => *tick > join.since && wide,
+				None => !active.starts.contains_key(&id) && now >= join.budget,
+			}
 		};
 		let live: Vec<(u64, bool)> = active
 			.into_iter()
 			.flat_map(|active| {
 				(active.live.iter())
-					.filter(|(id, range)| **range == probe && !active.fill_ids.contains(id))
+					.filter(|(id, range)| wire_join(range) == key && !active.fill_ids.contains(id))
 					.map(|(id, _)| (id, active.probe_ids.contains(&id)))
 			})
 			.collect();
 		// A demand range answers only while this edit keeps it: one the going-out ranges no longer
 		// ask, hidden by a wider range or collapsed into another, is retired with its answer.
-		let kept = ranges.contains(&probe);
+		let kept = ranges.iter().any(|range| wire_join(range) == key);
 		let demand_answers = kept && live.iter().any(|&(id, probe)| !probe && answers(id));
-		let added = kept && !live.iter().any(|&(_, probe)| !probe) && budget >= join.budget;
+		let added = kept && !live.iter().any(|&(_, probe)| !probe);
 		if demand_answers || added {
 			continue;
 		}
@@ -11260,21 +11483,70 @@ fn join_probes(
 		if !probing.iter().any(|&id| answers(id)) {
 			reasked.extend(probing);
 		}
-		probes.push(probe);
+		probes.push(join_probe(join));
 	}
 	(probes, reasked)
 }
 
-/// The range a copy asks its upstream to place the live join `min` behind the live edge
-/// through `end` with: the join itself, so readers waiting on it share it, as a demand range
-/// asking it goes out (see [`wire_ranges`]).
-fn join_probe(min: Duration, end: Option<u64>) -> lite::Range {
+/// The live probes in `reasked` whose join a fresh probe among `probes` still asks, so each is
+/// retired and asked afresh; the rest stay, as no probe that fit replaces them. Matched by the
+/// join each asks, not the whole range: the fresh probe asks the max its readers now wait
+/// with, which may differ from the one the live probe was answered under.
+fn fitted_reasks(
+	active: Option<&SubStream>,
+	reasked: std::collections::BTreeSet<u64>,
+	probes: &[lite::Range],
+) -> std::collections::BTreeSet<u64> {
+	if reasked.is_empty() {
+		return reasked;
+	}
+	let kept: std::collections::HashSet<_> = probes.iter().filter_map(wire_join).collect();
+	(reasked.into_iter())
+		.filter(|id| {
+			(active.and_then(|active| active.live.get(*id)))
+				.and_then(wire_join)
+				.is_some_and(|join| kept.contains(&join))
+		})
+		.collect()
+}
+
+/// The range a copy asks its upstream to place the live join `join` with: the join itself,
+/// under the widest max age its readers wait with, so readers waiting on it share it, as a
+/// demand range asking it goes out (see [`wire_ranges`]).
+fn join_probe(join: &track::JoinAsk) -> lite::Range {
 	lite::Range {
-		start: Some(lite::Anchor::Live(min)),
-		end: end
+		start: Some(lite::Anchor::Live {
+			min: join.min,
+			max: join.max(),
+		}),
+		end: join
+			.end
 			.and_then(|end| end.checked_add(1))
 			.map(|end| lite::Anchor::Absolute(Position::group(end))),
 	}
+}
+
+/// The live join a wire range asks, as its lag and inclusive end (see [`through`]), `None`
+/// for one that isn't a live join. Where it lands doesn't depend on its max age.
+fn wire_join(range: &lite::Range) -> Option<(Duration, Option<u64>)> {
+	match range.start {
+		Some(lite::Anchor::Live { min, .. }) => Some((min, through(range.end))),
+		_ => None,
+	}
+}
+
+/// The narrowest max age a live join among `live` asks, as a budget: `Duration::MAX` when
+/// none asks one.
+fn narrowest(live: &lite::LiveRanges) -> Duration {
+	(live.iter())
+		.filter_map(|(_, range)| match range.start {
+			Some(lite::Anchor::Live { max, .. } | lite::Anchor::Joined { max, .. }) => {
+				Some(max.unwrap_or(Duration::MAX))
+			}
+			_ => None,
+		})
+		.min()
+		.unwrap_or(Duration::MAX)
 }
 
 /// The last time a live range reaches, as its own inclusive time: an exclusive group end stops
@@ -11284,7 +11556,7 @@ fn through(end: Option<lite::Anchor>) -> Option<u64> {
 		lite::Anchor::Absolute(end) if end.frame == 0 => end.group.checked_sub(1),
 		lite::Anchor::Absolute(end) => Some(end.group),
 		lite::Anchor::Time(end) => Some(end),
-		lite::Anchor::Live(_) => None,
+		lite::Anchor::Live { .. } | lite::Anchor::Joined { .. } => None,
 	}
 }
 
@@ -11723,9 +11995,9 @@ impl TrackServe {
 					Sub::Active(active) => active.live.next(),
 					Sub::None => 0,
 				};
-				let (demand, demand_ranges) = match request {
-					Some((demand, ranges)) => (Some(demand), ranges),
-					None => (None, Vec::new()),
+				let (demand, demand_ranges, max_age) = match request {
+					Some(request) => (Some(request.subscription), request.ranges, request.max_age),
+					None => (None, Vec::new(), None),
 				};
 				let asks = demand.as_ref().map_or(&[][..], |demand| &demand.asks[..]);
 				let joins = demand.as_ref().map_or(&[][..], |demand| &demand.joins[..]);
@@ -11737,36 +12009,30 @@ impl TrackServe {
 				range_fills.retire_skipped(&groups);
 				// The probes the readers' asks need, as many as fit beside the rest: those left out
 				// go once an answer lets the readers waiting on others go.
-				let asked = demand
-					.as_ref()
-					.and_then(|demand| demand.delay.max)
-					.unwrap_or(Duration::MAX);
 				let active = match &*sub {
 					Sub::Active(active) => Some(active),
 					Sub::None => None,
 				};
-				let (mut probes, mut reasked) = probes(active, asks, &demand_ranges, asked);
-				let (joined, rejoined) = join_probes(active, joins, &demand_ranges, asked);
+				let mut probes = probes(asks, &demand_ranges);
+				let (joined, reasked) = join_probes(active, joins, &demand_ranges);
 				probes.extend(joined);
-				reasked.extend(rejoined);
 				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
-				let reasked = if reasked.is_empty() {
-					reasked
-				} else {
-					let kept: std::collections::HashSet<_> = probes.iter().copied().collect();
-					(reasked.into_iter())
-						.filter(|id| {
-							active
-								.and_then(|active| active.live.get(*id))
-								.is_some_and(|range| kept.contains(range))
-						})
-						.collect()
-				};
-				(demand.map(|demand| (demand, demand_ranges, probes, reasked)), groups)
+				let reasked = fitted_reasks(active, reasked, &probes);
+				(
+					demand.map(|demand| (demand, demand_ranges, probes, reasked, max_age)),
+					groups,
+				)
 			}
 			false => (
-				request.map(|(demand, ranges)| (demand, ranges, Vec::new(), Default::default())),
+				request.map(|request| {
+					let Request {
+						subscription,
+						ranges,
+						max_age,
+					} = request;
+					(subscription, ranges, Vec::new(), Default::default(), max_age)
+				}),
 				Default::default(),
 			),
 		};
@@ -11777,7 +12043,7 @@ impl TrackServe {
 		// What goes on the wire: the demand's ranges, then the fills', under the demand's
 		// parameters. The demand alone sets the floor.
 		let request = match request {
-			Some((demand, demand_ranges, probes, reasked)) => {
+			Some((demand, demand_ranges, probes, reasked, max_age)) => {
 				let mut ranges = demand_ranges.clone();
 				ranges.extend(probes.iter().copied());
 				ranges.extend(FillAsk::wire(&groups));
@@ -11788,6 +12054,7 @@ impl TrackServe {
 					probes: probes.len(),
 					reasked,
 					ranges,
+					max_age,
 				})
 			}
 			None if fills.is_empty() => None,
@@ -11798,6 +12065,7 @@ impl TrackServe {
 				probes: 0,
 				reasked: Default::default(),
 				ranges: FillAsk::wire(&groups).collect(),
+				max_age: fills.subscription().max_age(),
 			}),
 		};
 
@@ -11818,13 +12086,14 @@ impl TrackServe {
 							probes,
 							reasked,
 							ranges,
+							max_age,
 						} = wire;
 						// Downstream preferences changed: forward them upstream as a
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 						let start_moved = demand.is_some() && active.start != subscription.start();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
-						active.max_delay = subscription.delay.max;
+						active.max_delay = max_age;
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
 						// restarts.
@@ -11836,12 +12105,11 @@ impl TrackServe {
 						// two: each gap they reach waits a fresh grace, which only delays giving up
 						// on one still owed.
 						let fills = ranges.len() - demand_ranges.len() - probes;
-						let budget = active.max_delay.unwrap_or(Duration::MAX);
-						let (edit, changed) = active.edit(&ranges, (probes, fills), &reasked, budget)?;
+						let (edit, changed) = active.edit(&ranges, (probes, fills), &reasked)?;
 						let widened = (changed && demand.is_some())
 							.then(|| subscription.start().or(active.started.flatten()).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
-							tail.follow(producer, subscription.budget());
+							tail.follow(producer, track::budget(max_age));
 							let now = self.subscriber.runtime.now();
 							for groups in lowered.into_iter().chain(widened) {
 								tail.demand(groups, now);
@@ -11910,7 +12178,7 @@ impl TrackServe {
 			broadcast: self.path.clone(),
 			track: self.name.as_str().into(),
 			priority: subscription.priority,
-			max_delay: subscription.delay.max,
+			max_delay: subscription.max_age(),
 			ranges: vec![lite::Range::OPEN],
 			order: subscription.order,
 		};
@@ -11924,7 +12192,7 @@ impl TrackServe {
 	///
 	/// `idle` when this opens a subscription for a copy whose newest cached group, while
 	/// idle, is its first.
-	fn wire_request(&self, pref: Option<Subscription>, idle: Option<u64>) -> Option<(Subscription, Vec<lite::Range>)> {
+	fn wire_request(&self, pref: Option<Subscription>, idle: Option<u64>) -> Option<Request> {
 		// An empty half-open range asks for nothing, and the wire cannot say that: its
 		// bounds are inclusive, so the nearest encoding either hands back the position
 		// the caller excluded or inverts the range outright once the two bounds meet. No
@@ -11932,6 +12200,9 @@ impl TrackServe {
 		// certainly empty is the very first position, which is what `Position::default()`
 		// stands in for.
 		let subscription = pref.filter(|sub| sub.end().is_none_or(|end| end > sub.start().unwrap_or_default()))?;
+		// Read before the span narrows: a span from a start is history, which drops the max of
+		// every live join it covers.
+		let max_age = subscription.max_age();
 		let ranged = self.subscriber.version.has_ranges();
 		// Lite-07 carries every range asked for; an older wire one span covering them.
 		let mut subscription = match ranged {
@@ -11948,11 +12219,7 @@ impl TrackServe {
 		// every group from the oldest.
 		let newest = idle.filter(|_| {
 			subscription.start().is_none()
-				&& (!ranged
-					|| subscription
-						.ranges
-						.iter()
-						.all(|range| *range == track::Range::default()))
+				&& (!ranged || subscription.ranges.iter().all(|range| *range == track::Range::ALL))
 		});
 		if let Some(newest) = newest {
 			subscription = subscription.with_start(newest);
@@ -11961,25 +12228,27 @@ impl TrackServe {
 		if !self.subscriber.version.has_frame_bounds() {
 			subscription.resume = None;
 		}
-		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
+		let ranges = wire_ranges(&subscription)?;
+		Some(Request {
+			subscription,
+			ranges,
+			max_age,
+		})
 	}
 
 	/// Open the SUBSCRIBE for `pref` alongside the TRACK still waiting on its TRACK_INFO,
 	/// registered with its copy pending. `None` when it asks for nothing.
 	fn pipeline(&self, pref: Subscription) -> Result<Option<Pipelined>, Error> {
 		// A copy not accepted yet caches nothing.
-		let Some((subscription, ranges)) = self.wire_request(Some(pref.clone()), None) else {
+		let Some(mut request) = self.wire_request(Some(pref.clone()), None) else {
 			return Ok(None);
 		};
-		let ranges = match self.subscriber.version.has_ranges() {
-			true => {
-				let fields = self.subscribe_fields(&subscription);
-				let budget = fit::Budget::new(self.subscriber.version, fields, 0, ranges.len());
-				fit::fit(ranges, &Default::default(), &Default::default(), budget)?.0
-			}
-			false => ranges,
-		};
-		let establish = self.register(subscription, ranges, None);
+		if self.subscriber.version.has_ranges() {
+			let fields = self.subscribe_fields(&request.subscription);
+			let budget = fit::Budget::new(self.subscriber.version, fields, 0, request.ranges.len());
+			request.ranges = fit::fit(request.ranges, &Default::default(), &Default::default(), budget)?.0;
+		}
+		let establish = self.register(request, None);
 		Ok(Some(Pipelined {
 			pref,
 			state: PipelinedState::Opening(establish),
@@ -12003,15 +12272,20 @@ impl TrackServe {
 			probes,
 			reasked: _,
 			ranges,
+			max_age,
 		} = wire;
 		// One asking only for fills is no live feed, so it leaves the floor alone.
 		if demand.is_some() {
 			self.request_floor(producer, subscription.start());
 		}
 		let framing = lite::Framing::new(producer.info(), self.subscriber.version);
-		let mut establish = self.register(
+		let request = Request {
 			subscription,
 			ranges,
+			max_age,
+		};
+		let mut establish = self.register(
+			request,
 			Some(Accepted {
 				producer: producer.clone(),
 				framing,
@@ -12059,17 +12333,22 @@ impl TrackServe {
 	/// immediately, so a late insert races the group stream (a group whose id isn't
 	/// in the map yet is dropped, stalling the track forever). The caller
 	/// deregisters `id` if the establish fails.
-	fn register(&self, subscription: Subscription, ranges: Vec<lite::Range>, copy: Option<Accepted>) -> Establish {
+	fn register(&self, request: Request, copy: Option<Accepted>) -> Establish {
+		let Request {
+			subscription,
+			ranges,
+			max_age,
+		} = request;
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 
 		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
 		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted.
-		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.budget())));
+		let tail = kio::Producer::new(Tail::new(tail::grace(track::budget(max_age))));
 		if let Some(copy) = &copy
 			&& let Ok(mut tail) = tail.write()
 		{
-			tail.follow(&copy.producer, subscription.budget());
+			tail.follow(&copy.producer, track::budget(max_age));
 		}
 		let mut entry = TrackEntry::new(copy, tail.clone());
 		let version = self.subscriber.version;
@@ -12094,6 +12373,7 @@ impl TrackServe {
 			fills_changed: false,
 			subscription,
 			ranges,
+			max_age,
 			tail,
 			parked: false,
 			state: EstablishState::Start,
@@ -12108,12 +12388,15 @@ impl TrackServe {
 		sub: &mut Sub,
 		subscription: Subscription,
 	) -> Result<(), Error> {
-		let subscription = match self.subscriber.version.has_ranges() {
-			true => subscription,
-			false => wire_span(subscription),
-		};
-		let ranges = wire_ranges(&subscription).expect("a non-empty subscription");
+		let Request {
+			subscription,
+			ranges,
+			max_age,
+		} = self
+			.wire_request(Some(subscription), None)
+			.expect("a non-empty subscription");
 		let wire = Wire {
+			max_age,
 			subscription: subscription.clone(),
 			demand: Some(subscription),
 			demand_ranges: ranges.clone(),
@@ -12184,7 +12467,6 @@ enum Begin {
 /// the live ranges. The caller flushes. It reopens nothing: every drop the publisher sent,
 /// a stale one included, stays final on the subscription.
 fn buffer_update(active: &mut SubStream, ranges: lite::RangeEdit) -> Result<(), Error> {
-	active.stale_budget = active.stale_budget.min(active.max_delay.unwrap_or(Duration::MAX));
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,
@@ -12205,6 +12487,18 @@ struct Wire {
 	/// The live probes to ask afresh; see [`SubStream::probes`].
 	reasked: std::collections::BTreeSet<u64>,
 	ranges: Vec<lite::Range>,
+	/// See [`Request::max_age`].
+	max_age: Option<Duration>,
+}
+
+/// A demand as a SUBSCRIBE carries it.
+struct Request {
+	/// The demand, narrowed to one span on a wire without ranges.
+	subscription: Subscription,
+	ranges: Vec<lite::Range>,
+	/// The `Subscriber Max Age` a wire before lite-07 carries: the demand's widest live
+	/// join's max, read before its span narrows.
+	max_age: Option<Duration>,
 }
 
 /// Opens the upstream SUBSCRIBE control stream: send the request, then (pre
@@ -12233,6 +12527,8 @@ struct Establish {
 	fill_groups: rangemap::RangeSet<u64>,
 	/// The ranges the SUBSCRIBE carries: the demand's, its probes, then the fills'.
 	ranges: Vec<lite::Range>,
+	/// See [`Request::max_age`].
+	max_age: Option<Duration>,
 	tail: kio::Producer<Tail>,
 	/// Its group streams stay parked once it is active; see [`SubStream::parked`].
 	parked: bool,
@@ -12260,7 +12556,7 @@ impl Establish {
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
 			priority: self.subscription.priority,
-			max_delay: self.subscription.delay.max,
+			max_delay: self.max_age,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
 		};
@@ -12301,21 +12597,19 @@ impl Establish {
 	fn activate(&self, stream: Stream<Transport, Version>, answered: bool) -> SubStream {
 		let demand = self.demand_ranges.len();
 		let probes = demand + self.probes;
+		let live = lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges);
 		SubStream {
 			unanswered: (!answered).then(|| self.validity.clone()),
 			stream,
 			id: self.id,
-			max_delay: self.subscription.delay.max,
-			stale_budget: self.subscription.delay.max.unwrap_or(Duration::MAX),
+			max_delay: self.max_age,
+			stale_budget: narrowest(&live),
 			start: self.subscription.start(),
-			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
+			live,
 			demand: self.demand.clone(),
 			// The ranges take Range IDs in order: the demand's, its probes, then the fills'.
 			probe_ids: (demand as u64..probes as u64).collect(),
 			fill_ids: (probes as u64..self.ranges.len() as u64).collect(),
-			budgets: (0..self.ranges.len() as u64)
-				.map(|id| (id, self.subscription.delay.max.unwrap_or(Duration::MAX)))
-				.collect(),
 			fill_groups: self.fill_groups.clone(),
 			priority: self.subscription.priority,
 			order: self.subscription.order,
@@ -12326,6 +12620,7 @@ impl Establish {
 			parked: self.parked,
 			starts: Default::default(),
 			join_ticks: Default::default(),
+			join_budgets: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -13484,7 +13779,7 @@ impl ServeLoop {
 			PipelinedState::Open(active) => &active.tail,
 		};
 		if let Ok(mut tail) = tail.write() {
-			tail.follow(&self.serving, pipelined.pref.budget());
+			tail.follow(&self.serving, pipelined.pref.widest());
 		}
 		self.serving.seen_subscription(Some(pipelined.pref));
 		match pipelined.state {
@@ -13747,8 +14042,8 @@ impl ServeLoop {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
 				match serve.subscriber.version.has_skip() && error == crate::StreamError::Old {
-					// Lite-07 judged it stale, recorded under the narrowest budget it may have been
-					// judged under. A reader no wider settles on it; a wider one asks for the group
+					// Lite-07 judged it stale, recorded under the narrowest max age it may have been
+					// judged under (see [`SubStream::stale_budget`]). A reader no wider settles on it; a wider one asks for the group
 					// on a request of its own, since this subscription never delivers it. A key already skipped stays
 					// skipped, and one whose group arrived keeps it. A group a fill asked for is
 					// recovered on its own, so the copy does not record it given up meanwhile.
@@ -13806,7 +14101,7 @@ impl ServeLoop {
 	/// max delay is the stopgap grace: the wrong clock (it bounds presentation-time drift),
 	/// but it is how long the subscriber was willing to wait for a late group anyway.
 	fn settle(serve: &TrackServe, serving: &track::Producer, active: &SubStream) -> Settle {
-		let budget = serving.subscription().map(|sub| sub.budget());
+		let budget = serving.subscription().map(|sub| sub.widest());
 		if let Ok(mut tail) = active.tail.write() {
 			// Lite-05+ declared the end with SUBSCRIBE_FINISH instead.
 			if !serve.subscriber.version.has_track_stream() {
@@ -14553,10 +14848,6 @@ impl kio::Task for FetchServeRun {
 						broadcast: self.serve.path.clone(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),
-						// Older wires cannot carry it; the local cache judges it instead.
-						max_delay: request
-							.max_delay()
-							.filter(|_| self.serve.subscriber.version.has_fetch_max_delay()),
 						group: self.group,
 						start_frame: frame_start,
 						// A bounded plain copy keeps this provenance in the cache; older wires

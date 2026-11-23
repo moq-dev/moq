@@ -263,7 +263,13 @@ impl Consumer {
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
 		// slow to take its first, and the publisher should never see a stated zero min first.
 		let mut subscriber = track
-			.subscribe(playout.subscription(moq_net::track::Subscription::default().with_priority(options.priority)))
+			.subscribe(
+				playout.subscription(
+					moq_net::track::Subscription::default()
+						.with_priority(options.priority)
+						.with_ranges([moq_net::track::Range::ALL]),
+				),
+			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
 		// start, like any other join. Move the local cursor, not Subscription::ranges: the
@@ -1059,6 +1065,19 @@ mod tests {
 	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
 
+	/// The staleness budget of `subscription`'s one live join.
+	fn live_max(subscription: &moq_net::track::Subscription) -> Option<Duration> {
+		match subscription.ranges.as_slice() {
+			[
+				moq_net::track::Range {
+					start: moq_net::track::Start::Live { max, .. },
+					..
+				},
+			] => *max,
+			ranges => panic!("expected one live join, got {ranges:?}"),
+		}
+	}
+
 	/// The first request already states the min and max delay, each plus the warmup: a latest
 	/// start waits for the live edge with its subscription open, before the container could
 	/// update it.
@@ -1092,13 +1111,11 @@ mod tests {
 			first = track.subscription_changed() => first.unwrap(),
 		};
 		assert_eq!(
-			first.map(|sub| (sub.delay, sub.ranges)),
-			Some((
-				moq_net::track::Delay::default().with_max(Duration::from_millis(600)),
-				vec![moq_net::track::Range::from(moq_net::track::Start::Live(
-					Duration::from_millis(400)
-				))],
-			))
+			first.map(|sub| sub.ranges),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Duration::from_millis(400),
+				max: Some(Duration::from_millis(600)),
+			})])
 		);
 	}
 
@@ -1127,7 +1144,7 @@ mod tests {
 		consumer.set_max_delay(Duration::from_secs(2));
 		let subscription = track.subscription().unwrap();
 		assert_eq!(subscription.priority, -20);
-		assert_eq!(subscription.delay.max, Some(Duration::from_secs(2)));
+		assert_eq!(live_max(&subscription), Some(Duration::from_secs(2)));
 	}
 
 	/// A moved max delay reaches the subscription, plus the warmup, clamped to the max age.
@@ -1161,7 +1178,7 @@ mod tests {
 		consumer.set_max_delay(Duration::from_secs(2));
 		assert_eq!(consumer.max_delay(), Duration::from_secs(2));
 		assert_eq!(
-			track.subscription().unwrap().delay.max,
+			live_max(&track.subscription().unwrap()),
 			Some(Duration::from_millis(2_100))
 		);
 
@@ -1426,8 +1443,12 @@ mod tests {
 
 		// A first reader warms the relay's copy with every group.
 		{
-			let subscription = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+			let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Duration::from_secs(10),
+					max: Some(Duration::from_secs(10)),
+				},
+			)]);
 			let mut warm = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 			let mut groups = 0;
 			while groups < 4 {
@@ -1680,7 +1701,7 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(
-			track.subscription().unwrap().delay.max,
+			live_max(&track.subscription().unwrap()),
 			Some(Duration::from_millis(10_080))
 		);
 
@@ -3179,56 +3200,6 @@ mod tests {
 			.collect()
 	}
 
-	/// A join's backlog that arrives below the cursor is dropped unread, yet the target
-	/// still learns when it arrived: the live packets queued behind it measured the join,
-	/// not the path, so they fold nothing rather than a 300 ms stall. The publisher stood at
-	/// group 200 as the subscription began; its backlog lands behind it, 41 groups over the
-	/// first 400 ms and 15 more 1.0 to 1.3 s in, with the live packets produced meanwhile
-	/// queued behind them. Without `delivered`, that backlog never reaches this node, though
-	/// the live packets still queue behind it.
-	async fn join_delay(delivered: bool) -> f64 {
-		let mut events = live(|produced| match produced + 40 {
-			at if at <= 400 => 400 + produced / 10,
-			at if (1000..1300).contains(&at) => 1300 + (produced - 960) / 10,
-			at => at,
-		});
-		// Group 200 lands first, so the publisher's largest names it.
-		events[0].0 = 0;
-		if delivered {
-			for i in 0..41 {
-				events.push((5 + 10 * i, 100 + i, 90_000 + 20 * i));
-			}
-			for s in 0..15 {
-				events.push((1000 + 20 * s, 141 + s, 99_700 + 20 * s));
-			}
-		}
-		events.sort_by_key(|&(at, sequence, _)| (at, sequence));
-		let (delay, backlog) = play(&events, |sequence| sequence >= 200).await;
-		assert_eq!(backlog, delivered);
-
-		// The estimator fed the same arrivals directly, each skipped group reported.
-		let mut target = crate::jitter::Target::new(Duration::ZERO, true, None);
-		target.set_frame(20.0);
-		for &(at, sequence, media) in &events {
-			match sequence >= 200 {
-				true => target.observe(at as f64, media as f64),
-				false => target.backlog(at as f64),
-			}
-		}
-		assert_eq!(delay, target.millis());
-		delay
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn a_join_backlog_skipped_below_the_cursor_folds_nothing() {
-		let skipped = join_delay(true).await;
-		let unseen = join_delay(false).await;
-		assert!(
-			skipped <= 100.0 && unseen >= 300.0,
-			"{skipped} ms skipped, {unseen} ms unseen"
-		);
-	}
-
 	/// A path that delivers every fifth packet 300 ms late from the start: each lands after
 	/// the cursor passed it and is dropped unread, but was produced after the subscription
 	/// began, so it is no backlog and holds no join open. The estimator measures the path
@@ -3623,7 +3594,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().delay.max, Some(max_delay));
+		assert_eq!(live_max(&observed.subscription().unwrap()), Some(max_delay));
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

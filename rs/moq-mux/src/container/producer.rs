@@ -1487,8 +1487,12 @@ mod tests {
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 	/// edge: history has to be asked for.
 	fn replay() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
+		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: RECORDING_MAX_DELAY,
+				max: Some(RECORDING_MAX_DELAY),
+			},
+		)])
 	}
 
 	/// The media track's full max age, so readers started after publishing
@@ -1887,10 +1891,15 @@ mod tests {
 		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
-		let consumer = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(discontinuity_max_age)),
-		);
+		let consumer =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: discontinuity_max_age,
+						max: Some(discontinuity_max_age),
+					},
+				)]),
+			);
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();

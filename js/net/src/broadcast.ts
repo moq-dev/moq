@@ -323,7 +323,7 @@ async function fetchGroup(
 		ranges: [{ start: key, end: key }],
 	});
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
-	hooks.fetchBudget(subscriber, options.maxDelay, (options as FetchFrom).frameStart);
+	hooks.fetchFrom(subscriber, (options as FetchFrom).frameStart);
 	try {
 		// Judged in this turn when the track is known, so a cached group is taken before anything
 		// else can change it. A track requested on demand opens its handler once accepted, so its
