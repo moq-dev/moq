@@ -202,7 +202,10 @@ impl Shape {
 	/// subscription writes off as late.
 	fn subscription(&self) -> Option<track::Subscription> {
 		(self.burst > 1).then(|| {
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
+			track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+				min: Duration::from_secs(30),
+				max: Some(Duration::from_secs(30)),
+			})])
 		})
 	}
 
@@ -1410,11 +1413,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							.watch(
 								&path(0),
 								&[TRACK],
-								Some(
-									track::Subscription::default()
-										.with_ranges([from(span)])
-										.with_delay(track::Delay::default().with_max(None)),
-								),
+								Some(track::Subscription::default().with_ranges([from(span)])),
 							)
 							.await;
 						viewers.push(viewer);
@@ -1430,11 +1429,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let future = next + span;
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(
-										track::Subscription::default()
-											.with_ranges([from(future)])
-											.with_delay(track::Delay::default().with_max(None)),
-									)
+									.update(track::Subscription::default().with_ranges([from(future)]))
 									.unwrap();
 							}
 							kio::wait(|waiter| {
@@ -1460,11 +1455,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let started = Instant::now();
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(
-										track::Subscription::default()
-											.with_ranges([from(future - 1)])
-											.with_delay(track::Delay::default().with_max(None)),
-									)
+									.update(track::Subscription::default().with_ranges([from(future - 1)]))
 									.unwrap();
 							}
 							for _ in 0..1 {

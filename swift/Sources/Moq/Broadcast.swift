@@ -29,8 +29,7 @@ public final class BroadcastConsumer: Sendable {
         start: UInt64,
         options: FetchGroupOptions? = nil
     ) async throws -> GroupConsumer {
-        try checkFetch(options)
-        return GroupConsumer(try await ffi.fetchGroup(name: name, start: start, options: options))
+        GroupConsumer(try await ffi.fetchGroup(name: name, start: start, options: options))
     }
 
     /// Resolve a catalog rendition to the broadcast serving its track.

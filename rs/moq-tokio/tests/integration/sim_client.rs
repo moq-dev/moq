@@ -305,7 +305,12 @@ async fn read(origin: &moq_net::origin::Producer) -> Vec<u64> {
 		.track("video")
 		.unwrap()
 		// A budget spanning the run, so recovery has to deliver every group, however late.
-		.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(TIMEOUT)))
+		.subscribe(
+			track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+				min: TIMEOUT,
+				max: Some(TIMEOUT),
+			})]),
+		)
 		.await
 		.unwrap();
 	let mut groups = Vec::new();

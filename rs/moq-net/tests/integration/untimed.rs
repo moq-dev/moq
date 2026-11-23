@@ -7,6 +7,7 @@
 //! encoder writes each frame's group key instead, which their receivers pass through as the
 //! track's time.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 
@@ -220,7 +221,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 		let consumer = chain.nodes[1].consume().request("room", None).await.unwrap();
 		let subscription = track::Subscription::default()
 			.with_ranges([support::keys(2..)])
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+			.with_max(Duration::from_secs(30));
 		let mut subscriber = kio::clock::timeout(TIMEOUT, consumer.track("data").unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")

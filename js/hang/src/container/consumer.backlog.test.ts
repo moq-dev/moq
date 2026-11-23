@@ -7,6 +7,7 @@ import { Duration, type Installed, Instant, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track, Varint } from "@moq/net";
 import { race } from "@moq/signals";
+import { within } from "../subscription.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Jitter } from "./jitter.ts";
 import { Format } from "./legacy.ts";
@@ -34,8 +35,8 @@ async function play(
 	backlog: (group: number) => boolean,
 	observing = false,
 ): Promise<[number, number]> {
-	const track = new Track.Producer("audio");
-	const subscription = { delay: { max: Duration.millis(2000) } };
+	const track = new Track.Producer("audio").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
+	const subscription = within(Duration.millis(2000));
 	const consumer = new Consumer(track.subscribe(subscription), {
 		format: new Format("audio"),
 		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
@@ -138,9 +139,9 @@ test("late groups dropped from the start hold no join open", async () => {
  * `largest` says when asked. Its feed owes every key from `from`, as a session's would.
  */
 function joining(from: bigint, largest: () => bigint | Promise<bigint>) {
-	const track = new Track.Producer("audio");
+	const track = new Track.Producer("audio").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	track.requests();
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } });
+	const subscriber = track.subscribe(within(Duration.millis(2000)));
 	subscriber.withRange({ start: { included: from } });
 	let answer!: () => void;
 	const answered = new Promise<void>((resolve) => {
@@ -307,7 +308,7 @@ test("a gap given up before the join's boundary is known still tells the estimat
 test("a range capped below the largest still delivers", async () => {
 	// The track holds groups 0 to 5, and the subscriber's range ends before 3, so it never reports a
 	// largest: the consumer reports no backlog, but delivers what it can read.
-	const track = new Track.Producer("audio");
+	const track = new Track.Producer("audio").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	for (let sequence = 0; sequence <= 5; sequence++) {
 		const group = track.createGroup(BigInt(sequence));
 		const media = sequence * 20;
@@ -317,7 +318,7 @@ test("a range capped below the largest still delivers", async () => {
 		});
 		group.finish();
 	}
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } }).withRange({ end: { excluded: 3n } });
+	const subscriber = track.subscribe(within(Duration.millis(2000))).withRange({ end: { excluded: 3n } });
 	const consumer = new Consumer(subscriber, { format: new Format("audio"), delay: { max: Duration.millis(2000) } });
 	try {
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });

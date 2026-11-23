@@ -716,7 +716,7 @@ struct Output<V> {
 ///
 /// A superseded group never goes stale on the publisher's say: a reader that needs every
 /// delta, such as one metering counters, waits for a group's finish even when the next
-/// group lands first, as its own [`Delay::max`](track::Delay::max) allows. A latest-only
+/// group lands first, as a history range or its live join's `max` allows. A latest-only
 /// reader still skips one the moment a newer one arrives.
 fn info() -> track::Info {
 	track::Info::default()
@@ -1896,8 +1896,10 @@ mod tests {
 
 			let consumer = edge.consume().with_hidden(true);
 			let remote = consumer.request(".stats/node", None).await.unwrap();
-			let patient =
-				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
+			let patient = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+				min: Duration::from_secs(10),
+				max: Some(Duration::from_secs(10)),
+			})]);
 			let mut ordered = remote
 				.track("t.json")
 				.unwrap()

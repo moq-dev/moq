@@ -51,9 +51,6 @@ func TestRefusesNegativeDurations(t *testing.T) {
 	negative := -time.Millisecond
 	rendition := media.AudioRendition("audio", media.Audio{Jitter: &negative})
 
-	if _, err := media.FetchGroup(ctx, nil, media.GroupConfig{Options: &moq.FetchGroupOptions{MaxDelay: &negative}}); err == nil {
-		t.Fatal("a negative fetch max delay was accepted, want an error")
-	}
 	if _, err := media.FetchGroup(ctx, nil, media.GroupConfig{Rendition: rendition}); err == nil {
 		t.Fatal("a negative jitter was fetched, want an error")
 	}

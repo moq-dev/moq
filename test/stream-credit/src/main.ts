@@ -41,7 +41,16 @@ window.subscribe = async (plan) => {
 	const subscribers = plan.tracks.map((track, i) =>
 		consumers[i].subscribe({
 			priority: track.priority,
-			delay: { max: Moq.Clock.Duration.millis(track.budget) },
+			ranges: [
+				{
+					start: {
+						live: {
+							min: Moq.Clock.Duration.millis(track.budget),
+							max: Moq.Clock.Duration.millis(track.budget),
+						},
+					},
+				},
+			],
 		}),
 	);
 	// Each subscription is a stream the browser opens; its info arrives once the relay answers.

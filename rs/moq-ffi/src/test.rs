@@ -1288,7 +1288,10 @@ async fn raw_track_update_keeps_the_join_a_range_was_subscribed_with() {
 	};
 	let consumer = track.consume(Some(subscription(1, None))).unwrap();
 	let joined = |min: u64, end: Option<u64>| Range {
-		start: Start::Live(Duration::from_secs(min)),
+		start: Start::Live {
+			min: Duration::from_secs(min),
+			max: None,
+		},
 		end,
 	};
 	assert_eq!(consumer.control.subscription().ranges, [joined(1, None)]);
@@ -2848,14 +2851,7 @@ async fn fetches_cached_group_without_subscribing() {
 
 	let consumer = broadcast.consume().unwrap();
 	let fetched = consumer
-		.fetch_group(
-			"events".into(),
-			0,
-			Some(MoqFetchGroupOptions {
-				priority: 7,
-				max_delay: None,
-			}),
-		)
+		.fetch_group("events".into(), 0, Some(MoqFetchGroupOptions { priority: 7 }))
 		.await
 		.unwrap();
 
@@ -2903,10 +2899,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 			rendition: rendition("media", crate::media::MoqContainer::Legacy),
 			// The group starts at its first frame, a second in, in the track's milliseconds.
 			start: 1000,
-			options: Some(MoqFetchGroupOptions {
-				priority: 7,
-				max_delay: None,
-			}),
+			options: Some(MoqFetchGroupOptions { priority: 7 }),
 		},
 	)
 	.await
@@ -3176,14 +3169,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 
 	let fetch = tokio::spawn(async move {
 		consumer
-			.fetch_group(
-				"events".into(),
-				5,
-				Some(MoqFetchGroupOptions {
-					priority: 11,
-					max_delay: None,
-				}),
-			)
+			.fetch_group("events".into(), 5, Some(MoqFetchGroupOptions { priority: 11 }))
 			.await
 	});
 
@@ -7201,8 +7187,10 @@ fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
 	assert_eq!(moq_subscription_defaults().delay.min, None);
-	assert_eq!(defaults.ranges, [moq_net::track::Range::default()]);
-	assert_eq!(defaults.delay.max, Some(Duration::ZERO));
+	assert_eq!(
+		defaults.ranges,
+		[moq_net::track::Range::from(moq_net::track::Start::LATEST)]
+	);
 }
 
 /// A settings UI shows these, so each must be what an unset knob actually dials with.
@@ -9945,7 +9933,7 @@ async fn range_times_select_the_containing_groups() {
 	));
 	// No start is the range a subscription's delay places.
 	let joined = MoqRange { start: None, end: None };
-	assert_eq!(joined.resolve().unwrap(), moq_net::track::Range::default());
+	assert_eq!(joined.resolve().unwrap(), moq_net::track::Range::ALL);
 
 	// Every group a read hands out before it ends, by start. Start order ends at the first
 	// group past the range, where arrival order waits for a straggler until it ages out.

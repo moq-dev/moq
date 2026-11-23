@@ -1928,7 +1928,15 @@ mod tests {
 		let (update, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
 		let bc = egress.request(update.prefix.clone(), None).await.unwrap();
-		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
+		// A join reaching back past the first group, which its zero budget then skips as stale
+		// once the second supersedes it.
+		let join = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: std::time::Duration::from_secs(60),
+				max: Some(std::time::Duration::ZERO),
+			},
+		)]);
+		let mut egress_sub = bc.track("video").unwrap().subscribe(join).await.unwrap();
 		{
 			let mut group = pub_track
 				.append_group(

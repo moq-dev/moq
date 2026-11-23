@@ -319,8 +319,12 @@ pub(crate) async fn published<E>(
 
 	let mut out = std::collections::BTreeMap::new();
 	for (name, container) in containers {
-		let replay = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
+		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: std::time::Duration::from_secs(3600),
+				max: Some(std::time::Duration::from_secs(3600)),
+			},
+		)]);
 		let track = consumer.track(&name).unwrap().subscribe(replay).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, container);
 		let mut timestamps = Vec::new();
@@ -622,4 +626,15 @@ impl std::task::Wake for Woken {
 	fn wake(self: std::sync::Arc<Self>) {
 		self.0.store(true, std::sync::atomic::Ordering::SeqCst);
 	}
+}
+
+/// A live join reaching back past every group, so it takes each group still within `max` of the
+/// live edge: what a subscription-wide max age asked before moq-lite-07. Test groups often start
+/// at their sequence, not their time, so a join placed by time alone would land on the newest.
+pub(crate) fn within(max: std::time::Duration) -> moq_net::track::Subscription {
+	moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		// The largest lag every implementation carries losslessly.
+		min: std::time::Duration::from_millis((1 << 53) - 1),
+		max: Some(max),
+	})])
 }

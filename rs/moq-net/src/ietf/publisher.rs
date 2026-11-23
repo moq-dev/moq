@@ -40,12 +40,12 @@ fn subscribe_refusal<'a>(
 	error
 }
 
-/// Leave only the publisher's max age when the subscriber supplies no age budget.
+/// Serve at the subscriber's priority, bounded by the publisher's max age alone.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// No Max Age leaves the publisher's max age alone, whatever it turns out to be.
-		delay: crate::track::Delay { max: None },
+		// History from the oldest group: this draft's SUBSCRIBE carries no Max Age.
+		ranges: vec![track::Range::ALL],
 		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
 		// answer: never from its cache, nor from an edge reported before.
 		feed: true,
@@ -6869,7 +6869,6 @@ impl TrackServe {
 		if let Some(next) = range.fill_tail(fill, edge) {
 			let options = group::Fetch {
 				priority: self.track.subscription().priority,
-				max_delay: self.track.subscription().delay.max,
 				..Default::default()
 			};
 			// A stream still serving this group from the fill's edge keeps what it covers, so
@@ -8941,10 +8940,7 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
 		let serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
 			subscriber,
@@ -8992,7 +8988,7 @@ mod group_priority_test {
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_priority(3)
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
+				.with_max(std::time::Duration::from_secs(3600)),
 		);
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
@@ -9045,10 +9041,7 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		for millis in 0..FRAMES as u64 {
 			group
@@ -9090,9 +9083,7 @@ mod group_priority_test {
 		);
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
-			track.subscribe(Some(
-				track::Subscription::default().with_delay(track::Delay::default().with_max(None)),
-			)),
+			track.subscribe(Some(track::Subscription::default().with_max(None))),
 			RequestId(0),
 			Version::Draft18,
 			ServeRange::default(),
@@ -9223,10 +9214,8 @@ mod group_priority_test {
 						crate::track::Info::timed(),
 					);
 					// Nothing goes stale, so only the credit bounds what is held.
-					let subscriber = track.subscribe(
-						track::Subscription::default()
-							.with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-					);
+					let subscriber =
+						track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 					let serve = TrackServe::new(
 						crate::driver::Transport::new(session.clone()),
 						subscriber,
@@ -9270,9 +9259,7 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)));
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(SinkSession::gated_open_uni(gate.consume())),
 			subscriber,
@@ -13128,7 +13115,7 @@ mod serve_tests {
 						crate::track::Subscription::default()
 							.with_range(0..)
 							.with_order(crate::track::Order::Ascending)
-							.with_delay(crate::track::Delay::default().with_max(None)),
+							.with_max(None),
 					),
 				)
 				.await
@@ -17657,7 +17644,7 @@ mod serve_tests {
 		let subscriber = track.subscribe(Some(
 			track::Subscription::default()
 				.with_order(track::Order::Ascending)
-				.with_delay(track::Delay::default().with_max(None)),
+				.with_max(None),
 		));
 		let write = |group: group::Producer| {
 			let mut group = group;
@@ -19313,7 +19300,8 @@ mod tests {
 
 		let subscription = serving_subscription(128);
 		assert_eq!(
-			subscription.delay.max, None,
+			subscription.ranges,
+			[track::Range::ALL],
 			"no Max Age leaves the publisher's max age alone"
 		);
 		let mut subscriber = producer.subscribe(subscription);
@@ -22081,9 +22069,13 @@ impl ServeRange {
 
 /// Ask for a live join with no lag, as a SUBSCRIBE without an absolute start does: a range
 /// from the oldest group would have a relay's route replay everything it retains, and
-/// SUBSCRIBE_OK then name the oldest group replayed so far as Largest.
+/// SUBSCRIBE_OK then name the oldest group replayed so far as Largest. No group of it
+/// expires short of the publisher's max age, since this draft's SUBSCRIBE carries none.
 fn live_join(subscription: &mut Subscription) {
-	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
+	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live {
+		min: Duration::ZERO,
+		max: None,
+	})]);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.

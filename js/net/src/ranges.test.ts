@@ -26,7 +26,7 @@ test("the incremental union matches a full fold", () => {
 	const start = (): Start | undefined => {
 		const kind = int(10);
 		if (kind === 0) return undefined;
-		if (kind === 1) return { live: Duration.millis(int(3)) };
+		if (kind === 1) return { live: { min: Duration.millis(int(3)), max: Duration.millis(int(3)) } };
 		return BigInt(int(12));
 	};
 	const keys = (ranges: readonly Range[]) => ranges.map(rangeKey);
@@ -58,8 +58,8 @@ test("the incremental union matches a full fold", () => {
 // range of its own, unless a reader starts at the oldest group. Mirrors the Rust
 // `combined_ranges_union`.
 test("a live join covers nothing but itself", () => {
-	const two = { start: { live: Duration.secs(2) } };
-	const five = { start: { live: Duration.secs(5) } };
+	const two = { start: { live: { min: Duration.secs(2), max: Duration.ZERO } } };
+	const five = { start: { live: { min: Duration.secs(5), max: Duration.ZERO } } };
 	const history = { start: 2n, end: 4n };
 	expect(union([history, two, five, two]).map(rangeKey)).toEqual([history, two, five].map(rangeKey));
 	expect(union([history, two, {}])).toEqual([{}]);
