@@ -293,7 +293,7 @@ async fn a_latest_reader_reads_a_finished_untimed_group() {
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let mut track = broadcast
+		let track = broadcast
 			.broadcast()
 			.create_track("video", moq_net::track::Info::default())
 			.unwrap();
