@@ -412,6 +412,9 @@ pub(in crate::model) struct Window {
 	named: BTreeMap<u64, usize>,
 	/// How many spans reach back to the oldest group instead of naming one.
 	unnamed: usize,
+	/// The keys of the spans placed since [`Self::take_placed`], once each: what a publisher
+	/// answering each range on its own looks at again, rather than every range still waiting.
+	placed: BTreeSet<u64>,
 }
 
 /// One non-empty range, resolved.
@@ -497,6 +500,7 @@ impl Window {
 			covered: None,
 			named: BTreeMap::new(),
 			unnamed: 0,
+			placed: BTreeSet::new(),
 		};
 		for range in ranges.values() {
 			window.count_budget(range);
@@ -662,9 +666,17 @@ impl Window {
 		self.pending.remove(&key);
 		self.reaching.remove(&key);
 		self.joining.remove(&key);
+		self.placed.remove(&key);
 		if let Some(span) = self.spans.remove(&key) {
 			self.uncount(key, &span);
 		}
+	}
+
+	/// The keys of the spans placed since the last call, which [`Self::resolved_key`] may now
+	/// answer differently.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn take_placed(&mut self) -> BTreeSet<u64> {
+		std::mem::take(&mut self.placed)
 	}
 
 	/// Whether nothing is left to resolve as groups arrive.
@@ -1198,6 +1210,9 @@ impl Window {
 		}
 		if let Some(time) = span.waits_on() {
 			self.waiting.insert((time, key));
+		}
+		if span.looking.is_none() && !span.waiting {
+			self.placed.insert(key);
 		}
 		self.spans.insert(key, span);
 	}

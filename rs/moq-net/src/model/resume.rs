@@ -1418,6 +1418,14 @@ impl Subscriber {
 		}
 	}
 
+	/// The reader's ranges placed since the last call; see [`track::Subscriber::take_placed`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn take_placed(&self) -> std::collections::BTreeSet<u64> {
+		let mut reader = self.reader();
+		reader.window();
+		reader.window.take_placed()
+	}
+
 	/// The reader's ranges keyed in `keys` resolved; see [`track::Subscriber::resolved_keys`].
 	pub(super) fn resolved_keys(&self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
 		let mut reader = self.reader();

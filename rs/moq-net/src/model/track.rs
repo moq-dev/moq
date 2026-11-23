@@ -12262,6 +12262,19 @@ impl Subscriber {
 		}
 	}
 
+	/// The Range IDs of this subscriber's ranges placed since the last call, which
+	/// [`Self::resolved_keys`] may now answer differently.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn take_placed(&mut self) -> std::collections::BTreeSet<u64> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.take_placed()
+			}
+			Inner::Resume(resume, _) => resume.take_placed(),
+		}
+	}
+
 	/// The lowest group held at or after `from`, in the cache this subscriber reads from.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn next_held(&self, from: u64) -> Option<u64> {

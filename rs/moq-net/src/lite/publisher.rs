@@ -5446,6 +5446,8 @@ struct TrackRun {
 	/// Lite-07: the ranges no SUBSCRIBE_START answered yet, by Range ID, each as it was asked,
 	/// which a pin before the answer replaces.
 	unstarted: std::collections::BTreeMap<u64, Unstarted>,
+	/// Lite-07: what each range in [`Self::unstarted`] waits on.
+	waits: Waits,
 	/// Lite-07: where each range a SUBSCRIBE_START answered starts, by Range ID, `None` for one
 	/// answered with no group: it owes its groups from there to its end.
 	started: std::collections::BTreeMap<u64, Option<u64>>,
@@ -5458,6 +5460,7 @@ struct TrackRun {
 
 /// What a lite-07 track's source says of where its ranges start, read once per pass over the
 /// ranges still waiting for their SUBSCRIBE_START.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Source {
 	/// The track is a relay's copy that places each range only where its upstream would, from
 	/// that upstream's answer for it or groups proving it (see
@@ -5536,6 +5539,122 @@ impl Unpinned {
 	}
 }
 
+/// What a lite-07 range still waiting for its SUBSCRIBE_START waits on, so a pass of
+/// [`TrackRun::report_started`] looks again only at the ranges something changed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+	/// The cursor telling of the group held at this key.
+	Told(u64),
+	/// A group held at or past this key, with none held there yet.
+	Held(u64),
+	/// The range landing somewhere (see [`track::Subscriber::take_placed`]), or the floor
+	/// rising to the time its start waits at, if any.
+	Placed(Option<u64>),
+	/// What the track says as a whole (see [`Whole`]).
+	Track,
+}
+
+/// What a lite-07 track says as a whole of where its ranges start: rarely new, so a change
+/// wakes every range waiting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Whole {
+	source: Source,
+	/// Whether this hop knows the largest position, which a range following the live edge waits on.
+	largest: bool,
+}
+
+/// The lite-07 ranges still waiting for their SUBSCRIBE_START, by what each waits on; see
+/// [`Wait`]. A pass costs the ranges due, and every range once the track says something new
+/// as a whole, which it does a few times at most.
+#[derive(Debug, Default)]
+struct Waits {
+	/// Looked at on the next pass: added since, or woken.
+	due: std::collections::BTreeSet<u64>,
+	/// What each parked range waits on, by Range ID.
+	parked: std::collections::BTreeMap<u64, Wait>,
+	/// The ranges waiting on [`Wait::Told`], by key.
+	told: std::collections::BTreeSet<(u64, u64)>,
+	/// The ranges waiting on [`Wait::Held`], by key.
+	held: std::collections::BTreeSet<(u64, u64)>,
+	/// The ranges waiting on [`Wait::Placed`] with a time, by that time.
+	placed: std::collections::BTreeSet<(u64, u64)>,
+	/// The read cursor's floor on the last pass.
+	floor: u64,
+	/// What the track said as a whole on the last pass.
+	track: Option<Whole>,
+}
+
+impl Waits {
+	/// Look at range `id` on the next pass.
+	fn wake(&mut self, id: u64) {
+		self.remove(id);
+		self.due.insert(id);
+	}
+
+	/// Forget range `id`.
+	fn remove(&mut self, id: u64) {
+		self.due.remove(&id);
+		match self.parked.remove(&id) {
+			Some(Wait::Told(key)) => self.told.remove(&(key, id)),
+			Some(Wait::Held(key)) => self.held.remove(&(key, id)),
+			Some(Wait::Placed(Some(time))) => self.placed.remove(&(time, id)),
+			Some(Wait::Placed(None) | Wait::Track) | None => false,
+		};
+	}
+
+	/// Park range `id` until `wait` changes.
+	fn park(&mut self, id: u64, wait: Wait) {
+		self.remove(id);
+		self.parked.insert(id, wait);
+		match wait {
+			Wait::Told(key) => self.told.insert((key, id)),
+			Wait::Held(key) => self.held.insert((key, id)),
+			Wait::Placed(Some(time)) => self.placed.insert((time, id)),
+			Wait::Placed(None) | Wait::Track => false,
+		};
+	}
+
+	/// The cursor told of `keys`, which hold a group when `held`: wake the ranges waiting
+	/// where any of them is, or on a group held at or past where they wait.
+	fn tell(&mut self, keys: Range<u64>, held: bool) {
+		if keys.is_empty() {
+			return;
+		}
+		let mut woken: Vec<u64> = (self.told.range((keys.start, 0)..(keys.end, 0)))
+			.map(|(_, id)| *id)
+			.collect();
+		let from = if held { 0 } else { keys.start };
+		woken.extend(self.held.range((from, 0)..(keys.end, 0)).map(|(_, id)| *id));
+		for id in woken {
+			self.wake(id);
+		}
+	}
+
+	/// The ranges a pass looks at, in Range ID order: those due, those `placed`, those waiting
+	/// at a time a risen `floor` passed, and every range once what the `track` says as a whole
+	/// is new.
+	fn take(&mut self, track: Whole, floor: u64, placed: std::collections::BTreeSet<u64>) -> Vec<u64> {
+		if self.track.replace(track) != Some(track) {
+			let parked: Vec<u64> = self.parked.keys().copied().collect();
+			for id in parked {
+				self.wake(id);
+			}
+		}
+		if std::mem::replace(&mut self.floor, floor) < floor {
+			let passed: Vec<u64> = self.placed.range(..=(floor, u64::MAX)).map(|(_, id)| *id).collect();
+			for id in passed {
+				self.wake(id);
+			}
+		}
+		for id in placed {
+			if self.parked.contains_key(&id) {
+				self.wake(id);
+			}
+		}
+		std::mem::take(&mut self.due).into_iter().collect()
+	}
+}
+
 /// A live join's staleness budget, `None` for any other range.
 fn join_budget(range: &crate::track::Range) -> Option<Duration> {
 	matches!(range.start, crate::track::Start::Live { .. }).then(|| range.budget())
@@ -5589,16 +5708,19 @@ impl TrackRun {
 
 		let mut unpinned = Unpinned::default();
 		let mut unstarted = std::collections::BTreeMap::new();
+		let mut waits = Waits::default();
 		if ctx.version.has_ranges() {
 			for (id, range) in (0..).zip(&bounds.ranges) {
 				unpinned.insert(id, due(range, false));
 				unstarted.insert(id, Unstarted::new(range, bounds.placed.contains_key(&id)));
+				waits.wake(id);
 			}
 		}
 		Self {
 			#[cfg(test)]
 			initial,
 			unstarted,
+			waits,
 			started: Default::default(),
 			stale: RangeMap::new(),
 			unpinned,
@@ -5808,6 +5930,7 @@ impl TrackRun {
 			self.requested.remove(*id);
 			// A range retired before its start resolved is owed no SUBSCRIBE_START.
 			self.unstarted.remove(id);
+			self.waits.remove(*id);
 			self.started.remove(id);
 		}
 		// Retiring makes no stale run owed, so this names none.
@@ -5815,6 +5938,10 @@ impl TrackRun {
 		debug_assert!(owed.is_empty(), "a retired range owes nothing");
 		for (id, range) in pins.into_iter().chain(retuned) {
 			self.requested.insert(id, range, placed.get(&id).copied());
+			// Replaced in place, it may land elsewhere.
+			if self.unstarted.contains_key(&id) {
+				self.waits.wake(id);
+			}
 		}
 		// Retired and replaced ranges take their frame bounds with them.
 		let had = !self.positions.is_empty();
@@ -5828,6 +5955,7 @@ impl TrackRun {
 			self.unpinned.insert(id, due(&range, false));
 			self.unstarted
 				.insert(id, Unstarted::new(&range, placed.contains_key(&id)));
+			self.waits.wake(id);
 		}
 		self.positions.extend(positions);
 		self.stops.extend(stopping);
@@ -5952,16 +6080,30 @@ impl TrackRun {
 		}
 		let largest = self.largest(waiter);
 		let source = Source::read(&mut self.track, waiter);
-		let mut waiting = std::collections::BTreeMap::new();
+		// Once nothing more can arrive every range is answered; until then a pass looks only at
+		// the ranges something changed for.
+		let ids: Vec<u64> = match finished {
+			true => self.unstarted.keys().copied().collect(),
+			false => {
+				let placed = self.track.take_placed();
+				let whole = Whole {
+					source,
+					largest: largest != lite::Edge::Unknown,
+				};
+				self.waits.take(whole, self.floor, placed)
+			}
+		};
 		let mut reported = false;
-		let unstarted = std::mem::take(&mut self.unstarted);
-		let resolved = self.track.resolved_keys(unstarted.keys().copied());
-		let waits = self.track.waiting_keys(unstarted.keys().copied());
-		for (((id, asked), resolved), waits) in unstarted.into_iter().zip(resolved).zip(waits) {
+		let resolved = self.track.resolved_keys(ids.iter().copied());
+		let waits = self.track.waiting_keys(ids.iter().copied());
+		for ((id, resolved), waits) in ids.into_iter().zip(resolved).zip(waits) {
+			let Some(&asked) = self.unstarted.get(&id) else {
+				continue;
+			};
 			// Never answered without the largest, even once nothing else can resolve it: this
 			// hop's feed going live or ending tells it.
 			if asked.live && largest == lite::Edge::Unknown {
-				waiting.insert(id, asked);
+				self.waits.park(id, Wait::Track);
 				continue;
 			}
 			let placed = match resolved {
@@ -5973,18 +6115,22 @@ impl TrackRun {
 				None => match waits {
 					Some((time, end)) if time <= self.floor => (self.first_start(self.floor, &source, finished))
 						.map(|start| end.is_none_or(|end| end > start).then_some(start)),
-					_ if finished => Some(None),
-					_ => None,
+					_ if finished => Ok(None),
+					_ => Err(Wait::Placed(waits.map(|(time, _)| time))),
 				},
 			};
-			let Some(start) = placed else {
-				waiting.insert(id, asked);
-				continue;
+			let start = match placed {
+				Ok(start) => start,
+				Err(wait) => {
+					self.waits.park(id, wait);
+					continue;
+				}
 			};
+			self.unstarted.remove(&id);
+			self.waits.remove(id);
 			self.buffer_start(lite::SubscribeStart { id, start, largest }, writer)?;
 			reported = true;
 		}
-		self.unstarted = waiting;
 		if reported {
 			for (groups, hole) in self.settle_stale() {
 				self.forward_range(groups, &hole, writer)?;
@@ -5993,8 +6139,8 @@ impl TrackRun {
 		Ok(reported)
 	}
 
-	/// Where a range asked as `asked` and placed here as `resolved` starts, `None` while that
-	/// waits on something it still needs.
+	/// Where a range asked as `asked` and placed here as `resolved` starts, or what that waits
+	/// on.
 	///
 	/// A live join starts where it was placed, past the groups its max expired: the subscriber
 	/// reads its answer as the join's start, so its groups from there are owed. A range naming
@@ -6006,17 +6152,18 @@ impl TrackRun {
 		resolved: crate::model::track::Resolved,
 		source: &Source,
 		finished: bool,
-	) -> Option<u64> {
+	) -> Result<u64, Wait> {
 		if let Some(budget) = asked.joins {
-			return Some(self.track.join_start(resolved.start, budget));
+			return Ok(self.track.join_start(resolved.start, budget));
 		}
 		if resolved.floored && source.upstream {
-			return Some(resolved.start);
+			return Ok(resolved.start);
 		}
 		self.first_start(resolved.start, source, finished)
 	}
 
-	/// Where a range starting at or past group `from` starts, `None` until this hop knows.
+	/// Where a range starting at or past group `from` starts, or what that waits on until this
+	/// hop knows.
 	///
 	/// On a copy placing each range as its upstream answered, one reaching back to the oldest
 	/// group takes that upstream's answer to a range asked from the oldest group, or else where
@@ -6025,25 +6172,25 @@ impl TrackRun {
 	/// start where the range names, and a relay caches groups in upstream arrival order, where
 	/// a newer group's stream can beat an older one. Once nothing more arrives, it starts at
 	/// the feed or the floor, and the drops account for what is missing.
-	fn first_start(&mut self, from: u64, source: &Source, finished: bool) -> Option<u64> {
-		if source.upstream
-			&& let Some(answered) = source.oldest
-		{
-			return Some(from.max(answered));
+	fn first_start(&mut self, from: u64, source: &Source, finished: bool) -> Result<u64, Wait> {
+		if source.upstream && let Some(answered) = source.oldest {
+			return Ok(from.max(answered));
 		}
 		let feed = match source.feed {
 			Poll::Ready(feed) => feed.map(|feed| self.pass_stale(from.max(feed))),
 			Poll::Pending if finished => None,
-			Poll::Pending => return None,
+			Poll::Pending => return Err(Wait::Track),
 		};
-		if source.upstream && feed.is_some() {
-			return feed;
+		if source.upstream
+			&& let Some(feed) = feed
+		{
+			return Ok(feed);
 		}
 		match (feed, self.first_group(from)) {
-			(feed, Some(told)) => Some(feed.map_or(told, |feed| feed.min(told))),
-			(Some(feed), None) if finished => Some(feed),
-			(None, None) if finished => Some(from.max(self.floor)),
-			_ => None,
+			(feed, Ok(told)) => Ok(feed.map_or(told, |feed| feed.min(told))),
+			(Some(feed), Err(_)) if finished => Ok(feed),
+			(None, Err(_)) if finished => Ok(from.max(self.floor)),
+			(_, Err(wait)) => Err(wait),
 		}
 	}
 
@@ -6056,23 +6203,26 @@ impl TrackRun {
 		key
 	}
 
-	/// The first group from `from` the cursor served or dropped, `None` while it has yet to
-	/// reach the next group held here in its ranges. It passes the keys the cursor told start
-	/// none, the stale runs still held, and those no group held here starts at, which a group
-	/// arriving later may take: the source's feed accounts for that (see [`Self::first_start`]).
-	fn first_group(&mut self, from: u64) -> Option<u64> {
+	/// The first group from `from` the cursor served or dropped, or what that waits on: the
+	/// cursor reaching the next group held here in its ranges, or a group held at all. It
+	/// passes the keys the cursor told start none, the stale runs still held, and those no group
+	/// held here starts at, which a group arriving later may take: the source's feed accounts for
+	/// that (see [`Self::first_start`]).
+	fn first_group(&mut self, from: u64) -> Result<u64, Wait> {
 		let mut at = from;
 		loop {
 			at = self.pass_stale(at);
 			match self.track.record_mut().report_at(at) {
 				Some((end, Report::Skip)) => at = end,
-				Some(_) => return Some(at),
-				None => match self.track.next_held(at)? {
-					next if next > at => at = next,
+				Some(_) => return Ok(at),
+				None => match self.track.next_held(at) {
+					None => return Err(Wait::Held(at)),
+					Some(next) if next > at => at = next,
 					// The cursor tells of each group held in its ranges, so this waits for it to.
-					_ => match self.track.next_in_range(at)? {
-						next if next == at => return None,
-						next => at = next,
+					Some(_) => match self.track.next_in_range(at) {
+						Some(next) if next == at => return Err(Wait::Told(at)),
+						Some(next) => at = next,
+						None => return Err(Wait::Held(at)),
 					},
 				},
 			}
@@ -6376,6 +6526,7 @@ impl TrackRun {
 		match &mut self.start {
 			Start::Unresolved { skipped, .. } => skipped.insert(range, hole),
 			start if start.per_range() && hole.stale_budget().is_some() => {
+				self.told(range.clone());
 				self.stale.insert(range, hole);
 				for (groups, hole) in self.settle_stale() {
 					self.forward_range(groups, &hole, writer)?;
@@ -6392,8 +6543,15 @@ impl TrackRun {
 	/// span a whole group's GROUP_END accounted for.
 	fn mark_served(&mut self, groups: Range<u64>) {
 		if self.start.emits_range() {
-			self.track.record_mut().tell(groups, Report::Settled);
+			self.track.record_mut().tell(groups.clone(), Report::Settled);
+			self.waits.tell(groups, true);
 		}
+	}
+
+	/// Wake the ranges waiting on the cursor telling of `keys`; see [`Waits::tell`].
+	fn told(&mut self, keys: Range<u64>) {
+		let held = self.track.next_held(keys.start).is_some_and(|key| key < keys.end);
+		self.waits.tell(keys, held);
 	}
 
 	/// Forward a verdict the cursor reached on `range`, which its record already took in,
@@ -6415,6 +6573,7 @@ impl TrackRun {
 		};
 		let report = self.report(hole);
 		self.track.record_mut().tell(range.clone(), report);
+		self.told(range.clone());
 		self.buffer_hole(range, hole.clone(), writer)?;
 		Ok(true)
 	}
@@ -6446,6 +6605,7 @@ impl TrackRun {
 		let report = self.report(hole);
 		for gap in gaps.iter() {
 			self.track.record_mut().tell(gap.clone(), report);
+			self.told(gap.clone());
 			self.buffer_hole(gap.clone(), hole.clone(), writer)?;
 		}
 		Ok(!gaps.is_empty())
@@ -6681,6 +6841,7 @@ impl TrackRun {
 			.collect();
 		for id in ids {
 			self.unstarted.remove(&id);
+			self.waits.remove(id);
 			self.buffer_start(
 				lite::SubscribeStart {
 					id,
@@ -9057,8 +9218,10 @@ mod serve_group_test {
 			.map(|(id, range)| (id, Unstarted::new(range, false)))
 			.collect();
 		run.unpinned = Unpinned::default();
+		run.waits = Waits::default();
 		for (id, range) in (0..).zip(ranges) {
 			run.unpinned.insert(id, due(range, false));
+			run.waits.wake(id);
 		}
 	}
 
