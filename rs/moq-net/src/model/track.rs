@@ -4686,7 +4686,7 @@ impl Boarding {
 		// Boarded a flight already asked under a tighter budget, which judged the group too
 		// old for that budget, not ours: ask again with ours. Terminates, since the new
 		// flight asks at least our budget.
-		if !matches!(err, Error::Old) || !looser(asked, self.asking.max_delay) {
+		if !is_stale(&err) || !looser(asked, self.asking.max_delay) {
 			return Poll::Ready(Err(err));
 		}
 		let Some(join) = self.fills.lock().fly(&self.fills, key, self.frame, self.asking) else {
@@ -4700,10 +4700,15 @@ impl Boarding {
 /// Why a reader's frames are gone once the flight it boarded for them failed: the group is
 /// stale when its handler judged it too old, else the cache's eviction stands.
 pub(super) fn flight_failed(err: Error) -> Error {
-	match err {
-		Error::Old => Error::Old,
-		_ => Error::Evicted,
+	match is_stale(&err) {
+		true => Error::Old,
+		false => Error::Evicted,
 	}
+}
+
+/// Whether `err` judged a group too old, as a local verdict or one read off the wire.
+fn is_stale(err: &Error) -> bool {
+	StreamError::from(err) == StreamError::Old
 }
 
 /// Whether `ours` waits longer than the budget `asked` upstream, `None` being the longest.
@@ -33432,7 +33437,8 @@ mod test {
 			Poll::Ready(fill) => fill.unwrap(),
 			Poll::Pending => panic!("the end asks a flight"),
 		};
-		fill.refuse_groups(0..1, Error::Old);
+		// As a session reads the refusal off the wire.
+		fill.refuse_groups(0..1, Error::Stream(StreamError::Old));
 		assert!(flag.take(), "the refusal woke the end");
 		assert!(
 			matches!(reader.poll_finished(&waiter), Poll::Ready(Err(Error::Old))),
@@ -33790,38 +33796,41 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_looser_rider_asks_again_after_old() {
-		let producer = track_producer("test", Info::default());
-		let requests = producer.requests();
-		let subscribe = |budget: u64| {
-			let delay = Delay::default().with_max(Duration::from_secs(budget));
-			producer.subscribe(Subscription::default().with_delay(delay))
-		};
-		let (mut tight, mut loose) = (subscribe(1), subscribe(10));
-		let mut live = producer.append_next().unwrap();
-		for index in 0..3_000u32 {
-			live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
+		// A local verdict, and one a session reads off the wire.
+		for stale in [Error::Old, Error::Stream(StreamError::Old)] {
+			let producer = track_producer("test", Info::default());
+			let requests = producer.requests();
+			let subscribe = |budget: u64| {
+				let delay = Delay::default().with_max(Duration::from_secs(budget));
+				producer.subscribe(Subscription::default().with_delay(delay))
+			};
+			let (mut tight, mut loose) = (subscribe(1), subscribe(10));
+			let mut live = producer.append_next().unwrap();
+			for index in 0..3_000u32 {
+				live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
+					.unwrap();
+			}
+			let recv = |sub: &mut Subscriber| sub.recv_group().now_or_never().unwrap().unwrap().expect("group 0");
+			let (mut tight, mut loose) = (recv(&mut tight), recv(&mut loose));
+
+			assert_eq!(read_numbered(&mut tight), None, "boarding");
+			let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!(req.max_delay(), Some(Duration::from_secs(1)));
+			assert_eq!(read_numbered(&mut loose), None, "boards the same flight");
+			assert!(requests.requested_fill_group().now_or_never().is_none(), "one flight");
+
+			req.reject(stale.clone());
+			// Stale under its own budget.
+			assert!(matches!(tight.read_frame().now_or_never(), Some(Err(Error::Old))));
+			assert_eq!(read_numbered(&mut loose), None, "asks again");
+			let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!(req.max_delay(), Some(Duration::from_secs(10)));
+			let mut flight = req.accept(None).unwrap().expect("a fresh group");
+			flight
+				.write_frame(crate::Timestamp::unscaled(flight.start), numbered(0))
 				.unwrap();
+			assert_eq!(read_numbered(&mut loose), Some(0));
 		}
-		let recv = |sub: &mut Subscriber| sub.recv_group().now_or_never().unwrap().unwrap().expect("group 0");
-		let (mut tight, mut loose) = (recv(&mut tight), recv(&mut loose));
-
-		assert_eq!(read_numbered(&mut tight), None, "boarding");
-		let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
-		assert_eq!(req.max_delay(), Some(Duration::from_secs(1)));
-		assert_eq!(read_numbered(&mut loose), None, "boards the same flight");
-		assert!(requests.requested_fill_group().now_or_never().is_none(), "one flight");
-
-		req.reject(Error::Old);
-		// Stale under its own budget.
-		assert!(matches!(tight.read_frame().now_or_never(), Some(Err(Error::Old))));
-		assert_eq!(read_numbered(&mut loose), None, "asks again");
-		let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
-		assert_eq!(req.max_delay(), Some(Duration::from_secs(10)));
-		let mut flight = req.accept(None).unwrap().expect("a fresh group");
-		flight
-			.write_frame(crate::Timestamp::unscaled(flight.start), numbered(0))
-			.unwrap();
-		assert_eq!(read_numbered(&mut loose), Some(0));
 	}
 
 	/// Pool debt sheds a flight even once the cached copy of its group was evicted whole.
