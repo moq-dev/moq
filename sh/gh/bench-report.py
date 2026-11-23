@@ -711,7 +711,8 @@ def main():
     elif args.command == "prepare":
         prepare(args.directory, args.output)
     elif args.command in ("nightly-metrics", "codspeed-metrics"):
-        text = nightly_metrics(args.directory) if args.command == "nightly-metrics" else codspeed_metrics(args.directory)
+        metrics = nightly_metrics if args.command == "nightly-metrics" else codspeed_metrics
+        text = metrics(args.directory)
         if text is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(text)
