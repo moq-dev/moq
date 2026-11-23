@@ -10,7 +10,9 @@ START lies past that group. Today they differ:
   clamps to the copy's start (`self.start.key()`) whatever the floor.
 - JS keeps waiting until the budget's grace folds. `#landing` in
   `js/net/src/track.ts` applies the START bound only while the demand keeps the
-  floor START answered, and every backfill lowers it.
+  floor START answered. Every backfill lowers it, raised time starts included:
+  `#backfill` in `js/net/src/resume.ts` asks only for groups under the serving
+  copy's resume point, and returns early when there are none.
 
 ## Plan
 
