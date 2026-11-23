@@ -968,10 +968,11 @@ impl StreamsState {
 		None
 	}
 
-	pub(crate) fn retransmit(&mut self, frame: frame::StreamMeta) {
+	/// Queue `frame`'s data to send again, returning whether its stream now has data to send
+	pub(crate) fn retransmit(&mut self, frame: frame::StreamMeta) -> bool {
 		let Some(stream) = self.send.get_mut(&frame.id).and_then(|s| s.as_mut()) else {
 			// Loss of data on a closed stream is a noop
-			return;
+			return false;
 		};
 		let was_pending = stream.is_pending();
 		// The Reliable Size of a reset stream supersedes any FIN
@@ -981,9 +982,11 @@ impl StreamsState {
 			*fin_pending = true;
 		}
 		stream.pending.retransmit(frame.offsets);
-		if !was_pending && stream.is_pending() {
+		let pending = stream.is_pending();
+		if !was_pending && pending {
 			self.pending.push(frame.id, &mut stream.slot, stream.priority);
 		}
+		pending
 	}
 
 	pub(crate) fn received_max_streams(&mut self, dir: Dir, count: u64) -> Result<(), TransportError> {

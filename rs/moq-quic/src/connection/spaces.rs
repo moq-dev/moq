@@ -114,7 +114,7 @@ impl PacketSpace {
 		&mut self,
 		request_immediate_ack: bool,
 		has_ack_eliciting_data: bool,
-		streams: &StreamsState,
+		streams: &mut StreamsState,
 	) {
 		if self.loss_probes == 0 {
 			return;
@@ -143,6 +143,18 @@ impl PacketSpace {
 				// Remove retransmitted data from the old packet so we don't end up retransmitting
 				// it *again* even if the copy we're sending now gets acknowledged.
 				self.pending |= mem::take(&mut packet.retransmits);
+				return;
+			}
+			// STREAM frames stay on the packet, so an ACK of either copy credits the data, and
+			// a later loss of the original resends only what neither ACK covered. A probe of
+			// only a PING leaves recovery to an ACK of it, which loss can withhold for many
+			// backed-off PTOs while this copy would have delivered the data.
+			// Nothing queues when every frame was acknowledged or its stream reset
+			let mut queued = false;
+			for frame in packet.stream_frames.iter() {
+				queued |= streams.retransmit(frame.clone());
+			}
+			if queued {
 				return;
 			}
 		}
