@@ -2896,6 +2896,7 @@ export class Subscriber {
 			sentAsks = asks;
 			sentJoins = joins;
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
+			console.log("DBG sub update", this.version, update.maxDelay, update.startGroup, update.endGroup, (current.ranges ?? []).map((r: any) => `${typeof r.start === "object" ? `L${r.start.live.min.asMillis()}/${r.start.live.max?.asMillis() ?? "none"}` : r.start}..${r.end}`), current.placed);
 		}
 	}
 
