@@ -4,7 +4,7 @@ import { Credit } from "./credit.ts";
  *
  * QMux acknowledges whatever reaches the socket, so "Data Recvd" is a FIN on the
  * socket and a RESET_STREAM is received as soon as it is sent. */
-export type SendState = "ready" | "dataSent" | "dataRecvd" | "resetSent";
+type SendState = "ready" | "dataSent" | "dataRecvd" | "resetSent";
 
 /** The send half of a stream: its state, the peer's MAX_STREAM_DATA, and its offset.
  *
@@ -22,11 +22,6 @@ export class SendHalf {
 
 	constructor(max: bigint) {
 		this.credit = new Credit(max);
-	}
-
-	/** The current state. */
-	get state(): SendState {
-		return this.#state;
 	}
 
 	/** The bytes sent so far, which is where the next frame starts and the final size. */

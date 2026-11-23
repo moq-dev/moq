@@ -330,15 +330,15 @@ impl poll::SendStream for SinkSend {
 		self.written
 	}
 
-	/// Unsupported until the test acknowledges a prefix with [`Log::ack`].
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+	/// Ready at once, as a transport without acknowledgments, until the test acknowledges a
+	/// prefix with [`Log::ack`].
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
 		let answer = |acked: Option<u64>| match acked {
-			None => Poll::Ready(poll::Acked::Unsupported),
-			Some(acked) if acked >= *offset => Poll::Ready(poll::Acked::Delivered),
-			Some(_) => Poll::Pending,
+			Some(acked) if acked < *offset => Poll::Pending,
+			_ => Poll::Ready(()),
 		};
-		match self.log.acked.poll(waiter, |acked| answer(**acked).map(drop)) {
-			Poll::Ready(acked) => answer(*acked).map(Ok),
+		match self.log.acked.poll(waiter, |acked| answer(**acked)) {
+			Poll::Ready(_) => Poll::Ready(Ok(())),
 			Poll::Pending => Poll::Pending,
 		}
 	}
@@ -1037,6 +1037,8 @@ pub struct ScriptedSession {
 	groups: bool,
 	/// Set by [`Self::with_send_window`].
 	send_window: Option<usize>,
+	/// Set by [`Self::with_uni_send_window`].
+	uni_send_window: Option<usize>,
 }
 
 impl ScriptedSession {
@@ -1077,6 +1079,7 @@ impl ScriptedSession {
 			unacked_unis: Default::default(),
 			groups: false,
 			send_window: None,
+			uni_send_window: None,
 		}
 	}
 
@@ -1084,6 +1087,12 @@ impl ScriptedSession {
 	/// like a peer that never grants more send credit.
 	pub fn with_send_window(mut self, bytes: usize) -> Self {
 		self.send_window = Some(bytes);
+		self
+	}
+
+	/// The same for each opened unidirectional stream.
+	pub fn with_uni_send_window(mut self, bytes: usize) -> Self {
+		self.uni_send_window = Some(bytes);
 		self
 	}
 
@@ -1312,7 +1321,14 @@ impl poll::Session for ScriptedSession {
 				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
 			}
 		}
-		let mut send = SinkSend::new(self.log.clone());
+		let mut send = match self.uni_send_window {
+			// The gate's producer is gone, so the writes past the prefix park forever.
+			Some(window) => SinkSend {
+				prefix: window,
+				..SinkSend::gated(self.log.clone(), kio::Producer::new(false).consume())
+			},
+			None => SinkSend::new(self.log.clone()),
+		};
 		send.unacked_fin = self
 			.unacked_unis
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1))

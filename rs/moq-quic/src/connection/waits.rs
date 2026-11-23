@@ -89,6 +89,10 @@ pub(crate) struct Waits {
 impl Waits {
 	/// Register `waiter` for `wait` on stream `id`
 	pub(crate) fn register(&mut self, id: StreamId, wait: Wait, waiter: &Waiter) {
+		// A no-op waiter registers nothing, so a poll for the answer alone costs no entry.
+		if waiter.is_noop() {
+			return;
+		}
 		waiter.register(self.streams.entry(id).or_default().list(wait));
 	}
 

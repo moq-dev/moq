@@ -17,6 +17,8 @@ export class AnnounceStream {
 	// The last write queued, which the next one follows.
 	#tail: Promise<void> = Promise.resolve();
 	#finished = false;
+	// A claim was sent, which only this stream's FIN ends.
+	#announced = false;
 	#break!: (err: unknown) => void;
 
 	/**
@@ -58,6 +60,7 @@ export class AnnounceStream {
 	 */
 	send(...msgs: AnnounceBroadcast[]): Promise<void> {
 		if (this.#finished) return Promise.reject(new Error("the Announce Stream finished"));
+		if (msgs.some((msg) => msg.status === "start")) this.#announced = true;
 		const sent = this.#tail.then(async () => {
 			const writer = await this.#open();
 			for (const msg of msgs) await encodeAnnounceBroadcast(writer, msg, this.#version);
@@ -68,7 +71,8 @@ export class AnnounceStream {
 
 	/**
 	 * This side is leaving the session: finish the stream once everything sent is written, and
-	 * wait for the peer to take it. A stream that never opened stays unopened.
+	 * wait for the peer to take it when it carried a claim the FIN ends. A stream that never
+	 * opened stays unopened.
 	 */
 	finish(): Promise<void> {
 		this.#finished = true;
@@ -78,7 +82,7 @@ export class AnnounceStream {
 			if (!opened) return;
 			const writer = await opened;
 			writer.close();
-			await writer.closed;
+			if (this.#announced) await writer.closed;
 		});
 		this.#tail = done.catch(() => {});
 		return done;

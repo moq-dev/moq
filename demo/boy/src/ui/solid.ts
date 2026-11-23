@@ -23,7 +23,7 @@ export function createAccessor<T>(signal: Getter<T>): SolidAccessor<T> {
 }
 
 /** Creates a Solid setter that writes through to the given signal. */
-export function createSetter<T>(signal: Signal<T>): SolidSetter<T> {
+function createSetter<T>(signal: Signal<T>): SolidSetter<T> {
 	const setter = (value: T | ((prev: T) => T)) => {
 		if (typeof value === "function") {
 			signal.update(value as (prev: T) => T);

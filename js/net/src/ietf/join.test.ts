@@ -2,6 +2,7 @@ import { expect, jest, onTestFinished, test } from "bun:test";
 import { Duration, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as Connection from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -69,7 +70,12 @@ async function subscribed(version: IetfVersion = VERSION, subscription: Partial<
 	const consumer = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }], ...subscription });
+		.subscribe({
+			...track.Subscription.default(),
+			delay: { max: Duration.ZERO },
+			ranges: [{ start: { live: Duration.ZERO } }],
+			...subscription,
+		});
 	onTestFinished(() => {
 		consumer.close();
 		session.close();
@@ -281,7 +287,7 @@ for (const version of VERSIONS) {
 			const { subscriber, consumer, answer } = await subscribed(version, {
 				order: "ascending",
 				delay: { max: null },
-				ranges: [{ start: { time: 0n } }],
+				ranges: [{ start: 0n }],
 			});
 			await answer({ groupId: 0n, objectId });
 			// Largest is inclusive, including object 0: its following tail is no whole message.
@@ -606,9 +612,9 @@ async function publishing(version: IetfVersion) {
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	// Written once, before anyone subscribed, and left open: only the head can deliver it.
-	const catalog = broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI });
+	const catalog = defined(broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI }));
 	hooks.appendNext(catalog).writeFrame(textFrame("catalog"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(video);
 	group.writeFrame(textFrame("v0"));
 	group.writeFrame(textFrame("v1"));

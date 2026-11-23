@@ -21,6 +21,8 @@ export * as Audio from "./audio";
 export * from "./broadcast";
 export * from "./catalog";
 export type { Fanout } from "./fanout";
+/** The page's media clock, which every timestamp this package publishes is stamped on. */
+export * as MediaClock from "./media-clock";
 /** The local canvas preview. */
 export * as Preview from "./preview";
 export * from "./rendition";

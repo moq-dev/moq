@@ -44,7 +44,9 @@ Local and hosted checks select only what the diff touches, so a break can reach 
 Repository tooling tests run whole files in `just gh test`, listed explicitly in
 `.github/justfile`; the merge gate runs them only when a path they read changes (the `tooling` module in `sh/dispatch.sh`), and `just gate` runs them always. Slow fixtures live in separate `*.slow.test.py` files;
 `just gh test-integration` runs those files and selector timing nightly.
-To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
+The merge gate lints cfg-gated macOS and Windows Rust from Linux (`just rs cross-lint-changed`); to run its tests on those hosts before merging, dispatch `platform.yml` on the branch, never the full Nightly.
+
+`quest review` records each PR's risk tier, which [RISK.md](RISK.md) sets from its diff, in the body's `## Review` section.
 
 A PR the queue drops for a failing build or a conflict gets a fixer, which hands the PR back, with its diagnosis, when the fix needs a decision or stops making progress. `quest status` shows why a PR left the queue under `landing-stopped`.
 

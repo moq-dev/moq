@@ -27,13 +27,14 @@ export { Duplicate, Handle, Unsupported } from "./auth_session.ts";
 /**
  * What a peer lets this side do, in this side's own paths (relative to the session).
  *
- * An empty {@link Path.Patterns} grants nothing; `**` grants everything.
+ * Each {@link Path.Prefix} covers its whole subtree. An empty {@link Path.Prefixes} grants
+ * nothing; the empty prefix grants everything.
  */
 export interface Grant {
 	/** The broadcasts this side may publish to the peer. */
-	publish: Path.Patterns;
+	publish: Path.Prefixes;
 	/** The broadcasts this side may subscribe to from the peer. */
-	subscribe: Path.Patterns;
+	subscribe: Path.Prefixes;
 	/** When the grant lapses on the `@moq/clock` wall clock, or undefined for never. */
 	expires?: Wall;
 }

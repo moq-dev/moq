@@ -54,9 +54,11 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn millis(ms: u64) -> Timestamp {
@@ -299,12 +301,10 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 		let groups = request.requests();
 		let _track = request.accept(untimed());
 		let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
-			futures::future::Either::Left((request, _)) => {
-				support::groups(request.expect("the fetch reaches the publisher"))
-			}
+			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(3, timed()).unwrap();
+		let mut group = request.accept(3, timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(
 				moq_net::Timestamp::unscaled(group.start),

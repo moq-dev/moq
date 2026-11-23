@@ -141,7 +141,7 @@ class FakeBroadcast:
         self.tracks: dict[str, FakeTrack] = {}
 
     def video(self, init, target) -> FakeTrack:
-        assert init.format == "avc3"
+        assert init.format == "h264"
         self.tracks[target.name] = FakeTrack(init.data, target.name, init.hint)
         return self.tracks[target.name]
 

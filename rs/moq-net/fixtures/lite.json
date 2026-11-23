@@ -245,6 +245,13 @@
 		"expect": "refused"
 	},
 	{
+		"name": "a claim whose chain names a relay twice decodes: a routing node only declines to take it",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000f000001780161000103000080020707",
+		"expect": "decoded"
+	},
+	{
 		"name": "a claim whose chain names more than 32 relays is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
@@ -338,17 +345,10 @@
 		"expect": "decoded"
 	},
 	{
-		"name": "a lite-07 group carrying a Frame Start, which only lite-06 has",
+		"name": "a lite-07 group starting partway through, at a Frame Start",
 		"version": "moq-lite-07-wip",
 		"message": "group",
-		"hex": "0c00ffffffffffffffffff0000",
-		"expect": "refused"
-	},
-	{
-		"name": "a group naming the start just below it as the previous one, carried plus one",
-		"version": "moq-lite-07-wip",
-		"message": "group",
-		"hex": "1300ffffffffffffffffffffffffffffffffffff",
+		"hex": "03010704",
 		"expect": "decoded"
 	},
 	{

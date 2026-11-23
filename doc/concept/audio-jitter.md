@@ -46,10 +46,10 @@ Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
 group skipped for age is never observed, and a frame queued behind a stalled
 group is observed when the stall clears. A missing group, one that has delivered
-no frame, is waited for only the playout delay, the subscription's `delay.min`,
-since past that it would play late: a reordered backlog's holes waited out to the whole budget
-would delay the frames behind them, which the estimator would measure as
-jitter. The browser player leaves the hole to the transport: it reads its audio
+no frame, is given up by the subscription's `delay.max` alone, like any stale
+group; `delay.min` only sets where a join starts. Each frame is timed by when it
+landed in the node's cache, not when the read reached it, so the frames a hole
+holds back read as on time rather than as jitter. The browser player leaves the hole to the transport: it reads its audio
 through an ordered track reader whose own `delay.max` is what the ring holds of
 the delay plus the stretch threshold, past which the ring would skip the hole's
 audio anyway, and plays each gap that reader reports as the hole. The reader
@@ -115,7 +115,7 @@ observe(arrival, media):
         push (arrival, media) onto history
 
     fastest = min over history of (entry.arrival - entry.media)
-    if first observation: start = arrival; joined = arrival
+    if first observation: start = arrival; joined = max(joined, arrival)
     elif media + fastest < start:       # produced before the subscription: backlog
         joined = max(joined, arrival)
 
@@ -165,7 +165,7 @@ settle():                               # a stall is one observation
         fold(stall.bucket); fold(nothing) min(stall.span, IDLE_MAX) times; close it
 
 backlog(arrival):                       # a backlog group skipped unread arrived
-    if not first observation and open:
+    if open:                            # before the first observation too: it may land later
         joined = max(joined, arrival)
 
 end():                                  # a declared end precedes the next observation
@@ -586,6 +586,13 @@ interval in progress and any open stall, folds into the continued histogram as
 if that interval closed at the switch, judged by the outgoing track's join: a switch most often follows an outage,
 and would otherwise drop the outage's one observation.
 
+A subscription the viewer stops and starts again on the same path, as a pause or
+a hidden tab does, continues the same way. The stop says nothing about the path,
+as a [declared silence](#declared-silence) says nothing about it. Starting over
+would give the first outage after the resume a tenth of the histogram, so one
+late flush would hold the target near its own lateness for a half-life. A
+continued histogram gives that outage only `1 - FORGET`.
+
 ## At the speaker
 
 Audio is placed on the clock where it is heard, not where it is rendered. The
@@ -687,7 +694,7 @@ that interval is [stalled](#one-observation-per-stall), whose stall owns them.
 the work: after 1024 folds the retained weight is about 2e-8, so the cap changes
 no output an `f64` can represent.
 
-A receiver coming back from a pause is not cold: the evidence that survived
+A subscription whose arrivals stop and come back is not cold: the evidence that survived
 keeps decaying at the base rate. Only the weight the prior regained is replaced
 quickly, the same way it is at cold start, since it stands for no evidence at
 all.

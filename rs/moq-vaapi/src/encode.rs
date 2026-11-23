@@ -85,7 +85,9 @@ const MIN_QP: u8 = 24;
 const MAX_QP: u8 = 51;
 /// The HRD buffer, in frames of the bitrate, sent with every picture. The
 /// driver's own default is a second of the rate, which let a second of high
-/// motion run half again over the bitrate on radeonsi.
+/// motion run half again over the bitrate on radeonsi. It is also what a still
+/// scene banks: the first busy frames after one spend all of it, so that second
+/// runs this many frames over the bitrate.
 pub const HRD_FRAMES: u32 = 3;
 /// Window over which libva's rate controller targets the configured bitrate.
 ///

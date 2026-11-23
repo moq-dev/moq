@@ -3,6 +3,7 @@ import { Duration, type Installed, Instant } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
 import { GRACE as TAIL_GRACE_MS } from "./ledger.ts";
 import * as Lite from "./lite/index.ts";
@@ -29,7 +30,7 @@ async function session(protocol: string) {
 	]);
 	const broadcastRoute = origin.route(Path.from("test"));
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote
 		.track("video")

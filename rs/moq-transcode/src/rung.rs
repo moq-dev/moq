@@ -16,10 +16,10 @@
 //!   valid after the head that same encode produced. A fetch every caller
 //!   leaves before it is accepted is dropped, so a later one starts clean.
 //!
-//! Output groups mirror the source groups 1:1: each starts where its source group
-//! does, in the output's microseconds (see [`output_start`]), so a fetch for an
-//! output group maps back to its source group and a player switching renditions
-//! lands on the same content.
+//! Output groups mirror the source groups 1:1: the output track takes the source
+//! track's timescale, so each output group has its source group's key. A fetch for
+//! an output group fetches that key from the source, and a player switching
+//! renditions, the source's included, lands on the same content.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -82,6 +82,9 @@ pub(crate) struct Rung {
 	pub broadcast: moq_net::broadcast::Consumer,
 	/// The source rendition's catalog entry (codec + container).
 	pub config: VideoConfig,
+	/// The source track's timescale, which the output track takes so each output group has its
+	/// source group's key.
+	pub scale: moq_net::Timescale,
 	/// The codec implementations, devices, and resize the transcode was configured with.
 	pub transcode: crate::Config,
 	/// Where to report that this rung is encoding.
@@ -143,38 +146,6 @@ impl Rung {
 	}
 }
 
-/// The start of the output group mirroring a source group that starts at `start` on a track in
-/// `scale`: that start in the output's microseconds, where the group's first frame lands since a
-/// transcode keeps its timestamps, or `None` past that timescale's range. A scale-less source's
-/// starts pass through.
-pub(crate) fn output_start(start: u64, scale: Option<moq_net::Timescale>) -> Option<u64> {
-	let Some(scale) = scale else {
-		return Some(start);
-	};
-	let start = moq_net::Timestamp::new(start, scale).ok()?;
-	Some(start.convert(hang::container::TIMESCALE).ok()?.value())
-}
-
-/// The start of the source group the output group starting at `start` mirrors, for a source in
-/// `scale`: the lowest source start [`output_start`] maps there, or `None` when none does.
-///
-/// Exact for a source no finer than microseconds. A finer one maps several starts to each output
-/// start, and only the lowest is found.
-fn source_start(start: u64, scale: Option<moq_net::Timescale>) -> Option<u64> {
-	let source = source_from(start, scale)?;
-	(output_start(source, scale) == Some(start)).then_some(source)
-}
-
-/// The lowest source start that [`output_start`] maps at or after the output start `start`, or
-/// `None` past the source's range.
-fn source_from(start: u64, scale: Option<moq_net::Timescale>) -> Option<u64> {
-	let Some(scale) = scale else {
-		return Some(start);
-	};
-	let micros = u128::from(hang::container::TIMESCALE.as_u64());
-	u64::try_from((u128::from(start) * u128::from(scale.as_u64())).div_ceil(micros)).ok()
-}
-
 /// Keeps a cancelled serving future from dropping an unfinished output track.
 struct Serving(Option<moq_net::track::Producer>);
 
@@ -233,7 +204,8 @@ pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future
 	// Grab the group-request handle before accepting: a Request is dynamic from
 	// birth, so a fetch racing the acceptance queues instead of failing.
 	let dynamic = request.requests();
-	let info = hang::container::track_info(hang::catalog::PRIORITY.video);
+	// In the source's timescale, so each output group has its source group's key.
+	let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(rung.scale);
 	let mut producer = request.accept(info);
 	let serving = Serving(Some(producer.clone()));
 	async move {
@@ -275,7 +247,7 @@ pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future
 /// change seen through [`moq_net::track::Demand::wanted`] instead is never missed.
 async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
 	let mut demand = demand.clone();
-	while demand.wanted_changed().await?.is_some() != wanted {}
+	while demand.wanted_changed().await? != wanted {}
 	Ok(())
 }
 
@@ -301,7 +273,7 @@ impl Want {
 	fn now(&self, edge: Option<u64>) -> bool {
 		match &self.subscribers {
 			Some(track) => track.subscription().is_some_and(|sub| reaches_live(&sub, edge)),
-			None => self.demand.wanted().is_some(),
+			None => self.demand.wanted(),
 		}
 	}
 
@@ -330,13 +302,13 @@ impl Want {
 }
 
 /// Whether `subscription` reaches the live edge, the newest source group `edge`: some range is
-/// open, counts back from the latest group, or ends at or past it. As moq-net judges a copy's feed,
+/// open or ends at or past it. As moq-net judges a copy's feed,
 /// ranges wholly below it read only history, which fills serve. Before any group, every range
 /// does.
 fn reaches_live(subscription: &moq_net::track::Subscription, edge: Option<u64>) -> bool {
 	subscription.ranges.iter().any(|range| match (range.end, edge) {
 		// A time end is the last key it reads.
-		(Some(moq_net::track::Anchor::Time(last)), Some(edge)) => last >= edge,
+		(Some(last), Some(edge)) => last >= edge,
 		_ => true,
 	})
 }
@@ -504,28 +476,23 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// Mirror the source group so fetches and rendition
 					// switches map 1:1.
 					let info = moq_net::group::Info { start };
-					current = match producer.create_group(info) {
-						Ok(output) => Some(Writing(Some(output))),
-						// A fetch task is already serving this group (a consumer
-						// fetched a group at the live edge before the live loop
-						// reached it). The fetch is authoritative and its group
-						// reaches every subscriber through the shared track cache,
-						// so skip it here. Residual: if that fetch then fails and
-						// aborts the group, this rung skips one GOP until the next
-						// keyframe.
-						//
-						// The two paths stay separate writers on purpose. This one
-						// rides the shared feed (one decoder for every rung) and keeps
-						// its encoder's rate control across groups; a fetch decodes one
-						// past group on its own, at whatever pace the source serves it,
-						// with a fresh codec pair. Folding the fetch into this loop
-						// would either stall the live edge behind a past group's decode
-						// or give up the shared decode, and the track cache already
-						// settles who writes a group: the first `create_group` or
-						// `accept` wins, and the other sees `Duplicate`.
-						Err(moq_net::Error::Duplicate) => None,
-						Err(err) => return Err(err.into()),
-					};
+					// `None`: a fetch task is already serving this group (a
+					// consumer fetched a group at the live edge before the live
+					// loop reached it). The fetch is authoritative and its group
+					// reaches every subscriber through the shared track cache, so
+					// skip it here. Residual: if that fetch then fails and aborts
+					// the group, this rung skips one GOP until the next keyframe.
+					//
+					// The two paths stay separate writers on purpose. This one
+					// rides the shared feed (one decoder for every rung) and keeps
+					// its encoder's rate control across groups; a fetch decodes one
+					// past group on its own, at whatever pace the source serves it,
+					// with a fresh codec pair. Folding the fetch into this loop
+					// would either stall the live edge behind a past group's decode
+					// or give up the shared decode, and the track cache already
+					// settles who writes a group: the first `claim_group` or
+					// `accept` wins, and the other gets `None`.
+					current = producer.claim_group(info)?.map(|output| Writing(Some(output)));
 				}
 				Some(Item::Frame(frame)) => {
 					// No open group: attached mid-group, skipped a duplicate, or
@@ -630,11 +597,7 @@ async fn fetches(
 			},
 		};
 
-		// The rung can't place a time in its source without fetching it, so a lookup is dropped
-		// unanswered and its reader falls back to the groups held.
-		if let moq_net::track::Fill::Groups(fill) = fill {
-			spawn_fill(&mut tasks, rung.clone(), fill, limit.clone());
-		}
+		spawn_fill(&mut tasks, rung.clone(), fill, limit.clone());
 	}
 
 	if retired {
@@ -654,8 +617,7 @@ async fn fetches(
 			tokio::select! {
 				biased;
 				fill = dynamic.requested_fill() => match fill {
-					Ok(moq_net::track::Fill::Groups(fill)) => spawn_fill(&mut tasks, rung.clone(), fill, limit.clone()),
-					Ok(moq_net::track::Fill::Lookup(_)) => {}
+					Ok(fill) => spawn_fill(&mut tasks, rung.clone(), fill, limit.clone()),
 					// The output track closed; nothing left to serve.
 					Err(_) => break,
 				},
@@ -745,29 +707,14 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::FillGroups, sequence: u64, li
 			return Err(err.into());
 		}
 	};
-	// The source's timescale names the source group this output group mirrors.
-	let info = tokio::select! {
-		biased;
-		_ = fill.unwanted(sequence) => return abandon(sequence),
-		info = track.info() => match info {
-			Ok(info) => info,
-			Err(err) => {
-				refuse(err.clone());
-				return Err(err.into());
-			}
-		},
-	};
-	let Some(start) = source_start(sequence, info.timescale) else {
-		// No source start maps here: the group can't exist.
-		return drop_gap(rung, &track, fill, sequence, info.timescale).await;
-	};
+	// The output group has its source group's key.
 	let options = moq_net::group::Fetch::default().with_priority(fill.priority());
 	let mut source = tokio::select! {
 		biased;
 		_ = fill.unwanted(sequence) => return abandon(sequence),
-		source = track.fetch_group(start, options) => match source {
+		source = track.fetch_group(sequence, options) => match source {
 			Ok(source) => source,
-			Err(moq_net::Error::NotFound) => return drop_gap(rung, &track, fill, sequence, info.timescale).await,
+			Err(moq_net::Error::NotFound) => return drop_gap(rung, &track, fill, sequence).await,
 			Err(err) => {
 				refuse(err.clone());
 				return Err(err.into());
@@ -816,9 +763,9 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::FillGroups, sequence: u64, li
 		return abandon(sequence);
 	}
 
-	let output = match fill.accept(sequence, None) {
-		Ok(output) => output,
-		Err(err) => return Err(err.into()),
+	// Already written, as by the live path: nothing left to serve.
+	let Some(output) = fill.accept(sequence, None)? else {
+		return Ok(());
 	};
 	// A fetch builds its own pipeline, so it is billable work even when the
 	// live path is idle. Reference counted, so overlapping the live session
@@ -831,12 +778,11 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::FillGroups, sequence: u64, li
 /// Drop the run of output groups around `sequence`, which the source doesn't have, up to the
 /// source groups on either side of it.
 ///
-/// Output starts are microseconds, so a source keyed by its media time leaves most of them
-/// empty between two of its groups. Fetching each would cost one request per tick of the gap;
-/// one bounded read of the source, in key order, finds the groups around the miss instead, and
-/// the span between them is dropped at once. Filling in descending order, the span below the
-/// miss is still owed, so the read starts at the fill's first group; ascending, the span below
-/// was already answered, so it starts at the miss.
+/// Keys are media times, so most of them name no group between two of the source's. Fetching
+/// each would cost one request per tick of the gap; one bounded read of the source, in key order,
+/// finds the groups around the miss instead, and the span between them is dropped at once.
+/// Filling in descending order, the span below the miss is still owed, so the read starts at the
+/// fill's first group; ascending, the span below was already answered, so it starts at the miss.
 ///
 /// The miss itself is dropped first. A source holding no group at all resolves no time until it
 /// holds one, as it would for any reader of it, so the lookup for the rest then waits for the
@@ -848,9 +794,8 @@ async fn drop_gap(
 	track: &moq_net::track::Consumer,
 	fill: &moq_net::track::FillGroups,
 	sequence: u64,
-	scale: Option<moq_net::Timescale>,
 ) -> Result<(), Error> {
-	use moq_net::track::{Anchor, Delay, Order, Range, Subscription};
+	use moq_net::track::{Delay, Order, Range, Start, Subscription};
 
 	// The miss is the source's answer, so its readers have it at once, whatever the lookup for
 	// the rest of the gap waits on.
@@ -868,22 +813,13 @@ async fn drop_gap(
 	let Some(next) = next else {
 		return Ok(());
 	};
-	// The source starts that map into the fill, below the miss and from it.
-	let (Some(miss), Some(low)) = (source_from(sequence, scale), source_from(first, scale)) else {
-		fill.drop_groups(rest);
-		return Ok(());
-	};
-	let high = source_from(end, scale).map_or(u64::MAX, |high| high.saturating_sub(1));
-	if !below && high < miss {
-		// No source start maps between the miss and the fill's end.
-		fill.drop_groups(rest);
-		return Ok(());
-	}
-	let from = if below { low } else { miss };
+	// The fill holds the miss, so it has a last key.
+	let last = end - 1;
+	let from = if below { first } else { sequence };
 	let subscription = Subscription::default()
 		.with_ranges([Range {
-			start: Anchor::Time(from),
-			end: Some(Anchor::Time(high)),
+			start: Start::Time(from),
+			end: Some(last),
 		}])
 		.with_order(Order::Ascending)
 		.with_priority(fill.priority())
@@ -893,15 +829,12 @@ async fn drop_gap(
 		let mut groups = track.subscribe(subscription).await?.ordered();
 		// The newest source group below the miss, as the output start it maps to.
 		let mut before = None;
-		while let Some(item) = groups.next_group().await? {
-			// A group given up on is no source group.
-			let moq_net::track::Item::Group(group) = item else {
-				continue;
-			};
-			if group.start >= miss {
-				return Ok::<_, moq_net::Error>((before, output_start(group.start, scale)));
+		// A group given up on is no source group.
+		while let Some(group) = groups.next_group().await? {
+			if group.start >= sequence {
+				return Ok::<_, moq_net::Error>((before, Some(group.start)));
 			}
-			before = output_start(group.start, scale);
+			before = Some(group.start);
 		}
 		Ok((before, None))
 	};
@@ -1200,7 +1133,6 @@ fn scale_hint(size: moq_video::Size, output: moq_video::Output) -> Option<moq_vi
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::tests::groups;
 	use moq_video::Output;
 
 	/// A 160x120 software rung of an idle source, with the source and the
@@ -1235,6 +1167,7 @@ mod tests {
 			),
 			broadcast,
 			config,
+			scale: hang::container::TIMESCALE,
 			transcode: crate::Config {
 				encoder: moq_video::encode::Kind::Software,
 				decoder: moq_video::decode::Kind::Software,
@@ -1252,23 +1185,19 @@ mod tests {
 	async fn a_group_nobody_reads_releases_its_fill() {
 		use std::task::Poll;
 		let (rung, source, _retire) = idle_rung();
-		let source_fills = source
-			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap()
-			.requests();
+		// A rung's media max age, as `serve` accepts it, so its history is still fresh to fill.
+		let timed =
+			hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(moq_net::Timescale::MILLI);
+		let source_fills = source.create_track("video", timed.clone()).unwrap().requests();
 
 		let output = moq_net::broadcast::Info::default().produce();
-		// A rung's media max age, as `serve` accepts it, so its history is still fresh to fill.
-		let timed = moq_net::track::Info::default()
-			.with_timescale(moq_net::Timescale::MILLI)
-			.with_max_age(hang::container::MAX_AGE);
 		let mut track = output.create_track("video/120p", timed).unwrap();
 		let fills = track.requests();
 		let ascending = |from| {
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(from),
+					start: moq_net::track::Start::Time(from),
 					end: None,
 				}])
 				.with_order(moq_net::track::Order::Ascending)
@@ -1281,15 +1210,13 @@ mod tests {
 		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		// The reader first asks where 7 falls. A group starting at 6 covers it, so the reader
-		// starts there and asks for the groups after it.
-		let moq_net::track::Fill::Lookup(lookup) = fills.requested_fill().await.unwrap() else {
-			panic!("a time lookup");
-		};
-		assert_eq!(lookup.time(), 7);
-		lookup.accept(6, None).unwrap().finish().unwrap();
+		// The reader first asks for the group containing 7. A group starting at 6 covers it, so
+		// the reader starts there and asks for the groups after it.
+		let start = fills.requested_fill().await.unwrap();
+		assert_eq!((start.start().group, start.floor()), (7, 0));
+		start.accept(6, None).unwrap().expect("a fresh group").finish().unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let fill = fills.requested_fill().await.map(groups).unwrap();
+		let fill = fills.requested_fill().await.unwrap();
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
 		let mut tasks = tokio::task::JoinSet::new();
@@ -1298,7 +1225,6 @@ mod tests {
 		let first = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
 			.expect("group 7 is fetched from the source")
-			.map(groups)
 			.unwrap();
 		assert_eq!(first.start().group, 7);
 
@@ -1318,7 +1244,7 @@ mod tests {
 	}
 
 	/// A fill spanning a long stretch without source groups drops it in one go, rather than
-	/// asking the source for every microsecond in it.
+	/// asking the source for every key in it.
 	#[tokio::test(start_paused = true)]
 	async fn a_fill_drops_a_gap_between_source_groups_at_once() {
 		fill_across_a_gap(moq_net::track::Order::Ascending, false).await;
@@ -1330,7 +1256,7 @@ mod tests {
 		fill_across_a_gap(moq_net::track::Order::Descending, false).await;
 	}
 
-	/// A retired rung's drain drops the gap at once too, rather than a microsecond at a time.
+	/// A retired rung's drain drops the gap at once too, rather than a key at a time.
 	#[tokio::test(start_paused = true)]
 	async fn a_retired_fill_drops_a_gap_between_source_groups_at_once() {
 		fill_across_a_gap(moq_net::track::Order::Ascending, true).await;
@@ -1363,7 +1289,7 @@ mod tests {
 		let fills = track.requests();
 		let consumer = track.consume();
 		let fetching = tokio::spawn(async move { consumer.fetch_group(1, None).await.map(drop) });
-		let fill = fills.requested_fill().await.map(groups).unwrap();
+		let fill = fills.requested_fill().await.unwrap();
 		assert_eq!((fill.start().group, fill.end()), (1, 2));
 
 		let mut tasks = tokio::task::JoinSet::new();
@@ -1413,7 +1339,7 @@ mod tests {
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(1),
+					start: moq_net::track::Start::Time(1),
 					end: None,
 				}])
 				.with_order(order),
@@ -1426,13 +1352,11 @@ mod tests {
 			.unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let moq_net::track::Fill::Lookup(lookup) = fills.requested_fill().await.unwrap() else {
-			panic!("a time lookup");
-		};
-		assert_eq!(lookup.time(), 1);
-		lookup.accept(0, None).unwrap().finish().unwrap();
+		let start = fills.requested_fill().await.unwrap();
+		assert_eq!((start.start().group, start.floor()), (1, 0));
+		start.accept(0, None).unwrap().expect("a fresh group").finish().unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let fill = fills.requested_fill().await.map(groups).unwrap();
+		let fill = fills.requested_fill().await.unwrap();
 		assert_eq!((fill.start().group, fill.end()), (1, HOUR));
 		assert_eq!(fill.order(), order);
 
@@ -1469,22 +1393,18 @@ mod tests {
 	async fn retirement_serves_a_fill_past_a_reader_that_stopped() {
 		use std::task::Poll;
 		let (rung, source, retire) = idle_rung();
-		let source_fills = source
-			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap()
-			.requests();
+		let timed =
+			hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(moq_net::Timescale::MILLI);
+		let source_fills = source.create_track("video", timed.clone()).unwrap().requests();
 
 		let output = moq_net::broadcast::Info::default().produce();
-		let timed = moq_net::track::Info::default()
-			.with_timescale(moq_net::Timescale::MILLI)
-			.with_max_age(hang::container::MAX_AGE);
 		let mut track = output.create_track("video/120p", timed).unwrap();
 		let fills = track.requests();
 		let mut reader = track.subscribe(
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(7),
+					start: moq_net::track::Start::Time(7),
 					end: None,
 				}])
 				.with_order(moq_net::track::Order::Ascending),
@@ -1496,19 +1416,22 @@ mod tests {
 		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		// The reader first asks where 7 falls. A group starting at 6 covers it, so the reader
-		// starts there and asks for the groups after it.
-		let moq_net::track::Fill::Lookup(lookup) = fills.requested_fill().await.unwrap() else {
-			panic!("a time lookup");
-		};
-		assert_eq!(lookup.time(), 7);
-		lookup.accept(6, None).unwrap().finish().unwrap();
+		// The reader first asks for the group containing 7. A group starting at 6 covers it, so
+		// the reader starts there and asks for the groups after it.
+		let start = fills.requested_fill().await.unwrap();
+		assert_eq!((start.start().group, start.floor()), (7, 0));
+		start.accept(6, None).unwrap().expect("a fresh group").finish().unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let fill = fills.requested_fill().await.map(groups).unwrap();
+		let fill = fills.requested_fill().await.unwrap();
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
 		// Group 7 is served, and the reader never reads again to pick it up.
-		fill.clone().accept(7, None).unwrap().finish().unwrap();
+		fill.clone()
+			.accept(7, None)
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		let mut tasks = tokio::task::JoinSet::new();
 		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
 		let wait = std::time::Duration::from_secs(5);
@@ -1521,7 +1444,6 @@ mod tests {
 		let requested = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
 			.expect("a retired rung serves what its fill still owes")
-			.map(groups)
 			.unwrap();
 		assert_eq!(requested.start().group, 8);
 		// The source no longer has it. It holds no group to place the gap after it by, and the
@@ -1556,7 +1478,7 @@ mod tests {
 		// The track is admitted before `serve` is polled; the feed's subscription proves the
 		// live path is parked waiting for media rather than never started.
 		let mut demand = video.demand();
-		while demand.wanted_changed().await.unwrap().is_none() {}
+		while !demand.wanted_changed().await.unwrap() {}
 		running.abort();
 		assert!(running.await.unwrap_err().is_cancelled());
 		assert!(matches!(track.recv_group().await, Err(moq_net::Error::Cancel)));

@@ -1,7 +1,8 @@
 /**
  * Replay a recorded arrival trace through the player's consumer and ring on a simulated clock.
  *
- * Every frame is written into its group at the instant the trace says it arrived, and the player's
+ * Every frame is written into its group at the instant the trace says it arrived, the keys a
+ * timestamp-keyed publisher skipped declared as its group lands, and the player's
  * real `Container.Consumer` decides what to deliver and skip, at the max delay the decoder gives it,
  * reading the ordered reader that decides each hole at the budget the decoder gives that. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
  * does: a gap restarts only the codec. One render quantum is read every quantum's worth of that same
@@ -37,6 +38,9 @@ export const QUANTUM = 128;
  * leaves only the publisher's max age, which a replay never reaches.
  */
 const WIRE_MAX_DELAY = null;
+
+/** How far, in ms, a group may start past the end of the one below and still read as back to back, as the consumer allows. */
+const CONTIGUOUS = 1;
 
 /** Any non-empty payload: an empty one is the legacy container's end marker. */
 const PAYLOAD = new Uint8Array(1);
@@ -108,7 +112,7 @@ export interface Quantum {
  * raised-cosine level, with pauses of 100 to 400 ms between some. The floor stays above the harness's
  * -60 dBFS silence classifier, and no sample is exactly zero, which the output tap reads as missing.
  */
-export class Speech {
+class Speech {
 	readonly #rate: number;
 	readonly #origin: number;
 	#samples = new Float32Array(0);
@@ -208,6 +212,25 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	trace.forEach((arrival, i) => {
 		ends.set(arrival.group, i);
 	});
+	// A publisher keying groups by timestamp never produces the keys between two groups whose media
+	// is back to back, and the GROUP_END of the group below tells the subscriber so: its span reaches
+	// the next start. Keys between media that is not are owed, since a group there went missing.
+	const spans = new Map<number, { start: number; end: number }>();
+	for (const { group, timestamp, duration } of trace) {
+		const span = spans.get(group);
+		spans.set(group, {
+			start: Math.min(span?.start ?? timestamp, timestamp),
+			end: Math.max(span?.end ?? timestamp, timestamp + duration),
+		});
+	}
+	const keys = [...spans.keys()].sort((a, b) => a - b);
+	const skipped = new Map<number, number>();
+	keys.forEach((key, i) => {
+		const below = keys[i - 1];
+		if (below === undefined || below + 1 === key) return;
+		const end = spans.get(below)?.end ?? 0;
+		if ((spans.get(key)?.start ?? 0) <= end + CONTIGUOUS) skipped.set(key, below + 1);
+	});
 
 	const lookahead = Duration.millis(options.lookahead ?? 0);
 	const buffered = !lookahead.isZero();
@@ -222,7 +245,9 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	// group as it would for a session's, until the group lands or its budget gives up on it.
 	const requests = track.requests();
 	const subscriber = track.subscribe({ delay: { max: WIRE_MAX_DELAY } });
-	const ordered = track.subscribe({ delay: { min: sync.out.delay.peek() } }).ordered();
+	// It reads from the oldest group: a trace keys its groups by sequence rather than by time, where a
+	// live join could not measure back from the live edge.
+	const ordered = track.subscribe({ delay: {} }).ordered();
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
 		delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
@@ -260,7 +285,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	signals.run((effect) => {
 		const delay = effect.get(sync.out.delay);
 		const max = holeWait(delay, bound({ delay, maxDelay: effect.get(sync.out.maxDelay), stretch }));
-		ordered.update({ delay: { min: delay.add(warmup), max: max.add(warmup) } });
+		ordered.update({ delay: { max: max.add(warmup) } });
 	});
 	signals.cleanup(() => requests.close());
 	await settle();
@@ -325,7 +350,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const end = timestamp + micros((pcm.length / rate) * 1000);
 			gate.inserted(timestamp, end);
 			decoded.update((span) => ({ start: span?.start ?? media, end: Duration.micros(end) }));
-			gate.decoded(end, end);
+			gate.decoded(end, 0);
 		}
 	})().catch((error: unknown) => {
 		failure = { error };
@@ -361,6 +386,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				}
 				let group = groups.get(arrival.group);
 				if (!group) {
+					const from = skipped.get(arrival.group);
+					if (from !== undefined) track.skipGroups(BigInt(from), BigInt(arrival.group));
 					group = track.createGroup(BigInt(arrival.group));
 					groups.set(arrival.group, group);
 				}

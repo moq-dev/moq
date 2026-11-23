@@ -24,7 +24,7 @@ bun add @moq/room
 
 ## Token
 
-Sign with [`@moq/auth`](../auth). `root` is the room, `subscribe: ["**"]` subscribes to everyone, `publish: ["<identity>/**"]` so a participant cannot publish at someone else's paths.
+Sign with [`@moq/auth`](../auth). `root` is the room, `subscribe: [""]` subscribes to everyone, `publish: ["<identity>"]` so a participant cannot publish at someone else's paths.
 
 ```ts
 import { claims } from "@moq/room";
@@ -59,7 +59,7 @@ local.microphone.enabled.set(true);
 
 const room = new Room({ connection, identity });
 
-// room.remotes is a Map<identity, Remote>. Each Remote has camera/screen
+// room.remotes is a ReadonlyMap<identity, Remote>. Each Remote has camera/screen
 // Members; call member.canvas.set(canvas) to display video and
 // member.muted.set(false) to play audio. member.video and member.audio
 // report the playing timestamp and receive stats.

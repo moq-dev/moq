@@ -11,4 +11,4 @@ tls.generate = ["localhost", "127.0.0.1"]
 listen = "127.0.0.1:4443"
 
 [auth]
-public = "**"
+public = ""

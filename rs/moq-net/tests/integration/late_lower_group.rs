@@ -12,7 +12,7 @@ use moq_net::track::Delay;
 
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Info, Range, Subscription};
+use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -28,19 +28,21 @@ const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
 const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
-/// From `start`, or the oldest group still around when there is none.
+/// From `start`, or with an unstated Min Age the oldest group still around when there is none.
 fn floored(start: Option<u64>) -> Range {
-	Range {
-		start: start.map_or(Range::oldest().start, Anchor::Time),
-		end: None,
-	}
+	let start = match start {
+		Some(start) => moq_net::track::Start::Time(start),
+		None => moq_net::track::Start::Oldest,
+	};
+	Range { start, end: None }
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Four frames starting at `key` seconds, so a group created late still starts
@@ -248,9 +250,16 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		.expect("broadcast resolves")
 		.unwrap();
 
-	let subscribe = |range: Range| {
+	let subscribe = |range: Range, min: Option<Duration>| {
 		let track = remote.track("late").unwrap();
 		async move {
+			let range = match (range.start, min) {
+				(moq_net::track::Start::Oldest, Some(min)) => Range {
+					start: moq_net::track::Start::Live(min),
+					..range
+				},
+				_ => range,
+			};
 			let subscription = Subscription::default()
 				.with_delay(Delay::default().with_max(BUDGET))
 				.with_ranges([range]);
@@ -260,7 +269,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 				.expect("subscribe")
 		}
 	};
-	let mut live = subscribe(Range::live()).await;
+	let mut live = subscribe(Range::default(), Some(Duration::ZERO)).await;
 	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
@@ -275,7 +284,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		.expect("recv_group")
 		.expect("group 1");
 	assert_eq!(first.start, 1, "{version}: the live reader starts at group 1");
-	let mut oldest = subscribe(floored(Some(0))).await;
+	let mut oldest = subscribe(floored(Some(0)), None).await;
 
 	// Idle time lets the merged demand reach the publisher before the lower group exists.
 	kio::clock::sleep(Duration::from_millis(10)).await;

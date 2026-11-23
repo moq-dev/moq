@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::task::Poll;
 use std::time::Duration;
@@ -34,10 +34,10 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// duration for downstream consumers that throttle by fragment rate.
 /// Returns `None` when the broadcast ends.
 ///
-/// ## Avc3 / Hev1 sources
+/// ## Annex-B sources
 ///
-/// `Export` accepts Annex-B sources (`H264 { inline: true }`, `H265 { in_band: true }`,
-/// catalog `description` empty) by attaching a [`crate::codec::h264::Avc1`] /
+/// `Export` accepts Annex-B sources (H.264 or H.265 with an empty catalog
+/// `description`, whatever the codec string) by attaching a [`crate::codec::h264::Avc1`] /
 /// [`crate::codec::h265::Hvc1`] to each affected track. The transform caches
 /// parameter sets, builds the out-of-band `AVCDecoderConfigurationRecord` /
 /// `HEVCDecoderConfigurationRecord`, and length-prefixes sample NALs. Header
@@ -50,17 +50,26 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// A rendition the catalog moves to another track (a new `track` or `broadcast`) goes on
 /// under its track number from the new track's first sync frame past what was read, when
 /// the header's TrackEntry still describes it; otherwise, or when it goes back in time, the
-/// export fails.
+/// export fails. A rendition whose track fails ends alone while another track still reads, and
+/// a rendition of its kind that joins after the header continues it the same way: a publisher
+/// that loses a source, such as a microphone, lists a replacement under a new name. One that
+/// joins while a track of its kind still reads waits to continue that one should it fail.
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	delay: moq_net::track::Delay,
+	delay: crate::container::Delay,
 	jitter: crate::jitter::Buffer<String, Frame>,
 	/// An already released frame waiting for the previous cluster to be returned.
 	held: Option<(String, Frame)>,
 	fragment_duration: Option<Duration>,
 
 	tracks: HashMap<String, MkvTrack>,
+	/// Renditions that joined after the header while a declared track of their kind still
+	/// reads: each waits to continue a declared track of its kind that fails, and fails the
+	/// export once none is left that could.
+	spares: HashSet<String>,
+	/// Renditions a spare replaced after their track failed, ignored while still listed.
+	replaced: HashSet<String>,
 	/// Catalog snapshot used to build the header. Retained until header emission;
 	/// subsequent catalog updates only (un)subscribe tracks.
 	catalog_snapshot: Option<Catalog>,
@@ -86,7 +95,10 @@ struct MkvTrack {
 	subscribed: kio::clock::Instant,
 	// The latest arrival read from the source, which settles the frames held for their DTS.
 	latest: kio::clock::Instant,
-	finished: bool,
+	read: Read,
+	/// The catalog rendition the track reads: the one the header declared it for, or a spare
+	/// that continues it after that one failed.
+	rendition: String,
 	track_number: u64,
 	kind: TrackKind,
 	/// The TrackEntry the header declared.
@@ -96,9 +108,23 @@ struct MkvTrack {
 	moved: bool,
 }
 
+/// Whether a track still reads its source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Read {
+	Live,
+	/// The track ended, cleanly or as a sibling instance went.
+	Finished,
+	/// The track itself failed. A spare of its kind may continue it.
+	Lost,
+	/// The track ended before its codec config, so the header left it out: nothing may continue
+	/// it, or the file would carry a track number its header never declared.
+	Omitted,
+}
+
 impl MkvTrack {
-	/// A track numbered `track_number` reading `source`, with the video `config` it was added under.
-	fn new(source: ExportSource, kind: TrackKind, config: Option<VideoConfig>, track_number: u64) -> Self {
+	/// A track numbered `track_number` reading rendition `name` from `source`, with the video
+	/// `config` it was added under.
+	fn new(name: &str, source: ExportSource, kind: TrackKind, config: Option<VideoConfig>, track_number: u64) -> Self {
 		Self {
 			clock: Default::default(),
 			declared: None,
@@ -109,7 +135,8 @@ impl MkvTrack {
 			pending: None,
 			subscribed: kio::clock::now(),
 			latest: kio::clock::Instant::ZERO,
-			finished: false,
+			read: Read::Live,
+			rendition: name.to_string(),
 			track_number,
 			kind,
 			entry: None,
@@ -130,10 +157,15 @@ impl MkvTrack {
 		self.declared = None;
 		self.reorder = None;
 		self.source = source.continuing(&self.source);
-		self.finished = false;
+		self.read = Read::Live;
 		self.subscribed = kio::clock::now();
 		self.moved = true;
 		Ok(())
+	}
+
+	/// Nothing more is read: the track ended or failed.
+	fn finished(&self) -> bool {
+		self.read != Read::Live
 	}
 
 	/// The TrackEntry declaring this track under its catalog entry in `catalog`.
@@ -202,7 +234,7 @@ impl MkvTrack {
 				if (arrival.item.timestamp.as_nanos()? * 90_000 / 1_000_000_000) as u64 != pts {
 					arrival.item.timestamp = moq_net::Timestamp::from_scale(pts, 90_000)?;
 				}
-				if !self.finished && !flush {
+				if self.read == Read::Live && !flush {
 					arrival.arrived = arrival.arrived.max(self.latest);
 				}
 				arrival.decode = crate::jitter::Decode::from_ticks(dts);
@@ -241,7 +273,7 @@ impl MkvTrack {
 			let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, settle) else {
 				break;
 			};
-			if !self.finished && !flush {
+			if !self.finished() && !flush {
 				arrival.arrived = arrival.arrived.max(self.latest);
 			}
 			arrival.decode = moq_net::Timestamp::from_scale(dts, 90_000)?.try_into()?;
@@ -249,6 +281,17 @@ impl MkvTrack {
 		}
 		Ok(())
 	}
+}
+
+/// Whether the header can declare `track`, read for rendition `name`: its codec config, and a
+/// video track's geometry, are known.
+fn declarable(catalog: &Catalog, name: &str, track: &MkvTrack) -> bool {
+	track.source.header_ready()
+		&& catalog
+			.video
+			.renditions
+			.get(name)
+			.is_none_or(|config| track.source.video_geometry_ready(config))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -343,11 +386,13 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			delay: moq_net::track::Delay::default(),
+			delay: crate::container::Delay::default(),
 			jitter: crate::jitter::Buffer::new(Duration::ZERO),
 			held: None,
 			fragment_duration: None,
 			tracks: HashMap::new(),
+			spares: HashSet::new(),
+			replaced: HashSet::new(),
 			catalog_snapshot: None,
 			header_emitted: false,
 			cluster: None,
@@ -356,13 +401,13 @@ impl<S: Stream> Export<S> {
 
 	/// Set how far behind the live edge the export plays.
 	///
-	/// [`Delay::min`](moq_net::track::Delay::min) releases each frame that long after its decode
+	/// [`Delay::min`](crate::container::Delay::min) releases each frame that long after its decode
 	/// time, dropping frames that arrive later, and is where each per-track source starts. A source
 	/// whose clock runs further off ours than the output's may follow fails the export once it has
-	/// used half of it. [`Delay::max`](moq_net::track::Delay::max) is how late a source's group may
+	/// used half of it. [`Delay::max`](crate::container::Delay::max) is how late a source's group may
 	/// fall before it is skipped. Zero for both (the default) releases each frame as soon as it is
 	/// read and drops none as late, but a stalled group is still skipped once a newer one is ready.
-	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+	pub fn with_delay(mut self, delay: crate::container::Delay) -> Self {
 		self.delay = delay;
 		self.jitter = crate::jitter::Buffer::new(delay.min.unwrap_or_default());
 		self
@@ -414,21 +459,29 @@ impl<S: Stream> Export<S> {
 			// Still waiting on codec configs. If every track is finished and
 			// the header still isn't ready, the source never produced enough
 			// info to build it.
-			if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
+			if self.catalog.is_none() && self.tracks.values().all(MkvTrack::finished) {
 				return Poll::Ready(Ok(None));
 			}
 
 			return Poll::Pending;
 		}
 
+		// A frame released into the open cluster returns nothing, yet may be what kept its track
+		// from reading on: read again, since a track whose end already arrived wakes nothing.
+		let mut released = false;
 		loop {
 			let (name, frame) = match self.held.take() {
 				Some(held) => held,
 				None => match self.jitter.poll_next(waiter) {
 					Poll::Ready(ready) => (ready.track, ready.item),
+					Poll::Pending if std::mem::take(&mut released) => {
+						self.fill(waiter)?;
+						continue;
+					}
 					Poll::Pending => break,
 				},
 			};
+			released = true;
 			if let Some(chunk) = self.feed_frame(&name, frame)? {
 				return Poll::Ready(Ok(Some(chunk)));
 			}
@@ -441,7 +494,7 @@ impl<S: Stream> Export<S> {
 		// has finished. We don't require catalog EOS here - a long-lived
 		// producer may keep the catalog open even after every active track has
 		// ended, and we'd rather flush the cluster than hold the last frames.
-		if !self.tracks.is_empty() && self.tracks.values().all(|t| t.finished) {
+		if !self.tracks.is_empty() && self.tracks.values().all(MkvTrack::finished) {
 			if let Some(cluster) = self.cluster.take() {
 				return Poll::Ready(Ok(Some(cluster.finish())));
 			}
@@ -486,6 +539,7 @@ impl<S: Stream> Export<S> {
 
 	/// Read each track within its jitter window, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> Result<()> {
+		let mut lost = Vec::new();
 		for (name, track) in &mut self.tracks {
 			loop {
 				if self.header_emitted && self.jitter.full(name, waiter) {
@@ -498,10 +552,18 @@ impl<S: Stream> Export<S> {
 				let arrival = if let Some(pending) = track.pending.take() {
 					pending
 				} else {
-					if track.finished {
+					if track.finished() {
 						break;
 					}
-					let (frame, arrived) = match track.source.poll_event(waiter)? {
+					let event = match track.source.poll_event(waiter) {
+						Poll::Ready(Err(err)) if track.source.lost() => {
+							track.read = Read::Lost;
+							lost.push((name.clone(), err));
+							break;
+						}
+						event => event?,
+					};
+					let (frame, arrived) = match event {
 						Poll::Ready(Some(Event::Frame { frame, arrived })) => (frame, arrived.max(track.subscribed)),
 						// A group that ended or was cut short holds frames no later one can precede.
 						Poll::Ready(Some(Event::GroupEnd | Event::Cut { .. })) => {
@@ -512,7 +574,7 @@ impl<S: Stream> Export<S> {
 						}
 						Poll::Ready(Some(Event::FrameEnd { .. })) => continue,
 						Poll::Ready(None) => {
-							track.finished = true;
+							track.read = Read::Finished;
 							break;
 						}
 						Poll::Pending => break,
@@ -522,7 +584,7 @@ impl<S: Stream> Export<S> {
 						|| self
 							.catalog_snapshot
 							.as_ref()
-							.and_then(|catalog| catalog.video.renditions.get(name))
+							.and_then(|catalog| catalog.video.renditions.get(&track.rendition))
 							.is_some_and(|config| track.source.video_geometry_ready(config));
 					let declaring = !self.header_emitted || track.moved;
 					if declaring && (!track.source.header_ready() || !geometry_ready) {
@@ -533,7 +595,7 @@ impl<S: Stream> Export<S> {
 					if track.moved
 						&& let Some(catalog) = self.catalog_snapshot.as_ref()
 					{
-						if Some(track.track_entry(catalog, name)?) != track.entry {
+						if Some(track.track_entry(catalog, &track.rendition)?) != track.entry {
 							return Err(Error::TrackChanged(name.clone()).into());
 						}
 						track.moved = false;
@@ -570,11 +632,96 @@ impl<S: Stream> Export<S> {
 					self.jitter.push(name.clone(), arrival)?;
 				}
 			}
-			if track.finished {
+			if track.finished() {
 				track.release(name, &mut self.jitter, true)?;
 			}
 		}
+		let mut continued = false;
+		for (name, err) in lost {
+			continued |= self.survive(&name, err)?;
+		}
+		// A track that ended may have been the last a spare could continue. A continued track's
+		// new source is read now, since nothing else would wake the export for it.
+		if self.settle_spares()? || continued {
+			return self.fill(waiter);
+		}
 		Ok(())
+	}
+
+	/// Whether the export outlives the failure of track `name`, which [`Self::fill`] ended.
+	///
+	/// A spare of its kind continues it at once. Otherwise, while another track still reads,
+	/// only that rendition ends: a publisher that loses a source, such as a microphone, may
+	/// list a replacement, which continues it then. With nothing left reading, the failure is
+	/// the export's, as before. Returns whether a spare continued a track.
+	fn survive(&mut self, name: &str, err: crate::Error) -> Result<bool> {
+		let continued = self.settle_spares()?;
+		if self.tracks.values().all(MkvTrack::finished) {
+			return Err(err);
+		}
+		if self.tracks.get(name).is_some_and(|track| track.read == Read::Lost) {
+			tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
+		}
+		Ok(continued)
+	}
+
+	/// Continue each failed track with a spare of its kind, holding the other spares while a
+	/// track of their kind still reads. A spare with neither is a rendition the header never
+	/// declared, which fails the export. Returns whether a spare continued a track, whose new
+	/// source has yet to be polled.
+	fn settle_spares(&mut self) -> Result<bool> {
+		let Some(catalog) = self.catalog_snapshot.as_ref() else {
+			return Ok(false);
+		};
+		let mut names: Vec<String> = self.spares.iter().cloned().collect();
+		names.sort();
+		let mut continued = false;
+		for name in names {
+			let kind = match (catalog.video.renditions.get(&name), catalog.audio.renditions.get(&name)) {
+				(Some(_), _) => TrackKind::Video,
+				(None, Some(_)) => TrackKind::Audio,
+				(None, None) => continue,
+			};
+			let failed = self
+				.tracks
+				.iter()
+				.filter(|(_, track)| track.kind == kind && track.read == Read::Lost)
+				.map(|(key, track)| (track.track_number, key.clone()))
+				.min();
+			let Some((_, key)) = failed else {
+				if !self
+					.tracks
+					.values()
+					.any(|track| track.kind == kind && !track.finished())
+				{
+					return Err(Error::HeaderAddedTrack(name).into());
+				}
+				continue;
+			};
+			let source = match kind {
+				TrackKind::Video => {
+					ExportSource::for_video(&self.source, &name, &catalog.video.renditions[&name], self.delay)?
+				}
+				TrackKind::Audio => {
+					ExportSource::for_audio(&self.source, &name, &catalog.audio.renditions[&name], self.delay)?
+				}
+			};
+			let Some(source) = source else {
+				continue;
+			};
+			self.spares.remove(&name);
+			let track = self.tracks.get_mut(&key).expect("a failed track");
+			tracing::info!(track = %name, replaces = %track.rendition, "continuing a failed rendition");
+			track.rebind(&key, source, &mut self.jitter)?;
+			let failed = std::mem::replace(&mut track.rendition, name);
+			if kind == TrackKind::Video {
+				track.config = catalog.video.renditions.get(&track.rendition).cloned();
+				track.reorder = None;
+			}
+			self.replaced.insert(failed);
+			continued = true;
+		}
+		Ok(continued)
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> Result<()> {
@@ -591,32 +738,47 @@ impl<S: Stream> Export<S> {
 			active.insert(name.clone(), ());
 		}
 
-		// The MKV `Tracks` element is written once and can't be amended, so reject a
-		// rendition added once the header has been emitted.
+		// The MKV `Tracks` element is written once and can't be amended, so a rendition added
+		// once the header has been emitted only continues a declared track of its kind that
+		// failed ([`Self::settle_spares`]).
 		//
 		// A declared rendition that leaves the catalog (disabled, or retired) keeps its
 		// track and is read to its own end: a disabled rendition idles until it re-enables,
 		// and a retired one finishes on its own.
 		if self.header_emitted {
+			let mut spares = HashSet::new();
 			for name in active.keys() {
-				if !self.tracks.contains_key(name) {
-					return Err(Error::HeaderAddedTrack(name.clone()).into());
+				if self.replaced.contains(name) || self.tracks.values().any(|track| track.rendition == *name) {
+					continue;
 				}
+				if !self.spares.contains(name) {
+					tracing::warn!(track = %name, "rendition joined after the header; it waits to continue a failed one");
+				}
+				spares.insert(name.clone());
 			}
+			self.spares = spares;
+			self.replaced.retain(|name| active.contains_key(name));
 			for (name, config) in &catalog.audio.renditions {
-				if let Some(track) = self.tracks.get_mut(name)
+				if let Some((key, track)) = self
+					.tracks
+					.iter_mut()
+					.find(|(_, track)| track.rendition == *name && track.read != Read::Omitted)
 					&& !track.source.reads(&self.source, name, config)
 					&& let Some(source) = ExportSource::for_audio(&self.source, name, config, self.delay)?
 				{
-					track.rebind(name, source, &mut self.jitter)?;
+					track.rebind(key, source, &mut self.jitter)?;
 				}
 			}
 			for (name, config) in &catalog.video.renditions {
-				if let Some(track) = self.tracks.get_mut(name) {
+				if let Some((key, track)) = self
+					.tracks
+					.iter_mut()
+					.find(|(_, track)| track.rendition == *name && track.read != Read::Omitted)
+				{
 					if !track.source.reads(&self.source, name, config)
 						&& let Some(source) = ExportSource::for_video(&self.source, name, config, self.delay)?
 					{
-						track.rebind(name, source, &mut self.jitter)?;
+						track.rebind(key, source, &mut self.jitter)?;
 					}
 					if track
 						.config
@@ -629,7 +791,7 @@ impl<S: Stream> Export<S> {
 				}
 			}
 			self.catalog_snapshot = Some(catalog);
-			return Ok(());
+			return self.settle_spares().map(|_| ());
 		}
 
 		// Nothing went out yet, so a rendition that left the catalog is dropped, and one the
@@ -650,7 +812,7 @@ impl<S: Stream> Export<S> {
 			let Some(source) = ExportSource::for_video(&self.source, name, config, self.delay)? else {
 				continue;
 			};
-			let track = MkvTrack::new(source, TrackKind::Video, Some(config.clone()), next_track_number);
+			let track = MkvTrack::new(name, source, TrackKind::Video, Some(config.clone()), next_track_number);
 			self.tracks.insert(name.clone(), track);
 			next_track_number += 1;
 		}
@@ -662,7 +824,7 @@ impl<S: Stream> Export<S> {
 			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.delay)? else {
 				continue;
 			};
-			let track = MkvTrack::new(source, TrackKind::Audio, None, next_track_number);
+			let track = MkvTrack::new(name, source, TrackKind::Audio, None, next_track_number);
 			self.tracks.insert(name.clone(), track);
 			next_track_number += 1;
 		}
@@ -684,13 +846,17 @@ impl<S: Stream> Export<S> {
 		let Some(catalog) = self.catalog_snapshot.as_ref() else {
 			return false;
 		};
-		!self.tracks.is_empty()
-			&& self.tracks.values().all(|t| t.source.header_ready())
-			&& catalog.video.renditions.iter().all(|(name, config)| {
-				self.tracks
-					.get(name)
-					.is_some_and(|track| track.source.video_geometry_ready(config))
-			})
+		// A track that ended before its codec config can't be declared, and holds nothing back.
+		self.tracks.iter().any(|(name, track)| declarable(catalog, name, track))
+			&& self
+				.tracks
+				.iter()
+				.all(|(name, track)| track.finished() || declarable(catalog, name, track))
+			&& catalog
+				.video
+				.renditions
+				.keys()
+				.all(|name| self.tracks.contains_key(name))
 	}
 
 	fn build_header(&mut self) -> Result<Bytes> {
@@ -713,6 +879,13 @@ impl<S: Stream> Export<S> {
 		let video = catalog.video.renditions.keys().map(|name| (name, TrackKind::Video));
 		let audio = catalog.audio.renditions.keys().map(|name| (name, TrackKind::Audio));
 		for (name, kind) in video.chain(audio) {
+			if let Some(track) = self.tracks.get_mut(name)
+				&& track.finished()
+				&& !declarable(catalog, name, track)
+			{
+				track.read = Read::Omitted;
+				continue;
+			}
 			let track = self.tracks.get_mut(name).ok_or_else(|| match kind {
 				TrackKind::Video => Error::MissingVideoTrack(name.clone()),
 				TrackKind::Audio => Error::MissingAudioTrack(name.clone()),
@@ -839,7 +1012,7 @@ fn build_video_track_entry(
 	description: Option<&Bytes>,
 ) -> Result<MatroskaSpec> {
 	// The description came from either the catalog (avc1/hvc1 sources) or
-	// the codec transform (Avc3/Hev1 sources synthesizing it from inline params).
+	// the codec transform (Annex-B sources synthesizing it from inline params).
 	let codec_private = description.map(|b| b.to_vec());
 
 	let (codec_id, codec_private) = match &config.codec {

@@ -2,8 +2,7 @@
 
 //! A group the subscription's max delay gives up on before the publisher finishes it never
 //! reaches the next hop as finished, so a relay does not cache the frames it already has as
-//! the whole group. Before lite-07 the served stream resets with `Old`; lite-07 closes it
-//! without a GROUP_END, which the next hop keeps as a closed group with no end.
+//! the whole group: the served stream resets with `Old`.
 
 use crate::support;
 use moq_net::track::Delay;
@@ -24,10 +23,11 @@ const BUDGET: Duration = Duration::from_millis(500);
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// How a reader ended a group: the read's outcome, and the end the group was finished at.
@@ -37,7 +37,6 @@ type Ended = (Result<Option<usize>, moq_net::Error>, Option<u64>);
 /// return how a reader without a budget of its own ends group 0 at the downstream hop:
 /// `None` when that hop holds no copy of it.
 async fn round(version: &str) -> Option<Ended> {
-	let closes = version == "moq-lite-07-wip";
 	let publisher = produce_origin(1);
 	let downstream = produce_origin(2);
 	let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &downstream).await;
@@ -90,14 +89,7 @@ async fn round(version: &str) -> Option<Ended> {
 	let tail = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("the stalled group never gave up");
-	match closes {
-		true => assert!(
-			matches!(tail, Ok(None)) && group.end().is_none(),
-			"{version}: the live reader saw {tail:?} ending at {:?}",
-			group.end()
-		),
-		false => assert!(tail.is_err(), "{version}: the live reader saw a clean end: {tail:?}"),
-	}
+	assert!(tail.is_err(), "{version}: the live reader saw a clean end: {tail:?}");
 	kio::clock::sleep(Duration::from_millis(100)).await;
 
 	// A reader with no budget to apply sees only what the downstream hop cached.

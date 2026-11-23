@@ -244,7 +244,7 @@ fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bo
 
 /// Serve ordinary clients from an already-bound listener, each through its lease.
 fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio::Listener, serving: Serving) {
-	if let Ok(addr) = listener.local_addr() {
+	if let Some(addr) = listener.local_addr() {
 		tracing::info!(%addr, "listening");
 	}
 	tasks.spawn(async move {
@@ -1222,7 +1222,7 @@ mod tests {
 		let (trigger, observer) = moq_relay::shutdown::Observer::new(window);
 
 		let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test");
-		let all = moq_auth::Pattern::all;
+		let all = moq_auth::Prefixes::all;
 		let (producer, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 		let (lease, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Tcp, "/room")), async {
 			admissions.next().await.unwrap().grant(consumer);
@@ -1396,8 +1396,8 @@ mod tests {
 					"{timeout}: decided before the grant"
 				);
 				admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(
-					moq_auth::Pattern::all(),
-					moq_auth::Pattern::all(),
+					moq_auth::Prefixes::all(),
+					moq_auth::Prefixes::all(),
 				)));
 				tokio::time::resume();
 				let connection = kio::clock::timeout(TIMEOUT, listening.connection.clone().established())
@@ -1421,7 +1421,7 @@ mod tests {
 						.await
 						.unwrap()
 						.ordered();
-					let mut group = track.next_group().await.unwrap().unwrap().group().unwrap();
+					let mut group = track.next_group().await.unwrap().unwrap();
 					group.read_frame().await.unwrap().unwrap().payload
 				})
 				.await
@@ -1573,7 +1573,7 @@ mod tests {
 			"--listen-tcp-bind",
 			&addr,
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])
@@ -1635,7 +1635,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])

@@ -1066,7 +1066,7 @@ mod tests {
 
 		let mut output = moq_net::broadcast::Info::default().produce();
 		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();
-		let mut guard = derived.modify().unwrap();
+		let mut guard = derived.modify(derived.next_timestamp()).unwrap();
 		populate(&mut guard, &source.snapshot(), &[], None).unwrap();
 		guard.commit().unwrap();
 		let adopted = derived.clock();

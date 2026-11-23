@@ -9,6 +9,7 @@ import { Effect, Signal } from "@moq/signals";
 import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
+import { defined } from "../defined.test-util.ts";
 import { type Delay, Sync, Track } from "../sync";
 import { stubSupport } from "../webcodecs.test-util";
 import { Decoder } from "./decoder";
@@ -393,7 +394,9 @@ async function guardedPlayback(
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
 	const track = live
-		? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
+		? defined(
+				mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }),
+			)
 		: undefined;
 	const decoder = new Decoder({ source, sync, enabled, priority });
 	// Another track on the same clock, whose arrivals the tests drive by hand.
@@ -453,7 +456,12 @@ async function guardedPlayback(
 				? new Moq.Origin.Producer().route(Moq.Path.from(path), { hidden: true }).broadcast
 				: new Moq.Broadcast.Producer();
 			const track = live
-				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
+				? defined(
+						mediaProducer.createTrack("video", {
+							timescale: Moq.Time.Timescale.MILLI,
+							maxAge: Container.MAX_AGE,
+						}),
+					)
 				: undefined;
 			media.set(mediaProducer.consume());
 			return track;
@@ -1216,10 +1224,12 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		(playback.track as Moq.Track.Producer).close();
 		playback.switchRendition("video/1");
 		video.replace(
-			playback.producer.createTrack("video/1", {
-				timescale: Moq.Time.Timescale.MILLI,
-				maxAge: Container.MAX_AGE,
-			}),
+			defined(
+				playback.producer.createTrack("video/1", {
+					timescale: Moq.Time.Timescale.MILLI,
+					maxAge: Container.MAX_AGE,
+				}),
+			),
 		);
 		await run(20_000, 26_000);
 
@@ -1230,6 +1240,68 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		expect(playback.sync.out.delay.peek().ge(delay)).toBe(true);
 	} finally {
 		follow.close();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+// A pause releases the rendition and a resume subscribes again on the same path. Restarting its
+// arrival estimate from the cold-start prior gave the first outage after the resume a tenth of the
+// histogram, so one late keyframe group held the shared delay near a second and froze the picture.
+it("a resumed video track keeps its estimate, so one late burst does not raise the delay", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true);
+	const track = playback.track as Moq.Track.Producer;
+	// One frame every 33ms in one-second groups, each written as it is due unless `held`.
+	const FRAME = 33;
+	const GOP = 30;
+	let frame = 0;
+	let group: Moq.Group.Producer | undefined;
+	let held = false;
+	const queued: number[] = [];
+	const run = async (until: number) => {
+		while (frame * FRAME <= until) {
+			await clock.advance(FRAME);
+			queued.push(frame * FRAME);
+			frame++;
+			if (!held) {
+				for (const media of queued.splice(0)) {
+					if (media % (FRAME * GOP) === 0) {
+						group?.finish();
+						group = track.createGroup(BigInt(media / (FRAME * GOP)));
+					}
+					group?.writeFrame(legacyFrame(Duration.millis(media)));
+				}
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+			await microtasks();
+		}
+	};
+
+	try {
+		playback.delay.set("auto");
+		await microtasks();
+
+		// Long enough for the estimate to settle on a path where every frame lands on time.
+		await run(20_000);
+		const warm = playback.sync.out.delay.peek();
+
+		playback.enabled.set(false);
+		await run(23_000);
+		playback.enabled.set(true);
+		// Past the join, so the outage below is measured as the path's.
+		await run(25_000);
+
+		// One outage: the frames from a keyframe on held back for 800ms and flushed at once.
+		held = true;
+		await run(25_740 + 800);
+		held = false;
+		await run(28_000);
+
+		expect(playback.decoder.out.timestamp.peek()?.asMillis()).toBeGreaterThan(27_000);
+		expect(playback.sync.out.delay.peek().asMillis()).toBeLessThan(warm.asMillis() + 100);
+	} finally {
 		playback.close();
 		await microtasks();
 		clock.installed.close();

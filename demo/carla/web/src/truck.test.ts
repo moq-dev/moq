@@ -69,6 +69,7 @@ describe("Truck status", () => {
 	function statusBroadcast() {
 		const broadcast = new Moq.Broadcast.Producer();
 		const track = broadcast.createTrack("status", { compression: "deflate" });
+		if (!track) throw new Error("the track already exists");
 		const producer = new Json.Snapshot.Producer<TruckStatus>({ track });
 		return { broadcast, producer };
 	}
@@ -408,9 +409,9 @@ describe("Truck control", () => {
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const camera = origin.route(Moq.Path.from("carla/truck1/front.hang"));
-		const producer = new Json.Snapshot.Producer<TruckStatus>({
-			track: camera.broadcast.createTrack("status", { compression: "deflate" }),
-		});
+		const track = camera.broadcast.createTrack("status", { compression: "deflate" });
+		if (!track) throw new Error("the status track already exists");
+		const producer = new Json.Snapshot.Producer<TruckStatus>({ track });
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,

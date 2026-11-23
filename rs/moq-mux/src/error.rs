@@ -124,10 +124,6 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
 
-	/// URL parse error.
-	#[error("url: {0}")]
-	Url(String),
-
 	/// Unknown media format.
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
@@ -261,34 +257,6 @@ pub enum Error {
 	#[error("transport stream uses {0}-byte packets; passthrough carries 188-byte packets only")]
 	TsPacketSize(usize),
 
-	/// The clock PID's PCR went backwards without `discontinuity_indicator`.
-	///
-	/// The source broke its own timebase without saying so, which leaves no timestamp that both
-	/// follows the PCR and stays on one timeline.
-	#[error("PCR on PID {pid} went back from {from} to {to} without a discontinuity_indicator")]
-	PcrRewind {
-		/// The clock PID.
-		pid: u16,
-		/// The previous PCR, raw 27 MHz ticks.
-		from: u64,
-		/// The PCR that stepped back, raw 27 MHz ticks.
-		to: u64,
-	},
-
-	/// The clock PID's PCR went backwards with `discontinuity_indicator`: the source restarted.
-	///
-	/// What follows is new content, which belongs in a new broadcast rather than on a timeline that
-	/// steps back, so the import ends here.
-	#[error("PCR on PID {pid} restarted from {from} back to {to}; a restart needs a new broadcast")]
-	PcrRestart {
-		/// The clock PID.
-		pid: u16,
-		/// The previous PCR, raw 27 MHz ticks.
-		from: u64,
-		/// The flagged PCR, raw 27 MHz ticks.
-		to: u64,
-	},
-
 	/// The clock PID carried no PCR across more bytes than a group may hold.
 	///
 	/// Those bytes cannot be timed, and holding them for a PCR that may never come is unbounded.
@@ -371,13 +339,6 @@ impl Error {
 	/// An mp4 atom error, kept opaque so an mp4-atom bump is no moq-mux break.
 	pub(crate) fn mp4(err: mp4_atom::Error) -> Self {
 		Error::Mp4(std::sync::Arc::new(err))
-	}
-}
-
-// Flattened to its message so `url` stays out of this crate's public API.
-impl From<url::ParseError> for Error {
-	fn from(err: url::ParseError) -> Self {
-		Error::Url(message(err))
 	}
 }
 

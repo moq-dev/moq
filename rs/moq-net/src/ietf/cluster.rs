@@ -1,4 +1,4 @@
-//! The MoQ Cluster extension (draft-lcurley-moq-cluster-01).
+//! The MoQ Cluster extension (draft-lcurley-moq-cluster).
 //!
 //! moq-transport carries no routing information, so a mesh of relays gossiping
 //! namespaces loops forever and has no basis for choosing between two peers

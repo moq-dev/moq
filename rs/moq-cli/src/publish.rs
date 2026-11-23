@@ -4,8 +4,8 @@ use moq_mux::container::{flv, fmp4, ts};
 /// Container format read from stdin on the import (source) side.
 #[derive(Clone, Copy)]
 pub enum PublishFormat {
-	/// Raw AVC (H.264) Annex B elementary stream.
-	Avc3,
+	/// Raw H.264 Annex B elementary stream.
+	H264,
 	/// Fragmented MP4 (CMAF), republished whole as CMAF when `cmaf`.
 	Fmp4 { cmaf: bool },
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
@@ -112,6 +112,12 @@ pub struct CaptureArgs {
 	#[usage(long)]
 	pub bitrate: Option<u64>,
 
+	/// Also publish a smaller rendition as `video/NAME`, scaled from each captured frame to
+	/// SCALE of its pixels (0.25 is half the width and height). Repeatable. Each one encodes only
+	/// while watched, and under congestion the smallest keeps playing while larger ones pause.
+	#[usage(long = "rendition", value_name = "NAME=SCALE")]
+	pub renditions: Vec<moq_video::encode::Rendition>,
+
 	/// Video codec to encode. H.265 is hardware-only (VideoToolbox on macOS).
 	#[usage(long, value_enum, default = "h264")]
 	pub codec: VideoCodec,
@@ -172,7 +178,7 @@ pub struct CaptureArgs {
 }
 
 enum PublishDecoder {
-	Avc3 {
+	H264 {
 		split: Box<moq_mux::codec::h264::Split>,
 		import: Box<moq_mux::codec::h264::Import>,
 	},
@@ -196,7 +202,7 @@ impl PublishDecoder {
 	/// [`ts::Republish::decode`].
 	fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<Option<ts::Republished>> {
 		match self {
-			Self::Avc3 { split, import } => {
+			Self::H264 { split, import } => {
 				let frames = split.decode(chunk, None)?;
 				import.decode(frames)?;
 			}
@@ -215,19 +221,19 @@ impl PublishDecoder {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
 			Self::TsPrograms(d) => Some(d.stats()),
-			Self::Avc3 { .. } | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
+			Self::H264 { .. } | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
 		}
 	}
 
 	/// Flush any buffered trailing frame and close the tracks at end of input.
-	/// The avc3 split holds the final access unit until the next start code, so
+	/// The H.264 split holds the final access unit until the next start code, so
 	/// stdin EOF must flush it explicitly.
 	fn finish(self) -> anyhow::Result<FinishedDecoder> {
 		Ok(match self {
-			Self::Avc3 { mut split, mut import } => {
+			Self::H264 { mut split, mut import } => {
 				let tail = split.flush(None)?;
 				import.decode(tail)?;
-				FinishedDecoder::Avc3(Box::new(import.finish()?))
+				FinishedDecoder::H264(Box::new(import.finish()?))
 			}
 			Self::Fmp4(d) => FinishedDecoder::Fmp4(Box::new(d.finish()?)),
 			Self::Ts(d) => FinishedDecoder::Ts(Box::new(d.finish()?)),
@@ -241,7 +247,7 @@ impl PublishDecoder {
 	/// real cause rather than `Error::Dropped`. Consumes the decoder.
 	fn abort(self, err: moq_net::Error) {
 		match self {
-			Self::Avc3 { import, .. } => import.abort(err),
+			Self::H264 { import, .. } => import.abort(err),
 			Self::Fmp4(d) => d.abort(err),
 			Self::Ts(d) => d.abort(err),
 			Self::TsPrograms(d) => d.abort(err),
@@ -253,7 +259,7 @@ impl PublishDecoder {
 
 /// A [`PublishDecoder`] whose tracks finished, holding them so they stay servable.
 enum FinishedDecoder {
-	Avc3(Box<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>),
+	H264(Box<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>),
 	Fmp4(Box<fmp4::Finished>),
 	Ts(Box<ts::republish::Finished>),
 	TsPrograms(Box<ts::programs::Finished>),
@@ -276,13 +282,13 @@ impl FinishedDecoder {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
 			Self::TsPrograms(d) => Some(d.stats()),
-			Self::Avc3(_) | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
+			Self::H264(_) | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
 		}
 	}
 
 	fn abort(self, err: moq_net::Error) {
 		match self {
-			Self::Avc3(import) => import.abort(err),
+			Self::H264(import) => import.abort(err),
 			Self::Fmp4(d) => d.abort(err),
 			Self::Ts(d) => d.abort(err),
 			Self::TsPrograms(d) => d.abort(err),
@@ -444,11 +450,11 @@ impl Publish {
 		}
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let decoder = match format {
-			PublishFormat::Avc3 => {
-				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
+			PublishFormat::H264 => {
+				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
-				PublishDecoder::Avc3 {
+				PublishDecoder::H264 {
 					split,
 					import: Box::new(import),
 				}
@@ -633,19 +639,23 @@ impl Publish {
 	pub fn with_echo(mut self, echo: hang::catalog::Echo) -> anyhow::Result<Self> {
 		match &mut self.source {
 			Source::Stream { decoder, catalog } => match (decoder, catalog) {
-				(_, PublishCatalog::Media(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
-				(_, PublishCatalog::Passthrough(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+				(_, PublishCatalog::Media(catalog)) => {
+					catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?
+				}
+				(_, PublishCatalog::Passthrough(catalog)) => {
+					catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?
+				}
 				(PublishDecoder::Ts(republish), _) => {
 					self.sections.echo = Some(echo.clone());
-					republish
-						.catalog()
-						.clone()
-						.mutate(|catalog| catalog.echo = Some(echo))?;
+					republish.catalog().clone().mutate(
+						|catalog| catalog.echo = Some(echo),
+						republish.catalog().next_timestamp(),
+					)?;
 				}
 				_ => anyhow::bail!("`import ts --program all` builds a catalog per program"),
 			},
 			#[cfg(feature = "capture")]
-			Source::Capture { catalog, .. } => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+			Source::Capture { catalog, .. } => catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?,
 		}
 		Ok(self)
 	}
@@ -907,10 +917,10 @@ impl Sections {
 	/// they ride its first catalog, returning its report.
 	fn apply(&self, republish: &ts::Republish) -> anyhow::Result<Option<crate::report::Stats>> {
 		if let Some(echo) = &self.echo {
-			republish
-				.catalog()
-				.clone()
-				.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
+			republish.catalog().clone().mutate(
+				|catalog| catalog.echo = Some(echo.clone()),
+				republish.catalog().next_timestamp(),
+			)?;
 		}
 		self.report
 			.as_ref()
@@ -1286,6 +1296,7 @@ impl CaptureArgs {
 		options.bandwidth = bandwidth;
 		options.on_demand = self.video == Mode::Demand;
 		options.device = crate::device(&self.vaapi_device, &self.v4l2_encoder);
+		options.renditions = self.renditions.clone();
 		Ok(options)
 	}
 
@@ -1447,6 +1458,33 @@ pub(crate) mod tests {
 		}
 	}
 
+	/// `--rendition` repeats, each `NAME=SCALE` reaching the video capture, and a malformed one
+	/// fails parsing.
+	#[cfg(feature = "capture")]
+	#[test]
+	fn renditions_reach_the_video_capture() {
+		use moq_net::bandwidth::Allocator;
+
+		let args = capture_args(&["--rendition", "sd=0.25", "--rendition", "ld=0.1"]);
+		let renditions = args.video_capture(Allocator::unlimited()).unwrap().renditions;
+		let parsed: Vec<_> = renditions.iter().map(|r| (r.name(), r.scale())).collect();
+		assert_eq!(parsed, [("sd", 0.25), ("ld", 0.1)]);
+		assert!(capture_args(&[]).renditions.is_empty());
+
+		for bad in ["sd", "sd=1", "a/b=0.5"] {
+			let argv = [
+				"moq",
+				"--connect",
+				"http://localhost",
+				"import",
+				"capture",
+				"--rendition",
+				bad,
+			];
+			assert!(crate::args::Invocation::try_parse_from(argv).is_err(), "{bad}");
+		}
+	}
+
 	#[cfg(feature = "capture")]
 	#[test]
 	fn the_audio_source_sets_its_kind() {
@@ -1602,12 +1640,11 @@ pub(crate) mod tests {
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
 			.broadcast()
-			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text))
-			.unwrap();
+			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text));
 		let mut section_track = tscat::Track::new(SECTION_PID);
 		section_track.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.ext
 			.mpegts
@@ -1631,12 +1668,11 @@ pub(crate) mod tests {
 		// Whole-PES stream (undecoded private data, stream_type 0x06).
 		let pes = broadcast
 			.broadcast()
-			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text))
-			.unwrap();
+			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text));
 		let mut pes_track = tscat::Track::new(PES_PID);
 		pes_track.pes_packet = Some(tscat::PesPacket::new(0x06));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.ext
 			.mpegts
@@ -2140,7 +2176,11 @@ pub(crate) mod tests {
 			.value;
 		let clock = catalog.sync.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
-		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+		// The import already finished, so the default zero budget would age its last group out
+		// as the wall clock passes its span: reach back for the whole clip instead.
+		let history =
+			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
+		let track = consumer.track(name).unwrap().subscribe(history).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 		let first = next_frame(&mut Consumer::new(track, container)).await.timestamp;
 		assert!(
@@ -2735,7 +2775,7 @@ pub(crate) mod tests {
 			(PublishFormat::Ts { program: None }, Vec::new()),
 			(PublishFormat::Ts { program: Some(1) }, tables),
 			(PublishFormat::Flv, flv_header),
-			(PublishFormat::Avc3, aud),
+			(PublishFormat::H264, aud),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let mut announced = origin.consume().announced();

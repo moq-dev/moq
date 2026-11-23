@@ -384,12 +384,7 @@ mod tests {
 		producer.write(frame(10_033_000, false)).unwrap();
 		let _finished = producer.finish().unwrap();
 
-		let mut group = subscriber
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 
 		let mut muxer = video_muxer();
 
@@ -432,12 +427,7 @@ mod tests {
 		producer.cut(Some(Timestamp::from_micros(10_066_000).unwrap())).unwrap();
 		let _finished = producer.finish().unwrap();
 
-		let mut group = subscriber
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 		let mut muxer = video_muxer();
 		let frames = muxer.read(&mut group).await.unwrap();
 		assert_eq!(frames.len(), 2, "the marker is not a sample");
@@ -465,12 +455,7 @@ mod tests {
 			})
 			.unwrap();
 		let _finished = producer.finish().unwrap();
-		let mut group = subscriber
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 
 		let config = VideoConfig::new(VideoCodec::VP8);
 		let mut muxer = Muxer::video(&config).unwrap();

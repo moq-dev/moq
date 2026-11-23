@@ -27,7 +27,7 @@ import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
-import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
+import { hasClientParameters, ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -137,10 +137,6 @@ export class Connection implements Session {
 	// The transport closed, so a stream breaking says nothing about the peer.
 	#transportClosed = false;
 
-	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
-	// direction without handing out the whole SETUP (whose probe level gates our own streams).
-	#peerRole = new Signal<Role | undefined>(undefined);
-
 	// Written by the Subscriber as PROBE messages arrive.
 	#probe = new Observed<Probe>({});
 
@@ -162,19 +158,6 @@ export class Connection implements Session {
 
 	// How the session ended: `fromClose` of the transport's close, settled after auth lets go of it.
 	#closed = new Once<Error | null>();
-
-	/**
-	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
-	 * peer's authorization grants the direction it intends to use.
-	 *
-	 * `undefined` until the peer's SETUP arrives, and forever on pre-lite-05 versions, which
-	 * carry no in-band role. {@link Role.Both} is the absence of the parameter, so it is what
-	 * a peer reports when it declines to declare a direction, sends a value we don't
-	 * recognize, or is a server (which never sends one).
-	 */
-	get peerRole(): Getter<Role | undefined> {
-		return this.#peerRole;
-	}
 
 	/**
 	 * Creates a new Connection instance.
@@ -218,8 +201,8 @@ export class Connection implements Session {
 		this.#auth = new AuthSession({
 			wire: hasAuth(version) ? new LiteAuthWire(quic, version) : undefined,
 			peerGrant: {
-				publish: new Path.Patterns([Path.Pattern.all()]),
-				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
+				publish: Path.Prefixes.all(),
+				subscribe: publish ? Path.Prefixes.all() : new Path.Prefixes(),
 			},
 			handle,
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
@@ -412,14 +395,14 @@ export class Connection implements Session {
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return announce.list(this.#subscriber.routes(scope, options));
+	/** The paths announced matching `filter`, each present or absent; see {@link Session.announced}. */
+	announced(filter?: Path.Pattern, options?: announce.Options): announce.Consumer {
+		return announce.list(this.#subscriber.routes(filter, options));
 	}
 
-	/** Every route change matching `scope`, for code that forwards routes. @internal */
-	routes(scope?: Path.Pattern, options?: announce.RouteOptions): announce.Routes {
-		return this.#subscriber.routes(scope, options);
+	/** Every route change matching `filter`, for code that forwards routes. @internal */
+	routes(filter?: Path.Pattern, options?: announce.RouteOptions): announce.Routes {
+		return this.#subscriber.routes(filter, options);
 	}
 
 	async #runSession() {
@@ -599,7 +582,6 @@ export class Connection implements Session {
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
 			this.#auth.accept();
-			this.#peerRole.set(setup.role);
 			this.#peerImplementation.resolve(setup.implementation);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);

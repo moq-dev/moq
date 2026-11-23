@@ -23,10 +23,11 @@ fn timed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &moq_net::origin::Producer, to: &moq_net::origin::Producer) -> MockPair {
@@ -84,7 +85,6 @@ async fn fetch_ahead(
 	let fill = kio::clock::timeout(TIMEOUT, request.requests().requested_fill())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the FETCH waited for the info"))
-		.map(support::groups)
 		.unwrap();
 	let held = Held {
 		_publisher: publisher,
@@ -102,7 +102,7 @@ async fn the_first_fetch_goes_out_with_the_info_request() {
 		for relays in [0, 1] {
 			let (request, fill, fetching, _held) = fetch_ahead(version, relays).await;
 			let _track = request.accept(timed());
-			let mut group = fill.accept(0, timed()).unwrap();
+			let mut group = fill.accept(0, timed()).unwrap().expect("a fresh group");
 			group.write_frame(group.at_start(), b"early".as_ref()).unwrap();
 			group.finish().unwrap();
 			let mut fetched = kio::clock::timeout(TIMEOUT, fetching)

@@ -17,11 +17,14 @@ mod cluster_drain;
 mod cluster_fresh_port;
 mod cluster_idle;
 #[cfg(feature = "test-support")]
+mod cluster_two_sessions;
+#[cfg(feature = "test-support")]
 mod cluster_unknown;
 #[cfg(feature = "test-support")]
 mod connection;
 #[cfg(feature = "test-support")]
 mod drain;
+mod drain_dialed;
 mod embed;
 #[cfg(feature = "test-support")]
 mod goaway_cluster;

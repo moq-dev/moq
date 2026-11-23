@@ -18,10 +18,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VERSIONS: [&str; 2] = ["moq-transport-18", "moq-lite-06"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A server publishing `bcast` with `tracks`, and a client subscribed to its origin.
@@ -143,7 +144,7 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 			.collect();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 
-		let held = tracks.iter().filter(|track| track.demand().wanted().is_some()).count();
+		let held = tracks.iter().filter(|track| track.demand().wanted()).count();
 		assert!(held > 0, "{version}: nothing was subscribed");
 		assert!(held <= BOUND, "{version}: the server holds {held} subscriptions");
 		assert!(

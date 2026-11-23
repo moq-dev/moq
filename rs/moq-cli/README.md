@@ -60,7 +60,7 @@ Hosts a MoQ server and publishes a single broadcast read from stdin into it. Use
 
 ```bash
 ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
-    moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '**' --broadcast my-stream.hang import ts
+    moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '' --broadcast my-stream.hang import ts
 ```
 
 ### Self-host: subscribe to an inbound broadcast
@@ -68,10 +68,10 @@ ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
 Hosts a MoQ server and writes an incoming broadcast's media to stdout. The inverse of the above.
 
 ```bash
-moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '**' --broadcast my-stream.hang export ts | ffplay -
+moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '' --broadcast my-stream.hang export ts | ffplay -
 ```
 
 ### Import formats
 
-- `avc3` raw H.264 Annex-B from stdin
+- `h264` raw H.264 Annex B elementary stream from stdin
 - `fmp4` fragmented MP4 from stdin

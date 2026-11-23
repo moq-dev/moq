@@ -17,7 +17,7 @@ import (
 type Codec = *ffi.MoqVideoCodec
 
 // PixelFormat is a CPU pixel layout (I420 or RGBA).
-type PixelFormat = ffi.MoqVideoPixelFormat
+type PixelFormat = *ffi.MoqVideoPixelFormat
 
 // EncoderKind selects the encoder backend; build one with moq.AutoEncoder and friends.
 type EncoderKind = ffi.MoqVideoEncoderKind
@@ -41,7 +41,8 @@ type Packet = ffi.MoqVideoPacket
 type DecoderOutput struct {
 	Resize *media.Dimensions
 	// Delay.Min is the playout delay, where a cold join starts; Delay.Max is how far a stalled
-	// group may fall behind before it is skipped. The zero Delay is zero for both.
+	// group may fall behind before it is skipped. The zero Delay leaves Min unstated, which the
+	// decoder starts as zero, and Max zero.
 	Delay   moq.Delay
 	Surface bool
 	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.
@@ -129,7 +130,7 @@ func (p *Producer) Reservation() *moq.Reservation {
 }
 
 // AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
 // true once the track is closed, and false, leaving the track open, when a reader
 // joined since; keep serving and wait for the next nil on a fresh Demand():
 // one that already returned nil misses a reader that came and went, and waits on.

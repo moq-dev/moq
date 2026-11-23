@@ -104,9 +104,6 @@ impl AnnouncedRecord {
 		let (update, kind) = match event {
 			Event::Present(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT),
 			Event::Absent(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_ABSENT),
-			Event::Offline(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_OFFLINE),
-			Event::Unavailable(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UNAVAILABLE),
-			Event::Available(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_AVAILABLE),
 		};
 		let captures: Vec<_> = update
 			.captures
@@ -196,7 +193,7 @@ impl Origin {
 	pub fn announced(
 		&mut self,
 		origin: Id,
-		scope: moq_net::Pattern,
+		filter: moq_net::Pattern,
 		hidden: bool,
 		on_announce: OnStatus,
 	) -> Result<Id, Error> {
@@ -206,7 +203,7 @@ impl Origin {
 		let consumer = origin
 			.producer
 			.consume()
-			.scope("", &moq_net::Patterns::from(scope))?
+			.filter(&filter)?
 			.with_hidden(hidden)
 			.announced();
 		self.announced_task.spawn(

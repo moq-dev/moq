@@ -41,9 +41,20 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAMES: u64 = 4;
 
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	produce(hop, true)
+}
+
+/// An origin that never forwards what it learned, as an application's.
+pub(super) fn produce_app(hop: u64) -> origin::Producer {
+	produce(hop, false)
+}
+
+fn produce(hop: u64, proxy: bool) -> origin::Producer {
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = proxy;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -1321,7 +1332,7 @@ async fn producer_replaced(version: &str) {
 			group.write_frame(group.at_start(), payload(key, frame)).unwrap();
 			assert_eq!(next(&mut rx).await, (key, payload(key, frame)), "{version}");
 		}
-		group.finish().unwrap();
+		group.finish_at(key + 1).unwrap();
 	}
 
 	// The encoder restarts: the old producer goes away mid-broadcast, and the resumed
@@ -1338,7 +1349,7 @@ async fn producer_replaced(version: &str) {
 		group.write_frame(group.at_start(), payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");
 	}
-	group.finish().unwrap();
+	group.finish_at(3).unwrap();
 
 	settle().await;
 	assert!(

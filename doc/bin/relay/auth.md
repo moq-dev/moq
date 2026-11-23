@@ -10,13 +10,13 @@ A relay admits a session in exactly one of two ways:
 | Flag | What admits |
 | --- | --- |
 | `--auth-url` | An auth server, asked once per session event with everything the relay knows. `moq auth serve` is the reference server; a Worker or a service of your own answers the same contract. |
-| `--auth-public` | A static grant for anonymous sessions: patterns rooted at `/`, like a token with an empty root. No server. |
+| `--auth-public` | A static grant for anonymous sessions: prefixes rooted at `/`, like a token with an empty root. No server. |
 
 Setting both, or neither, fails at startup; an application that embeds the
 relay may leave both unset and decide [in process](#in-process) instead.
 Nothing else admits anyone: a verified client certificate is a fact the server
 weighs, never a grant on its own. A grant names publish and subscribe rights as
-path patterns under a root, and the session can only see that part of the tree.
+path prefixes under a root, and the session can only see that part of the tree.
 
 ## The contract
 
@@ -30,7 +30,7 @@ certificate. Nothing is parsed on the server's behalf: the `jwt` query parameter
 `moq auth serve`, not of the relay. A path with a `.` or `..` segment is refused
 before the server is asked: a URL transport resolves those away, but a SETUP
 path arrives verbatim. The grant answers with `publish` and
-`subscribe` pattern unions, each optionally [capped](#bitrate-caps), and optionally a `root` alias, read-only `mounts`,
+`subscribe` prefix lists, each optionally [capped](#bitrate-caps), and optionally a `root` alias, read-only `mounts`,
 `expires`, a `revalidate` cadence, a stats `tier` and `label`, and a `link` (`peer` or
 `upstream`) to mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
 A `tier` is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, such as `region/sjc`,
@@ -42,7 +42,9 @@ The relay reads a grant as strictly as a token's [claims](#claims): a field it
 does not know refuses the session, since a field added later may narrow the
 grant. A relay before 0.22 sends no `relay` and ignores a field it does not
 know, enforcing the grant without it, so a server branches on `relay` before
-sending a field newer than 0.22. Such a relay reads `peer: true` in place of
+sending a field newer than 0.22. Such a relay reads a bare `foo` as one path, so
+`moq_auth` and `@moq/auth`'s `GrantSchema` spell each prefix as `foo/**` or `**`,
+which every relay reads as the subtree. It also reads `peer: true` in place of
 `link` and knows no upstream: `moq_auth` writes `peer: true` beside every `link`, so that
 relay admits an upstream as a plain peer, which can carry traffic between two upstreams.
 Where that matters, refuse the session when the request has no `relay` (or one older than 0.22),
@@ -156,7 +158,7 @@ moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
 
 # Let the bearer publish under rooms/123/alice and subscribe to anything in rooms/123.
 # The token expires in an hour unless --ttl, --expires, or --unbounded says otherwise.
-moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' > alice.jwt
+moq auth sign --key private.jwk --root rooms/123 --publish alice --subscribe '' > alice.jwt
 
 moq auth verify --key public.jwk --in alice.jwt
 ```
@@ -199,7 +201,7 @@ it is retried with backoff like any other failure, within the retry window,
 presenting whatever tokens are current.
 Older versions refuse in-band tokens.
 
-Each accepted token adds its publish and subscribe patterns to the session's
+Each accepted token adds its publish and subscribe prefixes to the session's
 union, within its admitted root and SETUP role. A publish-only connection cannot
 become a subscriber. A replacement must retain the root, mounts, and routing
 classification. Dropping a token handle, expiry, or refusal at revalidation
@@ -222,8 +224,8 @@ cannot verify a presented token; both refuse it as unsupported. On moq-transport
 each distinct `AUTHORIZATION TOKEN` is verified once while any open request on
 that session names it. Its grant admits only requests naming that token,
 independently of the session's scope. Discovery reveals only paths it grants;
-a `PUBLISH_NAMESPACE` grant must cover the whole namespace: `room/**`, not just
-`room`. The last naming request ending releases the lease at the auth server;
+a `PUBLISH_NAMESPACE` grant must cover the whole namespace: a grant of `room/a`
+does not admit announcing `room`. The last naming request ending releases the lease at the auth server;
 a later request verifies the token again. Expiry or revocation ends every
 request naming it. Expiry says so, so the client knows to renew the token: a
 request not yet answered is refused with `EXPIRED_AUTH_TOKEN`, and an answered
@@ -251,8 +253,8 @@ outage still closes.
 | Claim | Meaning |
 | --- | --- |
 | `root` | Base path. Optional. |
-| `publish` | Patterns the bearer may publish under `root`. `**` means everything; omitted means no publishing. |
-| `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
+| `publish` | Prefixes the bearer may publish under `root`, each covering itself and everything beneath it. `""` means everything; omitted means no publishing. |
+| `subscribe` | Prefixes the bearer may subscribe to under `root`. Same rules. |
 | `exp`, `iat`, `nbf` | Expiry, issue time, and not-before. `exp` ends that credential's grant, including after connect; another accepted token can keep the session alive. A token is refused from its `exp` on and before its `nbf`. |
 | `jti` | The token's ID, which its issuer may record to revoke it: 1 to 128 printable ASCII characters, without spaces. Optional; `moq auth sign --id` writes one. |
 | `iss`, `sub` | Read and ignored. |
@@ -262,14 +264,14 @@ claim may narrow the grant, and a misspelled `root` would otherwise widen it to
 everything. Put application data somewhere other than the token.
 
 Tokens and key scopes from the older `moq-token` format still verify: each
-`put` and `get` prefix `p` reads as the subtree `p/**`. Nothing writes that
+`put` and `get` entry reads as the same prefix. Nothing writes that
 form any more, so a verifier that reads only `put` and `get`, such as moq-relay
 0.14 and earlier, refuses a new token.
 
 ### Bitrate caps
 
-A role may cap its bitrate, in bits per second, by naming its patterns as
-`{"path":["alice/**"],"rate":8000000}` in a token or an auth-server grant. A
+A role may cap its bitrate, in bits per second, by naming its prefixes as
+`{"path":["alice"],"rate":8000000}` in a token or an auth-server grant. A
 `publish` cap bounds what the session sends the relay, and a `subscribe` cap
 what the relay sends it, QUIC overhead and retransmissions included. Each
 averages over a second, with one second of the rate as a burst. Older relays
@@ -289,23 +291,29 @@ the relay opens the window once it admits the session.
 
 ### Path matching
 
-Grants are [patterns](https://docs.rs/moq-pattern) relative to `root`: `foo`
-is exactly `foo`, `foo/**` is `foo` and everything beneath it, `live/*` is
-every broadcast one segment under `live`, and `**` is everything. Matching is
-on path boundaries (`foo/**` covers `foo/bar` but not `foobar`), and the relay
+Grants are [prefixes](https://docs.rs/moq-pattern) relative to `root`: `foo`
+covers `foo` and everything beneath it, and the empty prefix `""` covers
+everything. A grant takes no wildcard: `foo/**`, `**`, `live/*`, or `cam-*.hang`
+is refused in `moq auth serve` rules, relay config, and CLI flags, with a
+message naming the prefix to write instead. Tokens, key scopes, and auth
+server grants spell each prefix as the subtree pattern releases before 0.22
+read, `foo/**` and `**`, and read that spelling back as the prefix, so they work
+with relays and verifiers on either side of the upgrade; any other wildcard
+there is refused.
+Matching is on path boundaries (`foo` covers `foo/bar` but not `foobar`), and the relay
 announces, publishes, and resolves only paths inside the grant. `moq auth
 serve` authorizes the token at the dialed path: the path may equal the root,
 extend it (which narrows the grant), or be a parent of it (the grant still
 applies at the root). An unrelated path is rejected.
 
 The session's root is always the path it dialed, and what it sees is named
-relative to that. For a grant of `demo/**` from the root:
+relative to that. For a grant of `demo` from the root:
 
 | Dialed | Session root | Granted |
 | --- | --- | --- |
-| `/demo/bar` | `demo/bar` | `**` |
-| `/demo` | `demo` | `**` |
-| `/` | \`\` | `demo/**` |
+| `/demo/bar` | `demo/bar` | everything (`""`) |
+| `/demo` | `demo` | everything (`""`) |
+| `/` | \`\` | `demo` |
 | `/other` | refused | |
 
 Anonymous and mTLS rules, on the relay and in `moq auth serve`, are authorized
@@ -313,9 +321,9 @@ the same way, as a token with an empty root.
 
 | root | publish | subscribe | Publish | Subscribe |
 | --- | --- | --- | --- | --- |
-| `demo` | `my-stream/**` | `**` | `demo/my-stream/**` | `demo/**` |
-| `demo` | (none) | `**` | nothing | `demo/**` |
-| `""` | `**` | `**` | everything | everything |
+| `demo` | `my-stream` | `""` | `demo/my-stream` | `demo` |
+| `demo` | (none) | `""` | nothing | `demo` |
+| `""` | `""` | `""` | everything | everything |
 
 Libraries: [`moq-auth`](/lib/rs/moq-auth) (Rust) and [`@moq/auth`](/lib/js/auth) (TypeScript) sign and verify the same tokens.
 
@@ -323,20 +331,21 @@ Libraries: [`moq-auth`](/lib/rs/moq-auth) (Rust) and [`@moq/auth`](/lib/js/auth)
 
 ```toml
 [auth]
-public = "anon/**"                    # anyone may publish and subscribe under anon/
+public = "anon"                       # anyone may publish and subscribe under anon/
 
 # or asymmetric rules:
-public_subscribe = ["anon/**", "demo/**"]
-public_publish = ["anon/**"]
+public_subscribe = ["anon", "demo"]
+public_publish = ["anon"]
 ```
 
 A static grant with no expiry and no re-check. Nothing here verifies a token,
 so a session presenting one is refused rather than admitted on the public
-grant. The patterns are rooted at `/`, like a token with an empty root (see
-[Path matching](#path-matching)): `anon/**` admits a session dialed at `/`,
-`/anon`, or `/anon/room`, and refuses one dialed anywhere else. A pattern with
-no wildcard names one broadcast: `anon` is the broadcast `anon`, and `anon/**` is the subtree.
-`public = "**"` opens everything and is for development only. With
+grant. The prefixes are rooted at `/`, like a token with an empty root (see
+[Path matching](#path-matching)): `anon` admits a session dialed at `/`,
+`/anon`, or `/anon/room`, and refuses one dialed anywhere else, `/anonymous`
+included. The empty prefix, `public = ""` (or `--auth-public ''`, or
+`MOQ_AUTH_PUBLIC=` set but empty), opens everything and is for development only.
+A wildcard such as `anon/**` or `**` is refused at startup. With
 `--auth-url` the anonymous rules live on the server instead
 (`moq auth serve --public-*`).
 
@@ -355,7 +364,7 @@ client certificates under `listen.tls.root`; plain HTTPS verifies them under
 refuses `listen.tls.root`.
 
 Cluster peers are admitted the same way, so a mesh runs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
+`moq auth serve --mtls-publish '' --mtls-subscribe '' --mtls-link peer` (or a
 server granting its cluster CA everything with `link: "peer"`); see
 [Clustering](/bin/relay/cluster). `--mtls-link peer` marks every certificate as
 another relay; leave it off when certificates identify clients. Without a
@@ -391,9 +400,9 @@ chain in decides which rule applies.
 dotted key; a flag given on the command line wins. Only the file holds
 per-certificate rules, keyed by any hash in `tls.chain`. The rule naming the
 certificate nearest the leaf applies: it can set `publish` and `subscribe`
-(each a pattern list, or `{ path = [...], rate = bps }` with a
+(each a prefix list, or `{ path = [...], rate = bps }` with a
 [cap](#bitrate-caps)), `link` (`peer`, `upstream`, or `none`), and `tier`,
-and each field it omits takes the server-wide value. Its patterns replace the
+and each field it omits takes the server-wide value. Its prefixes replace the
 shared ones, so a rule with empty lists revokes. A certificate no rule names
 gets `--mtls-*`. The server watches the file: an edit takes effect at each
 session's next re-check, and one that fails to load keeps the last valid
@@ -405,13 +414,13 @@ revalidate = "1m"
 expires = "1d"
 
 [mtls]
-publish = ["**"]
-subscribe = ["**"]
+publish = [""]
+subscribe = [""]
 link = "peer"                  # cluster CA: every other certificate is a relay
 
 [mtls.certificates.3f2a...]    # an affiliate's intermediate CA: everything it issued
-publish = { path = ["affiliate-a/**"], rate = 20000000 }
-subscribe = ["affiliate-a/**"]
+publish = { path = ["affiliate-a"], rate = 20000000 }
+subscribe = ["affiliate-a"]
 link = "none"
 tier = "affiliate-a"
 
@@ -435,8 +444,8 @@ Update any policy keyed on `tcp` for stream links to handle `tls` too.
 ```bash
 moq auth serve --listen 127.0.0.1:4440 \
   --key-dir /etc/moq/keys \
-  --public-subscribe 'anon/**' --public-publish 'anon/**' \
-  --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer \
+  --public-subscribe anon --public-publish anon \
+  --mtls-publish '' --mtls-subscribe '' --mtls-link peer \
   --tier edge --expires 1d --revalidate 1m --limit-remote 64
 ```
 
@@ -459,8 +468,9 @@ is refused too, because neither can safely win, so a peer presents
 
 Nothing is re-checked or closed by default: a session lives until its token's
 `exp` or its certificate's notAfter. `--expires D` bounds a grant with no bound
-of its own. `--revalidate D` has the relay re-check each grant on that cadence,
-and needs `--expires` so an outage still has a bound. Without `--revalidate`,
+of its own. `--revalidate D` has the relay re-check each grant on that cadence
+(at least `1s`, the finest the grant's whole seconds write), and needs
+`--expires` so an outage still has a bound. Without `--revalidate`,
 rotating or deleting a key does not close live sessions.
 
 `--limit-token N` and `--limit-remote N` cap live sessions per token and per
@@ -479,25 +489,24 @@ also guards a loopback listener. See `moq auth serve --help` for the rest.
 ### Migrating from the relay flags
 
 The 0.14 relay's auth flags moved to `moq auth serve`, and the relay points
-`--auth-url` at it. A relay without a server keeps `--auth-public`, as
-patterns: `--auth-public 'PREFIX/**'`.
+`--auth-url` at it. A relay without a server keeps `--auth-public PREFIX`.
 
 | 0.14 relay flag | `moq auth serve` |
 | --- | --- |
 | `--auth-key FILE` | `--key FILE` |
 | `--auth-key-dir DIR` | `--key-dir DIR` |
-| `--auth-public PREFIX` | `--public-publish 'PREFIX/**' --public-subscribe 'PREFIX/**'` |
-| `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
+| `--auth-public PREFIX` | `--public-publish PREFIX --public-subscribe PREFIX` |
+| `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe` |
 | `--auth-public-api URL` | your own server answering the contract |
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
-| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` |
+| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '' --mtls-subscribe '' --mtls-link peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
 | `--auth-domain` | your server reads `host` (present over plaintext too) and decides |
 
 Both on one host:
 
 ```bash
-moq auth serve --listen 127.0.0.1:4440 --key-dir /etc/moq/keys --public-subscribe 'anon/**'
+moq auth serve --listen 127.0.0.1:4440 --key-dir /etc/moq/keys --public-subscribe anon
 moq-relay --auth-url http://127.0.0.1:4440/
 ```
 

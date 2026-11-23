@@ -62,6 +62,7 @@ import { type Capabilities, capturePath, missing, probe, type Role } from "./src
 import {
 	ALT_AUDIO,
 	AUDIBLE_RMS,
+	audioPlays,
 	CHANGED_SAMPLE_RATE,
 	FAULTS,
 	KEYFRAME_INTERVAL_MS,
@@ -129,12 +130,7 @@ const native = values.publisher === "native";
 const isEngine = (name: string): name is Engine => ENGINES.some((engine) => engine === name);
 const requestedPublisher = values["publisher-engine"] ?? "chromium";
 const requestedPlayer = values["player-engine"] ?? "chromium";
-// moq-transport states no delay, so the incumbent replays its whole retention to a returning
-// viewer, and an in-order transport delivers all of it ahead of the live edge. Chromium's
-// WebTransport delivers newest first and hides it; the other engines play over WebSocket.
-const replacementVersions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"].filter(
-	(version) => requestedPlayer === "chromium" || version !== "moq-transport-22",
-);
+const replacementVersions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"];
 const selected = new Set<string>(
 	values.cases === undefined
 		? native
@@ -167,11 +163,6 @@ if (
 const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
-if (!native && selected.has("replacement") && !replacementVersions.includes("moq-transport-22")) {
-	console.error(
-		"QUARANTINE\treplacement moq-transport-22\tmoq-transport states no delay, so the incumbent replays its whole retention ahead of the live edge over an in-order transport; see test/interop/README.md",
-	);
-}
 
 // process.exit narrows `url` above, but not inside the function declarations below.
 const relay: string = url;
@@ -200,8 +191,9 @@ const REPLACEMENT_DELAY_MS = 50;
 
 /**
  * How long a following player may take to present a replacement or fallback once the new route is
- * ready or the old one withdrawn. Routing: the relay holds a route change for its update hold
- * (moq-net's `origin::DEFAULT_UPDATE_HOLD`; the JS origin holds none), and the announcement plus
+ * ready or the old one withdrawn. Routing: the relay holds a route change that arrived over a hop
+ * chain (lite-06 and older, or moq-transport) for its update hold (moq-net's
+ * `origin::DEFAULT_UPDATE_HOLD`; lite-07 and the JS origin hold none), and the announcement plus
  * the catalog and track subscriptions take five loopback round trips, each charged at QUIC's 1 ms
  * timer granularity. Presentation: a keyframe interval of codec cadence, one frame to decode, and
  * the player's delay. Observation: one page sample and one driver poll.
@@ -360,10 +352,9 @@ async function waitForLive(
 			}
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
-			audio =
-				state.audioContext === "running" && !state.audioStalled
-					? "playing"
-					: `${state.audioContext ?? "not built"}${state.audioStalled ? " and buffering" : ""}`;
+			audio = audioPlays(state)
+				? "playing"
+				: `${state.audioContext ?? "not built"}${state.audioStalled ? " and buffering" : ""}${state.audioTimestamp ? "" : " with nothing anchored"}`;
 			moved = frame !== undefined && state.frameId !== frame;
 			if (moved && !started) {
 				started = true;
@@ -394,15 +385,17 @@ async function waitForLive(
  *
  * A player shows its first frame as soon as it decodes, then holds that frame silent while it buffers
  * up to its sync delay, which rises past 400ms under load. A window opened on that held frame counts
- * the buffering as missing tone. Only the ring filling opens the window, never a tone, so silence
- * still fails {@link assertMedia} rather than this wait.
+ * the buffering as missing tone. A resume onto the fixture's on-demand audio first reads the epoch
+ * its encoder ended while unwatched, a declared silence rather than a stall, until the retained audio
+ * it encodes again arrives. Only the ring playing anchored audio opens the window, never a tone, so
+ * silence still fails {@link assertMedia} rather than this wait.
  */
 async function measurePlayback(player: Page, playerErrors: BrowserErrors, label: string): Promise<void> {
 	await waitForState(player, playerErrors, {
 		deadline: Date.now() + SETTLE_MS,
 		assertion: "playback starts",
 		description: `${label}: the audio buffer to fill to the player's delay and play`,
-		predicate: (state) => state.audioContext === "running" && !state.audioStalled,
+		predicate: audioPlays,
 	});
 	await (await observe(player, playerErrors, label)).grade();
 }

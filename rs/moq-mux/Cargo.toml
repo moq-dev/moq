@@ -50,7 +50,6 @@ serde_with = { workspace = true, features = ["base64"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 tracing = { workspace = true }
-url = { workspace = true }
 webm-iterable = "0.7"
 
 [dev-dependencies]

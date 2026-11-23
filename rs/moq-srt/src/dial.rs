@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use srt_tokio::SrtSocket;
 
-use crate::server::{DEFAULT_LATENCY, configure_buffers, serve_publish, serve_subscribe};
+use crate::server::{DEFAULT_LATENCY, configure, serve_publish, serve_subscribe, settled, track};
 use crate::{Export, Import, Result};
 
 /// An SRT caller that can publish a MoQ broadcast or pull a remote stream.
@@ -56,13 +56,18 @@ impl Client {
 
 	/// Push the [`Export`]'s broadcast out to the remote as MPEG-TS until the broadcast ends.
 	pub async fn publish(&self, export: Export<'_>) -> Result<()> {
-		let socket = self.call(Mode::Publish).await?;
+		let mut socket = self.call(Mode::Publish).await?;
+		let tracking = track(&mut socket, export.wire.clone());
 		let options = crate::ts::Options {
 			latency: self.latency,
 			follow: export.follow,
 			stitch: export.stitch,
 		};
-		serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options).await
+		settled(
+			tracking,
+			serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options),
+		)
+		.await
 	}
 
 	/// Pull a remote MPEG-TS stream into the [`Import`]'s broadcast, published as its ingest
@@ -76,9 +81,15 @@ impl Client {
 			broadcast,
 			ingest,
 			program,
+			wire,
 		} = import;
-		let socket = self.call(Mode::Request).await?;
-		serve_publish(publisher, broadcast.as_str(), socket, &ingest, program).await
+		let mut socket = self.call(Mode::Request).await?;
+		let tracking = track(&mut socket, wire);
+		settled(
+			tracking,
+			serve_publish(publisher, broadcast.as_str(), socket, &ingest, program),
+		)
+		.await
 	}
 
 	async fn call(&self, mode: Mode) -> Result<SrtSocket> {
@@ -88,7 +99,7 @@ impl Client {
 		let stream_id = format!("#!::r={},m={}", self.resource, mode.as_str());
 		let socket = SrtSocket::builder()
 			.latency(self.latency)
-			.set(configure_buffers)
+			.set(configure)
 			.call(self.addr, Some(&stream_id))
 			.await?;
 		tracing::info!(addr = %self.addr, resource = %self.resource, mode = mode.as_str(), "SRT caller connected");

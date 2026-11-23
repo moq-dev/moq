@@ -220,6 +220,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-interop" = rec {
+      packageId = "moq-interop";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-interop";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-json" = rec {
       packageId = "moq-json";
       build = internal.buildRustCrateWithFeatures {
@@ -9764,9 +9774,9 @@ rec {
       };
       "form_urlencoded" = rec {
         crateName = "form_urlencoded";
-        version = "1.2.2";
+        version = "1.2.3";
         edition = "2018";
-        sha256 = "1kqzb2qn608rxl3dws04zahcklpplkd5r1vpabwga5l50d2v4k6b";
+        sha256 = "0vph40jb1qvkvl52aigslr0hvbg1dhiwdwaxg48i5yxgkqcqk95g";
         authors = [
           "The rust-url developers"
         ];
@@ -12047,7 +12057,10 @@ rec {
             "v1_28"
           ];
         };
-        resolvedDefaultFeatures = [ "default" ];
+        resolvedDefaultFeatures = [
+          "default"
+          "v1_16"
+        ];
       };
       "gstreamer-audio" = rec {
         crateName = "gstreamer-audio";
@@ -12318,6 +12331,120 @@ rec {
           "v1_30" = [ "v1_28" ];
         };
       };
+      "gstreamer-check" = rec {
+        crateName = "gstreamer-check";
+        version = "0.25.0";
+        edition = "2024";
+        sha256 = "1ismmx6kxdd27xhyrjbrqwld21mp62rpr0g0qq2h9hhjhhqhx85w";
+        libName = "gstreamer_check";
+        authors = [
+          "Sebastian Dröge <sebastian@centricular.com>"
+        ];
+        dependencies = [
+          {
+            name = "glib";
+            packageId = "glib";
+          }
+          {
+            name = "gstreamer";
+            packageId = "gstreamer";
+            rename = "gst";
+          }
+          {
+            name = "gstreamer-check-sys";
+            packageId = "gstreamer-check-sys";
+          }
+        ];
+        features = {
+          "v1_16" = [
+            "gst/v1_16"
+            "gstreamer-check-sys/v1_16"
+          ];
+          "v1_18" = [
+            "gst/v1_18"
+            "gstreamer-check-sys/v1_18"
+            "v1_16"
+          ];
+          "v1_20" = [
+            "gst/v1_20"
+            "gstreamer-check-sys/v1_20"
+            "v1_18"
+          ];
+          "v1_22" = [
+            "gst/v1_22"
+            "gstreamer-check-sys/v1_22"
+            "v1_20"
+          ];
+          "v1_24" = [
+            "gst/v1_24"
+            "gstreamer-check-sys/v1_24"
+            "v1_22"
+          ];
+          "v1_26" = [
+            "gst/v1_26"
+            "gstreamer-check-sys/v1_26"
+            "v1_24"
+          ];
+          "v1_28" = [
+            "gst/v1_28"
+            "gstreamer-check-sys/v1_28"
+            "v1_26"
+          ];
+          "v1_30" = [
+            "gst/v1_30"
+            "gstreamer-check-sys/v1_30"
+            "v1_28"
+          ];
+        };
+        resolvedDefaultFeatures = [
+          "default"
+          "v1_16"
+        ];
+      };
+      "gstreamer-check-sys" = rec {
+        crateName = "gstreamer-check-sys";
+        version = "0.25.4";
+        edition = "2024";
+        sha256 = "175y0w12qj68zi47ir4crb0994bxkr0i55vv0haqws46rc2a3vkv";
+        libName = "gstreamer_check_sys";
+        authors = [
+          "Sebastian Dröge <sebastian@centricular.com>"
+        ];
+        dependencies = [
+          {
+            name = "glib-sys";
+            packageId = "glib-sys";
+          }
+          {
+            name = "gobject-sys";
+            packageId = "gobject-sys";
+          }
+          {
+            name = "gstreamer-sys";
+            packageId = "gstreamer-sys";
+          }
+          {
+            name = "libc";
+            packageId = "libc";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "system-deps";
+            packageId = "system-deps 9.0.0";
+          }
+        ];
+        features = {
+          "v1_18" = [ "v1_16" ];
+          "v1_20" = [ "v1_18" ];
+          "v1_22" = [ "v1_20" ];
+          "v1_24" = [ "v1_22" ];
+          "v1_26" = [ "v1_24" ];
+          "v1_28" = [ "v1_26" ];
+          "v1_30" = [ "v1_28" ];
+        };
+        resolvedDefaultFeatures = [ "v1_16" ];
+      };
       "gstreamer-sys" = rec {
         crateName = "gstreamer-sys";
         version = "0.25.4";
@@ -12362,6 +12489,7 @@ rec {
           "v1_28" = [ "v1_26" ];
           "v1_30" = [ "v1_28" ];
         };
+        resolvedDefaultFeatures = [ "v1_16" ];
       };
       "h2" = rec {
         crateName = "h2";
@@ -12624,11 +12752,6 @@ rec {
           {
             name = "thiserror";
             packageId = "thiserror 2.0.21";
-          }
-          {
-            name = "url";
-            packageId = "url";
-            features = [ "serde" ];
           }
         ];
         devDependencies = [
@@ -16075,6 +16198,17 @@ rec {
             optional = true;
           }
           {
+            name = "libc";
+            packageId = "libc";
+            target =
+              { target, features }:
+              (
+                ("linux" == target."os" or null)
+                || ("android" == target."os" or null)
+                || ("apple" == target."vendor" or null)
+              );
+          }
+          {
             name = "rand";
             packageId = "rand 0.10.3";
           }
@@ -17848,10 +17982,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "bitstream-io";
-            packageId = "bitstream-io 4.10.0";
-          }
-          {
             name = "block2";
             packageId = "block2 0.6.2";
             optional = true;
@@ -17919,6 +18049,7 @@ rec {
             features = [
               "CMSampleBuffer"
               "CMBlockBuffer"
+              "CMFormatDescription"
               "CMSync"
               "objc2-core-audio-types"
             ];
@@ -18797,10 +18928,6 @@ rec {
             target = { target, features }: (target."unix" or false);
           }
           {
-            name = "moq-audio";
-            packageId = "moq-audio";
-          }
-          {
             name = "moq-relay";
             packageId = "moq-relay";
             usesDefaultFeatures = false;
@@ -19249,6 +19376,11 @@ rec {
         ];
         devDependencies = [
           {
+            name = "kio";
+            packageId = "kio";
+            features = [ "manual" ];
+          }
+          {
             name = "libc";
             packageId = "libc";
             target = { target, features }: (target."unix" or false);
@@ -19383,6 +19515,12 @@ rec {
           {
             name = "futures";
             packageId = "futures";
+          }
+          {
+            name = "gstreamer-check";
+            packageId = "gstreamer-check";
+            rename = "gst-check";
+            features = [ "v1_16" ];
           }
           {
             name = "moq-audio";
@@ -19606,6 +19744,83 @@ rec {
           "server"
         ];
       };
+      "moq-interop" = rec {
+        crateName = "moq-interop";
+        version = "0.0.0";
+        edition = "2024";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-interop;
+        };
+        dependencies = [
+          {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "futures";
+            packageId = "futures";
+          }
+          {
+            name = "hang";
+            packageId = "hang";
+            features = [ "async" ];
+          }
+          {
+            name = "kio";
+            packageId = "kio";
+            features = [ "runtime" ];
+          }
+          {
+            name = "moq-audio";
+            packageId = "moq-audio";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "moq-json";
+            packageId = "moq-json";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-mux";
+            packageId = "moq-mux";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-net";
+            packageId = "moq-net";
+          }
+          {
+            name = "moq-tokio";
+            packageId = "moq-tokio";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "full" ];
+          }
+          {
+            name = "url";
+            packageId = "url";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
+          }
+        ];
+
+      };
       "moq-json" = rec {
         crateName = "moq-json";
         version = "0.5.8";
@@ -19686,6 +19901,11 @@ rec {
               "std"
               "handle-panics"
             ];
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+            features = [ "raw_value" ];
           }
           {
             name = "workspace-hack";
@@ -19899,10 +20119,6 @@ rec {
           {
             name = "tracing";
             packageId = "tracing";
-          }
-          {
-            name = "url";
-            packageId = "url";
           }
           {
             name = "webm-iterable";
@@ -20157,6 +20373,7 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
+            usesDefaultFeatures = false;
             features = [
               "relay"
               "test-support"
@@ -21607,6 +21824,11 @@ rec {
         ];
         devDependencies = [
           {
+            name = "hang";
+            packageId = "hang";
+            features = [ "async" ];
+          }
+          {
             name = "kio";
             packageId = "kio";
             features = [ "runtime" ];
@@ -21999,7 +22221,10 @@ rec {
           {
             name = "kio";
             packageId = "kio";
-            features = [ "sim" ];
+            features = [
+              "manual"
+              "sim"
+            ];
           }
           {
             name = "moq-congestion";
@@ -22041,6 +22266,10 @@ rec {
             packageId = "rind-rustls";
           }
           {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
             name = "socket2";
             packageId = "socket2 0.6.5";
             features = [ "all" ];
@@ -22048,6 +22277,10 @@ rec {
           {
             name = "tempfile";
             packageId = "tempfile";
+          }
+          {
+            name = "test-env";
+            packageId = "test-env";
           }
           {
             name = "tokio";
@@ -51831,9 +52064,9 @@ rec {
       };
       "url" = rec {
         crateName = "url";
-        version = "2.5.8";
+        version = "2.5.9";
         edition = "2018";
-        sha256 = "1v8f7nx3hpr1qh76if0a04sj08k86amsq4h8cvpw6wvk76jahrzz";
+        sha256 = "06ivkcv3ljdrp34vlr8n2byyzk7m43q4r3g8ggqhwb5lgd0d437h";
         authors = [
           "The rust-url developers"
         ];
@@ -59733,6 +59966,15 @@ rec {
             features = [ "i128" ];
           }
           {
+            name = "num-rational";
+            packageId = "num-rational";
+            usesDefaultFeatures = false;
+            features = [
+              "num-bigint-std"
+              "std"
+            ];
+          }
+          {
             name = "num-traits";
             packageId = "num-traits";
             features = [ "i128" ];
@@ -61183,6 +61425,15 @@ rec {
             name = "num-integer";
             packageId = "num-integer";
             features = [ "i128" ];
+          }
+          {
+            name = "num-rational";
+            packageId = "num-rational";
+            usesDefaultFeatures = false;
+            features = [
+              "num-bigint-std"
+              "std"
+            ];
           }
           {
             name = "num-traits";

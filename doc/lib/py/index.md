@@ -21,7 +21,7 @@ Share `media.Timebase(broadcast)` through `ContainerInit` when several imports u
 source timeline; omitting it keeps an independent offset. A timebase belongs to its
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
-`ContainerFormat.FMP4` splits each fragment into one frame per sample.
+`ContainerFormat.fmp4()` splits each fragment into one frame per sample.
 Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz tick survives a read and republish.
 `Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
 Every write takes a timestamp, and the library never substitutes zero or now.
@@ -50,7 +50,7 @@ async def main():
             # A path stays present across publisher restarts: hold client.follow(path) to
             # be handed each new run, or None once it goes offline.
             if not isinstance(event, moq.AnnounceEventPresent):
-                continue  # absent, offline, or a change in availability
+                continue  # AnnounceEventAbsent
             announcement = event.announce
             print(announcement.captures)  # list of wildcard matches, empty without wildcards
             broadcast = await client.request(announcement.prefix)
@@ -76,7 +76,7 @@ async def main():
         broadcast = route.broadcast
 
         # Already-encoded frames: the catalog is filled from the bitstream
-        audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
+        audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_init_bytes))
         audio.write_frame(payload, moq.media.CatalogProducer(broadcast).now())
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
@@ -84,7 +84,7 @@ async def main():
         catalog_producer = moq.media.CatalogProducer(broadcast)
         video = moq.video.Producer(
             catalog_producer,
-            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
+            moq.VideoEncoderInput(format=moq.VideoPixelFormat.rgba(), width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
             moq.VideoEncoderOutput(
                 codec=moq.VideoCodec.h264(),
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]
@@ -133,7 +133,8 @@ shows which module holds each.
 - **Catalog timing.** Each catalog a `CatalogConsumer` yields carries the `timestamp` it takes effect at on the broadcast's media timeline. `CatalogConsumer.subscribe(broadcast)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout `delay=` instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq.Error.UnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A bare `moq.Subscription()`, passing no subscription, and `moq.Subscription.default()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. Pass `delay=moq.Delay(max=None)` for no subscriber limit, or `min=None` to leave the target latency unstated. Decoders take the same `moq.Delay`.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call `abort_unwanted(code)` on its producer (raw, media, audio, video, or JSON) once `wanted_changed()` returns `None` rather than releasing it: it returns `False` and keeps the track for a subscriber that joined since. Then wait for the next `None` on a fresh `demand()`, since one that already returned `None` misses a subscriber that came and went.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call `abort_unwanted(code)` on its producer (raw, media, audio, video, or JSON) once `wanted_changed()` returns `False` rather than releasing it: it returns `False` and keeps the track for a subscriber that joined since. Then wait for the next `False` on a fresh `demand()`, since one that already returned `False` misses a subscriber that came and went.
+- **Group refresh.** `await demand().refresh()` returns once a subscriber asks for a new group: the first group of a track with none, or a join judged by `TrackInfo(refresh=moq.TrackRefresh(...))`. Write a group starting with a keyframe or snapshot, which answers it, then wait again. `ratio` asks on a join once the newest group has grown past that many times its first frame; `interval` has a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask. A subscriber asks with `await consumer.refresh()`, which returns once the request is sent (forwarded upstream, or read by a local publisher); cancelling the task first withdraws it.
 
 ## Runtime
 

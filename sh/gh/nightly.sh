@@ -117,7 +117,7 @@ case "$1" in
         nextest just rs bench-tests --no-fail-fast --run-ignored only \
             -p moq-bench -p moq-congestion -p moq-quic -p moq-net -p moq-tokio -p moq-uring \
             --features moq-net/async,moq-congestion/lab --lib --bin moq-bench --test integration \
-            -E 'test(benchmark_observation_contention) | test(benchmark_readiness_establishment) | test(benchmark_per_packet) | test(benchmark_feed_fetch_wakes) | test(=mesh_sweep::benchmark_route_mesh) | test(benchmark_route_rules) | test(benchmark_route_churn) | test(benchmark_receive_credit) | test(benchmark_receive_windows) | test(benchmark_datagram_delivery) | test(benchmark_socket_queues)'
+            -E 'test(benchmark_observation_contention) | test(benchmark_readiness_establishment) | test(benchmark_per_packet) | test(benchmark_feed_fetch_wakes) | test(=mesh_sweep::benchmark_route_mesh) | test(benchmark_route_rules) | test(benchmark_route_churn) | test(benchmark_receive_credit) | test(benchmark_receive_windows) | test(benchmark_join_lag) | test(benchmark_datagram_delivery) | test(benchmark_socket_queues)'
         ;;
     rust-test-apps)
         export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
@@ -177,7 +177,7 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills fill-probe forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams; do
+        for benchmark in broadcasts requests fills fill-probe forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop window-drop publisher-update refresh observed compression datagrams; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench

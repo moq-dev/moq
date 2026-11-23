@@ -24,6 +24,7 @@ exclude_re = [
     # relay.rs: `visit` and `count` only feed the tests' work budgets, which read the
     # count as an upper bound.
     'replace Router<N, I, A>::(visit|count) with \(\)$',
+    'replace \+ with (-|\*) in Router<N, I, A>::withdraw$',
     # A pick's key ends in its next hop or its claimant, so no two keys tie.
     'replace < with <= in Router<N, I, A>::(reselect|closest)$',
     # A session closed at a floor already recorded touches routes that stay as they
@@ -54,12 +55,28 @@ exclude_re = [
     # poll, so these differ only when another thread writes the route between that
     # read and this check, a window no deterministic test can stage. There the
     # original retries on the new copy and the arm prevents a lost wake.
-    'replace \|\| with && in Fetching::poll_moved$',
+    'replace \|\| with && in Fetching::(poll_moved|moved)$',
+    'replace Fetching::moved -> bool with false$',
+    # The same for `Recover::poll`'s route watch, whose generation it just read; once no
+    # front moves the copy, the read never continues on the watch.
+    ':\d+:43: replace \|\| with && in Recover::poll$',
     ':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
     # The reader list's sweep only bounds memory: a dead entry fails every
     # `Weak::upgrade`, and `subscribe` sweeps the list again.
     'replace > with >= in Producer::serve_from$',
     'replace == with != in Consumer::subscribe$',
+    # Ranges a reader asks again unchanged, once its log no longer reaches back: asked whole
+    # they place and backfill as before, and each copy's replace of equal ranges is a no-op,
+    # so treating them as unchanged only saves that work.
+    'replace match guard ranges == self.mirrored.ranges with false in Reader::sync$',
+    # A backfill fails only with its route's track, so asking that route again for what it
+    # refused fails at once too and is let go: skipping the ask only saves the subscribe.
+    # `poll_lowest` records that refusal for the skip.
+    ':\d+:19: replace <= with > in Reader::backfill$',
+    ':\d+:30: replace == with != in Reader::poll_lowest$',
+    # With no resume point `raised` names no start, and a settled window has no unsettled
+    # range: each guard only skips the walk.
+    'replace \|\| with && in Reader::raised$',
     # Dead: every write of `until` also writes `since`, so the superseded check
     # never runs. `ResumeReader.tla` models it, so it goes with the model.
     'replace >= with < in Copy::retains$',
@@ -67,6 +84,20 @@ exclude_re = [
     # and nothing is missing.
     'replace < with <= in Copy::retains$',
     'replace < with <= in Retain<.*>::holds_window$',
+    # `Placed` only sees ranges `Reader::resolve` placed, with no latest group: each
+    # start is a time it contains or the oldest, so it never looks a start up, waits on
+    # one, or counts one back, and an `Oldest` end only reaches it from a copy that
+    # accepted one, which every copy refuses.
+    'replace <impl Holdings for Placed>::(back|next_start|complete|resolves) ',
+    'replace == with != in <impl Holdings for Placed>::back$',
+    # A copy leaves a non-empty range starting at the oldest group or time 0 unresolved
+    # only when a cap at 0 empties every range, so a waiting range stops the window too.
+    'replace && with \|\| in Reader::resolve$',
+    # A range placed with its relative end still open stays unsettled, so a copy places it
+    # again once it resolves that end: skipping it only saves the window an edit.
+    ':\d+:7: delete ! in Reader::resolve$',
+    # `owes_below` is asked only of a key outside the window, where no run starts.
+    'replace < with <= in Reader::owes_below$',
     # Walking again before anything the read parked on fires returns the same
     # `Pending`, so the idle shortcut only saves work.
     'replace Subscriber::parked -> bool with false$',

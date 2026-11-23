@@ -18,18 +18,20 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_wi
 use support::{Kind, Rng, drain, watch};
 
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
-	produce(hop, origin::Config::default().update_hold())
+	produce(hop, origin::Config::default().update_hold(), true)
 }
 
 /// An origin holding route updates for `hold`. Its cache never expires idle
 /// groups: nothing here carries media, and the expiry sweep would keep a timer
 /// armed forever, so [`kio::clock::sim::idle`] could never see the mesh settle.
-fn produce(hop: u64, hold: Duration) -> origin::Producer {
+/// It forwards what it learned when `proxy`, as a relay does.
+fn produce(hop: u64, hold: Duration, proxy: bool) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()).with_update_hold(hold);
 	config.pool = cache::Pool::unbounded();
+	config.proxy = proxy;
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// `n` relays meshed over `edges`, watched from the last one.
@@ -168,11 +170,11 @@ pub(super) const PRODUCTION_LATENCY_MS: &[u64] = &[
 ];
 
 /// One withdrawal on a partial mesh retracts everywhere once. A relay two hops
-/// from the publisher's hears only that its neighbor withdrew, and must not
-/// fall back to, and re-advertise, another path derived from the same
-/// announcement. Holding route updates (`origin::Config::with_update_hold`) lets the
-/// withdrawal remove those paths first; with link latency and no hold, each
-/// withdrawal here costs tens of thousands of announcements.
+/// from the publisher's must not fall back to, and re-advertise, another path to
+/// the withdrawn claim. Over hop chains, with link latency and no update hold, each
+/// withdrawal here cost tens of thousands of announcements. Lite-07 holds nothing:
+/// the claim's own withdrawal is final, and a relay holding a copy of it through
+/// each neighbour drops every copy at once.
 #[kio::test]
 async fn partial_mesh_withdraw_retracts_once() {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
@@ -218,8 +220,8 @@ const fn ms(millis: u64) -> Duration {
 	Duration::from_millis(millis)
 }
 
-/// Eight relays where, without the retraction quarantine, relays 1 and 5
-/// retract a broadcast published on relay 7 and then announce it again.
+/// Eight relays where, over hop chains without the retraction quarantine, relays 1
+/// and 5 retract a broadcast published on relay 7 and then announce it again.
 #[rustfmt::skip]
 const STALE_PATHS: &[Link] = &[
 	((0, 1), ms(35)), ((1, 2), ms(90)), ((0, 3), ms(129)), ((2, 4), ms(140)), ((1, 5), ms(137)), ((4, 6), ms(148)),
@@ -227,9 +229,10 @@ const STALE_PATHS: &[Link] = &[
 ];
 
 /// A relay that already retracted a withdrawn broadcast must not announce it
-/// again. Its neighbors, two or more hops from the publisher's relay, still hunt
-/// through stale paths; one that falls back to a path not through this relay
-/// offers it as a new route after the relay forgot the withdrawal.
+/// again. Over hop chains its neighbors, two or more hops from the publisher's
+/// relay, still hunt through stale paths, and one that falls back to a path not
+/// through this relay offers it as a new route after the relay forgot the
+/// withdrawal. On lite-07 the claim's withdrawal is final, so none offers one.
 #[kio::test]
 async fn retracted_relay_ignores_a_stale_path() {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
@@ -288,9 +291,10 @@ impl Cluster {
 			.map(|id| {
 				let mut config = config.clone();
 				config.node = std::num::NonZeroU64::new(id).unwrap();
+				config.proxy = true;
 				let (origin, driver) = origin::Producer::new(config);
 				support::harness::spawn(driver);
-				origin.with_proxy(true)
+				origin
 			})
 			.collect();
 		let mut pairs = Vec::new();
@@ -298,13 +302,13 @@ impl Cluster {
 			pairs.push(peer_with_latency(version, &relays[a], &relays[b], latency).await);
 		}
 
-		let publishing = produce(1000, Duration::ZERO);
+		let publishing = produce(1000, Duration::ZERO, true);
 		let mut options = MockConnectOptions::new(version);
 		options.client_publish = Some(publishing.consume());
 		options.server_subscribe = Some(relays[publisher].clone());
 		pairs.push(connect_mock(options).await);
 
-		let watching = produce(1001, Duration::ZERO);
+		let watching = produce(1001, Duration::ZERO, true);
 		let mut options = MockConnectOptions::new(version);
 		options.server_publish = Some(relays[watcher].consume());
 		options.client_subscribe = Some(watching.clone());
@@ -354,9 +358,10 @@ impl Cluster {
 }
 
 /// #4349: a publisher on one relay cleanly closes a broadcast, and a client
-/// watching from another relay sees one retraction and no re-announce. On the
-/// release before the retraction quarantine (#5376), this client saw it
-/// retracted, announced, and retracted again. See [`slow_ring_retracts_once`].
+/// watching from another relay sees one retraction and no re-announce, with no
+/// update hold or retraction quarantine, which lite-07 routes skip. Lite-06 still
+/// re-announces: see [`cross_node_close_reannounces_on_lite06`] and
+/// [`slow_ring_retracts_once`].
 #[kio::test]
 async fn cross_node_close_retracts_once_lite07() {
 	cross_node_close_retracts_once("moq-lite-07-wip").await;
@@ -383,22 +388,23 @@ async fn cross_node_close_retracts_once(version: &str) {
 	}
 }
 
-/// The positive control for [`cross_node_close_retracts_once`]: without the
-/// update hold and the quarantine, the client sees the broadcast come back
-/// before it ends.
+/// The lite-06 residual of [`cross_node_close_retracts_once`]: the client sees the
+/// broadcast come back before it ends, with the update hold and the quarantine or
+/// without. Each lite-06 relay mints its own instance for what a neighbor
+/// announces, so falling back onto a stale path is a restart, which the hold does
+/// not absorb, under an instance the quarantine does not recognize.
 #[kio::test]
-async fn cross_node_close_without_hold_reannounces() {
-	let mut cluster = Cluster::new(
-		"moq-lite-06",
-		STALE_PATHS,
+async fn cross_node_close_reannounces_on_lite06() {
+	for config in [
+		origin::Config::default(),
 		origin::Config::default().with_update_hold(Duration::ZERO),
-		7,
-		1,
-	)
-	.await;
-	let (broadcast, _) = cluster.publish("room/a").await;
-	let (client, _) = cluster.close("room/a", broadcast).await;
-	assert_eq!(client, [Kind::End, Kind::Start, Kind::End]);
+	] {
+		let hold = config.update_hold();
+		let mut cluster = Cluster::new("moq-lite-06", STALE_PATHS, config, 7, 1).await;
+		let (broadcast, _) = cluster.publish("room/a").await;
+		let (client, _) = cluster.close("room/a", broadcast).await;
+		assert_eq!(client, [Kind::End, Kind::Start, Kind::End], "hold {hold:?}");
+	}
 }
 
 /// Relay 3 hears a broadcast published on relay 0 first over the longer, faster
@@ -420,12 +426,12 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 	for &((a, b), latency) in LATE_BETTER_PATH {
 		pairs.push(peer_with_latency(mesh, &relays[a], &relays[b], latency).await);
 	}
-	let publishing = produce(1000, Duration::ZERO);
+	let publishing = produce(1000, Duration::ZERO, true);
 	let mut options = MockConnectOptions::new(client);
 	options.client_publish = Some(publishing.consume());
 	options.server_subscribe = Some(relays[0].clone());
 	pairs.push(connect_mock(options).await);
-	let watching = produce(1001, Duration::ZERO);
+	let watching = produce(1001, Duration::ZERO, true);
 	let mut options = MockConnectOptions::new(client);
 	options.server_publish = Some(relays[3].consume());
 	options.client_subscribe = Some(watching.clone());
@@ -505,6 +511,11 @@ async fn mesh_retracts_once() {
 /// On a lite-06 mesh each relay mints its own instance for what a neighbor
 /// announces, so the move to the late, shorter path is another instance: the
 /// watching client sees the live broadcast retracted and announced again.
+///
+/// Lite-06 keeps it. Its wire carries no instance, so a relay cannot tell a move
+/// between neighbors from its publisher restarting, and keeping the instance
+/// across the move would give a restarted broadcast its old identity. A mesh on
+/// lite-07 updates in place: [`late_better_path_updates_in_place`].
 #[kio::test]
 async fn residual_late_better_path_restarts_on_lite06() {
 	let (published, closed) = late_better_path("moq-lite-06", "moq-lite-06").await;
@@ -815,7 +826,7 @@ async fn a_node_that_does_not_proxy_keeps_what_it_learned_over_lite06() {
 	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
 	let lite06: Version = "moq-lite-06".parse().unwrap();
 	let first = produce_origin(1);
-	let app = produce_origin(2).with_proxy(false);
+	let app = produce(2, origin::Config::default().update_hold(), false);
 	let second = produce_origin(3);
 	let mut pairs = Vec::new();
 	for (version, relay) in [(lite06, &first), (lite07, &second)] {

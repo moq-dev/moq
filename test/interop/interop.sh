@@ -50,7 +50,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_PUB_LIVE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_PUB_LIVE INTEROP_PUB_ANNEXB INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -564,8 +564,9 @@ GST_PLUGIN_DIR="" # dir holding the built moq-gst plugin (set in prepare)
 BROKEN_LANGS=""   # clients whose source build failed
 
 mark_broken() {
-    # A client whose source build fails fails only its own matrix cells instead
-    # of aborting the whole run, so one broken binding still lets the rest report.
+    # A client whose own toolchain or build fails fails only its own matrix cells
+    # instead of aborting the whole run, so one broken binding still lets the rest
+    # report. The Cargo clients build with the relay in build_cargo instead.
     BROKEN_LANGS="$BROKEN_LANGS $1"
     echo "  WARN  $1 client unavailable: $2"
 }
@@ -603,10 +604,14 @@ require_tools() {
     }
 }
 
-# Build moq-relay + moq-cli from the workspace. The relay is the spine of the
-# test, so a failure here aborts rather than marking a single client broken.
-build_relay_cli() {
-    local flag=() build_examples=0
+# Build every Cargo package the run needs in one call: moq-relay + moq-cli, the Rust
+# interop clients, libmoq for the C client, and moq-gst for GStreamer. One call
+# unifies their features, so each dependency compiles once instead of once per
+# package. A failure here aborts: the relay is the spine of the test, and a Cargo
+# client that fails to compile fails with the checkout, not its toolchain.
+CARGO_JSON="" # the build's JSON messages, which alone name libmoq's moq.h
+build_cargo() {
+    local flag=() packages=() clients=() package args=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
     if [[ -n "$RELAY" && -n "$MOQ" ]]; then
         [[ -x "$RELAY" && -x "$MOQ" ]] || {
@@ -614,17 +619,27 @@ build_relay_cli() {
             exit 1
         }
     else
-        build_examples=1
-        echo "building moq-relay + moq-cli ($PROFILE)..."
-        # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
-        # an empty (debug) array under `set -u`.
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli) || {
-            echo "error: failed to build moq-relay / moq-cli" >&2
-            exit 1
-        }
+        packages+=(moq-relay moq-cli)
+        if [[ "$MEDIA" -eq 0 ]]; then
+            clients=(interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
+            packages+=(moq-interop)
+        fi
         [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
         # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
         [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
+    fi
+    if needs c && have_c; then packages+=(libmoq); fi
+    if needs gst && [[ -z "$(gst_missing)" ]]; then packages+=(moq-gst); fi
+    if [[ ${#packages[@]} -gt 0 ]]; then
+        echo "building ${packages[*]} ($PROFILE)..."
+        for package in "${packages[@]}"; do args+=(-p "$package"); done
+        CARGO_JSON="$HARNESS_RUN/cargo-build.json"
+        # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
+        # an empty (debug) array under `set -u`.
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} "${args[@]}" --message-format=json-render-diagnostics) >"$CARGO_JSON" || {
+            echo "error: cargo build failed" >&2
+            exit 1
+        }
     fi
     harness_stage bin/moq-relay "$RELAY"
     harness_stage bin/moq "$MOQ"
@@ -634,14 +649,10 @@ build_relay_cli() {
         harness_stage bin/moq-sub "$INTEROP_SUB_MOQ"
         INTEROP_SUB_MOQ="$HARNESS_RUN/bin/moq-sub"
     fi
-    if [[ "$build_examples" -eq 1 && "$MEDIA" -eq 0 ]]; then
-        local example args=() examples=(interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
-        for example in "${examples[@]}"; do args+=(--example "$example"); done
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli "${args[@]}")
-        for example in "${examples[@]}"; do
-            harness_stage "examples/$example" "$TARGET_BASE/$PROFILE/examples/$example"
-        done
-    fi
+    local client
+    for client in ${clients[@]+"${clients[@]}"}; do
+        harness_stage "examples/$client" "$TARGET_BASE/$PROFILE/$client"
+    done
 }
 
 # Build the workspace Python packages as wheels (maturin builds rs/moq-ffi, hatchling
@@ -783,24 +794,19 @@ prepare_cpp() {
     CPP_INTEROP="$build/client/cpp-interop"
 }
 
-# Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
-# against it. cargo writes libmoq.a to the profile dir, and build.rs writes
+# Compile the C subscriber against libmoq (the C staticlib + cbindgen header), which
+# build_cargo built. cargo writes libmoq.a to the profile dir, and build.rs writes
 # moq.h into its OUT_DIR, which only cargo's JSON messages name.
+have_c() { have "${CC:-cc}"; }
+
 prepare_c() {
     local cc="${CC:-cc}" out_dir header lib os_libs
-    have "$cc" || {
+    have_c || {
         mark_broken c "no C compiler ($cc) on PATH"
         return
     }
-    echo "building c client (workspace libmoq + cc)..."
-    local flag=()
-    [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
-        mark_broken c "cargo build -p libmoq failed"
-        sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
-        return
-    fi
-    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/libmoq#' |
+    echo "building c client (libmoq from the cargo build + cc)..."
+    out_dir=$(grep '"reason":"build-script-executed"' "$CARGO_JSON" | grep -F '/libmoq#' |
         sed -n 's/.*"out_dir":"\([^"]*\)".*/\1/p' | tail -1) || true
     header="$out_dir/include/moq.h"
     lib="$TARGET_BASE/$PROFILE/libmoq.a"
@@ -832,29 +838,33 @@ prepare_c() {
     fi
 }
 
-# Build the moq-gst plugin and confirm it loads against the GStreamer in the
+# Stage the moq-gst plugin build_cargo built and confirm it loads against the GStreamer in the
 # environment. moqsrc links the host's libgstreamer, so this wants a real
 # GStreamer with the core plugins (the nix devShell ships gstreamer + base/good;
 # a bare shell without it marks gst unavailable). Sets GST_PLUGIN_DIR to the dir
 # holding libgstmoq.{so,dylib}. Subscribe only: moqsink publishing needs an
 # encoder + request-pad muxing this client doesn't drive.
-prepare_gst() {
-    have gst-launch-1.0 || {
-        mark_broken gst "gst-launch-1.0 not on PATH (needs a system GStreamer)"
-        return
-    }
-    have gst-inspect-1.0 || {
-        mark_broken gst "gst-inspect-1.0 not on PATH"
-        return
-    }
-    echo "building gstreamer client (workspace moq-gst plugin)..."
-    local flag=()
-    [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-gst) >"$HARNESS_RUN/gst-build.log" 2>&1; then
-        mark_broken gst "cargo build -p moq-gst failed"
-        sed 's/^/        /' "$HARNESS_RUN/gst-build.log" >&2 || true
-        return
+# Why this host can't build or run the GStreamer client, or nothing when it can.
+# moq-gst's sys crates find GStreamer through pkg-config, so a host with only the
+# runtime tools is unavailable here rather than aborting the shared cargo build.
+gst_missing() {
+    if ! have gst-launch-1.0; then
+        echo "gst-launch-1.0 not on PATH (needs a system GStreamer)"
+    elif ! have gst-inspect-1.0; then
+        echo "gst-inspect-1.0 not on PATH"
+    elif ! pkg-config --exists 'gstreamer-1.0 >= 1.14' 'gstreamer-audio-1.0 >= 1.14' 2>/dev/null; then
+        echo "GStreamer development files (gstreamer-1.0, gstreamer-audio-1.0 >= 1.14) not found by pkg-config"
     fi
+}
+
+prepare_gst() {
+    local missing
+    missing=$(gst_missing)
+    [[ -z "$missing" ]] || {
+        mark_broken gst "$missing"
+        return
+    }
+    echo "checking gstreamer client (moq-gst plugin from the cargo build)..."
     local extension=so
     [[ "$(uname -s)" != Darwin ]] || extension=dylib
     harness_stage "gst/libgstmoq.$extension" "$TARGET_BASE/$PROFILE/libgstmoq.$extension"
@@ -884,7 +894,7 @@ prepare_gst() {
 
 # ── setup ───────────────────────────────────────────────────────────────────
 require_tools
-build_relay_cli
+build_cargo
 
 echo "relay:   $RELAY"
 echo "moq-cli: $MOQ"
@@ -939,8 +949,13 @@ echo "starting relay on 127.0.0.1:${PORT}..."
 # committed file never has to be edited for a run.
 if [[ "$COMPAT" -eq 1 ]]; then
     # Anonymous, offering only the pinned version, which comes from the executable's
-    # advertised CLI choices.
-    sed -e "s|:4443\"|:${PORT}\"|g" -e '/^version = \[/,/^\]/d' -e 's|^url = "http://127.0.0.1:4440/"|public = "**"|' \
+    # advertised CLI choices. TEMPORARY MIGRATION, delete once `release` ships prefix grants:
+    # a released relay's help does not yet say "Prefixes an anonymous session", and it refuses
+    # the empty prefix at startup, reading only `**` as everything.
+    relay_help=$("$RELAY" --help 2>&1 | tr -s '[:space:]' ' ')
+    everything='""'
+    [[ "$relay_help" == *"Prefixes an anonymous session"* ]] || everything='"**"'
+    sed -e "s|:4443\"|:${PORT}\"|g" -e '/^version = \[/,/^\]/d' -e "s|^url = \"http://127.0.0.1:4440/\"|public = ${everything}|" \
         "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
     sed -i "/\[listen\]/a version = [\"${INTEROP_VERSION}\"]" "$HARNESS_RUN/relay.toml"
     [[ "$(grep -c '^version = ' "$HARNESS_RUN/relay.toml")" == 1 && "$(grep -c '^public = ' "$HARNESS_RUN/relay.toml")" == 1 ]] || {
@@ -997,17 +1012,6 @@ rust_connect() {
     esac
 }
 
-# The pattern a cell's token grants its publisher, or its subscribers, on <broadcast>. The `auto`
-# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. A pinned
-# pass may be moq-transport, whose requests name prefixes alone, so it grants the
-# broadcast's subtree.
-publish_grant() {
-    if [[ "$VERSION" == auto ]]; then printf '%s' "$1"; else printf '%s/**' "$1"; fi
-}
-subscribe_grant() {
-    if [[ "$VERSION" == auto ]]; then printf '**/%s' "$1"; else printf '%s/**' "$1"; fi
-}
-
 # moq-cli logs each grant it receives over AUTH at debug, under `moq_net::auth`.
 CLI_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net::auth=debug"
 
@@ -1016,9 +1020,9 @@ CLI_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net::auth=debug"
 AUTH_VERSION="${INTEROP_VERSION:-moq-lite-07-wip}"
 
 # The `auth granted` line a token minted with at most one publish and one
-# subscribe pattern implies. Every client that prints one dials $AUTH_VERSION,
+# subscribe prefix implies. Every client that prints one dials $AUTH_VERSION,
 # which carries AUTH, so a client that prints nothing never got its grant.
-# Each pattern is a JSON string, so a `\` in one reads `\\`.
+# Each prefix is a JSON string, so a `\` in one reads `\\`.
 grant_line() {
     local publish="${1//\\/\\\\}" subscribe="${2//\\/\\\\}"
     publish="${publish:+\"$publish\"}" subscribe="${subscribe:+\"$subscribe\"}"
@@ -1131,8 +1135,9 @@ run_publisher() {
                 ffmpeg_fmp4 "$(tone_source "$tone")" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$(cell_version rust)" \
                     --broadcast "$broadcast" import --max-age 5s fmp4
             else
+                # INTEROP_PUB_ANNEXB names the Annex-B source for a released CLI, which calls it `avc3`.
                 ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$(cell_version rust)" \
-                    --broadcast "$broadcast" import --max-age 1s avc3
+                    --broadcast "$broadcast" import --max-age 1s "${INTEROP_PUB_ANNEXB:-h264}"
             fi
             ;;
         python)
@@ -1534,7 +1539,7 @@ run_cell() {
 }
 
 # run_round <round> <broadcast> <pub_pid> <expect> <from>: every subscriber dials with a
-# token for <broadcast> alone (see subscribe_grant), and must see media with the tone its
+# token for <broadcast>'s prefix, and must see media with the tone its
 # publisher sends (expect=media), time out (nothing), or fail its audio check (wrong-tone).
 # <round> names the publisher in the output and the logs, and <from> is the relay log
 # line the round's connections start on.
@@ -1556,8 +1561,8 @@ run_round() {
     tone=$(publisher_tone "$publisher")
     codecs=$(publisher_codecs "$publisher")
     IFS=',' read -r -a renditions <<<"$codecs"
-    sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
-    sub_grant=$(grant_line "" "**/$broadcast")
+    sub_url=$(token_url --subscribe "$broadcast")
+    sub_grant=$(grant_line "" "$broadcast")
     for sub in "${SUB_LIST[@]}"; do
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
@@ -1689,13 +1694,18 @@ run_finish_publisher() {
 # leaving a WebSocket fallback that won a slow race would move it to a second session mid-read.
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
 run_finish_gst() {
-    local broadcast="$1" url="$2" out="$3" version pid deadline count
+    local broadcast="$1" url="$2" out="$3" version pid window deadline count
     version=$(cell_version gst)
-    # The read phase's deadline, as the other readers get; SECONDS counts whole seconds.
-    deadline=$((SECONDS + ${TIMEOUT%.*} * 2))
-    [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 2))
+    # The read phase, as the other readers get; SECONDS counts whole seconds, so a fractional
+    # timeout rounds up.
+    window=$((${TIMEOUT%.*} * 2))
+    [[ "$TIMEOUT" != *.* ]] || window=$((window + 2))
+    deadline=$((SECONDS + window))
+    # A finished track's last group ages out its max delay after it ends, so moqsrc's 1 s default
+    # drops the tail whenever gst-launch takes longer than that to start. Like the other finish
+    # readers it grants the whole read phase: how late it joins is not the delivery under test.
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} connect-websocket-enabled=false \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" max-delay="$((window * 1000))" ${version:+connect-version="$version"} connect-websocket-enabled=false \
         s.video_0 ! identity name=frames silent=false ! fakesink >"$out" 2>&1 &
     pid=$!
     count=0
@@ -1771,9 +1781,11 @@ run_finishes() {
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
         # moq-transport requests name prefixes alone.
         broadcast="$name-$$-$RANDOM/fixture.hang"
-        grant="${broadcast%/*}/**"
+        grant="${broadcast%/*}"
         ack="$LOGS/$name-ack"
-        local pids=() fds=() names=() all_ready=1 all_clean=1 publisher_ok=1
+        # causes[i] is reader i's own failure; row is what failed the whole row, which every
+        # cell without a failure of its own reports, so a withheld acknowledgement names its cause.
+        local pids=() fds=() names=() causes=() failed=() row="" status
         late=0
         started=$SECONDS
         echo "=== finished media: $pub ==="
@@ -1805,14 +1817,15 @@ run_finishes() {
             names+=("$sub")
         done
         for i in "${!pids[@]}"; do
-            if ! finish_ready "${pids[$i]}" "$LOGS/$name-${names[$i]}.log" '^finish reader ready$'; then all_ready=0; fi
+            finish_ready "${pids[$i]}" "$LOGS/$name-${names[$i]}.log" '^finish reader ready$' || causes[i]="never ready"
         done
-        if [[ "$all_ready" -eq 1 ]]; then
+        pid=""
+        if [[ ${#causes[@]} -eq 0 ]]; then
             harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_finish_publisher "$pub" "$broadcast" "$(token_url --publish "$grant")" "$ack"
             pid="$HARNESS_PID"
-            if ! finish_ready "$pid" "$LOGS/$name-pub.log" '^finish ready linger_us='; then all_ready=0; fi
-        else pid=""; fi
-        if [[ "$all_ready" -eq 1 ]]; then
+            finish_ready "$pid" "$LOGS/$name-pub.log" '^finish ready linger_us=' || row="publisher never ready"
+        fi
+        if [[ -z "$row" && ${#causes[@]} -eq 0 ]]; then
             for reader_fd in "${fds[@]}"; do printf 'read\n' >&"$reader_fd"; done
             if [[ "$late" -eq 1 ]]; then
                 harness_spawn "$name-gst" "$LOGS/$name-gst.log" run_finish_gst "$broadcast" "$(token_url --subscribe "$grant")" "$LOGS/$name-gst.out"
@@ -1821,24 +1834,42 @@ run_finishes() {
                 names+=(gst)
             fi
             for i in "${!pids[@]}"; do
-                harness_wait "${pids[$i]}" || all_clean=0
-                if ! grep -qx "$(finish_marker "${names[$i]}")" "$LOGS/$name-${names[$i]}.log"; then all_clean=0; fi
+                status=0
+                harness_wait "${pids[$i]}" || status=$?
+                # A reader that printed its marker can still fail on the way out, such as a
+                # session drain that times out, and that withholds the acknowledgement too.
+                if [[ "$status" -ne 0 ]]; then
+                    causes[i]="exited $status"
+                elif ! grep -qx "$(finish_marker "${names[$i]}")" "$LOGS/$name-${names[$i]}.log"; then
+                    causes[i]="no finish marker"
+                fi
             done
-        else all_clean=0; fi
-        if [[ "$all_clean" -eq 1 ]]; then
+        elif [[ "$late" -eq 1 ]]; then
+            # gst never started, but its cell still fails with the row's cause.
+            pids+=("")
+            fds+=("")
+            names+=(gst)
+        fi
+        for i in "${!causes[@]}"; do failed+=("${names[$i]}"); done
+        [[ ${#failed[@]} -eq 0 ]] || row="reader failed: ${failed[*]}"
+        if [[ -z "$row" ]]; then
             printf 'complete\n' >&"$ack_fd"
             exec {ack_fd}>&-
-            harness_wait "$pid" || publisher_ok=0
-            grep -qx 'finish acknowledged' "$LOGS/$name-pub.log" || publisher_ok=0
+            status=0
+            harness_wait "$pid" || status=$?
+            if [[ "$status" -ne 0 ]]; then
+                row="publisher exited $status after the acknowledgement"
+            elif ! grep -qx 'finish acknowledged' "$LOGS/$name-pub.log"; then
+                row="publisher did not print finish acknowledged"
+            fi
         else
-            publisher_ok=0
             [[ -z "$pid" ]] || harness_reap "$pid"
             exec {ack_fd}>&-
         fi
         for i in "${!pids[@]}"; do
             sub="${names[$i]}"
             local cell=(case=finish publisher="$pub" subscriber="$sub" seconds=$((SECONDS - started)) log="$LOGS/$name-$sub.log")
-            if [[ "$all_ready" -eq 1 && "$publisher_ok" -eq 1 ]] && grep -qx "$(finish_marker "$sub")" "$LOGS/$name-$sub.log"; then
+            if [[ -z "$row" ]]; then
                 if [[ "$sub" == gst ]]; then
                     echo "  PASS  finish $pub -> $sub (late tail; end N/A, moqsrc keeps watching)"
                     record pass "${cell[@]}" detail="late tail only; end N/A: moqsrc keeps watching a finished broadcast"
@@ -1847,8 +1878,8 @@ run_finishes() {
                     record pass "${cell[@]}"
                 fi
             else
-                record fail "${cell[@]}" detail="missing finish tail/EOF/withdrawal/health or acknowledgement"
-                echo "  FAIL  finish $pub -> $sub"
+                record fail "${cell[@]}" detail="${causes[$i]:-$row}"
+                echo "  FAIL  finish $pub -> $sub (${causes[$i]:-$row})"
                 overall=1
                 cat "$LOGS/$name-$sub.log" "$LOGS/$name-pub.log" 2>/dev/null || true
                 harness_reap "${pids[$i]}"
@@ -1899,9 +1930,9 @@ run_drop_pair() {
     fi
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" drop
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" drop
     pid="$HARNESS_PID"
-    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" drop
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" drop
     subscriber_pid="$HARNESS_PID"
     harness_wait "$subscriber_pid" || true
     if grep -qx 'tail drop clean end=4 groups=0,2,3 bytes=786432' "$LOGS/$name-sub.log"; then
@@ -1973,14 +2004,14 @@ run_tail_pair() {
     exec 9<>"$fifo"
     from=$(relay_next_line)
     # Each side's token grants this broadcast alone, like a media round's.
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" "$mode"
     pid="$HARNESS_PID"
     if [[ "$mode" == datagram ]]; then
         # Subscription metadata confirms the alias is bound. An acknowledgement per datagram
         # avoids testing a best-effort receive buffer's burst capacity.
         mkfifo "$LOGS/datagram-ack"
         exec 8<>"$LOGS/datagram-ack"
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" "$mode"
         subscriber_pid="$HARNESS_PID"
         local ack sequence
         if read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram ready" ]]; then
@@ -1992,7 +2023,7 @@ run_tail_pair() {
         exec 8>&-
         rm "$LOGS/datagram-ack"
     else
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" "$mode"
         subscriber_pid="$HARNESS_PID"
     fi
     harness_wait "$subscriber_pid" || true
@@ -2040,10 +2071,10 @@ run_late_pair() {
     mkfifo "$fifo" "$heads"
     exec 9<>"$fifo"
     from=$(relay_next_line)
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" late
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" late
     pid="$HARNESS_PID"
     exec 8<>"$heads"
-    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$heads" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" late
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$heads" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" late
     subscriber_pid="$HARNESS_PID"
     if read -r -t "$TIMEOUT" head <&8 && [[ "$head" == "late head" ]]; then
         printf 'late tail\n' >&9
@@ -2105,7 +2136,7 @@ run_fetch_round() {
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" "$mode"
     pid="$HARNESS_PID"
     if run_fetch_subscriber "$sub" "$broadcast" "$version" "$name"; then
         printf 'clean end\n' >&9
@@ -2145,12 +2176,12 @@ run_fetch_round() {
 run_fetch_subscriber() {
     local sub="$1" broadcast="$2" version="$3" name="$4"
     if [[ "$sub" != rust ]]; then
-        run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" fetch >"$LOGS/$name-sub.log" 2>&1 &&
+        run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" fetch >"$LOGS/$name-sub.log" 2>&1 &&
             grep -qx 'fetch clean group=1 frames=3 bytes=196608' "$LOGS/$name-sub.log"
         return
     fi
     # At debug, a failed fetch says whether it went on the wire and how the relay answered it.
-    RUST_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net=debug" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
+    RUST_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net=debug" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$broadcast")" ${version:+--connect-version "$version"} \
         --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" 2>"$LOGS/$name-sub.log" &&
         python3 - "$LOGS/$name.json" <<'PYCODE'
 import base64, json, sys
@@ -2203,11 +2234,6 @@ run_media() {
         # The measurements are the point even when nothing fails: a skew or frame rate creeping
         # toward its bound is worth seeing before it crosses.
         grep -E '^(  |=== )' "$log" || true
-        local marker quarantined detail
-        while IFS=$'\t' read -r marker quarantined detail; do
-            echo "  SKIP  $name: $quarantined: $detail"
-            record skip case="$name: $quarantined" publisher="$(media_publisher "$@")" subscriber=js detail="$detail" log="$log"
-        done < <(grep $'^QUARANTINE\t' "$log" || true)
     else
         echo "  FAIL  $name ($((SECONDS - started))s)"
         record fail "${cell[@]}" detail="media.ts exited $status"
@@ -2246,9 +2272,9 @@ run_matrix() {
             overall=1
             continue
         fi
-        # The exact broadcast, not its subtree.
+        # The broadcast's prefix, which AUTH_OK must deliver as minted.
         from=$(relay_next_line)
-        start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")"
+        start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$broadcast")"
         run_round "$pub" "$broadcast" "$PUB_PID" media "$from"
         if why=$(check_grant "$pub" "$LOGS/pub-$pub.log" "$(grant_line "$broadcast" "")"); then
             if prints_grant "$pub"; then
@@ -2269,7 +2295,7 @@ run_matrix() {
         broadcast="interop-swapped-$$-${RANDOM}.hang"
         echo "=== publisher: rust  broadcast: $broadcast (tone $SWAPPED_TONE, subscribers expect $STEREO_TONE) ==="
         from=$(relay_next_line)
-        start_publisher rust-swapped rust "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$SWAPPED_TONE"
+        start_publisher rust-swapped rust "$broadcast" "$(token_url --publish "$broadcast")" "$SWAPPED_TONE"
         run_round rust-swapped "$broadcast" "$PUB_PID" wrong-tone "$from"
     fi
 
@@ -2278,7 +2304,7 @@ run_matrix() {
     for pub in "${PUB_LIST[@]}"; do
         if ! enforces_grant "$pub" || is_broken "$pub"; then continue; fi
         broadcast="interop-denied-${pub}-$$-${RANDOM}.hang"
-        allowed="interop-allowed-*.hang"
+        allowed="interop-allowed"
         echo "=== publisher: $pub  broadcast: $broadcast (token grants only $allowed) ==="
         from=$(relay_next_line)
         start_publisher "$pub-denied" "$pub" "$broadcast" "$(token_url --publish "$allowed")"
@@ -2338,7 +2364,7 @@ run_claims_case() {
         return
     fi
     harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" "${command[@]}" "$CLIENTS/js-native/claims.ts" \
-        "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
+        "$(token_url --publish "$prefix")" "$(token_url --subscribe "$prefix")" "$prefix" "$transport"
     # Judged by its printed marker, as run_native is: the addon can crash during Bun's exit
     # teardown after every assertion has passed.
     harness_wait "$HARNESS_PID" || true
@@ -2398,7 +2424,7 @@ run_replacement_case() {
     [[ "$runtime" != js-native-node ]] || command=(node --import tsx)
     harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" \
         "${command[@]}" "$CLIENTS/js-native/replace.ts" \
-        "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
+        "$(token_url --publish "$prefix")" "$(token_url --subscribe "$prefix")" "$prefix" "$transport"
     # Judged by its printed marker, as run_native is: the addon can crash during Bun's exit
     # teardown after every assertion has passed.
     harness_wait "$HARNESS_PID" || true
@@ -2453,10 +2479,10 @@ run_catalog_fanout() {
     from=$(relay_next_line)
     before=$(relay_inflated) || why="relay metrics unavailable"
     # Subtree grants, which a moq-transport request can name too.
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast/**")" "$broadcast"
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast")" "$broadcast"
     pid="$HARNESS_PID"
     for version in "${CATALOG_VERSIONS[@]}"; do
-        harness_spawn "$name-$version" "$LOGS/$name-$version.log" run_catalog_reader "$runtime" "$(token_url --subscribe "$broadcast/**")" "$broadcast" "$version"
+        harness_spawn "$name-$version" "$LOGS/$name-$version.log" run_catalog_reader "$runtime" "$(token_url --subscribe "$broadcast")" "$broadcast" "$version"
         readers+=("$HARNESS_PID")
     done
     for reader in "${readers[@]}"; do harness_wait "$reader" || true; done
@@ -2520,9 +2546,9 @@ run_hls_grid() {
     mkfifo "$fifo"
     exec 9<>"$fifo"
     for publisher in rust "$runtime"; do
-        harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher/**")" "$broadcast-$publisher"
+        harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher")" "$broadcast-$publisher"
         pid="$HARNESS_PID"
-        harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher/**")" "$broadcast-$publisher"
+        harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher")" "$broadcast-$publisher"
         harness_wait "$HARNESS_PID" || why="${why:-$publisher groups unreadable}"
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
@@ -2620,7 +2646,7 @@ run_tails() {
 
 if [[ "$MEDIA" -eq 1 ]]; then
     # One token for the whole run: every media case publishes and watches its own broadcast.
-    MEDIA_URL=$(token_url --publish '**' --subscribe '**')
+    MEDIA_URL=$(token_url --publish '' --subscribe '')
     # Media output and lifecycle, browser to browser, against the deterministic fixture. The
     # negative controls below inject a defect and name the assertion that has to catch it; each
     # passes only by failing there, which is what keeps the positive run from being vacuous.

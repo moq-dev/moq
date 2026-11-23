@@ -14,7 +14,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use moq_net::{
-	Client, Path, Pattern, Patterns, Server, Version,
+	Client, Path, Prefixes, Server, Version,
 	fuzz::{decode_path, decode_subscribe, encode_path, encode_subscribe},
 	origin,
 	time::{Driver, Instant},
@@ -91,7 +91,7 @@ fn peer_route(producer: &origin::Producer, path: &'static str, peer: u64, cost: 
 fn churn_allocs(root: &str, cursors: usize) -> usize {
 	let (producer, _driver) = origin::Producer::new(origin::Config::default());
 	let _winner = peer_route(&producer, "room/a", 1, 1);
-	let all = Patterns::from(Pattern::all());
+	let all = Prefixes::all();
 	let mut cursors: Vec<_> = (0..cursors)
 		.map(|_| producer.consume().scope(root, &all).unwrap().routes())
 		.collect();

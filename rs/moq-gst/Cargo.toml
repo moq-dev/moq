@@ -12,6 +12,9 @@ edition = "2024"
 rust-version = "1.92"
 publish = true
 
+keywords = ["quic", "webtransport", "gstreamer", "media", "live"]
+categories = ["multimedia", "network-programming"]
+
 [lib]
 name = "gstmoq"
 crate-type = ["cdylib", "rlib"]
@@ -38,6 +41,8 @@ gst-plugin-version-helper = "0.8"
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
+# A test clock for synced sinks, so lateness checks hold however loaded the machine is.
+gst-check = { package = "gstreamer-check", version = "0.25", features = ["v1_16"] }
 # Decodes the OpusHead the sink publishes, so the surround regression checks playback.
 moq-audio = { path = "../moq-audio", default-features = false }
 # Runs the tests that need a variable set or unset in a child process given it.

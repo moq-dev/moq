@@ -328,7 +328,7 @@ export function formatFps(v: number): string {
 }
 
 /** A key/value row for the stat panels. */
-export function kv(key: string, value: string): HTMLElement {
+function kv(key: string, value: string): HTMLElement {
 	const row = document.createElement("div");
 	row.className = "flex justify-between gap-4 text-sm";
 	const k = document.createElement("span");

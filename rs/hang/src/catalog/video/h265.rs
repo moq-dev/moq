@@ -7,12 +7,13 @@ use crate::Error;
 /// H.265/HEVC codec mimetype.
 ///
 /// This struct contains the profile, tier, level, and constraint information
-/// needed to identify a specific H.265 variant. The `in_band` flag determines
-/// whether parameter sets are included in-band (hev1) or out-of-band (hvc1).
+/// needed to identify a specific H.265 variant. The `in_band` flag says whether
+/// parameter sets may ride in band (hev1) or live only in the description (hvc1);
+/// the description, not the flag, decides the NAL framing.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct H265 {
-	/// If true (hev1), then the SPS/PPS/etc are in the same NAL unit as the IDR.
-	/// If false (hvc1), then the SPS/PPS/etc are in the description.
+	/// If true (hev1), the VPS/SPS/PPS may also ride in the bitstream ahead of a keyframe.
+	/// If false (hvc1), they live only in the description.
 	pub in_band: bool,
 
 	/// Profile space (0 for main profile space, 1-3 for other spaces)

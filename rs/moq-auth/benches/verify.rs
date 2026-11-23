@@ -112,7 +112,7 @@ const SAMPLES: usize = 1 << 16;
 fn claims(expires: kio::clock::Wall) -> Claims {
 	Claims::default()
 		.with_root("demo")
-		.with_publish(["**".parse().unwrap()])
+		.with_publish([moq_auth::Prefix::all()])
 		.with_expires(expires)
 }
 
@@ -353,7 +353,7 @@ impl Bench {
 		let grant = runtime.block_on(post());
 		assert_eq!(
 			grant.publish.path,
-			["**".parse().unwrap()].into_iter().collect(),
+			[moq_auth::Prefix::all()].into_iter().collect(),
 			"{name}"
 		);
 		self.add(name, move || {
@@ -377,7 +377,7 @@ impl Bench {
 			let [_, a, b, c] = (index as u32).to_be_bytes();
 			let mut request = Request::new("bench", Transport::Quic, "/demo");
 			request.remote = Some(([10, a, b, c], 4433).into());
-			let claims = valid().with_publish([format!("s{index}/**").parse().unwrap()]);
+			let claims = valid().with_publish([format!("s{index}").parse().unwrap()]);
 			request.query = Some(format!("jwt={}", key.sign(&claims).unwrap()));
 			request
 		};

@@ -18,7 +18,10 @@ WebCodecs output painted to a canvas and drives the player's pause/resume contro
 The native JS tail lanes also resolve on-demand claims on lite-07, under Node
 and Bun over WebSocket and WebTransport. Fresh readers request or follow the
 claim's own path and child paths. A reader-first case checks that an absent
-request ends while its follower waits for the publisher to arrive.
+request ends while its follower waits for the publisher to arrive. A browser forwards
+nothing and knows no node, so every request `@moq/net` sends names Node ID 0, leaving the
+relay to pick the claim's node: these lanes are where a relay answers that end to end,
+since a Rust client always names one.
 
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
@@ -32,7 +35,7 @@ so a runner short of CPU splices the captured tone with no timestamp gap. The Py
 C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
 Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
-`interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
+`interop-audio` client, since the CLI has no PCM output), `moq-ffi` for Python,
 Go, and C++, `libmoq` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 `@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes the first
 600 ms of PCM and frame timestamps of each rendition, named by its codec, for
@@ -108,9 +111,16 @@ GStreamer checks the late tail alone. `moqsrc` keeps watching a finished
 broadcast, since an announcement means online/offline, so it has no end,
 withdrawal, or session to report. It joins once the broadcast has finished and
 requires exactly ten nonempty video buffers; its cell passes with the end check
-marked N/A. A pinned moq-transport pass records the case as skipped:
-moq-transport is a compatibility layer, and a finished broadcast's late tail
-between our own clients is not planned work.
+marked N/A. A finished track's last group ages out its max delay after it ends,
+so like the other finish readers it subscribes with a max delay of its whole
+read phase: how late `gst-launch` starts is not the delivery under test. A
+pinned moq-transport pass records the case as skipped: moq-transport is a
+compatibility layer, and a finished broadcast's late tail between our own
+clients is not planned work.
+
+The runner releases a publisher's teardown only once every reader it started
+exited cleanly with its marker, so one failed reader fails the whole row. Each
+failed cell names its own cause, or the reader or publisher that failed its row.
 
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
@@ -138,19 +148,22 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 
 | Client | Source under test | Built with | Roles |
 |---|---|---|---|
-| Rust | `rs/moq-relay` + `rs/moq-cli` (+ `rs/moq-audio` for the `interop-audio` example) | `cargo build` | publish (video + audio) + subscribe |
+| Rust | `rs/moq-relay` + `rs/moq-cli` (+ `rs/moq-interop`'s clients) | `cargo build` | publish (video + audio) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `uv build` wheels (maturin + hatchling), installed into a venv in the run directory | publish (video + audio) + subscribe |
 | Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `sh/go/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
 | C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
-| GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
+| C | `rs/libmoq` | `cargo build` + `cc` | subscribe |
+| GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
 (publishing media needs an encoder the native JS runtimes lack, the C client is
 intentionally minimal, and `moqsink` publishing needs request-pad muxing this
 client doesn't drive). Rust, Python, Go, C++, and the browser publish.
+
+The Rust, C, and GStreamer rows build in one `cargo build`, so their shared
+dependencies compile once; a compile error there fails the whole run.
 
 The Go client builds against the modules `sh/go/stage.sh` assembles from
 this checkout: `moq-ffi` compiled for the host, bindings regenerated with
@@ -206,10 +219,10 @@ Unauthorized and naming the path, and every subscriber must time out. The
 browser publisher enforces its grant too, but its driver reports no session
 error to read.
 
-Tokens use patterns no prefix could carry, so every cell checks that AUTH\_OK
-delivers them as minted: a publisher is granted its exact broadcast, a subscriber
-`**/name` (a leading `**` matching zero segments), and the refused publisher
-`interop-allowed-*.hang`.
+Every cell checks that AUTH\_OK delivers its token's grant as minted: a
+publisher and its subscribers are granted their broadcast's prefix, and the
+refused publisher `interop-allowed`, a prefix that does not cover its
+broadcast.
 
 ## moq-transport
 
@@ -249,14 +262,11 @@ The standalone control endpoints use OS-assigned ports and production QMux,
 SETUP codecs, and request sessions. They verify their negotiated version directly.
 The datagram and query lanes through moq-relay use their usual version-log check.
 
-Some cases change shape on moq-transport:
-
-- moq-net subscribes there from the largest group, not from a requested range,
-  so a tail reader started before the publisher's groups may begin past group 0.
-  The tails take any contiguous run of groups through group 3, each verified
-  byte for byte, and still require the clean end at 4.
-- Requests name prefixes alone, so pinned passes mint `name/**` for both roles
-  instead of the exact and `**/name` patterns above.
+The tails change shape on moq-transport: moq-net subscribes there from the
+largest group, not from a requested range, so a tail reader started before the
+publisher's groups may begin past group 0. The tails take any contiguous run of
+groups through group 3, each verified byte for byte, and still require the clean
+end at 4.
 
 The browser pins through the `versions` attribute on `<moq-watch>` and
 `<moq-publish>`, and GStreamer through the `versions` property on `moqsrc`.
@@ -373,9 +383,9 @@ It runs the cells planned breaks cover
 without letting them fail the run, then rewrites `compat/planned-breaks.json`:
 a break with a failing cell is re-pinned to the releases just measured, and one
 with none is deleted. It prints each break's failing cells; the release workflow
-copies that report into the pin-update PR body and retains failure artifacts for
-seven days. Reasons describe why a break is allowed; the measured pins and PR
-body record its current extent.
+copies that report into the pin-update PR body and retains the report, versions,
+and every cell's logs and verdict inputs (not the staged binaries or media) for
+seven days. Reasons describe why a break is allowed; the measured pins and PR body record its current extent.
 
 ## Media QA
 
@@ -518,15 +528,11 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-Off Chromium, the replacement case skips its IETF draft 22 viewer and reports it as
-quarantined. The fallback rejoins an incumbent that encodes its audio on demand, so the
-incumbent replays the audio it captured while nobody listened, as far back as the
-returning subscription asks. A moq-lite viewer's max delay bounds that to about two
-seconds, and the player decodes audio that trails the clock past its bound only to warm
-the codec, so it rejoins at the live edge on every engine. moq-transport states no
-delay, so the incumbent can only cut the replay at the retention, and a WebSocket
-delivers all of it ahead of the live edge; Chromium's WebTransport delivers newest
-first. This is a known moq-transport limitation.
+The fallback rejoins an incumbent that encodes its audio on demand, so it replays the
+audio it captured while nobody listened, as far back as the returning subscription asks.
+The player joins live, so a moq-lite viewer asks for its min delay. A relay serving a
+moq-transport SUBSCRIBE asks for a live join with no min delay, so neither wire replays
+the retention ahead of the live edge.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media

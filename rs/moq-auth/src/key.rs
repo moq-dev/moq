@@ -650,15 +650,15 @@ impl Key {
 
 	/// Sign the claims with this key, returning the encoded token.
 	///
-	/// Fails with [`Error::InvalidRoot`](crate::Error::InvalidRoot) on a root spelled with an
-	/// empty segment, a `\` escaping anything but `\` or `/`, or more than 4096 bytes.
-	/// Verifying stays lenient on the empty segments, so tokens minted before stay valid.
+	/// Fails with [`Error::InvalidRoot`](crate::Error::InvalidRoot) on a root `moq_net::Path::new`
+	/// refuses, so a token is never minted for a root no session can dial. Verifying never
+	/// checks the root, so tokens minted before stay valid.
 	pub fn sign(&self, payload: &Claims) -> crate::Result<String> {
 		if !self.operations.contains(&KeyOperation::Sign) {
 			return Err(KeyError::SignUnsupported.into());
 		}
 
-		crate::path::validate(&payload.root)?;
+		crate::path::signable(&payload.root)?;
 		payload.validate()?;
 		self.validate_scope(payload)?;
 
@@ -680,6 +680,7 @@ impl Key {
 	/// The scope is validated here, and it is the only way to set one, so a key can never carry a
 	/// scope that permits nothing, nor a root [`sign`](Self::sign) would refuse.
 	pub fn with_scope(mut self, scope: crate::Scope) -> crate::Result<Self> {
+		crate::path::signable(&scope.root)?;
 		scope.validate()?;
 		self.jwk.scope = Some(scope);
 		Ok(self)
@@ -765,7 +766,7 @@ fn decode_base64url(s: &str) -> Result<Vec<u8>, String> {
 mod tests {
 	use super::*;
 
-	fn patterns(texts: &[&str]) -> crate::Patterns {
+	fn prefixes(texts: &[&str]) -> crate::Prefixes {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 	use kio::clock::Wall;
@@ -785,8 +786,8 @@ mod tests {
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
+			publish: prefixes(&["test-pub"]).into(),
+			subscribe: prefixes(&["test-sub"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
@@ -940,18 +941,18 @@ mod tests {
 			.clone()
 			.with_scope(crate::Scope {
 				root: "test-path".into(),
-				publish: patterns(&["allowed/**"]),
-				subscribe: patterns(&[]),
+				publish: prefixes(&["allowed"]),
+				subscribe: prefixes(&[]),
 			})
 			.unwrap();
 		let allowed = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["allowed/room/**"]).into(),
+			publish: prefixes(&["allowed/room"]).into(),
 			..Default::default()
 		};
 		let denied = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["other/**"]).into(),
+			publish: prefixes(&["other"]).into(),
 			..Default::default()
 		};
 
@@ -969,13 +970,13 @@ mod tests {
 		let key = create_test_key();
 		let claims = |root: &str| Claims {
 			root: root.into(),
-			publish: patterns(&["**"]).into(),
+			publish: prefixes(&[""]).into(),
 			..Default::default()
 		};
 		let scope = |root: &str| crate::Scope {
 			root: root.into(),
-			publish: patterns(&["**"]),
-			subscribe: patterns(&[]),
+			publish: prefixes(&[""]),
+			subscribe: prefixes(&[]),
 		};
 
 		for root in ["/room", "room/", "a//b", r"a\b"] {
@@ -989,10 +990,10 @@ mod tests {
 			);
 		}
 
-		let legacy = sign_raw(&key, serde_json::json!({"root": "/room/", "publish": ["**"]}));
+		let legacy = sign_raw(&key, serde_json::json!({"root": "/room/", "publish": [""]}));
 		assert_eq!(
 			key.verify(&legacy).unwrap().authorize("room").unwrap().publish,
-			patterns(&["**"])
+			prefixes(&[""])
 		);
 	}
 
@@ -1002,7 +1003,7 @@ mod tests {
 	fn test_key_derived_material_never_stale() {
 		let claims = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["test-pub/**"]).into(),
+			publish: prefixes(&["test-pub"]).into(),
 			..Default::default()
 		};
 
@@ -1065,8 +1066,8 @@ mod tests {
 		let key = create_test_key();
 		let invalid_claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&[]).into(),
-			subscribe: patterns(&[]).into(),
+			publish: prefixes(&[]).into(),
+			subscribe: prefixes(&[]).into(),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1147,15 +1148,15 @@ mod tests {
 
 		let token = sign_raw(
 			&key,
-			serde_json::json!({"root": "room", "publish": ["**"], "iss": "api", "sub": "alice", "jti": "1", "iat": now}),
+			serde_json::json!({"root": "room", "publish": [""], "iss": "api", "sub": "alice", "jti": "1", "iat": now}),
 		);
 		assert_eq!(key.verify(&token).unwrap().root, "room");
 
 		for (claim, payload) in [
-			("rooot", serde_json::json!({"rooot": "room/123", "publish": ["**"]})),
+			("rooot", serde_json::json!({"rooot": "room/123", "publish": [""]})),
 			(
 				"user_id",
-				serde_json::json!({"root": "room", "publish": ["**"], "user_id": 7}),
+				serde_json::json!({"root": "room", "publish": [""], "user_id": 7}),
 			),
 			(
 				"cluster",
@@ -1169,7 +1170,7 @@ mod tests {
 		// No audience is configured, so there is nothing to check one against.
 		let token = sign_raw(
 			&key,
-			serde_json::json!({"root": "room", "publish": ["**"], "aud": "relay"}),
+			serde_json::json!({"root": "room", "publish": [""], "aud": "relay"}),
 		);
 		assert!(key.verify(&token).is_err());
 	}
@@ -1184,7 +1185,7 @@ mod tests {
 				.as_secs() as i64;
 			sign_raw(
 				&key,
-				serde_json::json!({"root": "room", "publish": ["**"], "nbf": now + offset}),
+				serde_json::json!({"root": "room", "publish": [""], "nbf": now + offset}),
 			)
 		};
 		assert!(key.verify(&at(-60)).is_ok());
@@ -1244,8 +1245,8 @@ mod tests {
 		let key = create_test_key();
 		let claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["**"]).into(),
-			subscribe: patterns(&["**"]).into(),
+			publish: prefixes(&[""]).into(),
+			subscribe: prefixes(&[""]).into(),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1265,8 +1266,8 @@ mod tests {
 		let key = create_test_key();
 		let original_claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
+			publish: prefixes(&["test-pub"]).into(),
+			subscribe: prefixes(&["test-sub"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
@@ -1861,22 +1862,22 @@ mod tests {
 		// A key minted by moq-token-cli with `--root demo --put room`.
 		let json = r#"{"kty":"oct","alg":"HS256","key_ops":["sign","verify"],"k":"Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68","scope":{"root":"demo","put":["room"]}}"#;
 		let key = Key::from_str(json).unwrap();
-		assert_eq!(key.scope.as_ref().unwrap().publish, patterns(&["room/**"]));
+		assert_eq!(key.scope.as_ref().unwrap().publish, prefixes(&["room"]));
 
 		let inside = Claims {
 			root: "demo/room".into(),
-			publish: patterns(&["alice"]).into(),
+			publish: prefixes(&["alice"]).into(),
 			..Default::default()
 		};
 		let outside = Claims {
 			root: "demo".into(),
-			publish: patterns(&["lobby/**"]).into(),
+			publish: prefixes(&["lobby"]).into(),
 			..Default::default()
 		};
 		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());
 		assert!(matches!(key.sign(&outside), Err(crate::Error::ScopeExceeded)));
 
-		// Written back as the pattern it reads as.
+		// Written back as the subtree pattern every release reads it as (`wire::alias`).
 		assert!(
 			serde_json::to_string(&key)
 				.unwrap()

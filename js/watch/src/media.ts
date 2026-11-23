@@ -1,10 +1,15 @@
-import type { Container } from "@moq/hang";
+import { Container } from "@moq/hang";
 import type * as Moq from "@moq/net";
 import { Error as NetError } from "@moq/net";
 import { type Effect, type Getter, type GetterInit, getter } from "@moq/signals";
 
 /**
- * Open a media subscription with its priority and delay on the initial request and every update.
+ * Open a media subscription, joining live at its min delay, with its priority and delay on the
+ * initial request and every update, and its max delay on every update. The serving hop starts the
+ * live join that far behind the live edge, so a cold join, a replacement, or a fallback arrives with
+ * its buffer full rather than replaying the retained backlog. An update keeps the ranges first
+ * subscribed: a changed range resolves again, which would place the join anew and skip media
+ * buffered behind it.
  *
  * @internal
  */
@@ -14,18 +19,22 @@ export function subscribeMedia(
 		broadcast: Moq.Broadcast.Consumer;
 		track: string;
 		priority: GetterInit<number>;
-		delay: Getter<Moq.Track.Delay>;
+		delay: Getter<Container.Delay>;
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
 	const priority = getter(props.priority);
-	const subscriber = props.broadcast
-		.track(props.track)
-		.subscribe({ priority: priority.peek(), delay: props.delay.peek() });
+	const { ranges } = Container.subscription(props.delay.peek());
+	const subscription = (level: number, delay: Container.Delay) => ({
+		priority: level,
+		delay: Container.subscription(delay).delay,
+		ranges,
+	});
+	const subscriber = props.broadcast.track(props.track).subscribe(subscription(priority.peek(), props.delay.peek()));
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		subscriber.update({ priority: inner.get(priority), delay: inner.get(props.delay) });
+		subscriber.update(subscription(inner.get(priority), inner.get(props.delay)));
 	});
 
 	return subscriber;

@@ -165,13 +165,15 @@ impl Reserved {
 			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
 			// Lite05 subscribers know what scale to expect and the model layer accepts
 			// Frame::timestamp on append, plus whatever max age the catalog declared.
-			Some(name) => broadcast.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))?,
+			Some(name) => broadcast
+				.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))
+				.ok_or_else(|| hang::Error::Duplicate(name.clone()))?,
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
 			None => broadcast.unique_track(
 				&format!(".{}", options.config.codec),
 				catalog.track_info(hang::catalog::PRIORITY.audio),
-			)?,
+			),
 		};
 		let track = catalog.audio(
 			track,
@@ -742,6 +744,9 @@ impl Producer {
 			duration: None,
 		})?;
 
+		// The group ends where the source does, unless the padding the codec needs to finish it
+		// starts past that: a group never ends below a frame of its own.
+		let mut end = terminal.end;
 		for (index, packet) in terminal.packets.into_iter().enumerate() {
 			let offset = Timestamp::from_scale((index * terminal.frame_size) as u64, terminal.codec_rate as u64)?
 				.convert(terminal.start.scale().ok_or(moq_net::TimeOverflow)?)?;
@@ -753,9 +758,12 @@ impl Producer {
 				keyframe: false,
 				duration: None,
 			})?;
+			if timestamp > end {
+				end = timestamp;
+			}
 		}
 
-		track.cut(Some(terminal.end))?;
+		track.cut(Some(end))?;
 		Ok(())
 	}
 
@@ -944,26 +952,32 @@ impl Finished {
 		self.track.demand()
 	}
 
-	/// Abort the track with `err`, so subscribers that have not drained it see the real cause; see
-	/// [`Producer::abort`].
+	/// Abort the track with `err`; see [`Producer::abort`]. Readers still draining get the end the
+	/// track declared instead once every group below it finished: the clean end after
+	/// [`Producer::finish`], or the capture's error when the source failed.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
 }
 
-/// How far back a subscription wants retained audio replayed. A live join starts its min delay
-/// behind the live edge, which a player states as its playout delay plus the codec's warmup, so
-/// that bounds it within the max delay. Any other range, or a live join stating no min
-/// (moq-transport, moq-lite before 07), wants all its max delay keeps; `None` leaves the retention.
+/// How far back a subscription wants retained audio replayed. A live join
+/// ([`Start::Live`](moq_net::track::Start::Live) with no end) starts its lag behind the live edge,
+/// which a player states as its playout delay plus the codec's warmup, so when every range is one
+/// the furthest bounds it within the max delay. Any other range, such as one from the oldest group
+/// (as moq-transport and moq-lite before 07 carry every join), wants all its max delay keeps;
+/// `None` leaves the retention.
 #[cfg(any(feature = "capture", test))]
 fn replay_budget(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
-	let live = !subscription.ranges.is_empty()
-		&& subscription
-			.ranges
-			.iter()
-			.all(|range| *range == moq_net::track::Range::live());
+	let joins: Option<Vec<std::time::Duration>> = subscription
+		.ranges
+		.iter()
+		.map(|range| match (range.start, range.end) {
+			(moq_net::track::Start::Live(min), None) => Some(min),
+			_ => None,
+		})
+		.collect();
 	let max = subscription.delay.max;
-	match (subscription.delay.min.filter(|_| live), max) {
+	match (joins.and_then(|joins| joins.into_iter().max()), max) {
 		(Some(min), Some(max)) => Some(min.min(max)),
 		(Some(min), None) => Some(min),
 		(None, max) => max,
@@ -1157,22 +1171,33 @@ mod tests {
 
 	/// Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old:
 	/// a live viewer rejoining after seconds idle would otherwise receive all of them first. A live
-	/// join states how far back it plays as its min delay, which bounds the replay however far its
-	/// max delay reaches; one that states none (moq-transport, moq-lite before 07) is bounded by its
-	/// max alone, as is a reader asking for history.
+	/// join states how far back it plays as its lag, which bounds the replay however far its max
+	/// delay reaches; a range from the oldest group (an oldest reader, as moq-transport and
+	/// moq-lite before 07 carry) is bounded by its max alone, as is a reader asking for history
+	/// from a time.
 	#[tokio::test(start_paused = true)]
 	async fn demand_replays_only_the_history_its_delay_wants() {
 		let budget = Duration::from_millis(130);
 		let long = Duration::from_secs(10);
-		let live = || vec![moq_net::track::Range::live()];
+		let from = |start| vec![moq_net::track::Range::from(start)];
 		for (delay, ranges) in [
-			(moq_net::track::Delay::default().with_min(budget).with_max(long), live()),
-			(moq_net::track::Delay::default().with_min(None).with_max(budget), live()),
-			(moq_net::track::Delay::default().with_min(long).with_max(budget), live()),
-			// A reader reaching back for history, such as an archive, wants all its max delay keeps.
+			(
+				moq_net::track::Delay::default().with_max(long),
+				from(moq_net::track::Start::Live(budget)),
+			),
 			(
 				moq_net::track::Delay::default().with_max(budget),
-				vec![moq_net::track::Range::oldest()],
+				from(moq_net::track::Start::Oldest),
+			),
+			(
+				moq_net::track::Delay::default().with_max(budget),
+				from(moq_net::track::Start::Live(long)),
+			),
+			// A reader reaching back for history from a time, such as an archive resuming, wants
+			// all its max delay keeps.
+			(
+				moq_net::track::Delay::default().with_max(budget),
+				from(moq_net::track::Start::Time(0)),
 			),
 		] {
 			replays_from(
@@ -1392,29 +1417,29 @@ mod tests {
 		let mut demand = producer.demand();
 
 		assert_eq!(demand.name(), "audio");
-		assert_eq!(demand.wanted(), None);
+		assert!(!demand.wanted());
 		let subscriber = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		let wanted = async {
-			while demand.wanted_changed().await?.is_none() {}
+			while !demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(Duration::from_secs(1), wanted)
 			.await
 			.expect("subscription demand")
 			.unwrap();
-		assert_eq!(demand.wanted(), Some(0));
+		assert!(demand.wanted());
 
 		drop(subscriber);
 		drop(consumer);
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("subscription released")
 			.unwrap();
-		assert_eq!(demand.wanted(), None);
+		assert!(!demand.wanted());
 
 		drop(producer.finish().unwrap());
 		let closed = kio::clock::timeout(Duration::from_secs(1), demand.closed())
@@ -2378,9 +2403,11 @@ mod tests {
 			pts.split_off(4)
 		}
 
-		// Priming would start at 1_006_000.
-		assert_eq!(pts(1_050_000).await, vec![1_041_333, 1_041_333, 1_048_666, 1_070_000]);
-		assert_eq!(pts(1_000_000).await, vec![1_041_333, 1_041_333, 1_041_333, 1_061_333]);
+		// Priming would start at 1_006_000. The break's marker starts where the packets before it
+		// end, so the group after it starts a microsecond later, and so does every packet stamped
+		// with its first.
+		assert_eq!(pts(1_050_000).await, vec![1_041_334, 1_041_334, 1_048_666, 1_070_000]);
+		assert_eq!(pts(1_000_000).await, vec![1_041_334, 1_041_334, 1_041_334, 1_061_333]);
 	}
 
 	/// A codec that holds frames returns their packets late, and each still goes out at the stamp

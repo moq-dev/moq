@@ -593,7 +593,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "thiserror 2.0.21",
- "url",
 ]
 
 [[package]]
@@ -866,6 +865,7 @@ version = "0.6.2"
 dependencies = [
  "crossbeam-epoch",
  "kio-macros",
+ "libc",
  "rand",
  "smallvec",
  "tokio",
@@ -1022,7 +1022,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "url",
  "webm-iterable",
 ]
 
@@ -2158,7 +2157,6 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
- "serde_derive",
 ]
 
 [[package]]

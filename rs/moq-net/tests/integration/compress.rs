@@ -31,10 +31,11 @@ fn compressed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A repetitive payload, which DEFLATE shrinks, distinct per frame.
@@ -131,7 +132,7 @@ const RANGED: &[&str] = &["moq-lite-07-wip", "moq-transport-18", "moq-transport-
 /// pair of hops, compressed or not, whether the group began before it subscribed or after.
 #[kio::test]
 async fn a_start_group_arrives_whole() {
-	use moq_net::track::{Anchor, Subscription};
+	use moq_net::track::Subscription;
 	let write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
 		for index in frames {
 			group
@@ -165,7 +166,7 @@ async fn a_start_group_arrives_whole() {
 						if lite {
 							assert_eq!(
 								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
-								Anchor::Time(5),
+								moq_net::track::Start::Time(5),
 								"{case}: upstream asks for the start group"
 							);
 						}

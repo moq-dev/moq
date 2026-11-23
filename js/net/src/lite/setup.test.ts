@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import { toHop } from "../hop.ts";
 import { encodeVarint, Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
@@ -10,6 +11,7 @@ import { Version } from "./version.ts";
 const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
+const PARAM_COST = 0x4n;
 const PARAM_HOP = 0x5n;
 const PARAM_IMPLEMENTATION = 0x6n;
 
@@ -169,6 +171,13 @@ test("lite-07 SETUP sends no Node ID and checks the one it is sent", async () =>
 	// A session's node is never a marked identity.
 	await expect(decodeParam(PARAM_HOP, node(7n, 9n, 1), v)).rejects.toThrow();
 	await expect(decodeParam(PARAM_HOP, concat([node(7n, 9n, 0), new Uint8Array([0])]), v)).rejects.toThrow();
+});
+
+test("lite-07 SETUP refuses a zero link cost, which older versions ignore", async () => {
+	const cost = (value: bigint, v: Version) => decodeParam(PARAM_COST, encodeVarint(value, v), v);
+	await expect(cost(0n, Version.DRAFT_07)).rejects.toThrow(ProtocolViolation);
+	await cost(5n, Version.DRAFT_07);
+	await cost(0n, Version.DRAFT_06);
 });
 
 test("SETUP with implementation round-trips", async () => {

@@ -3,9 +3,9 @@ use std::time::Duration;
 use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use moq_mux::catalog::{self, CatalogFormat, Stream};
+use moq_mux::container::Delay;
 use moq_mux::select;
-use moq_net::track::Delay;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 /// Container format written on the export (sink) side.
@@ -292,6 +292,16 @@ pub struct Subscribe {
 	finish: CancellationToken,
 }
 
+/// How a TS export ends, suggesting `--stitch` when another instance replaced its broadcast.
+fn replaced(end: moq_mux::Result<()>) -> anyhow::Result<()> {
+	match end {
+		Err(err @ moq_mux::Error::Replaced(_)) => {
+			Err(anyhow::Error::from(err).context("pass --stitch to follow a replacement as a program switch"))
+		}
+		end => Ok(end?),
+	}
+}
+
 /// Log how a TS export's release clock keeps up with the source.
 fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'static str) {
 	tracing::info!(
@@ -423,9 +433,14 @@ impl Subscribe {
 			}
 		};
 
-		match mp4.finish()? {
+		match mp4.finish(&[])? {
 			Some(trailer) => {
-				write_finish(&mut file, &trailer).await?;
+				// Converting drops the error of a write still in flight, which flushing returns.
+				file.flush().await?;
+				let mut file = file.into_std().await;
+				tokio::task::spawn_blocking(move || trailer.write(&mut file))
+					.await?
+					.with_context(|| format!("failed to finish {}", path.display()))?;
 				tracing::info!(path = %path.display(), "recording finished");
 			}
 			// Nothing reached the file, so there is no recording to keep.
@@ -501,7 +516,8 @@ impl Subscribe {
 	/// Write the selected TS media to a writer after resolving its route.
 	pub(super) async fn write_ts(self, mut stdout: impl tokio::io::AsyncWrite + Unpin) -> anyhow::Result<()> {
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
-		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
+		// keyframes for tune-in). Annex-B sources (no description) pass through;
+		// length-prefixed ones are rewritten to Annex-B; AAC
 		// is re-framed as ADTS. `fragment_duration` does not apply to TS. The catalog stream
 		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
@@ -559,19 +575,19 @@ impl Subscribe {
 		let stats = ts.export().stats();
 		report(&stats);
 		log_release(&stats.release, "TS export release clock");
-		match end {
-			Err(err @ moq_mux::Error::Replaced(_)) => {
-				Err(anyhow::Error::from(err).context("pass --stitch to follow a replacement as a program switch"))
-			}
-			end => Ok(end?),
-		}
+		replaced(end)
 	}
 
 	/// Write the multiplex the broadcast's passthrough track carries, each run of packets as its
 	/// time on the source's PCR comes round.
 	async fn run_ts_passthrough(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
-		let mut release = moq_mux::container::ts::Release::new(self.source, self.catalog, self.args.max_delay).await?;
+		let release = moq_mux::container::ts::Release::new(self.source, self.catalog, self.args.max_delay).await?;
+		// The path's announcements carry it across the broadcast's returns and, with `--stitch`,
+		// onto a replacement, as they do the demultiplexed export.
+		let mut release = moq_mux::container::ts::Follower::new(release)?
+			.with_follow(self.args.follow)
+			.with_stitch(self.args.stitch);
 		let report = |stats: &moq_mux::container::ts::stats::Release| {
 			if let Some(sections) = &self.sections {
 				sections.set(|report| report.release = Some(stats.clone()));
@@ -579,13 +595,18 @@ impl Subscribe {
 		};
 		let mut sampled = kio::clock::now();
 		let mut reported = (0, 0, 0, 0);
-		while let Some(object) = release.next().await? {
+		let end = loop {
+			let object = match release.next().await {
+				Ok(Some(object)) => object,
+				Ok(None) => break Ok(()),
+				Err(err) => break Err(err),
+			};
 			stdout.write_all(&object.payload).await?;
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = kio::clock::now();
-				let stats = release.stats();
+				let stats = release.export().stats();
 				report(&stats);
 				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);
 				if counts != reported {
@@ -593,11 +614,11 @@ impl Subscribe {
 					log_release(&stats, "TS passthrough release clock");
 				}
 			}
-		}
-		let stats = release.stats();
+		};
+		let stats = release.export().stats();
 		report(&stats);
 		log_release(&stats, "TS passthrough release clock");
-		Ok(())
+		replaced(end)
 	}
 
 	async fn run_flv(self) -> anyhow::Result<()> {
@@ -621,17 +642,4 @@ impl Subscribe {
 
 		Ok(())
 	}
-}
-
-/// Make the writes that turn a recording into a regular MP4: the moov where the media ends,
-/// then the mdat header over the reserved box.
-pub async fn write_finish(file: &mut tokio::fs::File, finish: &moq_mux::container::mp4::Finish) -> std::io::Result<()> {
-	file.set_len(finish.moov_offset).await?;
-	file.seek(std::io::SeekFrom::Start(finish.moov_offset)).await?;
-	file.write_all(&finish.moov).await?;
-	// The header points readers past the media at the moov, so the moov must be on disk first.
-	file.sync_data().await?;
-	file.seek(std::io::SeekFrom::Start(finish.mdat_offset)).await?;
-	file.write_all(&finish.mdat).await?;
-	file.sync_all().await
 }

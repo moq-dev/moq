@@ -53,6 +53,10 @@ smallvec = { version = "1.15", features = ["union"] }
 # The host timers, and the runtime handle that keeps a paused runtime's clock on its own origin.
 tokio = { workspace = true, features = ["rt", "time"], optional = true }
 
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+# Reads the clocks that count the host's sleep, which std's `Instant` does not.
+libc = { workspace = true }
+
 [dev-dependencies]
 # Bench-only: the FuturesUnordered comparison in benches/tasks.rs.
 criterion = { package = "bench-harness", path = "../bench-harness" }

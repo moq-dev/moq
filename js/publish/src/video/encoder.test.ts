@@ -83,6 +83,8 @@ class FakeVideoEncoder {
 	}
 
 	configure(config: VideoEncoderConfig): void {
+		// As browsers do: a bitrate must be positive.
+		if (config.bitrate === 0) throw new TypeError("invalid bitrate");
 		this.state = "configured";
 		this.#codec = config.codec;
 		this.configs.push(config);
@@ -185,7 +187,7 @@ for (const stage of ["support", "flush"] as const) {
 			if (stage === "flush") expect(FakeVideoEncoder.instances[0]?.state).toBe("closed");
 			enabled.set(true);
 			await settle();
-			expect(encoder.out.catalog.peek()?.codec).toStartWith("avc1");
+			expect(encoder.out.catalog.peek()?.codec).toStartWith("avc3");
 			// The abandoned browser promise still has not resolved.
 			expect(held.mock.calls.length).toBeGreaterThan(1);
 		} finally {
@@ -380,7 +382,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 // quantizer; one that accepts the mode and ignores the value, as Firefox does, or refuses it, as
 // Chrome's software H.264 does, runs a constant bitrate at the cap instead.
 for (const quantizer of ["honored", "ignored", "refused"] as const) {
-	test(`an encoder that ${quantizer} a per-frame quantizer follows a grant`, async () => {
+	test(`an encoder that ${quantizer} a per-frame quantizer follows a grant down to zero and back`, async () => {
 		using _videoEncoder = installFakeVideoEncoder();
 		FakeVideoEncoder.quantizer = quantizer;
 
@@ -451,6 +453,32 @@ for (const quantizer of ["honored", "ignored", "refused"] as const) {
 			} else {
 				expect(live.configs.map((config) => config.bitrate)).toEqual([cap, 200_000]);
 			}
+
+			// A zero grant, as higher priorities taking the whole estimate leave: every frame is held
+			// back, and constant mode can't be configured at zero, so it keeps its last config.
+			estimate.set(0);
+			await settle();
+			expect(encoder.out.resolved.peek()?.bitrate).toBe(0);
+			const configs = live.configs.length;
+			const encoded = live.options.length;
+			const skipped = encoder.out.stats.peek().skipped;
+			controller.enqueue({ timestamp: 66_666, close: () => {} } as unknown as VideoFrame);
+			await clock.advance(PROBE);
+			expect(encoder.out.error.peek()).toBeUndefined();
+			expect(live.configs).toHaveLength(configs);
+			expect(live.options).toHaveLength(encoded);
+			expect(encoder.out.stats.peek().skipped).toBe(skipped + 1);
+
+			// The grant recovers: constant mode configures again and encodes the next frame.
+			estimate.set(10_000_000);
+			await settle();
+			expect(encoder.out.resolved.peek()?.bitrate).toBe(cap);
+			if (mode === "constant") expect(live.configs.at(-1)?.bitrate).toBe(cap);
+			else expect(live.configs).toHaveLength(1);
+			controller.enqueue({ timestamp: 100_000, close: () => {} } as unknown as VideoFrame);
+			await clock.advance(PROBE);
+			expect(encoder.out.error.peek()).toBeUndefined();
+			expect(live.options).toHaveLength(encoded + 1);
 		} finally {
 			encoder.close();
 			fanout.close();
@@ -1095,10 +1123,12 @@ test("the catalog advertises the codec string a probe encode reports", async () 
 		encoder.config.set({ codec: "avc1" });
 		await settle();
 		expect(encoder.out.resolved.peek()?.codec).toBe("avc1.640028");
-		expect(encoder.out.catalog.peek()?.codec).toBe("avc1.64001F");
+		// Annex B carries its parameter sets in band, so the catalog says avc3 rather than the
+		// avc1 the encoder reports.
+		expect(encoder.out.catalog.peek()?.codec).toBe("avc3.64001F");
 
 		// The configured strings were never advertised, not even briefly.
-		expect([...new Set(advertised)]).toEqual(["vp09.00.31.08", "avc1.64001F"]);
+		expect([...new Set(advertised)]).toEqual(["vp09.00.31.08", "avc3.64001F"]);
 	} finally {
 		unsubscribe();
 		encoder.close();
@@ -1405,7 +1435,7 @@ for (const stop of ["resume", "close", "detach", "track closed", "track replaced
 }
 
 async function recordKeyframes(
-	info: Partial<Moq.Track.Info>,
+	info: Moq.Track.InfoInit,
 	run: (ctx: {
 		encoder: Encoder;
 		track: Moq.Track.Producer;
@@ -1475,7 +1505,7 @@ test("a repeated capture timestamp is dropped rather than failing the track", as
 });
 
 test("a join over the refresh ratio forces a keyframe on the next frame", async () => {
-	const keys = await recordKeyframes({ refresh: 2 }, async ({ track, send }) => {
+	const keys = await recordKeyframes({ refresh: { ratio: 2 } }, async ({ track, send }) => {
 		const watching = track.subscribe();
 		const joined: Moq.Track.Subscriber[] = [];
 		try {
@@ -1501,7 +1531,7 @@ test("a join over the refresh ratio forces a keyframe on the next frame", async 
 });
 
 test("a join that a written group serves forces no keyframe, even one encoded without a subscriber", async () => {
-	const keys = await recordKeyframes({ refresh: 2 }, async ({ encoder, track, send }) => {
+	const keys = await recordKeyframes({ refresh: { ratio: 2 } }, async ({ encoder, track, send }) => {
 		await send(0);
 		encoder.cut();
 		await send(100);

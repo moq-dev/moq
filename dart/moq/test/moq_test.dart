@@ -30,7 +30,7 @@ void main() {
     expect(request.priority(), 12);
     final producer = request.accept(info: null);
     expect(producer.priority(), 12);
-    expect(stream.demand().wanted(), isNull);
+    expect(stream.demand().wanted(), isFalse);
     producer.insert(
       datagram: Datagram(
         sequence: 7,
@@ -67,7 +67,7 @@ void main() {
       () => moq_media.ContainerProducer(
         broadcast: other,
         init: moq_media.ContainerInit(
-          format: moq_media.ContainerFormat.fmp4,
+          format: moq_media.ContainerFormat.fmp4(),
           data: Uint8List(0),
           timebase: timebase,
         ),
@@ -139,7 +139,7 @@ void main() {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(name: 'status', info: null);
     final demand = track.demand();
-    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    while (await demand.wantedChanged().timeout(timeout)) {}
 
     final late = track.consume(subscription: null);
     expect(track.abortUnwanted(errorCode: 7), isFalse);
@@ -152,9 +152,9 @@ void main() {
     final frame = await late.readFrame().timeout(timeout);
     expect(utf8.decode(frame!.payload), 'still serving');
 
-    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    while (!await demand.wantedChanged().timeout(timeout)) {}
     late.cancel();
-    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    while (await demand.wantedChanged().timeout(timeout)) {}
     expect(track.abortUnwanted(errorCode: 7), isTrue);
     expect(
       () => track.abortUnwanted(errorCode: 7),
@@ -214,14 +214,71 @@ void main() {
     broadcast.close();
   });
 
+  test(
+    'a refresh reads back as published and an omitted one asks for nothing',
+    () {
+      final broadcast = BroadcastProducer();
+      final refreshed = broadcast
+          .publishTrack(
+            name: 'refresh',
+            info: TrackInfo(
+              refresh: TrackRefresh(
+                ratio: 2,
+                interval: const Duration(milliseconds: 500),
+              ),
+            ),
+          )
+          .consume(subscription: null)
+          .info()
+          .refresh;
+      expect(refreshed.ratio, 2);
+      expect(refreshed.interval, const Duration(milliseconds: 500));
+      final plain = broadcast
+          .publishTrack(name: 'plain', info: TrackInfo())
+          .consume(subscription: null)
+          .info()
+          .refresh;
+      expect(plain.ratio, isNull);
+      expect(plain.interval, isNull);
+      broadcast.close();
+    },
+  );
+
+  test('a subscriber refresh with nothing to send returns at once', () async {
+    final broadcast = BroadcastProducer();
+    final consumer = broadcast
+        .publishTrack(
+          name: 'status',
+          info: TrackInfo(refresh: TrackRefresh(ratio: 0)),
+        )
+        .consume(subscription: null);
+    // A track with no group has nothing more to send: its first is already asked for.
+    await consumer.refresh();
+    broadcast.close();
+  });
+
+  test('refresh returns once the first subscriber asks for a group', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'status',
+      info: TrackInfo(refresh: TrackRefresh(ratio: 0)),
+    );
+    final demand = track.demand();
+    final consumer = track.consume(subscription: null);
+    await demand.refresh().timeout(timeout);
+    consumer.cancel();
+    track.finish();
+    broadcast.close();
+  });
+
   test('a default subscription skips superseded groups at once', () {
     for (final subscription in [defaultSubscription(), Subscription()]) {
-      expect(subscription.delay.min, Duration.zero);
+      expect(subscription.delay.min, isNull);
       expect(subscription.delay.max, Duration.zero);
     }
-    final unset = Delay(min: null, max: null);
-    expect(unset.min, isNull);
-    expect(unset.max, isNull);
+    final stated = Delay(min: Duration.zero, max: null);
+    expect(stated.min, Duration.zero);
+    expect(stated.max, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -262,7 +319,7 @@ void main() {
       final consumer = track.consume(
         subscription: Subscription(
           delay: Delay(max: const Duration(seconds: 10)),
-          ranges: [Range(start: RelativeMoqAnchor(2))],
+          ranges: [Range(start: Timestamp.unscaled(0))],
           order: Order.ascending,
         ),
       );
@@ -306,8 +363,8 @@ void main() {
 
     // Generated records compare by identity, so compare the fields.
     void expectEverything(Grant? grant) {
-      expect(grant?.publish, ['**']);
-      expect(grant?.subscribe, ['**']);
+      expect(grant?.publish, ['']);
+      expect(grant?.subscribe, ['']);
       expect(grant?.expires, isNull);
     }
 
@@ -538,7 +595,7 @@ void main() {
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
     final demand = track.demand();
-    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    while (!await demand.wantedChanged().timeout(timeout)) {}
 
     final producer = track.appendGroup(start: Duration.zero.toTimestamp());
     producer.writeFrame(
@@ -761,6 +818,16 @@ void main() {
     expect(
       () => const Duration(microseconds: -1).toTimestamp(),
       throwsArgumentError,
+    );
+    expect(
+      () => Timestamp(value: 3, scale: 0).toDuration(),
+      throwsArgumentError,
+    );
+    // A u64 past 2^63 reads as a negative int, and still converts as unsigned.
+    expect(() => Timestamp(value: -1, scale: 1).toDuration(), throwsRangeError);
+    expect(
+      Timestamp(value: 1 << 62, scale: -1).toDuration(),
+      const Duration(microseconds: 250000),
     );
     // A scale-less track's key is no time.
     final unscaled = Timestamp.unscaled(3);
@@ -991,11 +1058,11 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'events',
-        info: MoqTrackInfo(timescale: 1000000),
+        info: MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh()),
       ),
     );
     final demand = producer.demand();
-    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    while (await demand.wantedChanged().timeout(timeout)) {}
 
     final late = moq_json.StreamConsumer(
       track: await broadcast
@@ -1011,9 +1078,9 @@ void main() {
     final record = await late.next().timeout(timeout);
     expect(jsonDecode(record!.value), 'still serving');
 
-    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    while (!await demand.wantedChanged().timeout(timeout)) {}
     late.cancel();
-    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    while (await demand.wantedChanged().timeout(timeout)) {}
     expect(producer.abortUnwanted(errorCode: 7), isTrue);
     expect(
       () => producer.abortUnwanted(errorCode: 7),
@@ -1082,7 +1149,7 @@ void main() {
       catalog: moq_media.CatalogProducer(broadcast: broadcast),
       options: moq_video.ProducerOptions(
         input: moq_video.EncoderInput(
-          format: moq_video.PixelFormat.rgba,
+          format: moq_video.PixelFormat.rgba(),
           width: 320,
           height: 240,
           framerate: moq_video.FrameRate(numerator: 30000, denominator: 1001),
@@ -1137,10 +1204,10 @@ void main() {
     decoder.cancel();
     final pixels = frame.width() * frame.height();
     expect(
-      frame.pixels(format: moq_video.PixelFormat.i420).length,
+      frame.pixels(format: moq_video.PixelFormat.i420()).length,
       pixels * 3 ~/ 2,
     );
-    final packed = frame.pixels(format: moq_video.PixelFormat.rgba);
+    final packed = frame.pixels(format: moq_video.PixelFormat.rgba());
     expect(packed.length, pixels * 4);
     for (var i = 3; i < packed.length; i += 4) {
       expect(packed[i], 0xFF);
