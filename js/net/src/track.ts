@@ -1824,6 +1824,7 @@ export class Producer {
 			hooks.startTrack(producer, { ...served, restated: true });
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.acceptedInfo = (producer) => producer.#state.info.peek();
 		hooks.reportedLargest = (producer, largest, finished) => {
 			producer.#advanceObject(largest);
 			const current = producer.#state.largest.peek();

@@ -620,6 +620,11 @@ export class Consumer {
 			target.#unlisted = true;
 		};
 		hooks.unlisted = (target) => target.#unlisted;
+		hooks.heldInfo = (target, name) => {
+			if (target.#state.closed.peek() !== undefined) return undefined;
+			const producer = lookup(target.#state, name);
+			return producer && hooks.acceptedInfo(producer);
+		};
 	}
 
 	/**
