@@ -1,7 +1,7 @@
 // Pages that moved when the site was reorganized. Old links live on in blog
 // posts, the agent skill, and search engines, so they redirect rather than 404.
 // Keys are old paths without a trailing slash or `.html`; values are new paths.
-const MOVED = {
+const MOVED: Record<string, string> = {
 	"/setup/linux": "/setup/install",
 	"/setup/windows": "/setup/install",
 	"/setup/demo/web": "/bin/demo",
@@ -47,7 +47,7 @@ const MOVED = {
 };
 
 // Whole directories that were flattened one level.
-const FLATTENED = [
+const FLATTENED: [RegExp, string][] = [
 	[/^\/lib\/rs\/crate\/([^/]+)$/, "/lib/rs/$1"],
 	[/^\/lib\/js\/@moq\/([^/]+)$/, "/lib/js/$1"],
 ];
@@ -57,7 +57,11 @@ const COLLAPSED = ["/concept/standard"];
 
 const MOVED_PERMANENTLY = 301;
 
-function redirect(pathname) {
+interface Env {
+	ASSETS: { fetch(request: Request): Promise<Response> };
+}
+
+function redirect(pathname: string): string | undefined {
 	const key =
 		pathname
 			.replace(/\/index(?:\.html)?$/, "")
@@ -71,14 +75,64 @@ function redirect(pathname) {
 	return undefined;
 }
 
+// The quality an `Accept` header gives a media type: the most specific range that
+// matches, as RFC 9110 orders them, or 0 when none does.
+function quality(accept: string, type: string): number {
+	const [group] = type.split("/");
+	let best = { rank: -1, q: 0 };
+	for (const item of accept.split(",")) {
+		const [range, ...params] = item.trim().toLowerCase().split(";");
+		const rank = range === type ? 2 : range === `${group}/*` ? 1 : range === "*/*" ? 0 : -1;
+		if (rank <= best.rank) continue;
+		const q = params.map((p) => p.trim()).find((p) => p.startsWith("q="));
+		best = { rank, q: q === undefined ? 1 : Number(q.slice(2)) || 0 };
+	}
+	return best.q;
+}
+
+// An agent asks for Markdown by naming it, at least as high as HTML. A wildcard
+// such as curl's `*/*` is no ask, so it still gets HTML.
+export function prefersMarkdown(accept: string): boolean {
+	if (!/(^|,)\s*text\/markdown\s*(;|,|$)/i.test(accept)) return false;
+	const markdown = quality(accept, "text/markdown");
+	return markdown > 0 && markdown >= quality(accept, "text/html");
+}
+
+// The Markdown twin the site builds for a page, or undefined for anything that is not a page.
+function twin(pathname: string): string | undefined {
+	// A directory's index is `dir.md`, and the home page has none.
+	if (pathname.endsWith("/")) return pathname === "/" ? undefined : `${pathname.slice(0, -1)}.md`;
+	const leaf = pathname.slice(pathname.lastIndexOf("/") + 1);
+	if (leaf.endsWith(".html")) return `${pathname.slice(0, -".html".length)}.md`;
+	return leaf.includes(".") ? undefined : `${pathname}.md`;
+}
+
+async function serve(request: Request, env: Env): Promise<Response> {
+	const url = new URL(request.url);
+	if (request.method === "GET" || request.method === "HEAD") {
+		const path = prefersMarkdown(request.headers.get("Accept") ?? "") && twin(url.pathname);
+		if (path) {
+			url.pathname = path;
+			const response = await env.ASSETS.fetch(new Request(url, request));
+			// Only a missing twin falls through: a 304 revalidates the Markdown the client holds.
+			if (response.status !== 404) return response;
+		}
+	}
+	return env.ASSETS.fetch(request);
+}
+
 export default {
-	async fetch(request, env) {
+	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 		const target = redirect(url.pathname);
 		if (target && target !== url.pathname) {
 			url.pathname = target;
 			return Response.redirect(url.toString(), MOVED_PERMANENTLY);
 		}
-		return env.ASSETS.fetch(request);
+		// Every page has two representations, so a cache must key on `Accept`.
+		const served = await serve(request, env);
+		const response = new Response(served.body, served);
+		response.headers.append("Vary", "Accept");
+		return response;
 	},
 };

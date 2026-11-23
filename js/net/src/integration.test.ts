@@ -214,7 +214,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
 		// The negotiated lite-06 cannot state a minimum.
-		delay: { min: null, max: Duration.millis(250) },
+		delay: { max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: 1n, end: 8n }],
 	});
@@ -227,7 +227,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	});
 	expect(await updated).toEqual({
 		priority: 8,
-		delay: { min: null, max: Duration.millis(500) },
+		delay: { max: Duration.millis(500) },
 		order: "descending",
 		ranges: [{ start: 2n, end: 11n }],
 	});
@@ -464,9 +464,12 @@ test("integration: lite-07 serves sparse ranges and a live join", async () => {
 			.track("video")
 			.subscribe({
 				// The join starts 2 ms behind the newest group, which starts at 9 ms.
-				delay: { min: Duration.millis(2), max: null },
+				delay: { max: null },
 				order: "ascending",
-				ranges: [{ start: 1n, end: 2n }, { end: 8n }],
+				ranges: [
+					{ start: 1n, end: 2n },
+					{ start: { live: Duration.millis(2) }, end: 8n },
+				],
 			})
 			.ordered();
 		// Covering the ranges ends the subscription upstream, and the read with its window.
@@ -508,7 +511,7 @@ test("integration: lite-07 starts an ordered read at a live join over a frameles
 	const newest = hooks.appendNext(producer);
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscription = { delay: { min: Duration.ZERO, max: null }, ranges: [{}] };
+	const subscription = { delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] };
 	const reader = remote.track("video").subscribe(subscription).ordered();
 	const sibling = remote.track("video").subscribe(subscription);
 	try {
@@ -545,7 +548,7 @@ test("integration: lite-07 joins a late live join at the live edge", async () =>
 	hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscription = { delay: { min: Duration.ZERO, max: null }, ranges: [{}] };
+	const subscription = { delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] };
 	const first = remote.track("video").subscribe(subscription);
 	let late: ReturnType<typeof first.ordered> | undefined;
 	try {

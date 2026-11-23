@@ -3,6 +3,7 @@ import { Duration, Instant, Wall, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race } from "@moq/signals";
 import { DEFAULT_EXPIRY } from "./cache.ts";
+import { joinTick } from "./demand.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -789,7 +790,7 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	// range joins live, so no Min Age is stated.
 	expect(producer.subscription.peek()).toEqual({
 		priority: 0,
-		delay: { min: null, max: Duration.millis(0) },
+		delay: { max: Duration.millis(0) },
 		order: "descending",
 		ranges: [{ start: 0n }],
 	});
@@ -804,7 +805,7 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	});
 	expect(await next).toEqual({
 		priority: 7,
-		delay: { min: null, max: Duration.millis(250) },
+		delay: { max: Duration.millis(250) },
 		order: "ascending",
 		ranges: [{ start: 2n, end: 8n }],
 	});
@@ -852,9 +853,10 @@ test("a fractional delay is rounded up before the wire sees it", async () => {
 	const next = producer.subscription.changed();
 	track.update({ delay: { max: Duration.millis(500.25) } });
 	expect((await next)?.delay?.max).toEqual(Duration.millis(501));
-	const min = producer.subscription.changed();
-	track.update({ delay: { min: Duration.millis(99.5) } });
-	expect((await min)?.delay?.min).toEqual(Duration.millis(100));
+	// So is a live join's lag, rounded up so it never starts newer than asked.
+	const lag = producer.subscription.changed();
+	track.update({ ranges: [{ start: { live: Duration.millis(99.5) } }] });
+	expect((await lag)?.ranges).toEqual([{ start: { live: Duration.millis(100) } }]);
 
 	// The publisher half of the budget lands on the wire through TRACK_INFO, with the same hazard.
 	producer.accept({ maxAge: Duration.millis(1000.5) });
@@ -941,49 +943,50 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	const producer = new TrackProducer("test");
 	const bounded = producer.subscribe({
 		priority: 2,
-		delay: { min: Duration.millis(400), max: Duration.millis(100) },
+		delay: { max: Duration.millis(100) },
 		order: "ascending",
 		ranges: [{ start: 10n, end: 19n }],
 	});
 	const live = producer.subscribe({
 		priority: 7,
-		delay: { min: Duration.millis(50), max: Duration.millis(250) },
-		ranges: [{}],
+		delay: { max: Duration.millis(250) },
+		ranges: [{ start: { live: Duration.millis(50) } }],
 	});
 	const joining = producer.subscribe({
-		delay: { min: Duration.millis(20), max: Duration.millis(0) },
-		ranges: [{}],
+		delay: { max: Duration.millis(0) },
+		ranges: [{ start: { live: Duration.millis(20) } }],
 	});
-	// A live join that states no minimum, as a legacy peer's, reaches back furthest of all.
+	// One starting at the oldest group, as a legacy peer's, reaches back furthest of all.
 	const legacy = producer.subscribe({
-		delay: { min: null, max: Duration.millis(0) },
+		delay: { max: Duration.millis(0) },
 		ranges: [{}],
 	});
 
 	// One descending subscriber makes the aggregate descending, so a live reader is never held
-	// behind another's backlog. A live join with no minimum reaches back to the oldest group, so
-	// its open range covers every other.
+	// behind another's backlog. A range from the oldest group with no end covers every other.
 	expect(producer.subscription.peek()).toEqual({
 		priority: 7,
-		delay: { min: null, max: Duration.millis(250) },
+		delay: { max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{}],
 	});
 
-	// Only the live joins state a minimum, and the largest wins, so an upstream reaches back far
-	// enough for the reader that buffers most: the bounded reader's 400 ms counts for nothing.
+	// Each live join is a range of its own by its lag, beside the time ranges, so an upstream
+	// answers each reader's join as the origin would.
 	const stated = producer.subscription.changed();
 	legacy.close();
-	const aggregate = await stated;
-	expect(aggregate?.delay?.min).toEqual(Duration.millis(50));
-	expect(aggregate?.ranges).toContainEqual({ start: 10n, end: 19n });
+	expect((await stated)?.ranges).toEqual([
+		{ start: 10n, end: 19n },
+		{ start: { live: Duration.millis(20) } },
+		{ start: { live: Duration.millis(50) } },
+	]);
 
 	joining.close();
 	const narrowed = producer.subscription.changed();
 	live.close();
 	expect(await narrowed).toEqual({
 		priority: 2,
-		delay: { min: null, max: Duration.millis(100) },
+		delay: { max: Duration.millis(100) },
 		order: "ascending",
 		ranges: [{ start: 10n, end: 19n }],
 	});
@@ -993,7 +996,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await none).toBeUndefined();
 });
 
-// A reader without ranges or a Min Age reads from the oldest group, as Rust's default range does,
+// A reader without ranges reads from the oldest group, as Rust's default range does,
 // so beside a history reader the union still reaches the history floor and below it. A reader that
 // asks for the live edge alone keeps the history reader's floor as its own range.
 test("a reader without ranges keeps a history reader's floor", () => {
@@ -1009,8 +1012,8 @@ test("a reader without ranges keeps a history reader's floor", () => {
 	const other = new TrackProducer("test");
 	const kept = other.subscribe({ ranges: [{ start: 5n, end: 8n }] });
 	// A live join reaches back to no span of history, so the union keeps the history beside it.
-	const live = other.subscribe({ delay: { min: Duration.ZERO }, ranges: [{}] });
-	expect(other.subscription.peek()?.ranges).toEqual([{}, { start: 5n, end: 8n }]);
+	const live = other.subscribe({ ranges: [{ start: { live: Duration.ZERO } }] });
+	expect(other.subscription.peek()?.ranges).toEqual([{ start: 5n, end: 8n }, { start: { live: Duration.ZERO } }]);
 	live.close();
 	kept.close();
 });
@@ -1140,7 +1143,7 @@ test("an ordered reader keeps a group between its ranges until the cursor passes
 
 test("a live join waits for the first group", () => {
 	const empty = new TrackProducer("test");
-	const live = empty.subscribe({ delay: { min: Duration.ZERO, max: null }, ranges: [{}] });
+	const live = empty.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] });
 	empty.createGroup(7n).finish();
 	empty.createGroup(6n).finish();
 	empty.createGroup(8n).finish();
@@ -1205,39 +1208,43 @@ function halfSeconds(from: number, to: number): bigint[] {
 
 test("a live join reaches back by its min age", () => {
 	const producer = halfSecondGroups();
-	const reader = producer.subscribe({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [{}] });
+	const reader = producer.subscribe({
+		delay: { max: Duration.secs(30) },
+		ranges: [{ start: { live: Duration.secs(2) } }],
+	});
 	// The newest frame presents at 5 s, so the join starts at the group containing 3 s.
 	expect(readable(reader)).toEqual(halfSeconds(6, 10));
 	appendHalfSecond(producer, 11n);
 	expect(readable(reader)).toEqual([5500n]);
 });
 
-test("a min age update reaches a live join not yet started", () => {
+test("a lag update reaches a live join not yet started", () => {
 	const producer = new TrackProducer("test");
 	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
-	const reader = producer.subscribe({ delay: { min: Duration.secs(1), max: Duration.secs(30) }, ranges: [{}] });
+	const reader = producer.subscribe({
+		delay: { max: Duration.secs(30) },
+		ranges: [{ start: { live: Duration.secs(1) } }],
+	});
 	expect(readable(reader)).toEqual([]);
-	reader.update({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [{}] });
+	reader.update({ delay: { max: Duration.secs(30) }, ranges: [{ start: { live: Duration.secs(2) } }] });
 	for (let n = 0n; n <= 10n; n++) appendHalfSecond(producer, n);
 	expect(readable(reader)).toEqual(halfSeconds(6, 10));
 });
 
-test("a zero min age joins at the latest group, an unstated one reaches back to the oldest", () => {
+test("a zero lag joins at the latest group, a range with no start reaches back to the oldest", () => {
 	const producer = halfSecondGroups();
 	const all = halfSeconds(0, 10);
-	const live = producer.subscribe({ delay: { min: Duration.ZERO, max: Duration.secs(30) } });
+	const delay = { max: Duration.secs(30) };
+	const live = producer.subscribe({ delay, ranges: [{ start: { live: Duration.ZERO } }] });
 	expect(readable(live)).toEqual([5000n]);
-	for (const min of [null, undefined]) {
-		const oldest = producer.subscribe({ delay: { min, max: Duration.secs(30) } });
+	for (const ranges of [[{}], undefined]) {
+		const oldest = producer.subscribe({ delay, ranges });
 		expect(readable(oldest)).toEqual(all);
 	}
-	// Past everything held, it starts at the oldest group; a named start ignores it.
-	const far = producer.subscribe({ delay: { min: Duration.secs(60), max: Duration.secs(30) } });
+	// Past everything held, it starts at the oldest group.
+	const far = producer.subscribe({ delay, ranges: [{ start: { live: Duration.secs(60) } }] });
 	expect(readable(far)).toEqual(all);
-	const named = producer.subscribe({
-		delay: { min: Duration.secs(2), max: Duration.secs(30) },
-		ranges: [{ start: 4500n }],
-	});
+	const named = producer.subscribe({ delay, ranges: [{ start: 4500n }] });
 	expect(readable(named)).toEqual([4500n, 5000n]);
 });
 
@@ -1247,7 +1254,10 @@ test("a live join reads nothing until the groups held measure the live edge", ()
 	hooks.startsAtKeys(producer);
 	// Groups written before accept say nothing yet of whether the track is timed.
 	const groups = Array.from({ length: 11 }, (_, key) => producer.createGroup(BigInt(key)));
-	const reader = producer.subscribe({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [{}] });
+	const reader = producer.subscribe({
+		delay: { max: Duration.secs(30) },
+		ranges: [{ start: { live: Duration.secs(2) } }],
+	});
 	expect(readable(reader)).toEqual([]);
 	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
 	// Accepted, but still only headers: nothing to measure by.
@@ -1272,8 +1282,8 @@ test("a live join reaches back by ticks rounded up, at any timestamp the track a
 	}
 	// 1.5 ms back from 2 ms past the base is 0.5 ms past it, which only the first group starts by.
 	const reader = producer.subscribe({
-		delay: { min: Duration.micros(1500), max: Duration.secs(30) },
-		ranges: [{}],
+		delay: { max: Duration.secs(30) },
+		ranges: [{ start: { live: Duration.micros(1500) } }],
 	});
 	expect(readable(reader)).toEqual(starts);
 });
@@ -1287,7 +1297,10 @@ test("a live join measures timestamps between ticks, floored", () => {
 		group.finish();
 	}
 	// The edge floors to 2 ms, so 1 ms back is the group starting by 1 ms.
-	const reader = producer.subscribe({ delay: { min: Duration.millis(1), max: Duration.secs(30) }, ranges: [{}] });
+	const reader = producer.subscribe({
+		delay: { max: Duration.secs(30) },
+		ranges: [{ start: { live: Duration.millis(1) } }],
+	});
 	expect(readable(reader)).toEqual([1n, 2n]);
 });
 
@@ -1304,8 +1317,8 @@ test("a scale-less join reaches back by arrival", () => {
 			clock.set(Number(key + 1n) * 1000);
 		}
 		const reader = producer.subscribe({
-			delay: { min: Duration.millis(2500), max: Duration.secs(30) },
-			ranges: [{}],
+			delay: { max: Duration.secs(30) },
+			ranges: [{ start: { live: Duration.millis(2500) } }],
 		});
 		expect(readable(reader)).toEqual([2n, 3n, 4n]);
 		producer.close();
@@ -1403,9 +1416,9 @@ test("a moq-transport copy resolves a time anchor", () => {
 
 test("only unstated minimums aggregate to an unstated one", () => {
 	const producer = new TrackProducer("test");
-	producer.subscribe({ delay: { min: null } });
-	producer.subscribe({ delay: { min: null, max: Duration.millis(250) } });
-	expect(producer.subscription.peek()?.delay).toEqual({ min: null, max: Duration.millis(250) });
+	producer.subscribe({ delay: {} });
+	producer.subscribe({ delay: { max: Duration.millis(250) } });
+	expect(producer.subscription.peek()?.delay).toEqual({ max: Duration.millis(250) });
 });
 
 // A resume floor above the live edge must not hide the latest group from a reader that
@@ -1687,7 +1700,7 @@ test("zero latency takes the latest group when ages are equal", async () => {
 test("an omitted delay states no min and a zero max, and a null max sets no limit", async () => {
 	expect(Subscription.default()).toEqual({
 		priority: 0,
-		delay: { min: null, max: Duration.ZERO },
+		delay: { max: Duration.ZERO },
 		order: "descending",
 	});
 
@@ -5703,28 +5716,242 @@ test("finishing returns handles that write nothing new but fill a late group", a
 	finished.close();
 });
 
-// Two bounded joins with the same Min Age answer apart, one with a group and one empty. The group
-// places a third reader's join, which the empty answer alone could not, whatever order the answers
-// arrive in. Mirrors the Rust `a_received_copy_prefers_a_join_answered_with_a_group_over_one_answered_empty`.
-test("track: a received copy prefers a join answered with a group over one answered empty", () => {
-	const answers: [number, bigint, boolean][] = [
-		[200, 1000n, false],
-		[200, 501n, true],
-	];
-	for (const order of [answers, [...answers].reverse()]) {
-		const producer = receivedTrack({ timescale: Timescale.MILLI });
-		hooks.joinStarts(producer, order);
+// A received lite-07 copy places a live join only from its upstream's answer to that join recorded
+// after the reader began waiting: one answered for an earlier reader is stale, since the live edge
+// moved on, so the reader asks again and waits, however many groups the copy holds.
+test("track: a received copy places a live join only from a fresh answer", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	const join = { delay: { max: null }, ranges: [{ start: { live: Duration.millis(200) }, end: 9000n }] };
+	try {
+		const first = producer.subscribe(join);
+		expect(hooks.requested(producer).joins()).toEqual([
+			{ min: 200, end: 9000n, budget: NO_MAX_DELAY, since: joinTick() },
+		]);
 		putGroup(producer, 1000n, 1000);
+		putGroup(producer, 2000n, 2000);
+		// The groups held place nothing.
+		expect(first.tryRecvGroup()).toBeUndefined();
+		const tick = hooks.answerJoin(producer, 200, 9000n, 1000n, NO_MAX_DELAY);
+		expect(first.tryRecvGroup()?.start).toBe(1000n);
+		expect(hooks.requested(producer).joins()).toEqual([]);
+
+		// The same answer, recorded before the second reader began waiting, places nothing for it:
+		// it asks again from that tick.
+		const second = producer.subscribe(join);
+		expect(second.tryRecvGroup()).toBeUndefined();
+		expect(hooks.requested(producer).joins()).toEqual([
+			{ min: 200, end: 9000n, budget: NO_MAX_DELAY, since: tick },
+		]);
+		hooks.answerJoin(producer, 200, 9000n, 2000n, NO_MAX_DELAY);
+		expect(second.tryRecvGroup()?.start).toBe(2000n);
+		// The first reader stays where it started.
+		expect(first.tryRecvGroup()?.start).toBe(2000n);
+		expect(hooks.requested(producer).joins()).toEqual([]);
+	} finally {
+		producer.close();
+	}
+});
+
+// A copy whose wire carries no live join (lite-06, moq-transport) answers none, so it measures one
+// from the groups it holds: inside a held group whose frames reach past the join's time, with no
+// newer group yet, since groups never overlap. It asks nothing upstream for it.
+test("track: a copy that answers no joins places one inside a held group", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	try {
+		const group = producer.createGroup(1000n);
+		for (let millis = 1000; millis <= 1900; millis += 100)
+			group.writeFrame(textFrame("x", Timestamp.fromMillis(millis)));
 		const reader = producer.subscribe({
-			delay: { min: Duration.millis(200), max: null },
-			ranges: [{ end: 2000n }],
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(200) } }],
 		});
+		expect(reader.tryRecvGroup()?.start).toBe(1000n);
+		expect(hooks.requested(producer).joins()).toEqual([]);
+		group.finish();
+	} finally {
+		producer.close();
+	}
+});
+
+// Readers asking the same live join, by lag and end, wait on one answer: one pending range upstream,
+// which places them all. A different end is a join of its own.
+test("track: readers with the same lag and end share one pending join", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	const join = (end?: bigint): Subscription => ({
+		delay: { max: null },
+		ranges: [{ start: { live: Duration.millis(200) }, end }],
+	});
+	try {
+		const a = producer.subscribe(join(9000n));
+		const b = producer.subscribe(join(9000n));
+		expect(hooks.requested(producer).joins()).toEqual([
+			{ min: 200, end: 9000n, budget: NO_MAX_DELAY, since: joinTick() },
+		]);
+		expect(producer.subscription.peek()?.ranges).toEqual([{ start: { live: Duration.millis(200) }, end: 9000n }]);
+		const c = producer.subscribe(join());
+		// Sorted by lag, then by end, an open one first.
+		expect(
+			hooks
+				.requested(producer)
+				.joins()
+				.map(({ end }) => end),
+		).toEqual([undefined, 9000n]);
+		putGroup(producer, 1000n, 1000);
+		hooks.answerJoin(producer, 200, 9000n, 1000n, NO_MAX_DELAY);
+		expect([a.tryRecvGroup()?.start, b.tryRecvGroup()?.start, c.tryRecvGroup()]).toEqual([1000n, 1000n, undefined]);
+		expect(
+			hooks
+				.requested(producer)
+				.joins()
+				.map(({ end }) => end),
+		).toEqual([undefined]);
+	} finally {
+		producer.close();
+	}
+});
+
+// A reader asking the same live join with two ranges waits on it once: retiring them one at a time
+// leaves nothing asked. Mirrors moq-net's `a_reader_asking_one_join_twice_withdraws_it_once`.
+test("track: a reader asking one join twice withdraws it once", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	const lag = { start: { live: Duration.millis(2) } };
+	try {
+		const reader = producer.subscribe({ delay: { max: null }, ranges: [lag, lag] });
+		expect(hooks.requested(producer).joins()).toHaveLength(1);
+		reader.update({ delay: { max: null }, ranges: [lag] });
+		expect(hooks.requested(producer).joins()).toHaveLength(1);
+		reader.update({ delay: { max: null }, ranges: [{ start: 9000n }] });
+		expect(hooks.requested(producer).joins()).toEqual([]);
+	} finally {
+		producer.close();
+	}
+});
+
+// Once a copy's end is declared, nothing more is answered: a live join added then places as the
+// groups held measure it, and drains the final groups rather than waiting on an answer.
+test("track: a copy whose end is declared places a live join from its groups", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		putGroup(producer, 1000n, 1000);
+		putGroup(producer, 2000n, 2000);
+		producer.finishAt({ group: 2001n, frame: 0 });
+		const reader = producer.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] });
+		expect(reader.tryRecvGroup()?.start).toBe(2000n);
+		expect(hooks.requested(producer).joins()).toEqual([]);
+	} finally {
+		producer.close();
+	}
+});
+
+// Once its declared end settles, no more groups or answers arrive, so a join the groups held can't
+// prove resolves as a time start from the final edge and drains them instead of waiting forever.
+// Mirrors moq-net's `a_settled_end_resolves_an_unproven_live_join_from_the_final_edge`.
+test("track: a declared end resolves an unproven live join", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		putGroup(producer, 1000n, 1000);
+		putGroup(producer, 3000n, 3000);
+		producer.finishAt({ group: 3001n, frame: 0 });
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(1000) } }],
+		});
+		expect(reader.tryRecvGroup()?.start).toBe(3000n);
+	} finally {
+		producer.close();
+	}
+});
+
+// A received lite-07 copy's join answered with a group stays placed there once the end is declared,
+// at any lag: the copy holds only the groups from where its feed started, so the edge it measures may
+// fall behind all of them, and its newest group is past the answer. One joining after the answer
+// can't take it. Mirrors the Rust `a_received_copy_keeps_a_join_answer_past_its_declared_end`.
+test("track: a received copy keeps a join answer past its declared end", () => {
+	for (const min of [0, 1000]) {
+		const producer = receivedTrack({ timescale: Timescale.MILLI });
+		hooks.answersJoins(producer);
+		const join = { delay: { max: Duration.millis(1000) }, ranges: [{ start: { live: Duration.millis(min) } }] };
 		try {
-			expect(reader.tryRecvGroup()?.start).toBe(1000n);
+			const reader = producer.subscribe(join);
+			hooks.answerJoin(producer, min, undefined, 4000n, 1000);
+			// An end past the groups held, still owed the ones between.
+			producer.finishAt({ group: 7001n, frame: 0 });
+			putGroup(producer, 4000n, 4000);
+			putGroup(producer, 6000n, 6000);
+			expect(reader.tryRecvGroup()?.start).toBe(4000n);
+			expect(reader.tryRecvGroup()?.start).toBe(6000n);
+			const later = producer.subscribe(join);
+			expect(later.tryRecvGroup()?.start).not.toBe(4000n);
 		} finally {
-			reader.close();
 			producer.close();
 		}
+	}
+});
+
+// A declared end may arrive before the groups below it: until it settles the live edge isn't final,
+// so a join the groups held can't prove keeps waiting rather than placing from a stale edge.
+test("track: an unsettled end leaves an unproven live join waiting", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		putGroup(producer, 1000n, 1000);
+		putGroup(producer, 3000n, 3000);
+		producer.finishAt({ group: 6001n, frame: 0 });
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(1000) } }],
+		});
+		expect(reader.tryRecvGroup()).toBeUndefined();
+	} finally {
+		producer.close();
+	}
+});
+
+// A bounded join its upstream answered empty holds nothing: its start is past its end, so it
+// delivers none of the groups the copy holds or receives later.
+test("track: a bounded join answered empty delivers nothing", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(200) }, end: 2000n }],
+		});
+		putGroup(producer, 1000n, 1000);
+		hooks.answerJoin(producer, 200, 2000n, undefined, NO_MAX_DELAY);
+		putGroup(producer, 2000n, 2000);
+		putGroup(producer, 3000n, 3000);
+		expect(reader.tryRecvGroup()).toBeUndefined();
+		expect(hooks.requested(producer).joins()).toEqual([]);
+	} finally {
+		producer.close();
+	}
+});
+
+// A bounded join answered empty still delivers nothing once the end is declared, rather than wait on
+// groups that can't measure it. Mirrors the Rust
+// `a_received_copy_keeps_an_empty_join_answer_past_its_declared_end`.
+test("track: a bounded join answered empty delivers nothing past a declared end", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(200) }, end: 500n }],
+		});
+		hooks.answerJoin(producer, 200, 500n, undefined, NO_MAX_DELAY);
+		// An end past the groups held, still owed the ones between.
+		producer.finishAt({ group: 7001n, frame: 0 });
+		putGroup(producer, 1000n, 1000);
+		expect(hooks.servingResolved(reader)).toEqual([{ start: 501n, end: 501n, floored: true }]);
+		expect(reader.tryRecvGroup()).toBeUndefined();
+	} finally {
+		producer.close();
 	}
 });
 
@@ -5783,17 +6010,8 @@ test("track: a reader's unplaced times are only times its holdings can't place",
 // counted one against: Rust's Subscription::poll_combined.
 function foldSubscriptions(subscriptions: Iterable<Subscription | undefined>): Subscription | undefined {
 	let combined: Subscription | undefined;
-	// The Min Age counts only the subscribers holding a range with no start: the largest, with an
-	// unstated one counting as the largest.
-	let min: Duration | null = null;
-	let unstated = false;
 	for (const subscription of subscriptions) {
 		if (!subscription) continue;
-		if ((subscription.ranges ?? []).some((range) => range.start === undefined)) {
-			const age = subscription.delay?.min ?? null;
-			if (age === null) unstated = true;
-			else min = min === null ? age : min.max(age);
-		}
 		if (!combined) {
 			combined = { ...subscription };
 			continue;
@@ -5805,9 +6023,8 @@ function foldSubscriptions(subscriptions: Iterable<Subscription | undefined>): S
 		combined.ranges = [...(combined.ranges ?? []), ...(subscription.ranges ?? [])];
 	}
 	if (!combined) return undefined;
-	const age = unstated ? null : min;
-	combined.delay = { max: Duration.millis(maxDelayOf(combined)), min: age };
-	combined.ranges = union(combined.ranges ?? [], age !== null);
+	combined.delay = { max: Duration.millis(maxDelayOf(combined)) };
+	combined.ranges = union(combined.ranges ?? []);
 	return combined;
 }
 
@@ -5823,16 +6040,13 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 	const anchor = (): bigint | undefined => (random(6) < 2 ? undefined : BigInt(random(24)));
 	const range = (): Range => {
 		const out: Range = {};
-		const start = anchor();
+		const start = random(5) === 0 ? { live: Duration.millis(random(3) * 50) } : anchor();
 		if (start !== undefined) out.start = start;
 		const end = random(3) === 0 ? undefined : anchor();
 		if (end !== undefined) out.end = end;
 		return out;
 	};
-	const delay = (): Delay => ({
-		max: random(5) === 0 ? null : Duration.millis(random(4) * 100),
-		min: random(3) === 0 ? null : Duration.millis(random(4) * 50),
-	});
+	const delay = (): Delay => ({ max: random(5) === 0 ? null : Duration.millis(random(4) * 100) });
 	const order = (): Order => (random(2) === 0 ? "ascending" : "descending");
 	type Held = {
 		subscriber: ReturnType<TrackProducer["subscribe"]>;

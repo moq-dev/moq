@@ -18,6 +18,7 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { type Getter, Once, Signal } from "@moq/signals";
 import fc from "fast-check";
 import type { Grant } from "../auth.ts";
+import { ProtocolViolation } from "../error.ts";
 import { WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
@@ -414,5 +415,42 @@ test("a claim is shown only where its filing and the handle's scope share a path
 	for (const grant of [undefined, { publish: patterns([""]), subscribe: patterns([]) }]) {
 		expect(await shown(table, grant, allowed, Path.from("a/q"), false)).toEqual(new Set());
 		expect(await shown(table, grant, allowed, Path.from("a/r"), false)).toEqual(new Set(["a/r/y i1"]));
+	}
+});
+
+// A peer must wait for ANNOUNCE_OK before its next edit. One that does not is refused even while
+// the answer is still telling a claim change ahead of the OK, rather than checked against the
+// prefixes before the pending edit: there `a/x` would pass, nested below the pending `a`.
+test("an edit sent before the last was answered is refused", async () => {
+	const identity = {};
+	const route = (cost: bigint) => WireRoute.normalize({ instance: Instance.parse("i1"), epoch: 0n, cost });
+	const table = new Signal<Advertisements | undefined>(new Map([[Path.from("b"), [{ identity, route: route(1n) }]]]));
+	const { stream: fake, pending } = stream(() => {}, true);
+	const subject = answer(table, new Signal<Grant | undefined>(undefined), undefined, fake);
+	const running = subject.request(false, [], [{ prefix: Path.from("b"), hidden: false }]);
+	try {
+		for (let i = 0; i < 8; i++) {
+			await settle();
+			pending.shift()?.();
+		}
+		expect(pending.length).toBe(0);
+
+		// A change the answer tells before the next edit's OK, held in flight.
+		table.set(new Map([[Path.from("b"), [{ identity, route: route(2n) }]]]));
+		void subject.request(false, [], [{ prefix: Path.from("a"), hidden: false }]);
+		await settle();
+		expect(pending.length).toBe(1);
+		// Not returned: toThrow would wait on the loop's promise, which settles only on close.
+		expect(() => {
+			void subject.request(false, [], [{ prefix: Path.from("a/x"), hidden: false }]);
+		}).toThrow(ProtocolViolation);
+	} finally {
+		subject.close();
+		// The pending edit still writes its answer as each send completes.
+		while (pending.length > 0) {
+			pending.shift()?.();
+			await settle();
+		}
+		await running;
 	}
 });

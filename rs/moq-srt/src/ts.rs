@@ -217,7 +217,7 @@ pub(crate) struct Options {
 /// publisher instance returning within the follow window continues the stream, and a replacement either
 /// ends it with [`moq_mux::Error::Replaced`] or, with `stitch`, switches the program.
 pub struct Subscriber {
-	follower: ts::Follower<ts::Ext>,
+	follower: ts::Follower<ts::Export<moq_mux::catalog::Consumer<ts::Ext>>>,
 }
 
 impl Subscriber {

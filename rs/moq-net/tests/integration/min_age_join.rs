@@ -1,8 +1,9 @@
 #![cfg(feature = "async")]
 
-//! A live join stating a Min Age starts that far behind the live edge, through relays that
-//! hold nothing yet, and through a relay copy that holds less than it reaches back for. A
-//! range with no start and no Min Age reads from the oldest group instead.
+//! A live join starts its lag behind the live edge, through relays that hold nothing yet, and
+//! through a relay copy that holds less than it reaches back for: the copy asks its upstream
+//! for each join and starts it exactly where the answer says. A range with no start reads from
+//! the oldest group instead.
 
 use std::time::Duration;
 
@@ -15,9 +16,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 fn origin(hop: u64) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// Append the 500 ms group starting at `start`, presenting there.
@@ -29,9 +31,9 @@ fn append(source: &track::Producer, start: u64) {
 }
 
 /// A viewer joining through two relays that hold nothing gets the four groups behind the
-/// live group its 2 s Min Age asks for, oldest first, then plays on to live with no gap.
+/// live group its 2 s lag asks for, oldest first, then plays on to live with no gap.
 #[kio::test]
-async fn a_cold_relay_chain_reaches_back_by_min_age() {
+async fn a_cold_relay_chain_reaches_back_by_the_lag() {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let publisher = origin(1);
 	let edge = origin(2);
@@ -51,13 +53,7 @@ async fn a_cold_relay_chain_reaches_back_by_min_age() {
 	}
 	broadcast.announce().unwrap();
 
-	let joining = track::Subscription::default()
-		.with_order(track::Order::Ascending)
-		.with_delay(
-			track::Delay::default()
-				.with_min(Duration::from_secs(2))
-				.with_max(Duration::from_secs(30)),
-		);
+	let joining = joining(Some(Duration::from_secs(2)));
 	kio::clock::timeout(TIMEOUT, async {
 		let remote = viewer.consume().follow("live", None).unwrap().available().await;
 		let remote = remote.unwrap().expect("the broadcast resolves");
@@ -134,23 +130,29 @@ impl Chain {
 			.ordered()
 	}
 
-	/// Wait until the publisher is asked for a Min Age of `min`.
-	async fn asked(&self, min: Option<Duration>) {
+	/// Wait until the publisher is asked for a live join `min` behind the live edge.
+	async fn asked(&self, min: Duration) {
+		let join = track::Range::from(track::Start::Live(min));
 		let mut source = self.source.clone();
 		while source
 			.subscription()
-			.is_none_or(|subscription| subscription.delay.min != min)
+			.is_none_or(|subscription| !subscription.ranges.contains(&join))
 		{
 			source.subscription_changed().await.unwrap();
 		}
 	}
 }
 
-/// Reading with Min Age `min`, unstated for `None`, from a range with no start.
+/// A live join `min` behind the live edge, or a range from the oldest group for `None`.
 fn joining(min: Option<Duration>) -> track::Subscription {
+	let start = match min {
+		Some(min) => track::Start::Live(min),
+		None => track::Start::Oldest,
+	};
 	track::Subscription::default()
 		.with_order(track::Order::Ascending)
-		.with_delay(track::Delay::default().with_min(min).with_max(Duration::from_secs(30)))
+		.with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
+		.with_ranges([track::Range::from(start)])
 }
 
 /// The first group `reader` reads in key order.
@@ -158,10 +160,10 @@ async fn first(reader: &mut track::Ordered) -> u64 {
 	reader.next_group().await.unwrap().expect("a group").start
 }
 
-/// A live join whose Min Age reaches past what a relay copy holds reads the same groups from
-/// the copy as from the origin: the copy, live since a reader with a Min Age of zero, holds only
-/// the newest group, so it asks the publisher again with the larger Min Age and waits for its
-/// answer instead of starting at what it happens to hold.
+/// A live join reaching past what a relay copy holds reads the same groups from the copy as
+/// from the origin: the copy, live since a reader joining with no lag, holds only the newest
+/// group, so it asks the publisher for the join with the larger lag and waits for its answer
+/// instead of starting at what it happens to hold.
 #[kio::test]
 async fn a_join_past_what_a_relay_copy_holds_reads_as_the_origin_does() {
 	let chain = Chain::new().await;
@@ -172,10 +174,10 @@ async fn a_join_past_what_a_relay_copy_holds_reads_as_the_origin_does() {
 			5000,
 			"the live reader starts at the latest group"
 		);
-		chain.asked(Some(Duration::ZERO)).await;
+		chain.asked(Duration::ZERO).await;
 
 		let mut relayed = chain.relay(joining(Some(Duration::from_secs(2)))).await;
-		chain.asked(Some(Duration::from_secs(2))).await;
+		chain.asked(Duration::from_secs(2)).await;
 		let relayed = first(&mut relayed).await;
 
 		let mut direct = chain.origin(joining(Some(Duration::from_secs(2)))).await;
@@ -187,8 +189,8 @@ async fn a_join_past_what_a_relay_copy_holds_reads_as_the_origin_does() {
 	.expect("both joins read their start");
 }
 
-/// An oldest reader, a range with no start and no Min Age, and a live reader with a Min Age of
-/// zero on one relay each get their own start, whichever subscribes first: the oldest group
+/// An oldest reader, a range with no start, and a live reader joining with no lag on one relay
+/// each get their own start, whichever subscribes first: the oldest group
 /// held and the latest one. The live reader doesn't cut the oldest reader's backlog off.
 #[kio::test]
 async fn an_oldest_and_a_live_reader_on_one_relay_each_get_their_own_start() {
@@ -228,8 +230,8 @@ async fn an_oldest_and_a_live_reader_on_one_relay_each_get_their_own_start() {
 async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
 	let chain = Chain::new().await;
 	let bounded = || {
-		joining(Some(Duration::from_secs(1))).with_ranges([track::Range {
-			start: None,
+		joining(None).with_ranges([track::Range {
+			start: track::Start::Live(Duration::from_secs(1)),
 			end: Some(1000),
 		}])
 	};
@@ -243,7 +245,7 @@ async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
 		assert!(relayed.next_group().await.unwrap().is_none(), "nor does the copy");
 
 		// That empty answer places no reader whose range reaches past its end: one unbounded,
-		// with the same Min Age, joins where the origin does.
+		// with the same lag, joins where the origin does.
 		let mut open = chain.relay(joining(Some(Duration::from_secs(1)))).await;
 		assert_eq!(first(&mut open).await, 4000, "1 s behind the live edge at 5 s");
 		drop(relayed);
@@ -252,10 +254,10 @@ async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
 	.expect("both bounded joins end");
 }
 
-/// A live join on a relay copy reopened while idle reaches back by its Min Age, as at the
-/// origin: reopening asks the publisher for the join, not just the newest group the copy kept.
+/// A live join on a relay copy reopened while idle reaches back by its lag, as at the origin:
+/// reopening asks the publisher for the join, not just the newest group the copy kept.
 #[kio::test]
-async fn a_join_on_an_idle_copy_reaches_back_by_its_min_age() {
+async fn a_join_on_an_idle_copy_reaches_back_by_its_lag() {
 	let chain = Chain::new().await;
 	kio::clock::timeout(TIMEOUT, async {
 		let mut live = chain.relay(joining(Some(Duration::ZERO))).await;
@@ -273,12 +275,12 @@ async fn a_join_on_an_idle_copy_reaches_back_by_its_min_age() {
 	.expect("the join read its start");
 }
 
-/// A live join on a relay copy reopened while idle reaches back by its Min Age when it opens
-/// together with a reader that leaves its own unstated, on a track that writes nothing more:
-/// the unstated reader hides the join's Min Age from the aggregate, which must not reopen the
-/// copy from just the newest group it kept.
+/// A live join on a relay copy reopened while idle reaches back by its lag when it opens
+/// together with an oldest reader, on a track that writes nothing more: the oldest reader's
+/// range covers the join's in the aggregate, which must not reopen the copy from just the
+/// newest group it kept.
 #[kio::test]
-async fn a_join_on_an_idle_copy_opened_with_an_unstated_reader_reaches_back() {
+async fn a_join_on_an_idle_copy_opened_with_an_oldest_reader_reaches_back() {
 	let chain = Chain::new().await;
 	kio::clock::timeout(TIMEOUT, async {
 		let mut live = chain.relay(joining(Some(Duration::ZERO))).await;
@@ -298,7 +300,7 @@ async fn a_join_on_an_idle_copy_opened_with_an_unstated_reader_reaches_back() {
 		);
 		let (mut oldest, mut joined) = (oldest.unwrap().ordered(), joined.unwrap().ordered());
 		assert_eq!(first(&mut joined).await, 3000, "2 s behind the live edge at 5 s");
-		assert_eq!(first(&mut oldest).await, 0, "the unstated reader reads from the oldest");
+		assert_eq!(first(&mut oldest).await, 0, "the oldest reader reads from the oldest");
 	})
 	.await
 	.expect("both readers read their start");
@@ -332,7 +334,7 @@ async fn a_join_on_an_idle_copy_waits_for_the_live_edge() {
 	.expect("the join read on to live");
 }
 
-/// moq-transport states no Min Age, so a relay serving its live SUBSCRIBE asks the route for a
+/// moq-transport states no lag, so a relay serving its live SUBSCRIBE asks the route for a
 /// live join with none: the publisher replays nothing it retains, and the viewer starts at the
 /// live group.
 #[kio::test]
@@ -356,23 +358,26 @@ async fn a_moq_transport_live_join_asks_the_route_for_no_backlog() {
 	}
 	broadcast.announce().unwrap();
 
-	let joining = track::Subscription::default().with_delay(
-		track::Delay::default()
-			.with_min(Duration::ZERO)
-			.with_max(Duration::from_secs(30)),
-	);
+	let joining = joining(Some(Duration::ZERO));
 	kio::clock::timeout(TIMEOUT, async {
 		let remote = viewer.consume().follow("live", None).unwrap().available().await;
 		let remote = remote.unwrap().expect("the broadcast resolves");
 		let mut subscriber = remote.track("video").unwrap().subscribe(joining).await.unwrap();
 		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 5000);
+		// Asked as a live join, which the publisher pins where it started: nothing below it.
+		let joined = |ranges: &[track::Range]| {
+			ranges.iter().all(|range| match range.start {
+				track::Start::Live(min) => min.is_zero(),
+				track::Start::Time(start) => start >= 5000,
+				track::Start::Oldest => false,
+			})
+		};
 		let asked = source.subscription().expect("the relay subscribes");
-		assert_eq!(asked.ranges, [track::Range::default()]);
-		assert_eq!(asked.delay.min, Some(Duration::ZERO));
+		assert!(joined(&asked.ranges), "{asked:?}");
 		append(&source, 5500);
 		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 5500);
 		let asked = source.subscription().expect("still subscribed");
-		assert_eq!(asked.ranges, [track::Range::default()]);
+		assert!(joined(&asked.ranges), "{asked:?}");
 	})
 	.await
 	.expect("the viewer joined live");
@@ -399,11 +404,7 @@ async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
 	append(&source, 500);
 	broadcast.announce().unwrap();
 
-	let joining = track::Subscription::default().with_delay(
-		track::Delay::default()
-			.with_min(Duration::ZERO)
-			.with_max(Duration::from_secs(30)),
-	);
+	let joining = joining(Some(Duration::ZERO));
 	kio::clock::timeout(TIMEOUT, async {
 		let remote = viewer.consume().follow("live", None).unwrap().available().await;
 		let remote = remote.unwrap().expect("the broadcast resolves");
@@ -418,8 +419,59 @@ async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
 		let mut subscriber = remote.track("video").unwrap().subscribe(joining).await.unwrap();
 		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 3000);
 		let asked = source.subscription().expect("the relay subscribes again");
-		assert_eq!(asked.ranges, [track::Range::default()]);
+		assert_eq!(asked.ranges, [track::Range::from(track::Start::Live(Duration::ZERO))]);
 	})
 	.await
 	.expect("the viewer joined live again");
+}
+
+/// A live reader whose join a relay copy asked, but the publisher hasn't answered yet, is still
+/// placed when an oldest reader joins meanwhile: the oldest reader's range hides the live one, so
+/// the update retires it with its answer, and the copy asks for the join on its own instead (the
+/// subscriber's `a_retired_unanswered_join_range_is_asked_again` pins that ask).
+#[kio::test]
+async fn a_join_asked_but_unanswered_is_placed_when_an_oldest_reader_hides_it() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = origin(1);
+	let relay = origin(2);
+	let _peer = peer(version, &publisher, &relay).await;
+	let route = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	// Nothing written yet, so no live edge answers the join.
+	let source = route.broadcast().create_track("video", info).unwrap();
+	route.announce().unwrap();
+
+	kio::clock::timeout(TIMEOUT, async {
+		let remote = relay.consume().follow("live", None).unwrap().available().await;
+		let remote = remote.unwrap().expect("the broadcast resolves");
+		let track = remote.track("video").unwrap();
+		let lag = Duration::from_secs(1);
+		let mut live = track.subscribe(joining(Some(lag))).await.unwrap().ordered();
+		let join = track::Range::from(track::Start::Live(lag));
+		let mut asked = source.clone();
+		while asked
+			.subscription()
+			.is_none_or(|subscription| !subscription.ranges.contains(&join))
+		{
+			asked.subscription_changed().await.unwrap();
+		}
+
+		// An oldest reader hides the unanswered live range before any group answers it.
+		let mut oldest = track.subscribe(joining(None)).await.unwrap().ordered();
+		while asked
+			.subscription()
+			.is_none_or(|subscription| !subscription.ranges.contains(&track::Range::default()))
+		{
+			asked.subscription_changed().await.unwrap();
+		}
+		for start in (0..=2000).step_by(500) {
+			append(&source, start);
+		}
+		assert_eq!(first(&mut oldest).await, 0, "the oldest reader reads from the oldest");
+		assert_eq!(first(&mut live).await, 1000, "1 s behind the live edge at 2 s");
+	})
+	.await
+	.expect("both readers read their start");
 }

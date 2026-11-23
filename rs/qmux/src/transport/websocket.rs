@@ -5,12 +5,12 @@ use std::pin::Pin;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::{Sink, Stream};
 use kio::clock::{Interval, MissedTickBehavior, Sleep};
 use tokio_tungstenite::tungstenite;
 
-use super::Transport;
+use super::{READ_BUFFER, Transport};
 use crate::ws::KeepAlive;
 use crate::{Config, Error, MAX_FRAME_SIZE};
 
@@ -38,6 +38,8 @@ pub struct WsTransport<T> {
 	deadline: Option<(Sleep, Duration)>,
 	/// The largest message the session accepts.
 	recv_limit: usize,
+	/// Where received records are copied, so each pins no more than the session counts.
+	read: BytesMut,
 	socket_stats: Option<crate::SharedSocketStats>,
 	address: moq_net::transport::Address,
 }
@@ -51,6 +53,7 @@ impl<T: WsStream> WsTransport<T> {
 			ping_due: false,
 			deadline: None,
 			recv_limit: MAX_FRAME_SIZE,
+			read: BytesMut::new(),
 			socket_stats: None,
 			address,
 		}
@@ -72,6 +75,20 @@ impl<T: WsStream> WsTransport<T> {
 	pub(crate) fn with_socket_stats(mut self, stats: crate::SharedSocketStats) -> Self {
 		self.socket_stats = Some(stats);
 		self
+	}
+
+	/// Copy a received message into a read buffer of our own, as [`Stream`](super::Stream)
+	/// reads into one.
+	///
+	/// tungstenite slices messages out of its own read buffer, which its growth policy can
+	/// leave several times larger than the session counts a record as pinning.
+	fn record(&mut self, data: &[u8]) -> Bytes {
+		// Reuse the buffer in place once no record still points into it.
+		if self.read.capacity() < data.len() && !self.read.try_reclaim(data.len()) {
+			self.read = BytesMut::with_capacity(READ_BUFFER.max(data.len()));
+		}
+		self.read.extend_from_slice(data);
+		self.read.split().freeze()
 	}
 
 	/// Queue a keep-alive Ping once one is due and the socket has room; the driver's next flush
@@ -138,7 +155,7 @@ impl<T: WsStream> Transport for WsTransport<T> {
 				// The binding makes an empty message a no-op, unlike an empty record.
 				Message::Binary(data) if data.is_empty() => {}
 				Message::Binary(data) if data.len() > self.recv_limit => return Poll::Ready(Err(Error::FrameTooLarge)),
-				Message::Binary(data) => return Poll::Ready(Ok(data)),
+				Message::Binary(data) => return Poll::Ready(Ok(self.record(&data))),
 				Message::Close(_) => return Poll::Ready(Err(Error::Closed)),
 				// QMux rides binary messages only; text means the peer speaks something else.
 				Message::Text(_) => return Poll::Ready(Err(Error::ProtocolViolation)),

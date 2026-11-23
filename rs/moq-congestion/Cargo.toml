@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository = "https://github.com/moq-dev/moq"
 license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
 
+keywords = ["quic", "congestion-control", "bbr", "gcc", "live"]
+categories = ["multimedia", "network-programming", "algorithms"]
+
 [features]
 # Test support for the candidates under test and the comparisons that run them: the `gcc` and
 # `scream` controllers, BBR3's delay bound, and the probe hooks GoogCC overrides

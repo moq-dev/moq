@@ -783,10 +783,7 @@ export class Publisher {
 			// subscription's cursor. Forked from this subscriber rather than resolved through
 			// the broadcast again: a dynamic serve is one request per peer subscription, so
 			// asking the broadcast would mint a second producer nobody has accepted.
-			cache =
-				fill && fill.kind !== "empty"
-					? track.fork({ priority, order, delay: { max: NO_MAX, min: null } })
-					: undefined;
+			cache = fill && fill.kind !== "empty" ? track.fork({ priority, order, delay: { max: NO_MAX } }) : undefined;
 
 			const ranked = new Priority(track, info.priority);
 			ranking = ranked;
@@ -988,7 +985,7 @@ export class Publisher {
 								? track.fork({
 										priority: fromWire(msg.subscriberPriority),
 										order: msg.groupOrder,
-										delay: { max: NO_MAX, min: null },
+										delay: { max: NO_MAX },
 									})
 								: undefined;
 						try {
@@ -2509,14 +2506,13 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 const NO_MAX = Duration.millis(Varint.MAX_U53);
 
 /**
- * A live join with a Min Age of zero, as a SUBSCRIBE without an absolute start asks: a range
- * with no start and no Min Age would reach back to the oldest group and have a relay's route
- * replay everything it retains, and SUBSCRIBE_OK then name the oldest group replayed so far as
- * Largest. Mirrors the Rust `live_join`.
+ * A live join with no lag, as a SUBSCRIBE without an absolute start asks: a range from the oldest
+ * group would have a relay's route replay everything it retains, and SUBSCRIBE_OK then name the
+ * oldest group replayed so far as Largest. Mirrors the Rust `live_join`.
  */
 const LIVE_JOIN: Pick<Subscription, "delay" | "ranges"> = {
-	delay: { max: NO_MAX, min: Duration.ZERO },
-	ranges: [{}],
+	delay: { max: NO_MAX },
+	ranges: [{ start: { live: Duration.ZERO } }],
 };
 
 /**
@@ -2544,8 +2540,7 @@ function serveRequest(
 	// would leave it where it already resolved.
 	const out: Range = { start: range.start?.group ?? 0n };
 	if (range.end) out.end = range.end.group;
-	// moq-transport has no field for a minimum.
-	return { delay: { max: NO_MAX, min: null }, ranges: [out] };
+	return { delay: { max: NO_MAX }, ranges: [out] };
 }
 
 function rangeGroups(range: ServeRange): Groups {

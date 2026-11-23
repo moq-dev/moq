@@ -14,8 +14,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
+import parallel_tests
 from test_env import dispatch_env
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,7 +38,24 @@ class QueryTests(unittest.TestCase):
             path.chmod(0o755)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for command in ("bash", "git", "sort", "mktemp", "rm", "grep", "cat", "sed", "tr", "xargs", "sleep"):
+        for command in (
+            "bash",
+            "git",
+            "sort",
+            "mktemp",
+            "rm",
+            "grep",
+            "cat",
+            "sed",
+            "tr",
+            "xargs",
+            "sleep",
+            "awk",
+            "env",
+            "mkdir",
+            "mv",
+            "realpath",
+        ):
             (self.bin / command).symlink_to(shutil.which(command))
         self.env = dispatch_env(
             LOCAL_SUPERVISED="1",
@@ -372,13 +389,7 @@ class QueryTests(unittest.TestCase):
                 self.assertIn(f"{action}: check text failed", result.stderr)
 
     def test_ci_requires_its_tool_stubs_even_when_the_host_has_them(self):
-        host = self.root / "host"
-        host.mkdir()
-        tool = host / "zizmor"
-        tool.write_text("#!/bin/sh\nexit 0\n")
-        tool.chmod(0o755)
-        with patch.dict(os.environ, PATH=str(host)):
-            self.stub_ci()
+        self.stub_ci()
         (self.bin / "zizmor").unlink()
         result = subprocess.run(
             ["bash", "sh/dispatch.sh", "ci", "origin/main"],
@@ -405,7 +416,7 @@ class QueryTests(unittest.TestCase):
         )
         reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
         releases = "; ".join(f'echo >"{released}"' for _, _, released in blocked.values())
-        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\n    "go check") {releases} ;;\nesac\n')
+        self.stub_ci(f'case "$*" in\n{stub}    "biome") {reads}; exit 3 ;;\n    "go check") {releases} ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
         self.change("js/net/src/index.ts")
         self.change("sh/example.sh")
@@ -418,8 +429,8 @@ class QueryTests(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("ci: check tooling failed", result.stderr)
-        self.assertRegex(result.stderr, r"\d+  check tooling \(failed\)")
+        self.assertIn("ci: check biome failed", result.stderr)
+        self.assertRegex(result.stderr, r"\d+  check biome \(failed\)")
         self.assertNotIn("(cancelled)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
         self.assertIn("go check", calls)
@@ -440,7 +451,7 @@ class QueryTests(unittest.TestCase):
             f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n' for call, started, released in blocked.values()
         )
         reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
-        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\nesac\n')
+        self.stub_ci(f'case "$*" in\n{stub}    "biome") {reads}; exit 3 ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
         self.change("js/net/src/index.ts")
         self.change("sh/example.sh")
@@ -453,7 +464,7 @@ class QueryTests(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("ci: check tooling failed", result.stderr)
+        self.assertIn("ci: check biome failed", result.stderr)
         self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
         self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
         self.assertNotIn("ci: test rs failed", result.stderr)
@@ -500,7 +511,7 @@ class QueryTests(unittest.TestCase):
     def test_failure_continues_independent_modules_in_the_same_lane(self):
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
-                self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
+                self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "js dead-code") exit 4 ;; esac\n')
                 self.change("js/net/src/index.ts")
                 self.change("dart/example.dart")
                 result = subprocess.run(
@@ -512,12 +523,70 @@ class QueryTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 3, result.stderr)
                 self.assertIn("ci: check js failed", result.stderr)
-                self.assertIn("ci: check gh failed", result.stderr)
+                self.assertIn("ci: check dead_code failed", result.stderr)
                 calls = (self.root / "calls").read_text().splitlines()
-                self.assertIn("gh check", calls)
+                self.assertIn("js dead-code", calls)
                 self.assertIn("dart check", calls)
                 self.assertFalse(any(call.startswith("js test-changed ") for call in calls))
-                self.assertNotIn("gh test", calls)
+
+    def test_check_skips_a_memo_phase_that_passed_on_the_same_inputs(self):
+        self.env.pop("CI_STRICT")
+        calls = self.root / "calls"
+
+        def run(action="check", fail=False, zig="", **env):
+            self.stub_ci('case "$*" in "rs test-changed "*) exit 5 ;; esac\n' if fail else "")
+            with (self.bin / "zig").open("a") as file:
+                file.write(zig)
+            result = subprocess.run(
+                ["bash", "sh/dispatch.sh", action, "origin/main"],
+                cwd=self.repo,
+                env=dict(self.env, **env),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 5 if fail else 0, result.stderr)
+            return {" ".join(call.split(" ")[:2]) for call in calls.read_text().splitlines()} & rust
+
+        rust = {"rs lint-changed", "rs test-changed", "rs cross-lint-changed", "carla bridge-check"}
+        self.change("rs/dep/src/lib.rs")
+        # Each phase that passed is remembered, and a failure never is.
+        self.assertEqual(run(fail=True), rust)
+        self.assertEqual(run(), {"rs test-changed"})
+        self.assertEqual(run(), set())
+        # Each run differs from the one before it in one way only. Committing
+        # changes no file, and a dispatcher control steers no phase.
+        self.git("add", "-A")
+        self.git("commit", "-qm", "work")
+        self.assertEqual(run(CHECK_JOBS="1"), set())
+        # A file anywhere in the tree runs every phase again, even one that no
+        # pattern selects rs by: moq-net's tests run test/interop's scripts,
+        # which import js/. The second edit leaves the diff's paths as they
+        # were, so only the file's content changed.
+        self.change("js/net/src/index.ts")
+        self.assertEqual(run(), rust)
+        self.assertEqual(run(), set())
+        self.change("js/net/src/index.ts")
+        self.assertEqual(run(), rust)
+        # So does any other variable, or a tool replaced in place.
+        self.assertEqual(run(zig="# upgraded\n"), {"rs cross-lint-changed"})
+        self.assertEqual(run(), {"rs cross-lint-changed"})
+        self.assertEqual(run(RUSTFLAGS="-Dwarnings"), rust)
+        self.assertEqual(run(RUSTFLAGS="-Dwarnings"), set())
+        self.assertEqual(run(RUSTFLAGS="-Dwarnings", UNFORESEEN="1"), rust)
+        self.change("rs/dep/src/lib.rs")
+        self.assertEqual(run(), rust)
+        self.assertEqual(run(CHECK_RERUN="1"), rust)
+        # CI, the merge queue, and any check on Actions run every phase.
+        self.assertEqual(run("ci", CI_STRICT="1"), rust)
+        self.assertEqual(run(GITHUB_ACTIONS="true"), rust)
+        self.assertEqual(run(), set())
+        # A failure forgets the pass, under CHECK_RERUN and `just ci` alike,
+        # while CHECK_RERUN still records the phases that passed.
+        self.assertEqual(run(fail=True, CHECK_RERUN="1"), rust)
+        self.assertEqual(run(), {"rs test-changed"})
+        self.assertEqual(run(), set())
+        self.assertEqual(run("ci", fail=True, CI_STRICT="1"), rust)
+        self.assertEqual(run(), {"rs test-changed"})
 
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
     def test_local_flake_namespace_refusal_is_reported_as_skipped(self):
@@ -895,4 +964,4 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--bench"]:
         benchmark()
     else:
-        unittest.main()
+        parallel_tests.main(sys.modules[__name__])

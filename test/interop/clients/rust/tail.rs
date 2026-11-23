@@ -283,10 +283,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 			let options = moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
-				.with_ranges([moq_net::track::Range {
-					start: Some(0),
-					end: None,
-				}]);
+				.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
 			let mut track = remote.subscribe(Some(options)).await?;
 			if compress {
 				ensure!(

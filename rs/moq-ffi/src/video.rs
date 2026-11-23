@@ -20,13 +20,53 @@ use crate::media::MoqTimestamp;
 
 /// A CPU pixel layout: what [`MoqVideoProducer::write`] is fed, and what
 /// [`MoqVideoDecodedFrame::pixels`] converts to.
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum MoqVideoPixelFormat {
+///
+/// An immutable object so adding a layout later does not break callers
+/// switching over a closed enum.
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
+pub struct MoqVideoPixelFormat(PixelFormat);
+
+/// The layouts [`MoqVideoPixelFormat`] names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PixelFormat {
+	I420,
+	Rgba,
+}
+
+#[uniffi::export]
+impl MoqVideoPixelFormat {
 	/// Tightly-packed planar I420: Y, then U, then V, no row padding
 	/// (`width * height * 3 / 2` bytes).
-	I420,
+	#[uniffi::constructor]
+	pub fn i420() -> Arc<Self> {
+		Arc::new(Self(PixelFormat::I420))
+	}
+
 	/// Tightly-packed RGBA, `width * height * 4` bytes, no row padding.
-	Rgba,
+	#[uniffi::constructor]
+	pub fn rgba() -> Arc<Self> {
+		Arc::new(Self(PixelFormat::Rgba))
+	}
+
+	/// The layout's lowercase name, such as `i420`.
+	pub fn name(&self) -> String {
+		match self.0 {
+			PixelFormat::I420 => "i420",
+			PixelFormat::Rgba => "rgba",
+		}
+		.to_string()
+	}
+}
+
+impl PixelFormat {
+	/// Wrap one picture of `size` in this layout, refusing a buffer of any other length.
+	fn surface(self, size: moq_video::Size, data: Vec<u8>) -> Result<moq_video::Surface, MoqError> {
+		Ok(match self {
+			Self::I420 => moq_video::Surface::I420(moq_video::I420::new(size, data)?),
+			Self::Rgba => moq_video::Surface::rgba(&data, size)?,
+		})
+	}
 }
 
 /// Output video codec.
@@ -36,7 +76,8 @@ pub enum MoqVideoPixelFormat {
 ///
 /// An immutable object so adding a codec later does not break callers
 /// switching over a closed enum.
-#[derive(uniffi::Object)]
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
 pub struct MoqVideoCodec {
 	inner: moq_video::encode::Codec,
 }
@@ -57,6 +98,11 @@ impl MoqVideoCodec {
 		Arc::new(Self {
 			inner: moq_video::encode::Codec::H265,
 		})
+	}
+
+	/// The codec's lowercase name, such as `h264`.
+	pub fn name(&self) -> String {
+		self.inner.as_str().to_string()
 	}
 }
 
@@ -120,7 +166,7 @@ impl TryFrom<MoqVideoFrameRate> for moq_video::FrameRate {
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderInput {
 	/// The raw pixel layout.
-	pub format: MoqVideoPixelFormat,
+	pub format: Arc<MoqVideoPixelFormat>,
 	/// Encoded width in pixels. Must be even (I420 chroma is subsampled 2x2).
 	pub width: u32,
 	/// Encoded height in pixels. Must be even.
@@ -230,7 +276,7 @@ fn video_encoder_config(
 #[derive(uniffi::Object)]
 pub struct MoqVideoEncoder {
 	inner: std::sync::Mutex<moq_video::encode::Sink>,
-	format: MoqVideoPixelFormat,
+	format: PixelFormat,
 	size: moq_video::Size,
 }
 
@@ -243,17 +289,14 @@ impl MoqVideoEncoder {
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		Ok(Arc::new(Self {
 			inner: std::sync::Mutex::new(encoder),
-			format: input.format,
+			format: input.format.0,
 			size: config.size(),
 		}))
 	}
 
 	/// Submit one raw picture, whose access units `receive` returns.
 	pub fn encode(&self, frame: MoqVideoFrame) -> Result<(), MoqError> {
-		let surface = match self.format {
-			MoqVideoPixelFormat::I420 => moq_video::Surface::I420(moq_video::I420::new(self.size, frame.data)?),
-			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, self.size)?,
-		};
+		let surface = self.format.surface(self.size, frame.data)?;
 		let frame = moq_video::Frame::new(surface, frame.timestamp.try_into()?);
 		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
 		block_on(guard.encode(frame))?;
@@ -325,7 +368,7 @@ pub struct MoqVideoProducer {
 	/// from, and an encoder built on one thread and dropped on another unbalances the
 	/// per-thread COM apartment the Windows backend opens.
 	inner: std::sync::Mutex<Option<moq_video::encode::Producer>>,
-	format: MoqVideoPixelFormat,
+	format: PixelFormat,
 	/// The encoded resolution, from the publish config. Frames carry only pixels, so this is
 	/// what says how to read them.
 	size: moq_video::Size,
@@ -392,10 +435,7 @@ impl MoqVideoProducer {
 		let _guard = crate::ffi::runtime().enter();
 		// A buffer that isn't one picture at the configured size is rejected here,
 		// by the surface constructors, rather than reinterpreted.
-		let surface = match self.format {
-			MoqVideoPixelFormat::I420 => moq_video::Surface::I420(moq_video::I420::new(self.size, frame.data)?),
-			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, self.size)?,
-		};
+		let surface = self.format.surface(self.size, frame.data)?;
 		let frame = moq_video::Frame::new(surface, frame.timestamp.try_into()?);
 		self.with(|producer| Ok(block_on(producer.write(frame))?))
 	}
@@ -548,7 +588,7 @@ impl MoqVideoProducer {
 		let producer = block_on(moq_video::encode::Producer::new(&target, catalog, options))?;
 		children.adopt(Arc::new(MoqVideoProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
-			format: input.format,
+			format: input.format.0,
 			size,
 			bandwidth,
 			children: children.clone(),
@@ -642,11 +682,11 @@ impl MoqVideoDecodedFrame {
 	/// Neither has row padding.
 	///
 	/// A retained surface is downloaded first.
-	pub fn pixels(&self, format: MoqVideoPixelFormat) -> Result<Vec<u8>, MoqError> {
+	pub fn pixels(&self, format: Arc<MoqVideoPixelFormat>) -> Result<Vec<u8>, MoqError> {
 		let surface = &self.frame.surface;
-		match format {
-			MoqVideoPixelFormat::I420 => surface.to_i420().map(|i420| i420.into_owned().into_data()),
-			MoqVideoPixelFormat::Rgba => surface
+		match format.0 {
+			PixelFormat::I420 => surface.to_i420().map(|i420| i420.into_owned().into_data()),
+			PixelFormat::Rgba => surface
 				.to_rgba(&moq_video::convert::Config::default())
 				.map(|rgba| rgba.into_data()),
 		}
@@ -788,7 +828,7 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 	config.bitrate = catalog_video.bitrate;
 	config.preference = catalog_video.preference;
 	config.framerate = catalog_video.framerate;
-	config.container = catalog_video.container.into();
+	config.container = catalog_video.container.try_into()?;
 	Ok(config)
 }
 
@@ -864,6 +904,34 @@ mod decode_tests {
 	use super::*;
 	use crate::media::{MoqContainer, MoqDimensions, MoqVideo};
 
+	/// Codecs and pixel layouts compare and hash by value, and their names are distinct.
+	#[test]
+	fn selectors_name_compare_and_hash_by_value() {
+		use std::collections::HashSet;
+
+		assert_eq!(MoqVideoCodec::h264().name(), "h264");
+		assert_eq!(MoqVideoCodec::h265().name(), "h265");
+		assert_eq!(HashSet::from([MoqVideoCodec::h264(), MoqVideoCodec::h264()]).len(), 1);
+		assert_ne!(MoqVideoCodec::h264(), MoqVideoCodec::h265());
+
+		assert_eq!(MoqVideoPixelFormat::i420().name(), "i420");
+		assert_eq!(MoqVideoPixelFormat::rgba().name(), "rgba");
+		assert_eq!(
+			HashSet::from([MoqVideoPixelFormat::rgba(), MoqVideoPixelFormat::rgba()]).len(),
+			1
+		);
+		assert_ne!(MoqVideoPixelFormat::i420(), MoqVideoPixelFormat::rgba());
+	}
+
+	/// A catalog rendition whose container the bindings cannot name is refused, not decoded
+	/// as some other container.
+	#[test]
+	fn unknown_container_is_unsupported() {
+		let mut video = catalog_video("avc1.64001f");
+		video.container = MoqContainer::Unknown;
+		assert!(matches!(video_config(video), Err(MoqError::UnsupportedConfig { .. })));
+	}
+
 	fn catalog_video(codec: &str) -> MoqVideo {
 		MoqVideo {
 			preference: 0,
@@ -926,7 +994,7 @@ mod finish_tests {
 		for (numerator, denominator) in [(30_000, 1001), (60_000, 2002), (24_000, 1001)] {
 			let config = video_encoder_config(
 				&MoqVideoEncoderInput {
-					format: MoqVideoPixelFormat::I420,
+					format: MoqVideoPixelFormat::i420(),
 					width: 64,
 					height: 48,
 					framerate: MoqVideoFrameRate { numerator, denominator },
@@ -943,7 +1011,7 @@ mod finish_tests {
 		for (numerator, denominator) in [(0, 1), (30_000, 0), (1_000_001, 1)] {
 			let error = video_encoder_config(
 				&MoqVideoEncoderInput {
-					format: MoqVideoPixelFormat::I420,
+					format: MoqVideoPixelFormat::i420(),
 					width: 64,
 					height: 48,
 					framerate: MoqVideoFrameRate { numerator, denominator },
@@ -963,7 +1031,7 @@ mod finish_tests {
 		let (width, height) = (64u32, 48u32);
 		let encoder = MoqVideoEncoder::new(
 			MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::I420,
+				format: MoqVideoPixelFormat::i420(),
 				width,
 				height,
 				framerate: crate::video::MoqVideoFrameRate {
@@ -1021,7 +1089,7 @@ mod rung_tests {
 
 	fn input() -> MoqVideoEncoderInput {
 		MoqVideoEncoderInput {
-			format: MoqVideoPixelFormat::I420,
+			format: MoqVideoPixelFormat::i420(),
 			width: 320,
 			height: 240,
 			framerate: MoqVideoFrameRate {
