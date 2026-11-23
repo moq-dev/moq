@@ -123,7 +123,7 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 indexmap = "2.14.2"
 io-uring = "0.7.15"
 jni = "0.22"
-jsonwebtoken = "11"
+jsonwebtoken = "12"
 kio = { version = "0.6.2", path = "rs/kio" }
 kio-macros = { version = "0.1.0", path = "rs/kio/macros" }
 libc = "0.2"
@@ -184,7 +184,7 @@ moq-vaapi = { version = "0.2.1", path = "rs/moq-vaapi" }
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
 moq-webrtc = { version = "0.3.12", path = "rs/moq-webrtc" }
 mp4-atom = "0.17.1"
-nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
+nix = { version = "0.32.0", features = ["net", "socket", "uio"] }
 num_enum = "0.7"
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
