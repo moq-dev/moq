@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
+import { NO_MAX_DELAY } from "./internal.ts";
 import type { Live, Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
 import {
@@ -269,6 +270,37 @@ describe("Window", () => {
 		expect(bounded.settled).toBe(true);
 		expect(open.settle(99n, held)).toBe(false);
 		expect(open.joins()).toEqual([[40, undefined, 0, 3]]);
+	});
+
+	// A live join already placed starts at that group on any hop, asking nothing and waiting on
+	// nothing, and its groups still go stale past its max. Mirrors the Rust
+	// `a_placed_join_starts_where_it_was_placed`.
+	test("a placed join starts where it was placed", () => {
+		const held = new Keys([0n, 33n, 66n, 99n]);
+		held.joins = () => ({ group: 66n });
+		held.answered = 3;
+		const max = Duration.secs(2);
+		const join: Range = { start: { live: { min: Duration.millis(40), max } } };
+		const placed = () => ({ at: 33n });
+		for (const window of [
+			Window.keyed([[0n, join]], 99n, held, placed),
+			Window.keyed([[0n, join]], undefined, UNHELD, placed),
+		]) {
+			expect(window.settled).toBe(true);
+			expect(window.joins()).toEqual([]);
+			expect(window.start()).toBe(33n);
+			const budget = window.budget();
+			expect([budget.at(66n), budget.asked]).toEqual([2000, false]);
+		}
+		expect(covered(Window.keyed([[0n, join]], 99n, held, placed), held.held)).toEqual([33n, 66n, 99n]);
+
+		// Placed elsewhere by an edit, it moves there; retuned in place, it stays.
+		const window = Window.keyed([[0n, join]], 99n, held, placed);
+		window.edit([0n], [[0n, join]], 99n, held, () => ({ at: 66n }));
+		expect(window.start()).toBe(66n);
+		const wider: Range = { start: { live: { min: Duration.millis(40), max: null } } };
+		window.edit([0n], [[0n, wider]], 99n, held, () => ({ at: 66n }));
+		expect([window.start(), window.budget().at(33n)]).toEqual([66n, NO_MAX_DELAY]);
 	});
 
 	test("a zero lag starts a live join at the latest group, once there is one", () => {
