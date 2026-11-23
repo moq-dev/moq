@@ -42,6 +42,7 @@ import {
 	staleHole,
 	wireMaxDelay,
 } from "../internal.ts";
+import { GRACE } from "../ledger.ts";
 import type { Lister } from "../listing.ts";
 import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
@@ -51,7 +52,6 @@ import { type Counted, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { GRACE } from "../ledger.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { toNumber } from "../util/bigint.ts";
 import { Deadline } from "../util/deadline.ts";
@@ -2133,7 +2133,11 @@ export class Subscriber {
 	// Settle `fills` as their inputs change, until the copy closes, asking what they owe through
 	// `entry`'s subscription, and `fetch` what a stalled recovery handed back (a TEMPORARY MIGRATION,
 	// see `RecoveryHandle.walk`). Mirrors the Rust serve loop's `RangeFills::poll`.
-	async #driveFills(entry: SubscribeEntry, fills: RangeFills, fetch: (fill: track.FillGroups) => void): Promise<void> {
+	async #driveFills(
+		entry: SubscribeEntry,
+		fills: RangeFills,
+		fetch: (fill: track.FillGroups) => void,
+	): Promise<void> {
 		const demand = entry.track.demand();
 		while (!fills.closed) {
 			// A stream still arriving on a recovery is kept only for someone reading it. A recovery
@@ -2355,7 +2359,12 @@ export class Subscriber {
 							opened.writer.close();
 							break;
 						}
-						await race([Signal.race(entry.tail.changed), over, leaving, ...(stall ? [stall] : [])]);
+						await race([
+							Signal.race(entry.tail.changed),
+							over,
+							leaving,
+							...(stall === undefined ? [] : [stall]),
+						]);
 					}
 				} finally {
 					stopped.set(null);
