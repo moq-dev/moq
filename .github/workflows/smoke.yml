@@ -327,8 +327,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Compare dev.moq:moq on the mirror and Central
-        run: ./maven-mirror.sh
+        run: just maven-mirror
 
   relays:
     name: External relay interop
