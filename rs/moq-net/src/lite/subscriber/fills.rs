@@ -272,7 +272,7 @@ impl RangeFills {
 		}
 		for groups in skipped {
 			for gap in self.refused.gaps(&groups).collect::<Vec<_>>() {
-				self.refused.insert(gap, Refusal::dropped(StreamError::NotFound));
+				self.refused.insert(gap, Refusal::skipped());
 			}
 		}
 		// The groups the subscription already accounted for, which it never sends again, are
@@ -497,6 +497,9 @@ struct Refusal {
 	/// fills owing them now, since another request may still get them: a stale drop judges
 	/// a budget, and a range starting past them is the subscriber's own choice.
 	lost: bool,
+	/// Whether the source never produced them (a SUBSCRIBE_SKIP), which the fill answers as a
+	/// skip: its readers pass over them rather than losing them.
+	skip: bool,
 }
 
 impl Refusal {
@@ -504,17 +507,33 @@ impl Refusal {
 	/// lost only when it never had them.
 	fn dropped(err: StreamError) -> Self {
 		let lost = err == StreamError::NotFound;
-		Self { err, lost }
+		Self { err, lost, skip: false }
 	}
 
 	/// Not delivered on this subscription, which says nothing of the source.
 	fn passing(err: StreamError) -> Self {
-		Self { err, lost: false }
+		Self {
+			err,
+			lost: false,
+			skip: false,
+		}
+	}
+
+	/// Never produced, as the publisher declared.
+	fn skipped() -> Self {
+		Self {
+			err: StreamError::NotFound,
+			lost: false,
+			skip: true,
+		}
 	}
 
 	/// Answer `groups` of `fill`: a lost group is named dropped, as a FETCH's miss is, and
 	/// anything else is refused for now, recorded nowhere.
 	fn answer(&self, fill: &track::FillGroups, groups: Range<u64>) {
+		if self.skip {
+			return fill.skip_groups(groups);
+		}
 		match &self.err {
 			StreamError::NotFound if self.lost => fill.drop_groups(groups),
 			StreamError::NotFound => fill.refuse_groups(groups, Error::NotFound),
@@ -693,7 +712,7 @@ impl Recovery {
 						Recv::Message(lite::SubscribeResponse::Skip(skipped)) => {
 							if !skipped.groups.is_empty() {
 								self.serving.skip_received(skipped.groups.clone());
-								given_up(skipped.groups, Refusal::dropped(StreamError::NotFound));
+								given_up(skipped.groups, Refusal::skipped());
 							}
 						}
 						// Nothing at or past the track's end will be produced.
@@ -918,6 +937,21 @@ mod tests {
 			requests.poll_requested_fill(&waiter).is_pending(),
 			"a lost group is not asked again"
 		);
+	}
+
+	/// Groups a recovery's SUBSCRIBE_SKIP names were never produced: the reader passes over
+	/// them, not a gap, even once the pool forgets the skip the copy recorded to pay its debt.
+	#[test]
+	fn a_skip_answer_is_no_gap_once_the_cache_forgets_it() {
+		let waiter = kio::Waiter::noop();
+		let (producer, _requests, mut reader, fill) = missed();
+		Refusal::skipped().answer(&fill, 0..3);
+		producer.forget_drops(0..3);
+		assert!(
+			matches!(reader.poll_next_item(&waiter), Poll::Ready(Ok(None))),
+			"the read ends with no gap"
+		);
+		drop(fill);
 	}
 
 	/// A range starting past what it asked refuses those groups only while that range is live:

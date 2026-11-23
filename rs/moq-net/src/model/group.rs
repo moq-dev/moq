@@ -2385,7 +2385,8 @@ impl Producer {
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
 		// Finished short of its transport bound, a bounded copy reached the group's own end too.
-		state.charge.finish(state.range_end.is_none_or(|bound| fin < bound));
+		let whole = state.range_end.is_none_or(|bound| fin < bound);
+		state.charge.finish(whole);
 		if let Some(content) = &state.content {
 			content.siblings.update(&state.charge);
 		}

@@ -1076,6 +1076,15 @@ impl FillGroups {
 		self.inner.refuse(&owed, err, self.max_delay());
 	}
 
+	/// Name `groups` as never produced, as the source answered a request for them: readers
+	/// pass over them, as over a skip the track recorded, however soon the cache forgets it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn skip_groups(&self, groups: ops::Range<u64>) {
+		let owed = self.inner.owed(groups);
+		self.inner
+			.drop_groups(&owed, Error::Skipped, super::Hole::Skip, self.max_delay());
+	}
+
 	/// Poll until no reader waits on this fill: it is withdrawn, so stop serving it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_withdrawn(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -1298,15 +1307,10 @@ impl FillGroups {
 	}
 
 	/// The run from `key` over the `owed` groups beside it, in the fill's order, up to
-	/// the nearest one the cache holds. Just `key` in a pool held past its capacity by what
-	/// it pins: each group landing there evicts the rest of the run before a reader gets to
-	/// it, but for the first, which the fill holds.
+	/// the nearest one the cache holds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn run_from(&self, key: u64, owed: ops::Range<u64>) -> ops::Range<u64> {
 		let state = self.inner.state.read();
-		if state.cache.pool().room() == 0 {
-			return key..key + 1;
-		}
 		let held = |(_, slot): &(&u64, &super::Slot)| !slot.is_aborted();
 		match self.order() {
 			Order::Ascending => {

@@ -9596,7 +9596,13 @@ impl Cursor {
 			self.drops = Some(Box::new(DropCursor::new(&self.state.read())));
 			if let Some(misses) = &self.misses {
 				for run in misses.given_up().iter() {
-					DropCursor::give_up(&mut self.record, run.clone(), Hole::missed(None));
+					for skipped in misses.skipped().overlapping(run) {
+						let skipped = skipped.start.max(run.start)..skipped.end.min(run.end);
+						DropCursor::give_up(&mut self.record, skipped, Hole::Skip);
+					}
+					for missed in misses.skipped().gaps(run) {
+						DropCursor::give_up(&mut self.record, missed, Hole::missed(None));
+					}
 				}
 			}
 		}
@@ -10544,8 +10550,8 @@ impl Cursor {
 			misses.expire(&self.state.read(), drift, &mut given_up, waiter);
 		}
 		if self.drops.is_some() {
-			for (run, stale) in given_up {
-				DropCursor::give_up(&mut self.record, run.clone(), Hole::missed(stale));
+			for (run, hole) in given_up {
+				DropCursor::give_up(&mut self.record, run, hole);
 			}
 		}
 		// A refusal taken in may move a time end walking history past it, widening what
@@ -10615,8 +10621,8 @@ impl Cursor {
 			misses.ask(&self.state, &fills, &lost, &asking, &mut given_up);
 		}
 		if self.drops.is_some() {
-			for (run, stale) in given_up {
-				DropCursor::give_up(&mut self.record, run.clone(), Hole::missed(stale));
+			for (run, hole) in given_up {
+				DropCursor::give_up(&mut self.record, run, hole);
 			}
 		}
 		group

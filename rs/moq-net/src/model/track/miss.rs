@@ -33,7 +33,7 @@ use super::super::delivered::Delivered;
 use super::super::subscription::Cover;
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
-use super::{Drift, Order, Position, TrackState};
+use super::{Drift, Hole, Order, Position, TrackState};
 use crate::{Error, ledger};
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
@@ -81,6 +81,9 @@ pub(super) struct Misses {
 	picked: BTreeMap<u64, RangeSet<u64>>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
+	/// The part of `given_up` a fill answered was never produced: reported skipped, not
+	/// dropped, whatever the cache still records of it.
+	skipped: RangeSet<u64>,
 	/// The part of `given_up` judged stale, with the budget each run was judged under: a
 	/// wider budget asks it again (see [`Self::widen`]).
 	stale: RangeMap<u64, Duration>,
@@ -109,7 +112,7 @@ pub(super) struct Misses {
 
 /// A run of misses the reader gives up, for the drop cursor to name, with the budget it was
 /// judged stale under when that is why.
-pub(super) type GivenUp = Vec<(ops::Range<u64>, Option<Duration>)>;
+pub(super) type GivenUp = Vec<(ops::Range<u64>, Hole)>;
 
 /// The joins whose fills changed their answer, recorded by each join's own waiter before it
 /// wakes the reader's tasks.
@@ -355,6 +358,11 @@ impl Misses {
 	/// Everything given up so far, for a drop cursor created after.
 	pub fn given_up(&self) -> &RangeSet<u64> {
 		&self.given_up
+	}
+
+	/// The part of [`Self::given_up`] never produced, reported skipped.
+	pub fn skipped(&self) -> &RangeSet<u64> {
+		&self.skipped
 	}
 
 	/// The exclusive end of the run from `key` this reader's fills refused or it gave
@@ -610,12 +618,19 @@ impl Misses {
 						// unanswered is settled by run, since it may span far more groups than
 						// were ever cached; an accepted group evicted before this reader took it
 						// in is asked again, since a key it is owed is never lost to the cache.
+						// Walked by the groups cached, not by key: a group accepted below the fill's
+						// start answers every key up to it.
 						let mut evicted = RangeSet::new();
 						if !unanswered.overlaps(&groups) {
-							for key in groups.clone() {
-								if !state.lookup.contains_key(&key) {
-									evicted.insert(key..key + 1);
+							let mut from = groups.start;
+							for &key in state.lookup.range(groups.clone()).map(|(key, _)| key) {
+								if from < key {
+									evicted.insert(from..key);
 								}
+								from = key + 1;
+							}
+							if from < groups.end {
+								evicted.insert(from..groups.end);
 							}
 						}
 						for run in evicted.gaps(&groups) {
@@ -637,6 +652,12 @@ impl Misses {
 					// Stale under the budget it was asked with, which this reader's is no wider
 					// than: a stale verdict a wider budget asks again, never a refusal spent for good.
 					Err((Error::Old, Some(asked))) => self.give_up_stale(groups, asked, given_up),
+					// Never produced: passed over, not lost, however soon the cache forgets the skip.
+					Err((Error::Skipped, _)) => {
+						for hole in holes(&state, groups) {
+							self.give_up_skipped(hole, given_up);
+						}
+					}
 					// A drop the track recorded is named by the drop cursor already.
 					Err(_) => self.settle(&state, groups, given_up),
 				}
@@ -835,6 +856,7 @@ impl Misses {
 			self.judged = clip(&self.judged);
 			self.refused = clip(&self.refused);
 			self.given_up = clip(&self.given_up);
+			self.skipped = clip(&self.skipped);
 			if !self.stale.is_empty() {
 				let mut stale = RangeMap::new();
 				for (run, budget) in self.stale.iter() {
@@ -869,7 +891,12 @@ impl Misses {
 			// A moving read floor removes only its retired prefix. New production extends the
 			// judged span; neither path visits older deferred gaps.
 			if low > 0 {
-				for set in [&mut self.judged, &mut self.refused, &mut self.given_up] {
+				for set in [
+					&mut self.judged,
+					&mut self.refused,
+					&mut self.given_up,
+					&mut self.skipped,
+				] {
 					set.remove(0..low);
 				}
 				self.stale.remove(0..low);
@@ -885,7 +912,12 @@ impl Misses {
 			{
 				let half = |run: RangeInclusive<u64>| *run.start()..run.end().saturating_add(1);
 				for run in old.gained(view, low, last).into_iter().map(half) {
-					for set in [&mut self.judged, &mut self.refused, &mut self.given_up] {
+					for set in [
+						&mut self.judged,
+						&mut self.refused,
+						&mut self.given_up,
+						&mut self.skipped,
+					] {
 						set.remove(run.clone());
 					}
 					self.stale.remove(run.clone());
@@ -1179,7 +1211,12 @@ impl Misses {
 			return false;
 		}
 		if low > 0 {
-			for set in [&mut self.judged, &mut self.refused, &mut self.given_up] {
+			for set in [
+				&mut self.judged,
+				&mut self.refused,
+				&mut self.given_up,
+				&mut self.skipped,
+			] {
 				set.remove(0..low);
 			}
 			self.stale.remove(0..low);
@@ -1412,6 +1449,7 @@ impl Misses {
 			return;
 		}
 		self.given_up.insert(groups.clone());
+		self.skipped.remove(groups.clone());
 		match stale {
 			Some(budget) => {
 				self.stale.insert(groups.clone(), budget);
@@ -1419,7 +1457,18 @@ impl Misses {
 			}
 			None => self.stale.remove(groups.clone()),
 		}
-		given_up.push((groups, stale));
+		given_up.push((groups, Hole::missed(stale)));
+	}
+
+	/// Give up `groups` as never produced, as a fill answered: reported skipped.
+	fn give_up_skipped(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
+		if groups.is_empty() {
+			return;
+		}
+		self.given_up.insert(groups.clone());
+		self.skipped.insert(groups.clone());
+		self.stale.remove(groups.clone());
+		given_up.push((groups, Hole::Skip));
 	}
 
 	/// Take back the runs given up as stale under a budget narrower than `budget`, returning
@@ -1676,12 +1725,13 @@ fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
 /// settled those keys, so never asks a fill for them again.
 impl super::super::record::Beside for Misses {
 	fn runs(&self) -> u64 {
-		(self.given_up.len() + self.stale.len()) as u64
+		(self.given_up.len() + self.skipped.len() + self.stale.len()) as u64
 	}
 
 	fn forget(&mut self, folded: ops::Range<u64>) {
 		if !folded.is_empty() {
 			self.given_up.remove(folded.clone());
+			self.skipped.remove(folded.clone());
 			self.stale.remove(folded);
 		}
 	}
@@ -1988,7 +2038,11 @@ mod tests {
 			&waiter,
 		);
 		assert!(!asks.contains(&2), "a refused hole is not asked again");
-		assert_eq!(given_up, vec![(2..3, None)], "a refusal is no stale verdict");
+		assert_eq!(
+			given_up,
+			vec![(2..3, Hole::missed(None))],
+			"a refusal is no stale verdict"
+		);
 	}
 	#[kio::test]
 	async fn unchanged_probes_and_late_arrivals_keep_other_gap_deadlines() {
@@ -2092,7 +2146,7 @@ mod tests {
 		assert!(asks.is_empty(), "the successor has aged past this reader's budget too");
 		assert_eq!(
 			given_up,
-			vec![(3..4, Some(drift.budget))],
+			vec![(3..4, Hole::stale(drift.budget))],
 			"judged stale under the reader's budget"
 		);
 		assert!(misses.deferred.runs.is_empty());
