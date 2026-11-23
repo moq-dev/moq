@@ -2706,6 +2706,26 @@ mod tests {
 		assert!(parse(258).is_err());
 	}
 
+	/// Scaling lists whose steps span more than 127 survive a round trip, the
+	/// synthesizer writing each delta modulo 256 within the parser's bound.
+	#[test]
+	fn wide_scaling_lists_round_trip() {
+		let mut sps = Sps {
+			profile_idc: 100,
+			chroma_format_idc: 1,
+			frame_mbs_only_flag: true,
+			seq_scaling_matrix_present_flag: true,
+			..Default::default()
+		};
+		let alternating: [u8; 16] = std::array::from_fn(|i| if i % 2 == 0 { 255 } else { 1 });
+		// A repeated tail of 255, and steps of 254 both ways.
+		sps.scaling_lists_4x4[0] = [255; 16];
+		sps.scaling_lists_4x4[1] = alternating;
+		let parsed = round_trip(&sps).expect("the SPS parses");
+		assert_eq!(parsed.scaling_lists_4x4[0], [255; 16]);
+		assert_eq!(parsed.scaling_lists_4x4[1], alternating);
+	}
+
 	/// (7-12): the cycle's sum is kept whole, whatever range its prefixes or it
 	/// reach, since only the order counts derived from it must fit an `i32`, and
 	/// a cycle may hold the full 255 offsets.
