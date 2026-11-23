@@ -99,9 +99,10 @@ impl Hop {
 pub struct Config {
 	/// The origin's Node ID: its identity on every wire, appended to broadcast hop chains
 	/// for loop detection and declared as the Relay ID on moq-lite-07, which also names it
-	/// in the hops of each route it forwards there. Random, so each run is a new node:
-	/// lite-07 floors trust that a Relay ID names one run, numbering its sessions upward.
-	pub(crate) node: NonZeroU64,
+	/// in the hops of each route it forwards there. `None` mints a random one as each
+	/// [`Producer`] is built, so a config reused or cloned still makes a new node: lite-07
+	/// floors trust that a Relay ID names one run, numbering its sessions upward.
+	pub(crate) node: Option<NonZeroU64>,
 
 	/// Longest hop path a session using this origin accepts or forwards (default 32).
 	///
@@ -192,11 +193,11 @@ pub(super) mod lite06_churn {
 use lite06_churn::{DEFAULT_UPDATE_HOLD, RETRACT_QUARANTINE};
 
 impl Default for Config {
-	/// A fresh random node with no byte target and the default idle expiry.
+	/// A node minted per origin, with no byte target and the default idle expiry.
 	fn default() -> Self {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
-			node: random_id(),
+			node: None,
 			max_hops: MAX_HOP_LIMIT,
 			pool,
 			cache_duration: None,
@@ -214,7 +215,7 @@ impl Config {
 	#[cfg(any(test, feature = "test-support"))]
 	pub fn new(node: NonZeroU64) -> Self {
 		Self {
-			node,
+			node: Some(node),
 			..Self::default()
 		}
 	}
@@ -2378,7 +2379,7 @@ impl Producer {
 		let shared = SendCell::new(kio::Shared::new(OriginState::new(config.update_hold)));
 		let pool = config.pool.clone();
 		let producer = Self {
-			node: config.node,
+			node: config.node.unwrap_or_else(random_id),
 			max_hops: config.max_hops.min(MAX_HOP_LIMIT),
 			scope: scope.clone(),
 			root: Path::default(),
@@ -2485,11 +2486,12 @@ impl Producer {
 		self.consume().route_node()
 	}
 
-	/// This origin's construction config.
+	/// This origin's construction config, less its Node ID: an origin built from it is a
+	/// new node.
 	pub fn config(&self) -> Config {
 		let shared = self.shared.lock();
 		Config {
-			node: self.node,
+			node: None,
 			max_hops: self.max_hops,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
@@ -9509,10 +9511,15 @@ mod tests {
 	#[kio::test]
 	async fn default_config_mints_a_real_hop() {
 		let config = Config::default();
-		assert!(config.node.get() < 1 << 53, "older JS clients decode it as a number");
 		let (producer, _driver) = Producer::new(config.clone());
-		assert_eq!(producer.node(), config.node);
-		assert_eq!(producer.consume().node(), config.node);
+		assert!(producer.node().get() < 1 << 53, "older JS clients decode it as a number");
+		assert_eq!(producer.consume().node(), producer.node());
+		// One config, or the config an origin reports, builds a new node each time: a
+		// Relay ID names one run.
+		let (again, _driver) = Producer::new(config);
+		let (rebuilt, _driver) = Producer::new(producer.config());
+		assert_ne!(again.node(), producer.node());
+		assert_ne!(rebuilt.node(), producer.node());
 	}
 
 	#[kio::test]
