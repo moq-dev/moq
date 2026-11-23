@@ -849,6 +849,8 @@ type Wire = {
 	// resolves it, null for a resolved-empty range, and the floor its SUBSCRIBE requested.
 	// `resolved` when the publisher placed the start itself, whatever the wire.
 	served?: { start?: bigint | null; requested?: bigint; resolved?: boolean };
+	// Its upstream said where the live feed is (see `hooks.answerEdge`).
+	edge?: true;
 };
 
 // Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
@@ -986,6 +988,7 @@ let wireFed: (producer: Producer) => boolean;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { key: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
+let knowsEdge: (producer: Producer) => boolean;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The keys of the groups the producer caches, sorted: what time starts and live joins resolve
@@ -1406,6 +1409,9 @@ export class Producer {
 	// The wire subscription feeding this copy, from `hooks.receiveTrack` until `hooks.cacheTrack`
 	// ends it: only a copy one feeds owes missing groups. Unset on a track's own publisher.
 	#wire?: Wire;
+	// A copy some wire subscription fed, which knows the live feed only from its upstream's answer,
+	// even between feeds; never set on a track's own publisher.
+	#copy = false;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The keys the live feed delivered as a group, and the drops a reclaim forgot, which `drops`
@@ -1582,9 +1588,21 @@ export class Producer {
 				? producer.#state.largest.peek()?.group
 				: undefined;
 		hooks.receiveTrack = (producer, starts = {}) => {
+			// A new feed's answer says afresh where the live feed is.
 			producer.#wire = { starts, served: producer.#wire?.served };
+			producer.#copy = true;
 			producer.#placing++;
 		};
+		hooks.answerEdge = (producer) => {
+			if (!producer.#wire || producer.#wire.edge) return;
+			producer.#wire.edge = true;
+			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
+		};
+		knowsEdge = (producer) =>
+			!producer.#copy ||
+			producer.#wire?.edge === true ||
+			producer.#state.closed.peek() !== undefined ||
+			producer.#state.end.peek() !== undefined;
 		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) =>
 			producer.#createGroup(sequence, start, { fetched: fill });
 		hooks.arrivingGroup = (producer, key) => {
@@ -4597,6 +4615,11 @@ export class Subscriber {
 		};
 		hooks.skippedBelow = (subscriber, key) =>
 			subscriber.#resume ? subscriber.#resume.skippedBelow(key) : skippedBelow(subscriber.#state, key);
+		hooks.knowsEdge = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.knowsEdge();
+			const producer = subscriber.#state.producer;
+			return !producer || knowsEdge(producer);
+		};
 		hooks.sourceStart = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.start();
 			// A live join still pending reads every group, so a fill asked below would claim

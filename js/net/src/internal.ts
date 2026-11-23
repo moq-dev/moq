@@ -578,6 +578,8 @@ export interface ResumeSource {
 	latest(): bigint | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): bigint | "pending" | undefined;
+	/** Whether the serving copy knows where the live feed is; see `hooks.knowsEdge`. */
+	knowsEdge(): boolean;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
 	/** The longest run of keys just below `key` any copy knows were never produced. */
@@ -879,6 +881,8 @@ export const hooks: {
 	 * assigned by `track.ts`.
 	 */
 	reportedLargest: (producer: Producer, largest: Position | undefined, finished: boolean) => void;
+	/** A received copy's upstream said where the live feed is, its largest or that it has none. */
+	answerEdge: (producer: Producer) => void;
 	/**
 	 * Seed a received track from the publisher's reported group alone, whose frame is unknown,
 	 * so it names no object; assigned by `track.ts`.
@@ -898,6 +902,12 @@ export const hooks: {
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
 	 */
 	sourceStart: (subscriber: Subscriber) => bigint | "pending" | undefined;
+	/**
+	 * Whether this hop knows where the live feed is: always on a track's own publisher, and on a
+	 * received copy once its upstream said so or the track ended; assigned by `track.ts`. A relay
+	 * answers a range following the live edge only then. Mirrors the Rust `poll_live`.
+	 */
+	knowsEdge: (subscriber: Subscriber) => boolean;
 	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
@@ -1381,6 +1391,9 @@ export const hooks: {
 	reportedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
+	answerEdge: () => {
+		throw new Error("track.ts not loaded");
+	},
 	reportedGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1394,6 +1407,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	sourceStart: () => {
+		throw new Error("track.ts not loaded");
+	},
+	knowsEdge: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bufferedLargest: () => {

@@ -539,13 +539,10 @@ export class LiveRanges {
 	readonly #live = new Map<bigint, WireRange>();
 	// The bytes the live ranges take on the wire, held to what one SUBSCRIBE carries.
 	#size = 0;
-	/** How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports. */
-	readonly initial: bigint;
 
 	/** The ranges a SUBSCRIBE carried. */
 	constructor(version: Version, ranges: readonly WireRange[]) {
 		this.#version = version;
-		this.initial = BigInt(ranges.length);
 		this.#add(ranges);
 	}
 
@@ -1116,7 +1113,7 @@ export class SubscribeOk {
 	}
 }
 
-/** The publisher's largest position, as SUBSCRIBE_OK reports it. Mirrors the Rust `Largest`. */
+/** The publisher's largest position, as SUBSCRIBE_START reports it. Mirrors the Rust `Largest`. */
 export interface Largest {
 	/** The newest group and its last frame so far. */
 	position: Position;
@@ -1125,82 +1122,85 @@ export interface Largest {
 }
 
 /**
- * Resolves where a Draft-05+ subscription starts. The first message the publisher sends,
- * once the start is known. A start above the requested one implicitly drops the groups
- * below it.
+ * What a SUBSCRIBE_START knows of the track's largest position: `"unknown"` when the answering
+ * hop has yet to learn it, `"empty"` for a track with no group yet, or the {@link Largest}.
+ * Mirrors the Rust `Edge`.
+ */
+export type Edge = "unknown" | "empty" | Largest;
+
+/**
+ * Says where one range of a Draft-05+ subscription starts, once the publisher resolves it. Before
+ * lite-07 one answers the subscription's one range; lite-07 answers each range by Range ID, from
+ * the SUBSCRIBE or an update, along with what the publisher knows of the largest position. A start
+ * above the requested one implicitly drops the groups below it.
  *
  * There is no start frame: a partial group is only served to a subscriber that asked for
  * one, so a range begins at its requested frame when it starts at its requested group,
  * and at frame 0 of a later one otherwise.
  */
 export class SubscribeStart {
-	/**
-	 * The group each range's delivery starts at, in turn, `undefined` for a range with no
-	 * group there. Before draft-07 the wire carries the one range's start as `Group`.
-	 */
-	starts: (bigint | undefined)[];
+	/** The range's Range ID; 0 before lite-07, whose one range has none on the wire. */
+	id: bigint;
+	/** The group its delivery starts at, `undefined` for a range with no group there. */
+	start?: bigint;
+	/** What the publisher knows of the largest position; always `"unknown"` before lite-07. */
+	largest: Edge;
 
-	/**
-	 * The publisher's largest when it answered, or `undefined` for a track with nothing yet.
-	 * Draft-07+ only; not on the wire before, where it decodes as `undefined`.
-	 */
-	largest?: Largest;
-
-	constructor(starts: (bigint | undefined)[], largest?: Largest) {
-		this.starts = starts;
-		this.largest = largest;
+	constructor(props: { id: bigint; start?: bigint; largest: Edge }) {
+		this.id = props.id;
+		this.start = props.start;
+		this.largest = props.largest;
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		return Message.encode(w, async (w) => {
-			// Draft-07 added the largest position along with the ranges.
 			if (!hasRanges(version)) {
-				const [group, ...rest] = this.starts;
-				if (group === undefined || rest.length > 0) throw new Error("one start group before draft-07");
-				return w.u62(group);
+				if (this.id !== 0n || this.start === undefined || this.largest !== "unknown")
+					throw new Error("one start group before draft-07");
+				return w.u62(this.start);
 			}
-			// Group + 1, so 0 is a track with nothing yet; the frame and whether the group ended
-			// follow only otherwise.
-			if (this.largest === undefined) {
-				await w.u53(0);
-			} else {
-				await w.u62(this.largest.position.group + 1n);
-				await w.u53(this.largest.position.frame);
-				await w.u8(this.largest.ended ? 1 : 0);
-			}
-			await w.u53(this.starts.length);
-			for (const start of this.starts) await w.u62(start === undefined ? 0n : start + 1n);
+			await w.u62(this.id);
+			// Group + 1, so 0 is a range with no group there.
+			await w.u62(this.start === undefined ? 0n : this.start + 1n);
+			if (this.largest === "unknown") return w.u8(0);
+			if (this.largest === "empty") return w.u8(1);
+			await w.u8(2);
+			await w.u62(this.largest.position.group);
+			await w.u53(this.largest.position.frame);
+			await w.u8(this.largest.ended ? 1 : 0);
 		});
 	}
 
 	static async decode(r: Reader, version: Version): Promise<SubscribeStart> {
 		return Message.decode(r, async (r) => {
-			if (!hasRanges(version)) return new SubscribeStart([await r.u62()]);
+			if (!hasRanges(version)) return new SubscribeStart({ id: 0n, start: await r.u62(), largest: "unknown" });
+			const id = await r.u62();
 			const wire = await r.u62();
-			let largest: Largest | undefined;
-			if (wire !== 0n) {
-				const position = { group: wire - 1n, frame: await r.u53() };
-				const ended = await r.u8();
-				if (ended > 1) throw new ProtocolViolation(`invalid Largest Ended: ${ended}`);
-				largest = { position, ended: ended === 1 };
+			const start = wire === 0n ? undefined : wire - 1n;
+			const type = await r.u8();
+			switch (type) {
+				case 0:
+					return new SubscribeStart({ id, start, largest: "unknown" });
+				case 1:
+					return new SubscribeStart({ id, start, largest: "empty" });
+				case 2: {
+					const position = { group: await r.u62(), frame: await r.u53() };
+					const ended = await r.u8();
+					if (ended > 1) throw new ProtocolViolation(`invalid Largest Ended: ${ended}`);
+					return new SubscribeStart({ id, start, largest: { position, ended: ended === 1 } });
+				}
+				default:
+					throw new ProtocolViolation(`invalid Largest Type: ${type}`);
 			}
-			// Not preallocated: each start costs a byte of the bounded message.
-			const starts: (bigint | undefined)[] = [];
-			for (let count = await r.u53(); count > 0; count--) {
-				const start = await r.u62();
-				starts.push(start === 0n ? undefined : start - 1n);
-			}
-			return new SubscribeStart(starts, largest);
 		});
 	}
 }
 
 /**
- * SUBSCRIBE_FINISH (SUBSCRIBE_END before lite-07): no group at or after `group` (exclusive
- * upper bound) will be produced on a Draft-05+ subscription. `0` means the track ended before
- * producing any groups.
+ * SUBSCRIBE_END: no group at or after `group` (exclusive upper bound) will be produced on a
+ * Draft-05+ subscription. `0` means the track ended before producing any groups.
  */
-export class SubscribeFinish {
+export class SubscribeEnd {
 	/** The exclusive final group key: the first key that will never be produced. */
 	group: bigint;
 	/** The stream error code the track ended with, if it did not end cleanly. Draft-07+ only. */
@@ -1228,40 +1228,12 @@ export class SubscribeFinish {
 		});
 	}
 
-	static async decode(r: Reader, version: Version): Promise<SubscribeFinish> {
+	static async decode(r: Reader, version: Version): Promise<SubscribeEnd> {
 		return Message.decode(r, async (r) => {
 			const group = await r.u62();
-			if (!hasEndError(version)) return new SubscribeFinish(group);
+			if (!hasEndError(version)) return new SubscribeEnd(group);
 			const code = await r.u53();
-			return new SubscribeFinish(group, code === 0 ? undefined : code - 1);
-		});
-	}
-}
-
-/** SUBSCRIBE_STARTED: where a range a SUBSCRIBE_UPDATE added starts. Lite-07+. */
-export class SubscribeStarted {
-	/** The range's Range ID. */
-	id: bigint;
-	/** The group its delivery starts at, `undefined` for a range with no group there. */
-	start?: bigint;
-
-	constructor(id: bigint, start?: bigint) {
-		this.id = id;
-		this.start = start;
-	}
-
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, async (w) => {
-			await w.u62(this.id);
-			await w.u62(this.start === undefined ? 0n : this.start + 1n);
-		});
-	}
-
-	static async decode(r: Reader): Promise<SubscribeStarted> {
-		return Message.decode(r, async (r) => {
-			const id = await r.u62();
-			const start = await r.u62();
-			return new SubscribeStarted(id, start === 0n ? undefined : start - 1n);
+			return new SubscribeEnd(group, code === 0 ? undefined : code - 1);
 		});
 	}
 }
@@ -1383,18 +1355,17 @@ export class SubscribeSkip {
  *
  * The discriminator is version-dependent:
  * - Draft-03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
- * - Draft-05+: `0x0` SUBSCRIBE_START (SUBSCRIBE_OK on lite-07), `0x1` SUBSCRIBE_FINISH
- *   (SUBSCRIBE_END before lite-07), `0x2` SUBSCRIBE_DROP (SUBSCRIBE_OK was removed;
- *   acceptance is implicit).
- * - Lite-07+: also `0x3` SUBSCRIBE_SKIP and `0x4` SUBSCRIBE_STARTED.
+ * - Draft-05/06: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP (SUBSCRIBE_OK
+ *   was removed; acceptance is implicit).
+ * - Lite-07+: `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP, `0x3` SUBSCRIBE_SKIP, and `0x4`
+ *   SUBSCRIBE_START, one per range; `0x0` is unused.
  */
 export type SubscribeResponse =
 	| { ok: SubscribeOk }
 	| { start: SubscribeStart }
-	| { finish: SubscribeFinish }
+	| { end: SubscribeEnd }
 	| { drop: SubscribeDrop }
-	| { skip: SubscribeSkip }
-	| { started: SubscribeStarted };
+	| { skip: SubscribeSkip };
 
 export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse, version: Version): Promise<void> {
 	switch (version) {
@@ -1421,20 +1392,17 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 		default:
 			// Draft-05+: SUBSCRIBE_OK is gone; START/END/DROP carry the resolved range.
 			if ("start" in resp) {
-				await w.u53(0x0);
+				await w.u53(hasRanges(version) ? 0x4 : 0x0);
 				await resp.start.encode(w, version);
-			} else if ("finish" in resp) {
+			} else if ("end" in resp) {
 				await w.u53(0x1);
-				await resp.finish.encode(w, version);
+				await resp.end.encode(w, version);
 			} else if ("drop" in resp) {
 				await w.u53(0x2);
 				await resp.drop.encode(w, version);
 			} else if ("skip" in resp && hasSkip(version)) {
 				await w.u53(0x3);
 				await resp.skip.encode(w, version);
-			} else if ("started" in resp && hasRanges(version)) {
-				await w.u53(0x4);
-				await resp.started.encode(w);
 			} else {
 				throw new Error("subscribe response not supported for this version");
 			}
@@ -1463,9 +1431,10 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 			const typ = await r.u53();
 			switch (typ) {
 				case 0x0:
+					if (hasRanges(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 					return { start: await SubscribeStart.decode(r, version) };
 				case 0x1:
-					return { finish: await SubscribeFinish.decode(r, version) };
+					return { end: await SubscribeEnd.decode(r, version) };
 				case 0x2:
 					return { drop: await SubscribeDrop.decode(r, version) };
 				case 0x3:
@@ -1473,7 +1442,7 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 					return { skip: await SubscribeSkip.decode(r, version) };
 				case 0x4:
 					if (!hasRanges(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
-					return { started: await SubscribeStarted.decode(r) };
+					return { start: await SubscribeStart.decode(r, version) };
 				default:
 					throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 			}

@@ -17,12 +17,11 @@ import {
 	requestedRanges,
 	Subscribe,
 	SubscribeDrop,
-	SubscribeFinish,
+	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeSkip,
 	SubscribeStart,
-	SubscribeStarted,
 	SubscribeUpdate,
 	spanOf,
 	toWireRanges,
@@ -406,63 +405,77 @@ test("lite-07 carries every range, times and no start included, and older wires 
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {
-	const got = await responseRoundtrip(Version.DRAFT_05, { start: new SubscribeStart([42n]) });
-	expect("start" in got).toBe(true);
+	const got = await responseRoundtrip(Version.DRAFT_05, {
+		start: new SubscribeStart({ id: 0n, start: 42n, largest: "unknown" }),
+	});
 	if (!("start" in got)) throw new Error("expected start");
-	expect(got.start.starts).toEqual([42n]);
-});
-
-test("SubscribeStart carries the largest position and whether it ended on draft-07", async () => {
+	expect([got.start.id, got.start.start, got.start.largest]).toEqual([0n, 42n, "unknown"]);
+	// Before lite-07 one start answers the one range, and carries no largest.
 	const position = { group: 3n, frame: 2 };
-	// Type, length, largest group + 1, largest frame, ended, one range start plus one.
-	expect(await encode(Version.DRAFT_07, { start: new SubscribeStart([4n], { position, ended: true }) })).toEqual(
-		new Uint8Array([0, 5, 4, 2, 1, 1, 5]),
-	);
-	for (const largest of [undefined, { position, ended: false }, { position, ended: true }]) {
-		const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart([4n], largest) });
-		if (!("start" in got)) throw new Error("expected start");
-		expect(got.start.largest).toEqual(largest);
+	for (const start of [
+		new SubscribeStart({ id: 1n, start: 4n, largest: "unknown" }),
+		new SubscribeStart({ id: 0n, largest: "unknown" }),
+		new SubscribeStart({ id: 0n, start: 4n, largest: { position, ended: true } }),
+	])
+		await expect(encode(Version.DRAFT_06, { start })).rejects.toThrow();
+	await expect(
+		decodeSubscribeResponse(
+			new Reader(undefined, new Uint8Array([4, 2, 0, 0]), Version.DRAFT_06),
+			Version.DRAFT_06,
+		),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+test("SubscribeStart answers one range with its start and the largest on draft-07", async () => {
+	const position = { group: 3n, frame: 2 };
+	// Type 4, length, Range ID, start plus one, Largest Type 2, group, frame, ended.
+	const answered = new SubscribeStart({ id: 1n, start: 4n, largest: { position, ended: true } });
+	expect(await encode(Version.DRAFT_07, { start: answered })).toEqual(new Uint8Array([4, 6, 1, 5, 2, 3, 2, 1]));
+	// Unknown and Empty carry no fields; a start of 0 is a range with no group there.
+	expect(
+		await encode(Version.DRAFT_07, { start: new SubscribeStart({ id: 4n, largest: "unknown" }) }),
+	).toEqual(new Uint8Array([4, 3, 4, 0, 0]));
+	expect(
+		await encode(Version.DRAFT_07, { start: new SubscribeStart({ id: 0n, start: 0n, largest: "empty" }) }),
+	).toEqual(new Uint8Array([4, 3, 0, 1, 1]));
+	for (const largest of ["unknown", "empty", { position, ended: false }, { position, ended: true }] as const) {
+		for (const start of [undefined, 0n, 7n]) {
+			const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart({ id: 2n, start, largest }) });
+			if (!("start" in got)) throw new Error("expected start");
+			expect([got.start.id, got.start.start, got.start.largest]).toEqual([2n, start, largest]);
+		}
 	}
-	// Any other ended is malformed.
-	const malformed = new Reader(undefined, new Uint8Array([0, 5, 4, 2, 2, 1, 5]), Version.DRAFT_07);
-	await expect(decodeSubscribeResponse(malformed, Version.DRAFT_07)).rejects.toThrow(ProtocolViolation);
-	// Draft-06 has no largest position on the wire.
-	expect(await encode(Version.DRAFT_06, { start: new SubscribeStart([4n], { position, ended: true }) })).toEqual(
-		new Uint8Array([0, 1, 4]),
-	);
+	// Any other Largest Type or ended is malformed, and lite-07 leaves type 0 unused.
+	for (const bytes of [
+		[4, 6, 1, 5, 2, 3, 2, 2],
+		[4, 3, 1, 5, 3],
+		[0, 1, 4],
+	]) {
+		const malformed = new Reader(undefined, new Uint8Array(bytes), Version.DRAFT_07);
+		await expect(decodeSubscribeResponse(malformed, Version.DRAFT_07)).rejects.toThrow(ProtocolViolation);
+	}
 });
 
-test("SubscribeStart carries each range's start in place of one group on draft-07", async () => {
-	const start = new SubscribeStart([2n, undefined, 0n]);
-	// Type, length, no largest, three starts each plus one with 0 for none.
-	expect(await encode(Version.DRAFT_07, { start })).toEqual(new Uint8Array([0, 5, 0, 3, 3, 0, 1]));
-	const got = await responseRoundtrip(Version.DRAFT_07, { start });
-	if (!("start" in got)) throw new Error("expected start");
-	expect(got.start.starts).toEqual([2n, undefined, 0n]);
-	// Draft-06's one `Group` names a single range.
-	await expect(encode(Version.DRAFT_06, { start })).rejects.toThrow();
-});
-
-test("SubscribeFinish round-trips on draft-05", async () => {
+test("SubscribeEnd round-trips on draft-05", async () => {
 	// Type, length, exclusive final group.
-	expect(await encode(Version.DRAFT_05, { finish: new SubscribeFinish(7n) })).toEqual(new Uint8Array([1, 1, 7]));
-	const got = await responseRoundtrip(Version.DRAFT_05, { finish: new SubscribeFinish(7n) });
-	expect("finish" in got).toBe(true);
-	if (!("finish" in got)) throw new Error("expected end");
-	expect(got.finish.group).toBe(7n);
+	expect(await encode(Version.DRAFT_05, { end: new SubscribeEnd(7n) })).toEqual(new Uint8Array([1, 1, 7]));
+	const got = await responseRoundtrip(Version.DRAFT_05, { end: new SubscribeEnd(7n) });
+	expect("end" in got).toBe(true);
+	if (!("end" in got)) throw new Error("expected end");
+	expect(got.end.group).toBe(7n);
 });
 
-test("SubscribeFinish carries its error on draft-07", async () => {
+test("SubscribeEnd carries its error on draft-07", async () => {
 	// Type, length, exclusive final group, then the error code + 1, 0 for a clean end.
-	expect(await encode(Version.DRAFT_07, { finish: new SubscribeFinish(7n) })).toEqual(new Uint8Array([1, 2, 7, 0]));
-	expect(await encode(Version.DRAFT_07, { finish: new SubscribeFinish(7n, 71) })).toEqual(
+	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7n) })).toEqual(new Uint8Array([1, 2, 7, 0]));
+	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7n, 71) })).toEqual(
 		new Uint8Array([1, 2, 7, 72]),
 	);
-	const got = await responseRoundtrip(Version.DRAFT_07, { finish: new SubscribeFinish(7n, 71) });
-	if (!("finish" in got)) throw new Error("expected end");
-	expect([got.finish.group, got.finish.error]).toEqual([7n, 71]);
+	const got = await responseRoundtrip(Version.DRAFT_07, { end: new SubscribeEnd(7n, 71) });
+	if (!("end" in got)) throw new Error("expected end");
+	expect([got.end.group, got.end.error]).toEqual([7n, 71]);
 	// An older version has nowhere to carry it.
-	await expect(encode(Version.DRAFT_06, { finish: new SubscribeFinish(7n, 71) })).rejects.toThrow();
+	await expect(encode(Version.DRAFT_06, { end: new SubscribeEnd(7n, 71) })).rejects.toThrow();
 });
 
 test("SubscribeDrop is restored on draft-07", async () => {
@@ -815,21 +828,3 @@ test("lite-07 a refused edit leaves the ranges as sent", () => {
 	expect(live.edit(wide.slice(0, 2))).toEqual({ remove: [0n], add: wide.slice(0, 2), fillIds: [], probeIds: [] });
 });
 
-test("SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it", async () => {
-	for (const start of [undefined, 0n, 7n]) {
-		const started = new SubscribeStarted(4n, start);
-		expect(await encode(Version.DRAFT_07, { started })).toEqual(
-			new Uint8Array([4, 2, 4, start === undefined ? 0 : Number(start) + 1]),
-		);
-		const got = await responseRoundtrip(Version.DRAFT_07, { started });
-		if (!("started" in got)) throw new Error("expected SUBSCRIBE_STARTED");
-		expect([got.started.id, got.started.start]).toEqual([4n, start]);
-	}
-	await expect(encode(Version.DRAFT_06, { started: new SubscribeStarted(0n) })).rejects.toThrow();
-	await expect(
-		decodeSubscribeResponse(
-			new Reader(undefined, new Uint8Array([4, 2, 0, 0]), Version.DRAFT_06),
-			Version.DRAFT_06,
-		),
-	).rejects.toThrow(ProtocolViolation);
-});

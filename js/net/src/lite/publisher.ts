@@ -70,13 +70,13 @@ import {
 	requestedRange,
 	requestedRanges,
 	type Subscribe,
+	type Edge,
 	SubscribeDrop,
-	SubscribeFinish,
+	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeSkip,
 	SubscribeStart,
-	SubscribeStarted,
 	SubscribeUpdate,
 	spanBetween,
 	type WireRange,
@@ -465,9 +465,9 @@ class SubscriptionControls {
 		return this.#live.get(id) !== undefined;
 	}
 
-	/** Whether Range ID `id` is live and starts with a live join. */
-	joins(id: bigint): boolean {
-		return this.#live.get(id)?.start?.live !== undefined;
+	/** The live range with Range ID `id`, as the subscriber asked it. */
+	range(id: bigint): WireRange | undefined {
+		return this.#live.get(id);
 	}
 
 	/** Whether {@link take} has a control to answer with now. */
@@ -675,6 +675,21 @@ function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 }
 
 // The later of two locations, either of which may be unknown.
+/** A lite-07 range still waiting for its SUBSCRIBE_START, as it was asked. Mirrors the Rust `Unstarted`. */
+interface Asked {
+	/** It starts with a live join. */
+	joins: boolean;
+	/** It follows the live edge, starting with a live join or ending at none, so its answer waits until this hop knows the largest position. */
+	live: boolean;
+	/** It starts at the oldest group, which places it at group 0 on a track with none yet. */
+	oldest: boolean;
+}
+
+function asked(range: WireRange): Asked {
+	const joins = range.start?.live !== undefined;
+	return { joins, live: joins || range.end === undefined, oldest: range.start === undefined };
+}
+
 function newer(a: track.Position | undefined, b: track.Position | undefined): track.Position | undefined {
 	if (!a || !b) return a ?? b;
 	return b.group > a.group || (b.group === a.group && b.frame > a.frame) ? b : a;
@@ -1579,7 +1594,7 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: bigint;
 			bounds: FrameBounds;
-			// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports.
+			// How many ranges the SUBSCRIBE carried, which take Range IDs from 0.
 			initial: bigint;
 		},
 	): Promise<boolean> {
@@ -1597,7 +1612,7 @@ export class Publisher {
 			moveCursor();
 		};
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
-		// first group is known, SUBSCRIBE_FINISH when the track finishes.
+		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Dispositions before START refine its boundary; later ones must be named as drops.
@@ -1607,33 +1622,60 @@ export class Publisher {
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
-		// The largest as SUBSCRIBE_OK reports it, with whether its group ended.
-		const answered = (position: track.Position | undefined) =>
-			position && { position, ended: hooks.largestFinished(track, position) };
+		// What this hop knows of the largest position, `position` the newest it saw: nothing on a
+		// relay's copy its upstream has yet to answer, whatever its cache holds. Mirrors the Rust
+		// `TrackRun::largest`.
+		const edge = (position: track.Position | undefined): Edge => {
+			if (!hooks.knowsEdge(track)) return "unknown";
+			return position ? { position, ended: hooks.largestFinished(track, position) } : "empty";
+		};
+		const newest = () => newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest);
 		let endSent = false;
-		// Lite-07: the Range IDs an update added whose start no SUBSCRIBE_STARTED reported yet.
-		const unstarted = new Set<bigint>();
+		// Lite-07: the ranges no SUBSCRIBE_START answered yet, by Range ID, each as it was asked.
+		const unstarted = new Map<bigint, Asked>();
+		if (hasRanges(this.version)) {
+			for (let id = 0n; id < initial; id++) {
+				const range = controls.range(id);
+				if (range) unstarted.set(id, asked(range));
+			}
+		}
+		const sendStart = (start: SubscribeStart) =>
+			controls.response(encodeSubscribeResponse(stream, { start }, this.version));
 
-		// Where each of the SUBSCRIBE's ranges starts once delivery starts at `from`, by Range ID,
-		// undefined for one with no group there or an update retired: SUBSCRIBE_STARTED answers
-		// each one an update added. Before lite-07 there is one range, which starts there.
-		const rangeStarts = (from: bigint): (bigint | undefined)[] => {
-			if (!hasRanges(this.version)) return [from];
-			const starts = hooks.servingStarts(track, from);
-			const positions = controls.positions();
-			return Array.from({ length: Number(initial) }, (_, id) => {
-				const index = positions.get(BigInt(id));
-				return index === undefined ? undefined : starts[index];
-			});
+		// Resolve delivery at `from`, `position` the newest this hop saw, and answer each of the
+		// SUBSCRIBE's ranges resolved there. Before lite-07 the one start answers the subscription.
+		// A lite-07 range still waiting, or one following the live edge before this hop knows where
+		// it is, is answered later by `reportStarted`. Mirrors the Rust `TrackRun::resolve`.
+		const resolve = async (from: bigint, position: track.Position | undefined): Promise<boolean> => {
+			startSent = true;
+			startKey = from;
+			if (!hasRanges(this.version)) return sendStart(new SubscribeStart({ id: 0n, start: from, largest: "unknown" }));
+			const largest = edge(position);
+			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
+			const resolution = hooks.servingResolvedKeys(track, ids);
+			for (const [index, id] of ids.entries()) {
+				const range = resolution[index];
+				if (!range || (unstarted.get(id)?.live && largest === "unknown")) continue;
+				const start = max(range.start, from);
+				unstarted.delete(id);
+				const at = range.end === undefined || range.end > start ? start : undefined;
+				if (!(await sendStart(new SubscribeStart({ id, start: at, largest })))) return false;
+			}
+			return true;
 		};
 
-		// Report where each range an update added starts, once it resolves, or with no start once
-		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
+		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
+		// once nothing can resolve it (`finished`). One following the live edge also waits until this
+		// hop knows where it is. The first answers go out with `resolve`. Mirrors the Rust
+		// `TrackRun::report_started`.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
 			if (startKey === undefined || unstarted.size === 0) return true;
+			const largest = edge(newest());
 			// An update not taken yet retired one, and taking that update forgets it. In Range ID
 			// order, as the Rust `TrackRun::report_started` reports them.
-			const held = [...unstarted].filter((id) => controls.holds(id)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+			const held = [...unstarted.keys()]
+				.filter((id) => controls.holds(id))
+				.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 			// Every range clamps against where delivery started before this batch, so one reported
 			// later isn't clamped against a start an earlier join in the batch lowered.
 			const from = startKey;
@@ -1641,6 +1683,10 @@ export class Publisher {
 			for (const [index, id] of held.entries()) {
 				// Or one taken while an earlier start went out.
 				if (!controls.holds(id)) continue;
+				const ask = unstarted.get(id);
+				// Never answered without the largest, even once nothing else can resolve it: this hop's
+				// feed answering or ending tells it.
+				if (ask?.live && largest === "unknown") continue;
 				const range = resolution[index];
 				if (!range && !finished) continue;
 				let start: bigint | undefined;
@@ -1649,15 +1695,29 @@ export class Publisher {
 					// the first ranges, starts where it was placed: the subscriber reads its answer as
 					// the join's start, so its groups from there are owed, and delivery now starts there
 					// too. Any other range starts no earlier than delivery.
-					const joins = controls.joins(id);
-					start = joins ? range.start : max(range.start, from);
+					start = ask?.joins ? range.start : max(range.start, from);
 					if (range.end !== undefined && range.end <= start) start = undefined;
 					else startKey = min(startKey, start);
 				}
-				const started = new SubscribeStarted(id, start);
-				if (!(await controls.response(encodeSubscribeResponse(stream, { started }, this.version))))
-					return false;
 				unstarted.delete(id);
+				if (!(await sendStart(new SubscribeStart({ id, start, largest })))) return false;
+			}
+			return true;
+		};
+
+		// Lite-07, on a track this hop knows has no group yet: answer each range starting at the
+		// oldest group at once, since every group the track produces is owed, so the subscriber
+		// learns the track is empty rather than wait on a group. A time start or a live join waits
+		// for a group to place it. Mirrors the Rust `TrackRun::resolve_empty`.
+		const resolveEmpty = async (): Promise<boolean | undefined> => {
+			if (!hasRanges(this.version) || ![...unstarted.values()].some((ask) => ask.oldest)) return undefined;
+			if (newest() !== undefined || !hooks.knowsEdge(track) || hooks.subscriberEnd(track) !== undefined)
+				return undefined;
+			if (!(await resolve(0n, undefined))) return false;
+			for (const [id, ask] of [...unstarted]) {
+				if (!ask.oldest || !controls.holds(id)) continue;
+				unstarted.delete(id);
+				if (!(await sendStart(new SubscribeStart({ id, start: 0n, largest: "empty" })))) return false;
 			}
 			return true;
 		};
@@ -1715,7 +1775,7 @@ export class Publisher {
 			return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
 		};
 
-		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_FINISH
+		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
 		// straight into finish_at, so it must name the track's boundary (which counts
 		// datagram sequences too), not the delivered range: a subscription cap can hold
 		// produced groups back. The latest() fallback covers a subscription torn down
@@ -1735,7 +1795,7 @@ export class Publisher {
 			const endError = hooks.subscriberEndError(track);
 			const code = endError && hasEndError(this.version) ? toStreamCode(endError) : undefined;
 			return controls.response(
-				encodeSubscribeResponse(stream, { finish: new SubscribeFinish(boundary(), code) }, this.version),
+				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary(), code) }, this.version),
 			);
 		};
 
@@ -1766,7 +1826,7 @@ export class Publisher {
 				for (const close of dispose) close();
 			}
 		};
-		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_FINISH sent
+		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
 		// early could let the subscriber settle before the reset arrives. A subscription capped
 		// short of the end is owed no error, so its boundary goes out.
 		const declareEarly = () =>
@@ -1847,9 +1907,9 @@ export class Publisher {
 							finished = false;
 							const update = control.update;
 							if (hasRanges(this.version)) {
-								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
+								// A range retired before its start resolved is owed no SUBSCRIBE_START.
 								for (const id of control.applied.retired) unstarted.delete(id);
-								for (const [id] of control.applied.added) if (id >= initial) unstarted.add(id);
+								for (const [id, range] of control.applied.added) unstarted.set(id, asked(range));
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
@@ -1921,13 +1981,7 @@ export class Publisher {
 						if (emitRange && !startSent && hasRanges(this.version)) {
 							const end = hooks.servingEnd(track);
 							if (end !== undefined && hooks.servingRuns(track, 0n, end).length === 0) {
-								startSent = true;
-								startKey = end;
-								const start = new SubscribeStart(rangeStarts(end), answered(largest));
-								if (
-									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
-								)
-									return false;
+								if (!(await resolve(end, largest))) return false;
 								continue;
 							}
 						}
@@ -1948,15 +2002,14 @@ export class Publisher {
 								runs.length > 0 &&
 								runs.every((run) => runGaps(given, run.start, run.end).length === 0)
 							) {
-								startSent = true;
-								startKey = runs[0].start;
-								const start = new SubscribeStart(rangeStarts(startKey), answered(largest));
-								if (
-									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
-								)
-									return false;
+								if (!(await resolve(runs[0].start, largest))) return false;
 								continue;
 							}
+						}
+						if (emitRange && !startSent) {
+							const empty = await resolveEmpty();
+							if (empty === false) return false;
+							if (empty) continue;
 						}
 						await waitForSubscription(controls, track, drops);
 						continue;
@@ -1981,11 +2034,8 @@ export class Publisher {
 						// any group resolved the start still says where delivery starts; the loop then
 						// names what it held back, and the drops below account for the rest.
 						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
-							startSent = true;
-							startKey = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
-							const start = new SubscribeStart(rangeStarts(startKey), answered(largest));
-							if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version))))
-								return false;
+							const from = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
+							if (!(await resolve(from, largest))) return false;
 							continue;
 						}
 						// Nothing arrives to resolve a range still waiting on the live feed.
@@ -2011,7 +2061,7 @@ export class Publisher {
 						if (drain === undefined) continue;
 						if (!drain) return false;
 						if (pendingDrops.length > 0) continue;
-						// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: an update may still ask
+						// Lite-07 keeps the stream open past SUBSCRIBE_END: an update may still ask
 						// for the ended track's history, and the subscriber FINs once it wants nothing
 						// more.
 						if (keepsSubscribeOpen(this.version)) {
@@ -2043,7 +2093,6 @@ export class Publisher {
 						await waitForSubscription(controls, track, drops);
 						continue;
 					}
-					startSent = true;
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
 					startKey = min(group.start, source ?? group.start);
@@ -2058,16 +2107,7 @@ export class Publisher {
 					// Group Start is the latest group, and this key becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
 					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startKey);
-					if (
-						!(await controls.response(
-							encodeSubscribeResponse(
-								stream,
-								{ start: new SubscribeStart(rangeStarts(startKey), answered(largest)) },
-								this.version,
-							),
-						))
-					)
-						return false;
+					if (!(await resolve(startKey, largest))) return false;
 				}
 				record?.tell(group.start, group.start + 1n, { kind: "settled" });
 				streaming.add(group.start);
@@ -2425,12 +2465,16 @@ export class Publisher {
 		);
 		try {
 			const info = await untilAborted(track.info(), signal);
-			await encodeSubscribeResponse(stream.writer, { start: new SubscribeStart([0n]) }, this.version);
+			await encodeSubscribeResponse(
+				stream.writer,
+				{ start: new SubscribeStart({ id: 0n, start: 0n, largest: "unknown" }) },
+				this.version,
+			);
 			const end = await untilAborted(
 				this.#runDatagrams(track, { sub: msg.id, stamp: stamping(this.version, info) }),
 				signal,
 			);
-			await encodeSubscribeResponse(stream.writer, { finish: new SubscribeFinish(end) }, this.version);
+			await encodeSubscribeResponse(stream.writer, { end: new SubscribeEnd(end) }, this.version);
 			stream.writer.close();
 			await updates;
 		} finally {

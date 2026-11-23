@@ -89,6 +89,7 @@ import {
 	rangeKey,
 	requestedRange,
 	Subscribe,
+	type SubscribeStart,
 	SubscribeUpdate,
 	toWireRanges,
 	type WireAnchor,
@@ -2330,15 +2331,14 @@ export class Subscriber {
 			if (!resp) {
 				// The publisher FINs in reply to ours, or once it finished the track.
 				if (fin() || finished) return;
-				throw new ProtocolViolation("recovery subscribe ended without SUBSCRIBE_FINISH");
+				throw new ProtocolViolation("recovery subscribe ended without SUBSCRIBE_END");
 			}
 			if ("start" in resp) {
 				// One start, for its one range.
-				if (started || resp.start.starts.length !== 1)
-					throw new ProtocolViolation("unexpected recovery SUBSCRIBE_OK");
+				if (started || resp.start.id !== 0n) throw new ProtocolViolation("unexpected recovery SUBSCRIBE_START");
 				started = true;
 				// Below its start the publisher, asked with no max delay, lacks them.
-				const from = resp.start.starts[0] ?? groups.end;
+				const from = resp.start.start ?? groups.end;
 				giveUp(
 					groups.start,
 					max(groups.start, min(from, groups.end)),
@@ -2356,11 +2356,11 @@ export class Subscriber {
 				const { start, end } = resp.skip;
 				entry.tail.account(start, end);
 				hooks.skipTrackGroups(entry.track, start, end);
-			} else if ("finish" in resp) {
-				if (finished) throw new ProtocolViolation("duplicate SUBSCRIBE_FINISH");
+			} else if ("end" in resp) {
+				if (finished) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				finished = true;
 				// Nothing at or past the track's end will be produced.
-				const end = max(resp.finish.group, groups.start);
+				const end = max(resp.end.group, groups.start);
 				giveUp(end, groups.end, dropped(new NotFound(`group ${end}`)));
 			} else {
 				throw new ProtocolViolation("unexpected recovery subscribe response");
@@ -2527,88 +2527,47 @@ export class Subscriber {
 					return;
 				}
 				if (entry.end === undefined && hooks.trackReleased(entry.track).peek() === undefined)
-					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_FINISH");
+					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_END");
 				return;
 			}
 
 			if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
 			if ("start" in resp) {
-				if (hasRanges(this.version)) {
-					if (entry.start !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
-					// One start per range the SUBSCRIBE carried, by Range ID.
-					if (BigInt(resp.start.starts.length) !== entry.live.initial)
-						throw new ProtocolViolation(
-							`SUBSCRIBE_OK resolves ${resp.start.starts.length} ranges, not ${entry.live.initial}`,
-						);
-					// An update may have retired some already, whose starts say nothing now.
-					resp.start.starts.forEach((start, index) => {
-						if (entry.live.get(BigInt(index))) entry.starts.set(BigInt(index), start);
-					});
+				if (hasRanges(this.version)) this.#started(entry, resp.start);
+				else {
+					// Before lite-07 the one start answers the subscription, and says the feed is live.
+					if (entry.start !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_START");
+					const start = resp.start.start;
+					entry.start = start ?? null;
+					// A tail waits for SUBSCRIBE_START to say where delivery starts.
+					entry.tail.touch();
+					hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
+					hooks.answerEdge(entry.track);
+					// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
+					// demand asks later. One that still arrives is delivered.
+					if (entry.requested !== undefined && start !== undefined) entry.tail.account(entry.requested, start);
 				}
-				// The lowest range start is the first group served; none leaves nothing owed.
-				const start = resp.start.starts.reduce<bigint | undefined>(
-					(lowest, start) =>
-						start === undefined || (lowest !== undefined && lowest <= start) ? lowest : start,
-					undefined,
-				);
-				entry.start = start ?? null;
-				// A lite-07 tail waits for SUBSCRIBE_START to say where delivery starts.
-				entry.tail.touch();
-				// Lite-07 says where every live range starts, so the declaration follows them
-				// whatever an update changed since.
-				if (hasRanges(this.version)) this.#declare(entry);
-				else hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
-				// Recorded whole, so a relay answers its own readers that the group ended.
-				hooks.reportedLargest(entry.track, resp.start.largest?.position, resp.start.largest?.ended ?? false);
-				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
-				// demand asks later. One that still arrives is delivered.
-				if (entry.requested !== undefined && start !== undefined) entry.tail.account(entry.requested, start);
-			} else if ("finish" in resp) {
-				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_FINISH");
-				entry.end = resp.finish.group;
+			} else if ("end" in resp) {
+				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
+				entry.end = resp.end.group;
 				// A local close can win the race with the response; there is nothing left to end.
 				if (hooks.trackReleased(entry.track).peek() !== undefined) continue;
 				try {
 					// Lower groups may still be on the wire behind a higher one, so readers hold
 					// at a hole below the end until the tail settles.
-					hooks.endTrack(entry.track, { group: entry.end, frame: 0 }, resp.finish.cause());
+					hooks.endTrack(entry.track, { group: entry.end, frame: 0 }, resp.end.cause());
 				} catch (err) {
 					// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so
 					// there an end below a received group only costs the early boundary: the FIN
 					// still finishes the track. Later drafts made it exclusive.
 					if (this.version !== Version.DRAFT_05) {
-						throw new ProtocolViolation(`invalid SUBSCRIBE_FINISH: ${reason(error(err))}`);
+						throw new ProtocolViolation(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
 					}
-					console.warn(`invalid SUBSCRIBE_FINISH: ${reason(error(err))}`);
+					console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
 				}
-				// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: FIN once the tail settles,
+				// Lite-07 keeps the stream open past SUBSCRIBE_END: FIN once the tail settles,
 				// and the publisher's FIN in reply ends this loop.
 				if (keepsSubscribeOpen(this.version)) void this.#finishTail(stream, entry).catch(() => {});
-			} else if ("started" in resp) {
-				// Where a range an update added starts, from which its groups are owed.
-				const { id, start } = resp.started;
-				if (
-					entry.start === undefined ||
-					!entry.live.assigned(id) ||
-					id < entry.live.initial ||
-					entry.starts.has(id)
-				)
-					throw new ProtocolViolation(`unexpected SUBSCRIBE_STARTED: ${id}`);
-				// One retired since is owed nothing.
-				const range = entry.live.get(id);
-				if (range) {
-					entry.starts.set(id, start);
-					// A fill's range starting past where it asked skips groups it will not deliver.
-					const asked = entry.fillIds.has(id) ? fillRun(range) : undefined;
-					if (asked) {
-						const skipped = max(asked.start, min(start ?? asked.end, asked.end));
-						entry.tail.account(asked.start, skipped);
-						entry.fills?.skip(asked, asked.start, skipped);
-					}
-					// The tail judges what is owed again.
-					entry.tail.touch();
-					this.#declare(entry);
-				}
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups on this subscription, so they are accounted
 				// for without a stream, and a reader of one still arriving ends with the drop's error now.
@@ -2630,6 +2589,43 @@ export class Subscriber {
 				this.#skipped(entry, start, end);
 			}
 		}
+	}
+
+	// Lite-07: where one range starts, from its SUBSCRIBE_START, along with what the publisher knows
+	// of the live edge. A range following the live edge is answered with where the edge is. Mirrors
+	// the Rust `ServeLoop::record_start` and `apply_starts`.
+	#started(entry: SubscribeEntry, msg: SubscribeStart): void {
+		const { id, start, largest } = msg;
+		const range = entry.live.get(id);
+		const follows = range !== undefined && (range.start?.live !== undefined || range.end === undefined);
+		if (!entry.live.assigned(id) || entry.starts.has(id) || (largest === "unknown" && follows))
+			throw new ProtocolViolation(`unexpected SUBSCRIBE_START: ${id}`);
+		// Recorded whole, so a relay answers its own readers that the group ended.
+		if (typeof largest === "object") hooks.reportedLargest(entry.track, largest.position, largest.ended);
+		if (largest !== "unknown") hooks.answerEdge(entry.track);
+		// One retired since is owed nothing.
+		if (range) {
+			entry.starts.set(id, start);
+			// A fill's range starting past where it asked skips groups it will not deliver.
+			const asked = entry.fillIds.has(id) ? fillRun(range) : undefined;
+			if (asked) {
+				const skipped = max(asked.start, min(start ?? asked.end, asked.end));
+				entry.tail.account(asked.start, skipped);
+				entry.fills?.skip(asked, asked.start, skipped);
+			}
+		}
+		// The lowest start any range reported is the first group served; none leaves nothing owed.
+		let lowest: bigint | null = null;
+		for (const at of entry.starts.values()) if (at !== undefined && (lowest === null || at < lowest)) lowest = at;
+		entry.start = lowest;
+		// The tail judges what is owed again.
+		entry.tail.touch();
+		this.#declare(entry);
+		// The groups the SUBSCRIBE asked for below where every demand range starts are not waited
+		// for, whatever the demand asks later. One that still arrives is delivered.
+		const served = entry.declared?.start;
+		if (entry.requested !== undefined && served !== undefined && served !== null)
+			entry.tail.account(entry.requested, served);
 	}
 
 	// The publisher never produced `[start, end)`, as a SUBSCRIBE_SKIP says, so nothing is waited

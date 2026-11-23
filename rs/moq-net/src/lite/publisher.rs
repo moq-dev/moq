@@ -5368,6 +5368,10 @@ struct TrackRun {
 	/// Lite-07: the ranges no SUBSCRIBE_START answered yet, by Range ID, each as it was asked,
 	/// which a pin before the answer replaces.
 	unstarted: std::collections::BTreeMap<u64, Unstarted>,
+	/// What the last [`Self::report_started`] that answered none saw: the track's resolution and
+	/// whether this hop knew the largest. While both stand none can be answered, so a wake that
+	/// moved neither skips walking thousands of waiting ranges.
+	unanswerable: Option<(u64, bool)>,
 	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 }
@@ -5479,6 +5483,7 @@ impl TrackRun {
 		Self {
 			initial,
 			unstarted,
+			unanswerable: None,
 			unpinned,
 			bounded,
 			requested: Requested::new((0..).zip(bounds.ranges.iter().copied())),
@@ -5684,6 +5689,8 @@ impl TrackRun {
 			self.unpinned.insert(id, due(&range, false));
 			self.unstarted.insert(id, Unstarted::new(&range));
 		}
+		// The ranges and the start they clamp against moved.
+		self.unanswerable = None;
 		self.positions.extend(positions);
 		self.stops.extend(stopping);
 		if had || !self.positions.is_empty() {
@@ -5799,6 +5806,10 @@ impl TrackRun {
 			return Ok(false);
 		}
 		let largest = self.largest(waiter);
+		let seen = (self.track.resolution()).map(|resolution| (resolution, largest != lite::Edge::Unknown));
+		if !finished && seen.is_some() && seen == self.unanswerable {
+			return Ok(false);
+		}
 		let mut waiting = std::collections::BTreeMap::new();
 		let mut reported = false;
 		let unstarted = std::mem::take(&mut self.unstarted);
@@ -5839,6 +5850,7 @@ impl TrackRun {
 		}
 		self.unstarted = waiting;
 		self.start = Start::Resolved(lowest);
+		self.unanswerable = seen.filter(|_| !reported);
 		Ok(reported)
 	}
 

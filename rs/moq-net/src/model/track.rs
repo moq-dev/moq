@@ -9084,28 +9084,43 @@ impl Asked {
 		mut joins: Vec<JoinAsk>,
 		subscriptions: impl FnOnce() -> kio::Lock<Subscriptions>,
 	) {
-		fn dedup<T: PartialEq>(items: &mut Vec<T>) {
-			let mut kept = 0;
-			for index in 0..items.len() {
-				if !items[..kept].contains(&items[index]) {
-					items.swap(kept, index);
-					kept += 1;
-				}
-			}
-			items.truncate(kept);
-		}
-		dedup(&mut times);
-		dedup(&mut joins);
+		// Sorted, so taking duplicates out and diffing against what is counted stay linear past
+		// the sort: a copy's readers can wait on thousands of time starts, re-asked on every sync.
+		times.sort_unstable();
+		times.dedup();
+		joins.sort_unstable();
+		joins.dedup();
 		if times == self.times && joins == self.joins {
 			return;
 		}
 		let subscriptions = self.subscriptions.get_or_insert_with(subscriptions);
 		let wakes: Vec<kio::WaiterList> = {
 			let mut subs = subscriptions.lock();
-			fn changes<T: Copy + PartialEq>(old: &[T], new: &[T]) -> Vec<(T, bool)> {
-				let added = new.iter().filter(|ask| !old.contains(ask)).map(|ask| (*ask, true));
-				let gone = old.iter().filter(|ask| !new.contains(ask)).map(|ask| (*ask, false));
-				added.chain(gone).collect()
+			/// Each ask `new` adds (`true`) or `old` lost (`false`), both sorted without duplicates.
+			fn changes<T: Copy + Ord>(old: &[T], new: &[T]) -> Vec<(T, bool)> {
+				let (mut old, mut new) = (old.iter().peekable(), new.iter().peekable());
+				let mut changes = Vec::new();
+				loop {
+					match (old.peek(), new.peek()) {
+						(Some(gone), Some(came)) if gone == came => {
+							old.next();
+							new.next();
+						}
+						(Some(gone), Some(came)) if gone < came => {
+							changes.push((**gone, false));
+							old.next();
+						}
+						(_, Some(came)) => {
+							changes.push((**came, true));
+							new.next();
+						}
+						(Some(gone), None) => {
+							changes.push((**gone, false));
+							old.next();
+						}
+						(None, None) => return changes,
+					}
+				}
 			}
 			let times = changes(&self.times, &times)
 				.into_iter()
@@ -11871,6 +11886,20 @@ impl Subscriber {
 					.collect()
 			}
 			Inner::Resume(resume, _) => resume.resolved_keys(keys),
+		}
+	}
+
+	/// A count that moves whenever this subscriber's ranges may resolve differently, so a caller
+	/// waiting on [`Self::resolved_keys`] can skip asking again while it stands. `None` for a
+	/// front's reader, which keeps none.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn resolution(&mut self) -> Option<u64> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				Some(cursor.filter.revision)
+			}
+			Inner::Resume(..) => None,
 		}
 	}
 
