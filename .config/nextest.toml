@@ -42,7 +42,7 @@ test-group = "io-uring"
 # The vivid tests share one capture node, and a second process configuring its
 # queue while another streams gets EBUSY.
 [[profile.default.overrides]]
-filter = "package(moq-video) & test(/^capture::v4l2::tests::vivid::/)"
+filter = "(package(moq-video) & test(/^capture::v4l2::tests::vivid::/)) | (package(moq-v4l) & test(/::tests::vivid::/))"
 test-group = "v4l2"
 
 # The binding benchmark runs many `MOQ_BENCH_SECONDS` budgets back to back, so its
@@ -101,8 +101,8 @@ slow-timeout = { period = "300s", terminate-after = 3 }
 retries = 0
 failure-output = "immediate-final"
 
-# A sweep run past its gate count on purpose, such as `MOQ_ROUTE_SCENARIOS=20000
-# just rs test -P sweep ...`, takes minutes. Still bounded, so a lost wakeup
+# A sweep run past its gate count on purpose, such as those `test/route-sweep.sh`
+# runs with `-P sweep`, takes minutes. Still bounded, so a lost wakeup
 # ends in a TIMEOUT rather than a wedge.
 [profile.sweep]
 slow-timeout = { period = "60s", terminate-after = 60 }

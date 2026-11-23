@@ -1374,6 +1374,86 @@ test("a time start resolves on keys alone, before any group's first frame", () =
 	}
 });
 
+// A whole group's span runs from its start to its End: a time inside it starts at that group, and
+// a time in the pause past it belongs to no group, so a time start there starts at the next group,
+// even before that group exists, and a time end there stops after the whole group. A group with no
+// End spans up to the next start. Mirrors the Rust `time_anchors_resolve_against_group_spans`.
+test("time anchors resolve against group spans", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const append = (start: number, end?: bigint) => {
+		const group = producer.appendGroup(Timestamp.fromMillis(start));
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(start)));
+		if (end === undefined) group.finish();
+		else group.finishAt(end);
+	};
+	const from = (start: bigint, end?: bigint) =>
+		producer.subscribe({ delay: { max: null }, ranges: [end === undefined ? { start } : { start, end }] });
+	append(0, 1000n);
+	append(1000, 1400n);
+
+	const inside = from(1200n);
+	const paused = from(1700n);
+	const atEnd = from(1400n);
+	const holdings = hooks.subscriberHoldings(inside);
+	expect(holdings.containing(1200n, NO_MAX_DELAY)).toEqual({ at: 1000n });
+	expect(holdings.containing(1700n, NO_MAX_DELAY)).toEqual({ at: 1400n });
+	expect(holdings.containing(1400n, NO_MAX_DELAY)).toEqual({ at: 1400n });
+	// Its own start names a group whatever its End.
+	expect(holdings.containing(1000n, NO_MAX_DELAY)).toEqual({ at: 1000n });
+	expect(drainGroups(inside)).toEqual([1000n]);
+	expect(drainGroups(paused)).toEqual([]);
+	expect(drainGroups(atEnd)).toEqual([]);
+
+	append(2000);
+	expect(drainGroups(inside)).toEqual([2000n]);
+	expect(drainGroups(paused)).toEqual([2000n]);
+	expect(drainGroups(atEnd)).toEqual([2000n]);
+	expect(drainGroups(from(0n, 1700n))).toEqual([0n, 1000n]);
+	// 2000 has no End, so it spans up to the next start.
+	expect(holdings.containing(2500n, NO_MAX_DELAY)).toEqual({ at: 2000n });
+	producer.close();
+});
+
+// A lite-07 copy holding a whole group places a time inside its span from that group alone, with
+// no successor, since its GROUP_END gave up the starts there. A time past its End waits until the
+// publisher skips the pause up to it, then starts at that End. Mirrors the Rust
+// `a_received_copy_places_a_time_from_a_whole_groups_span`.
+test("a received copy places a time from a whole group's span", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	const group = producer.createGroup(1000n);
+	group.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
+	group.finishAt(1400n);
+	hooks.skipTrackGroups(producer, 1001n, 1400n);
+	const paused = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1700n }] });
+	const holdings = hooks.subscriberHoldings(paused);
+	expect(holdings.containing(1300n, NO_MAX_DELAY)).toEqual({ at: 1000n });
+	expect(holdings.containing(1700n, NO_MAX_DELAY)).toBe("unknown");
+	expect(drainGroups(paused)).toEqual([]);
+
+	// The publisher names the pause with SUBSCRIBE_SKIP.
+	hooks.skipTrackGroups(producer, 1400n, 2000n);
+	expect(holdings.containing(1700n, NO_MAX_DELAY)).toEqual({ at: 1400n });
+	putGroup(producer, 2000n, 2000);
+	expect(drainGroups(paused)).toEqual([2000n]);
+	producer.close();
+});
+
+// Expiry may forget the skip a GROUP_END recorded while the group stays held: its End alone still
+// proves a time inside the span. Mirrors the end of the Rust
+// `a_received_copy_places_a_time_from_a_whole_groups_span`.
+test("a received copy places a time from a whole group's End once its skip is gone", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	const group = producer.createGroup(1000n);
+	group.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
+	group.finishAt(1400n);
+	const reader = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1300n }] });
+	const holdings = hooks.subscriberHoldings(reader);
+	expect(holdings.containing(1300n, NO_MAX_DELAY)).toEqual({ at: 1000n });
+	expect(holdings.containing(1700n, NO_MAX_DELAY)).toBe("unknown");
+	expect(drainGroups(reader)).toEqual([1000n]);
+	producer.close();
+});
+
 // A drop inside a time end is reported, and one past it is not: the end settles by key.
 test("a drop a time end covers is reported", () => {
 	const producer = new TrackProducer("test");
@@ -5188,6 +5268,131 @@ test("a widened maxDelay re-offers what it skipped as stale", () => {
 	producer.close();
 });
 
+// A group skipped as stale under the current budget is not one the reader may still hand out,
+// until the budget widens past the one it was judged under. Mirrors the Rust test.
+test("a stale skip may be taken only once the budget widens", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const subscriber = producer.subscribe({ delay: { max: Duration.millis(1500) } });
+	stampGroup(producer, 0n, 0);
+	expect(drainGroups(subscriber)).toEqual([0n]);
+	for (const [key, ms] of [
+		[1n, 1000],
+		[2n, 2000],
+		[3n, 3000],
+		[4n, 6000],
+	] as const) {
+		stampGroup(producer, key, ms);
+	}
+	expect(drainGroups(subscriber)).toEqual([3n, 4n]);
+	expect(hooks.taking(subscriber)(0n)).toBe(false);
+	expect(hooks.taking(subscriber)(1n)).toBe(false);
+	expect(hooks.taking(subscriber)(5n)).toBe(true);
+
+	subscriber.update({ delay: { max: Duration.millis(10_000) } });
+	expect(hooks.taking(subscriber)(1n)).toBe(true);
+	expect(drainGroups(subscriber)).toEqual([1n, 2n]);
+	expect(hooks.taking(subscriber)(1n)).toBe(false);
+	producer.close();
+});
+
+// A stale skip stays one the reader may not hand out once the groups that convicted it leave the
+// cache: the walk passed it, and only a widening offers it again. Mirrors the Rust test.
+test("a stale skip may not be taken once its successors leave", async () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	try {
+		const window = CACHE_WINDOW_MS;
+		const subscriber = producer.subscribe({ delay: { max: Duration.millis(4 * window) } });
+		for (const [key, ms] of [
+			[1n, window],
+			[2n, 2 * window],
+			[3n, 3 * window],
+			[4n, 10 * window],
+		] as const) {
+			stampGroup(producer, key, ms);
+		}
+		// Groups 1 and 2 reach 2 and 3 windows, at least 4 behind the edge.
+		expect(drainGroups(subscriber)).toEqual([3n, 4n]);
+
+		// Another reader keeps group 1 cached while 2 and 3 idle out, leaving the edge to bound
+		// its reach.
+		await clock.advance(10_000 + window - 1);
+		const keeper = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1n, end: 2n }] });
+		expect(keeper.tryRecvGroup()?.start).toBe(1n);
+		await clock.advance(10_000 + window + SWEEP_LAG_MS + 1);
+		await settle();
+		expect(hooks.holdsGroup(subscriber, 1n, true)).toBe(true);
+		expect(hooks.holdsGroup(subscriber, 2n, false)).toBe(false);
+		expect(hooks.holdsGroup(subscriber, 3n, false)).toBe(false);
+		expect(hooks.taking(subscriber)(1n)).toBe(false);
+
+		subscriber.update({ delay: { max: Duration.millis(100 * window) } });
+		expect(hooks.taking(subscriber)(1n)).toBe(true);
+		keeper.close();
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// Re-offered under a budget the track's max age bounds, a group still stale there is final: the
+// reader may not hand it out, though its skip is no longer recorded, nor once the groups that
+// convicted it leave the cache. Mirrors the Rust test.
+test("a stale skip at the max age bound may not be taken", async () => {
+	const clock = manualTime(10_000);
+	const window = CACHE_WINDOW_MS;
+	const producer = new TrackProducer("test").accept({
+		timescale: Timescale.MILLI,
+		maxAge: Duration.millis(5 * window),
+	});
+	try {
+		const subscriber = producer.subscribe({ delay: { max: Duration.millis(4 * window) } });
+		for (const [key, ms] of [
+			[1n, window],
+			[2n, 2 * window],
+			[3n, 3 * window],
+			[4n, 10 * window],
+		] as const) {
+			stampGroup(producer, key, ms);
+		}
+		expect(drainGroups(subscriber)).toEqual([3n, 4n]);
+
+		subscriber.update({ delay: { max: Duration.millis(100 * window) } });
+		expect(drainGroups(subscriber)).toEqual([]);
+		expect(hooks.taking(subscriber)(1n)).toBe(false);
+		expect(hooks.taking(subscriber)(2n)).toBe(false);
+
+		// Another reader keeps group 1 cached while 2 and 3 idle out.
+		await clock.advance(10_000 + window - 1);
+		const keeper = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1n, end: 2n }] });
+		expect(keeper.tryRecvGroup()?.start).toBe(1n);
+		await clock.advance(10_000 + window + SWEEP_LAG_MS + 1);
+		await settle();
+		expect(hooks.holdsGroup(subscriber, 1n, true)).toBe(true);
+		expect(hooks.holdsGroup(subscriber, 3n, false)).toBe(false);
+		expect(hooks.taking(subscriber)(1n)).toBe(false);
+		keeper.close();
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// Groups stale at the max age bound are settled as handed out, and compacted like them: sparse
+// lower groups arriving after a newer one leave the reader's record as small as it was.
+test("final stale skips do not grow the delivery record", () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Duration.ZERO });
+	const subscriber = producer.subscribe();
+	producer.createGroup(100n).finish();
+	expect(drainGroups(subscriber)).toEqual([100n]);
+	for (let key = 99n; key > 0n; key -= 2n) {
+		producer.createGroup(key).finish();
+		expect(drainGroups(subscriber)).toEqual([]);
+	}
+	expect(hooks.deliveredRuns(subscriber)).toBeLessThanOrEqual(1);
+	producer.close();
+});
+
 // A read already parked when the budget widens wakes for the re-offer.
 test("a widened maxDelay wakes a parked read", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
@@ -5994,9 +6199,12 @@ test("track: a reader's unplaced times are only times its holdings can't place",
 				else if (unknown) expect([at, received && between]).toEqual([at, true]);
 			}
 			const key = BigInt(random(48));
-			if (random(2) === 0) {
+			const op = random(3);
+			if (op < 2) {
 				try {
-					putGroup(producer, key);
+					// Finished, or left open: an open group places no time past its newest frame.
+					if (op === 0) putGroup(producer, key);
+					else producer.createGroup(key);
 				} catch {
 					// A key this copy refuses, such as one a skip covers.
 				}

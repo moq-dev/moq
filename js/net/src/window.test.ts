@@ -80,7 +80,7 @@ class Keys implements Holdings {
 	containing(at: bigint): Containing {
 		const sorted = this.#sorted();
 		const group = sorted.filter((key) => key <= at).at(-1);
-		if (group !== undefined) return { group };
+		if (group !== undefined) return { at: group };
 		return sorted.length === 0 && at >= this.dropped ? "unknown" : "before";
 	}
 
@@ -117,7 +117,7 @@ class Keys implements Holdings {
 /** A hop holding every group from 0 through the latest, as contiguous starts do. */
 const CONTIGUOUS: Holdings = {
 	resolves: () => true,
-	containing: (at) => ({ group: at }),
+	containing: (at) => ({ at }),
 	nextStart: (from) => from,
 	complete: () => false,
 };

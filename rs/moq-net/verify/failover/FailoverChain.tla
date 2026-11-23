@@ -230,22 +230,36 @@ Whole(e) ==
     /\ have # {}
     /\ \A g \in Groups : g >= Min(have) => cp[e].fr[g] = F \/ g \in cp[e].bad
 
-\* A held copy at u may still land g: it is live, asked for g, and is not done.
+\* A held copy at u may still land g: it is live, lacks g, and either its
+\* subscription asked for g and is not done or it fetched g, which lands after
+\* the end too.
 MayLand(u, g) ==
     \E s \in Up(u) :
         /\ Live(<<u, s>>)
-        /\ g \in cp[<<u, s>>].ask
         /\ cp[<<u, s>>].fr[g] = -1
-        /\ ~cp[<<u, s>>].fin
+        /\ \/ g \in cp[<<u, s>>].ask /\ ~cp[<<u, s>>].fin
+           \/ g \in cp[<<u, s>>].fetch
+
+\* The relay at u can still ask upstream for g: the copy its reads go to first is
+\* live and never asked for g, so its end proves nothing about g (`Fetching`).
+Askable(u, g) ==
+    /\ u \in Relays
+    /\ front[u].end # "err"
+    /\ Live(Answering(u))
+    /\ g \notin cp[Answering(u)].ask \cup cp[Answering(u)].fetch
+    /\ cp[Answering(u)].fr[g] = -1
 
 \* The reader at u has handed out all it can: every group its copy asks for is
-\* out, or no copy at u holds it or may still land it (`poll_end`).
+\* out, or no copy at u holds it, may still land it, or could be asked for it
+\* (`poll_end`). A reader that joined a copy asked from a later group waits for
+\* the rest, as a copy waits for a recovery after its track finished.
 Drained(e) ==
     LET u == e[2] IN
     \A g \in cp[e].ask :
         \/ cp[e].fr[g] >= 0
         \/ /\ \A s \in Srcs(u) : SrcFr(u, s, g) < 0
            /\ ~MayLand(u, g)
+           /\ ~Askable(u, g)
 
 \* Where a short group can continue at u: a copy holding it whose source is
 \* still alive or holds a frame past the reader's (`Recover::held`).

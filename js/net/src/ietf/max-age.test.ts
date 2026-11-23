@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Reader, Writer } from "../stream.ts";
+import { framed } from "./message.test-util.ts";
 import { SubscribeOk } from "./subscribe.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -35,11 +36,7 @@ for (const version of Object.values(Version)) {
 				for (const field of [0, 0, 4]) await writer.u53(field);
 				await writer.u62(age);
 			});
-			const framed = await bytes(version, async (writer) => {
-				await writer.u16(payload.length);
-				await writer.write(payload);
-			});
-			const decoded = await SubscribeOk.decode(new Reader(undefined, framed, version), version);
+			const decoded = await SubscribeOk.decode(new Reader(undefined, framed(payload, version), version), version);
 			expect(decoded.properties.maxCacheDuration).toBe(age);
 		}
 	});

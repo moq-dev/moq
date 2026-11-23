@@ -10,8 +10,8 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_18, ALPN_20, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP,
-	Consume, Error, NEGOTIATED, Session, SessionError, Version, Versions,
+	ALPN_18, ALPN_20, ALPN_22, ALPN_23, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06,
+	ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, SessionError, Version, Versions,
 	coding::{Closing, Encode, Reader, Stream, Writer},
 	ietf, lite,
 	setup::{self, Role},
@@ -676,8 +676,9 @@ impl Handshaking {
 						unreachable!("matched above");
 					};
 					self.step = match session.protocol() {
-						Some(alpn @ (ALPN_22 | ALPN_20 | ALPN_18)) => {
+						Some(alpn @ (ALPN_23 | ALPN_22 | ALPN_20 | ALPN_18)) => {
 							let version = match alpn {
+								ALPN_23 => ietf::Version::Draft23,
 								ALPN_22 => ietf::Version::Draft22,
 								ALPN_20 => ietf::Version::Draft20,
 								_ => ietf::Version::Draft18,

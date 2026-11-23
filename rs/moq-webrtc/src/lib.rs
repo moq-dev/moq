@@ -347,13 +347,20 @@ mod tests {
 		/// Send `payload` every [`Self::STEP`] until `viewer` plays something other than an earlier
 		/// live payload, and return that. Repeating the last payload skips nothing.
 		async fn play(&mut self, payload: &'static [u8], viewer: &mut impl Viewer) -> Vec<u8> {
-			let stale = self.sent.replace(payload).filter(|sent| *sent != payload);
-			let read = fresh(viewer, stale);
-			tokio::pin!(read);
+			let stale = self.sent.filter(|sent| *sent != payload);
+			self.until(payload, fresh(viewer, stale))
+				.await
+				.expect("the viewer was closed")
+		}
+
+		/// Send `payload` every [`Self::STEP`] until `done` resolves, and return its output.
+		async fn until<T>(&mut self, payload: &'static [u8], done: impl Future<Output = T>) -> T {
+			self.sent = Some(payload);
+			tokio::pin!(done);
 			loop {
 				self.push(payload);
 				tokio::select! {
-					played = &mut read => return played.expect("the viewer was closed"),
+					output = &mut done => return output,
 					_ = kio::clock::sleep(Self::STEP) => {}
 				}
 			}
@@ -684,11 +691,13 @@ mod tests {
 		let cap =
 			moq_net::bandwidth::Cap::new(moq_net::bandwidth::Rate::from_kbps(8)).with_burst(Duration::from_millis(100));
 		let (address, http, mut sessions) = serve_capped_whip(moq_net::bandwidth::Limit::new(cap)).await;
-		push(&mut *opus, 20_000, &[0xfc; 1000]);
+		const LOUD: &[u8] = &[0xfc; 1000];
+		let mut live = Live::new(&mut *opus);
+		live.push(LOUD);
 		let pushed = push_whip(&origin, address).await;
 
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv()).await.unwrap().unwrap();
-		let ended = kio::clock::timeout(TIMEOUT, session)
+		let ended = kio::clock::timeout(TIMEOUT, live.until(LOUD, session))
 			.await
 			.expect("the publisher past its cap stayed open")
 			.unwrap();

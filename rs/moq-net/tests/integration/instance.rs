@@ -106,7 +106,7 @@ async fn older_lite_mints_per_announcement() {
 
 #[kio::test]
 async fn moq_transport_mints_per_announcement() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		job_reannounced(version).await;
 	}
 }
