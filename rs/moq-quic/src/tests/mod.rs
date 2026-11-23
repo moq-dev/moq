@@ -3808,7 +3808,9 @@ fn client_probe_acknowledges_ack_only_initial() {
 	let mut ack = Vec::new();
 	frame::Ack::encode(0, &ranges, None, false, &mut ack);
 	let now = pair.time;
-	let packet = pair.server_conn_mut(server_ch).forge_packet(now, SpaceId::Initial, &ack);
+	let packet = pair
+		.server_conn_mut(server_ch)
+		.forge_packet(now, SpaceId::Initial, &ack);
 	pair.client.inbound.push_back((now, None, packet.as_slice().into()));
 	pair.client.drive(now, pair.server.addr);
 	pair.client.outbound.clear();
@@ -3823,7 +3825,10 @@ fn client_probe_acknowledges_ack_only_initial() {
 		assert!(pair.step(), "the client never probed");
 	}
 	let after = pair.client_conn_mut(client_ch).stats().frame_tx;
-	assert!(after.acks > before.acks, "the probe left the ACK-only Initial unacknowledged");
+	assert!(
+		after.acks > before.acks,
+		"the probe left the ACK-only Initial unacknowledged"
+	);
 }
 
 /// The ack-eliciting frames the client has sent, which its probes carry
