@@ -584,8 +584,8 @@ struct Recovery {
 	/// its start, so it asks open, then caps once at the first group that arrives.
 	capped: bool,
 	/// TEMPORARY MIGRATION, delete at the next version cut with [`Self::walk`]: armed once the
-	/// cap left keys below the first group unaccounted for, which a current relay never does.
-	stall: Option<crate::time::Deadline>,
+	/// cap left keys below the first group unaccounted for.
+	stall: Option<Stall>,
 	/// TEMPORARY MIGRATION, delete at the next version cut, once no relay of the previous
 	/// release is left: the keys a stalled recovery leaves to FETCH. A relay of that release
 	/// starts the recovery at its floor, then sends the next group it holds and never accounts
@@ -731,12 +731,10 @@ impl Recovery {
 						continue;
 					}
 					// TEMPORARY MIGRATION, see [`Recovery::walk`]: what is still owed once the
-					// grace passed, with no stream being read, is left to FETCH.
-					if let Some(stall) = &mut self.stall
-						&& stall.poll(waiter).is_ready()
-					{
+					// grace passed with no progress is left to FETCH.
+					if let Some(stall) = &mut self.stall {
 						let tail = active.tail.read();
-						if !tail.is_reading() && !tail.covers(self.groups.clone()) {
+						if stall.poll(&tail, waiter).is_ready() && !tail.covers(self.groups.clone()) {
 							let mut walk = RangeSet::new();
 							walk.insert(self.groups.clone());
 							for arrived in tail.accounted(self.groups.clone()) {
@@ -786,10 +784,7 @@ impl Recovery {
 								cap(&self.groups, active)?;
 								// TEMPORARY MIGRATION, see [`Recovery::walk`].
 								if !active.tail.read().covers(self.groups.clone()) {
-									self.stall = Some(crate::time::Deadline::after(
-										&self.serve.subscriber.runtime,
-										crate::tail::GRACE,
-									));
+									self.stall = Some(Stall::new(&self.serve.subscriber.runtime, &active.tail.read()));
 								}
 								continue;
 							}
@@ -804,6 +799,10 @@ impl Recovery {
 					let now = self.serve.subscriber.runtime.now();
 					let version = self.serve.subscriber.version;
 					let groups = self.groups.clone();
+					// TEMPORARY MIGRATION, see [`Stall`]: the publisher is still answering.
+					if let Some(stall) = &mut self.stall {
+						stall.restart();
+					}
 					// What the publisher gives up of the groups, accounted for in the tail.
 					let mut given_up = |given: Range<u64>, refusal: Refusal| {
 						if let Ok(mut tail) = active.tail.write() {
@@ -889,6 +888,45 @@ impl Recovery {
 				RecoveryState::Done => return Poll::Ready(Ok(std::mem::take(&mut self.fresh))),
 			}
 		}
+	}
+}
+
+/// TEMPORARY MIGRATION, delete at the next version cut with [`Recovery::walk`]: how long a
+/// capped recovery may go without progress before what it still owes is left to FETCH.
+///
+/// A relay of the previous release never answers the keys below the first group. A current one
+/// answers them once its own upstream does, which may take longer than the grace behind a slow
+/// or deep chain, so the grace restarts on every response and data stream instead of running
+/// from the cap.
+struct Stall {
+	runtime: crate::time::Deadlines,
+	deadline: crate::time::Deadline,
+	/// The tail's streams received and whether one is being read, when last seen.
+	seen: (u64, bool),
+}
+
+impl Stall {
+	fn new(runtime: &crate::time::Deadlines, tail: &Tail) -> Self {
+		Self {
+			runtime: runtime.clone(),
+			deadline: crate::time::Deadline::after(runtime, crate::tail::GRACE),
+			seen: (tail.streams(), tail.is_reading()),
+		}
+	}
+
+	/// Restart the grace, as the publisher made progress.
+	fn restart(&mut self) {
+		self.deadline.set(self.runtime.now().checked_add(crate::tail::GRACE));
+	}
+
+	/// Ready once the grace passed with no stream arriving, being read, or finishing.
+	fn poll(&mut self, tail: &Tail, waiter: &kio::Waiter) -> Poll<()> {
+		let seen = (tail.streams(), tail.is_reading());
+		if seen != self.seen || seen.1 {
+			self.seen = seen;
+			self.restart();
+		}
+		self.deadline.poll(waiter)
 	}
 }
 

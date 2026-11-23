@@ -330,8 +330,8 @@ async fn a_recovery_outlives_the_finished_subscription() {
 	drop((broadcast, upstream, publisher, relay, finished, first));
 }
 
-/// Publisher → relay A, which holds every group for good → relay B, whose cache expires them,
-/// over lite-06, with a reader's view of B.
+/// Publisher → relay A, which by default holds every group for good → relay B, whose cache
+/// expires them, over lite-06, with a reader's view of B.
 struct Chain {
 	track: track::Producer,
 	remote: moq_net::broadcast::Consumer,
@@ -348,12 +348,17 @@ struct Chain {
 
 impl Chain {
 	async fn new(info: track::Info) -> Self {
+		Self::with_upstream(info, Duration::ZERO, holding(2)).await
+	}
+
+	/// A chain through `middle` as A, whose hop from the publisher has a one-way `latency`.
+	async fn with_upstream(info: track::Info, latency: Duration, middle: origin::Producer) -> Self {
 		let publisher = holding(1);
 		let route = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
 		let track = route.broadcast().create_track("video", info).unwrap();
 		route.announce().unwrap();
-		let middle = holding(2);
 		let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+		options.latency = latency;
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(middle.clone());
 		let first_link = connect_mock(options).await;
@@ -476,4 +481,40 @@ async fn a_relay_chain_settles_a_small_undeclared_gap_live() {
 		.await
 		.expect("the reader reaches the end of its range while the track is live");
 	assert_eq!(keys, [0, 1, 4, 5]);
+}
+
+/// Relay B recovers a run it evicted from relay A, which evicted it too, so A asks the
+/// publisher over a slow hop before it can answer the keys below the first group it sends.
+/// Each of A's answers lands within the grace of the last, so B waits on them rather than
+/// taking A for a relay of the previous release and fetching the run a key at a time.
+#[kio::test]
+async fn a_slow_relay_still_answering_is_not_walked() {
+	const TIMEOUT: Duration = Duration::from_secs(20);
+	let chain = Chain::with_upstream(
+		track::Info::default()
+			.with_timescale(moq_net::Timescale::MICRO)
+			.with_max_age(None),
+		Duration::from_millis(300),
+		origin(2),
+	)
+	.await;
+	let _written: Vec<_> = (0..6)
+		.map(|index| chain.write(index * GROUP, Timestamp::from_micros(index * GROUP).unwrap()))
+		.collect();
+	let mut live = chain.read(track::Range::default()).await;
+	for _ in 0..6 {
+		kio::clock::timeout(TIMEOUT, live.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("a group");
+	}
+	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+
+	let read = chain.read(support::keys(1..4 * GROUP)).await;
+	let keys = kio::clock::timeout(TIMEOUT, keys(read))
+		.await
+		.expect("the reader reaches the end of its range");
+	assert_eq!(keys, [GROUP, 2 * GROUP, 3 * GROUP]);
+	assert_eq!(fetches(&chain.last_link), 0, "nothing fetched");
 }

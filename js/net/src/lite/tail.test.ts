@@ -539,7 +539,7 @@ test("draft-07's SUBSCRIBE_START says the largest before any group arrives", asy
 
 // TEMPORARY MIGRATION, delete with `RecoveryHandle.walk`: a relay of the previous release starts a
 // recovery at its floor, sends the next group it holds, and never accounts for the keys between.
-// Once the grace passes, the copy FETCHes them a key at a time instead. Mirrors the Rust
+// Once the grace passes with no progress, the copy FETCHes them a key at a time instead. Mirrors the Rust
 // `a_stalled_recovery_walks_its_keys`, on lite-05, where a floor below the start is recovered.
 test("a recovery stalled behind a relay of the previous release is fetched", async () => {
 	using clock = manual();
@@ -564,9 +564,11 @@ test("a recovery stalled behind a relay of the previous release is fetched", asy
 	// The grace passes while group 3 is still being read, which is waited on rather than spun on.
 	const fetched = accept();
 	expect(await settlesWithin(fetched, clock, Duration.millis(2000))).toBe(false);
+	// Its finishing is progress too, so the grace starts over from there.
 	held.finish();
 	await held.handled;
-	expect(await settlesWithin(fetched, clock)).toBe(true);
+	expect(await settlesWithin(fetched, clock, Duration.millis(900))).toBe(false);
+	expect(await settlesWithin(fetched, clock, Duration.millis(200))).toBe(true);
 	const fetch = defined(await fetched);
 	expect(await fetch.reader.u53()).toBe(StreamId.Fetch);
 
@@ -581,4 +583,45 @@ test("a recovery stalled behind a relay of the previous release is fetched", asy
 	expect(await second.reader.u53()).toBe(StreamId.Fetch);
 	second.abort(new StreamError(StreamCode.NotFound));
 	expect(await settlesWithin(closed, clock, Duration.millis(100))).toBe(true);
+});
+
+// A current relay answers the keys below the first group once its own upstream does, which may
+// take longer than the grace in all: each answer restarts the grace, so the copy waits on a relay
+// still answering rather than fetching the run a key at a time. Mirrors the Rust
+// `a_slow_relay_still_answering_is_not_walked`.
+test("a recovery behind a slow relay still answering is not fetched", async () => {
+	using clock = manual();
+	const version = Version.DRAFT_05;
+	const { subscriber, reader, respond, accept } = await subscribed(version, Duration.millis(60_000), {
+		start: 1n,
+	});
+	await respond({ start: new SubscribeStart([4n]) });
+	const group = groupStream(subscriber, 4n);
+	group.finish();
+	await group.handled;
+	expect((await reader.recvGroup())?.start).toBe(4n);
+	void reader.recvGroup().catch(() => undefined);
+	const recovery = defined(await accept());
+	expect(await recovery.reader.u53()).toBe(StreamId.Subscribe);
+	await Subscribe.decode(recovery.reader, version);
+	await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([1n]) }, version);
+	const first = groupStream(subscriber, 3n, 1n);
+	first.finish();
+	await first.handled;
+
+	// Keys 1 and 2 are answered 800 ms apart, 1.6 s in all.
+	const fetched = accept();
+	expect(await settlesWithin(fetched, clock, Duration.millis(800))).toBe(false);
+	await encodeSubscribeResponse(
+		recovery.writer,
+		{ drop: new SubscribeDrop({ start: 1n, end: 2n, error: 0 }) },
+		version,
+	);
+	expect(await settlesWithin(fetched, clock, Duration.millis(800))).toBe(false);
+	await encodeSubscribeResponse(
+		recovery.writer,
+		{ drop: new SubscribeDrop({ start: 2n, end: 3n, error: 0 }) },
+		version,
+	);
+	expect(await settlesWithin(fetched, clock, Duration.millis(2000))).toBe(false);
 });
