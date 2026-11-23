@@ -136,14 +136,18 @@ impl RangeFills {
 		}
 	}
 
-	/// Take the held fills a FETCH asked or joined, which outlive the subscription; its tail
-	/// settles the rest.
-	pub fn take_fetches(&mut self) -> Vec<track::FillGroups> {
-		let (fetches, held) = std::mem::take(&mut self.held)
-			.into_iter()
-			.partition(|fill| fill.is_fetch());
-		self.held = held;
-		fetches
+	/// The fills of a copy whose subscription is over, each run on a subscription of its own,
+	/// which any version carries.
+	pub fn per_run() -> Self {
+		Self {
+			per_run: true,
+			..Default::default()
+		}
+	}
+
+	/// Take every held fill, which outlives the subscription that carried it.
+	pub fn take_held(&mut self) -> Vec<track::FillGroups> {
+		std::mem::take(&mut self.held)
 	}
 
 	/// TEMPORARY MIGRATION, see [`Recovery::walk`]: take the fills a stalled recovery handed back,

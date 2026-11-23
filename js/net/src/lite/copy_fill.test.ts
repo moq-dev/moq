@@ -404,6 +404,43 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s recovers a run past the t
 	}
 });
 
+// The publisher finishes the track and the copy's reader reaches the end, and only then does a
+// second reader ask for a run the copy evicted: the copy's tail settled what its subscription
+// owed, not this, so the run still goes upstream. Mirrors the Rust
+// `finished_copy_history::a_finished_copy_reads_back_what_it_evicted`.
+test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"copy fill: %s reads back what a finished copy evicted",
+	async (alpn) => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const peer = await peers(alpn);
+		try {
+			const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
+			const first = peer.remote.track("video").subscribe(history);
+			for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+			expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
+
+			// Both caches age out what nobody touched; only the live edge stays.
+			await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
+			write(peer.track.createGroup(4n), 4n, "live");
+			peer.track.finish();
+			expect((await first.recvGroup())?.start).toBe(4n);
+			expect(await first.recvGroup()).toBeUndefined();
+
+			const again = peer.remote.track("video").subscribe({ ...history, ranges: [{ start: 2n, end: 3n }] });
+			expect(sorted(await take(again, 2))).toEqual([
+				[2n, "old 2"],
+				[3n, "old 3"],
+			]);
+			first.close();
+			again.close();
+		} finally {
+			peer.close();
+			installed.close();
+		}
+	},
+);
+
 // Resolve once nobody reads `group` any more.
 async function unwanted(group: { demand(): { wanted: { peek(): boolean; changed(): Promise<boolean> } } }) {
 	const wanted = group.demand().wanted;

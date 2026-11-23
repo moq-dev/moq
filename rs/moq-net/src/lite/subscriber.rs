@@ -6603,8 +6603,9 @@ mod tests {
 		let finished = FinishedServe {
 			serving: Some(serve_loop.serving),
 			demand: serve_loop.demand,
-			dynamic: serve_loop.dynamic.fetches_only(),
+			dynamic: serve_loop.dynamic,
 			fetches: serve_loop.fetches,
+			range_fills: RangeFills::per_run(),
 			closed: serve_loop.closed,
 		};
 		// A reader holds the finished copy.
@@ -12612,25 +12613,42 @@ struct TrackServeRun {
 	gate: crate::auth::Gate,
 	/// Lite-05/06: the name's datagram track, taking the datagrams its subscription carries.
 	datagrams: Option<SharedDatagrams>,
-	/// The copy once the publisher finished it, still serving fetches below its end.
+	/// The copy once the publisher finished it, still serving fills below its end.
 	finished: Option<FinishedServe>,
 }
 
-/// A copy whose publisher finished the track, which still takes a group below its end that
-/// a reader fetches, as a local [`track::Finished`] does. Its subscription is over, but a
-/// group read partway, or never delivered, continues only through a FETCH upstream, so the
-/// copy stays while anyone reads it or a fetch is in flight. A reader's miss is no fetch:
-/// the subscription's tail already settled what it owed.
+/// A copy whose publisher finished the track, which still takes a group below its end that a
+/// reader misses or fetches, as a local [`track::Finished`] does. Its subscription is over,
+/// and its tail settled only what that subscription owed: a group read partway, never
+/// delivered, or delivered and since evicted continues only through upstream, so the copy
+/// stays while anyone reads it or a fill is in flight.
 struct FinishedServe {
 	serving: Option<track::Producer>,
 	demand: track::Demand,
 	dynamic: track::Requests,
 	fetches: kio::Tasks<FillServeRun>,
+	/// Fills spanning groups, each run on a subscription of its own.
+	range_fills: RangeFills,
 	closed: Transport,
 }
 
 impl FinishedServe {
-	/// Ready once nobody reads the copy and no fetch is in flight, or the session closed.
+	/// A fill spanning groups goes on a subscription of its own, which any version carries,
+	/// and a group, or a slice of one, by FETCH.
+	fn take_fill(&mut self, serve: &TrackServe, fill: track::FillGroups) {
+		let Some(serving) = &self.serving else {
+			return;
+		};
+		match spans_groups(&fill) {
+			true => self.range_fills.push(fill),
+			false => {
+				let info = FetchInfo::Known(serving.info().clone());
+				self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
+			}
+		}
+	}
+
+	/// Ready once nobody reads the copy and no fill is in flight, or the session closed.
 	fn poll(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			let Some(serving) = &self.serving else {
@@ -12638,8 +12656,7 @@ impl FinishedServe {
 			};
 			match self.dynamic.poll_requested_fill(waiter) {
 				Poll::Ready(Ok(fill)) => {
-					let info = FetchInfo::Known(serving.info().clone());
-					self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
+					self.take_fill(serve, fill);
 					continue;
 				}
 				// Aborted through another handle: nothing is left to serve.
@@ -12650,6 +12667,12 @@ impl FinishedServe {
 				Poll::Pending => {}
 			}
 			let _ = self.fetches.poll(waiter);
+			let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
+			if let Err(err) = self.range_fills.poll(serve, serving, None, read, waiter) {
+				// A recovery's publisher broke the protocol, which closes the session.
+				lite::error::control(&mut serve.subscriber.session.clone(), err);
+			}
+			ServeLoop::walk_fills(serve, &mut self.range_fills, &mut self.fetches, serving);
 			// The groups it already holds stay readable, its clean end too once settled.
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				if let Some(serving) = self.serving.take() {
@@ -12658,7 +12681,7 @@ impl FinishedServe {
 				}
 				return Poll::Ready(());
 			}
-			if !self.fetches.is_empty() || crate::util::poll_unwanted(&mut self.demand, waiter).is_pending() {
+			if !self.fetches.is_empty() || !self.range_fills.is_empty() || read {
 				return Poll::Pending;
 			}
 			// No linger: a new reader asks upstream afresh rather than reading this cache, which
@@ -13079,22 +13102,26 @@ impl TrackServeRun {
 							let _ = serve_loop.serving.finish_shared();
 							// No FETCH before lite-05: nothing but the subscription fills a group.
 							if serve_loop.supports_fetch {
-								// A reader's miss in flight is settled by the tail instead, except one a
-								// stalled recovery handed to FETCH.
-								let mut fetches = serve_loop.fetches;
-								fetches.retain(|run| run.fill.is_fetch() || run.walk);
-								let mut range_fills = serve_loop.range_fills;
-								for fill in range_fills.take_fetches() {
-									let info = FetchInfo::Known(serve_loop.serving.info().clone());
-									fetches.push(FillServeRun::new(self.serve.clone(), fill, info));
-								}
-								self.finished = Some(FinishedServe {
+								let mut finished = FinishedServe {
 									serving: Some(serve_loop.serving),
 									demand: serve_loop.demand,
-									dynamic: serve_loop.dynamic.fetches_only(),
-									fetches,
+									dynamic: serve_loop.dynamic,
+									fetches: serve_loop.fetches,
+									range_fills: RangeFills::per_run(),
 									closed: serve_loop.closed,
-								});
+								};
+								// Each fill the subscription carried goes on its own now.
+								let mut range_fills = serve_loop.range_fills;
+								ServeLoop::walk_fills(
+									&self.serve,
+									&mut range_fills,
+									&mut finished.fetches,
+									finished.serving.as_ref().expect("just set"),
+								);
+								for fill in range_fills.take_held() {
+									finished.take_fill(&self.serve, fill);
+								}
+								self.finished = Some(finished);
 							}
 							if let Some(datagrams) = &mut self.datagrams {
 								datagrams.end(Ok(()));
@@ -13609,6 +13636,21 @@ impl FeedFetches {
 }
 
 impl ServeLoop {
+	/// Serve a reader's or a fetch's `fill`: through a subscription when it spans groups, by
+	/// FETCH when it is one, and before lite-05, which has neither, from the live feed.
+	fn take_fill(&mut self, serve: &TrackServe, fill: track::FillGroups) {
+		if serve.subscriber.version.has_track_stream() && spans_groups(&fill) {
+			self.range_fills.push(fill);
+		} else if self.supports_fetch {
+			let info = FetchInfo::Known(self.serving.info().clone());
+			self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
+		} else {
+			// No FETCH on the wire: wait for the live feed, which a subscription arriving
+			// alongside may still be opening.
+			self.feed_fetches.push(fill, &self.serving.consume());
+		}
+	}
+
 	/// TEMPORARY MIGRATION, delete at the next version cut with `fills::Recovery::walk`: FETCH
 	/// what a recovery stalled on behind a relay of the previous release, a key at a time.
 	fn walk_fills(
@@ -13619,9 +13661,7 @@ impl ServeLoop {
 	) {
 		for fill in range_fills.take_walks() {
 			let info = FetchInfo::Known(serving.info().clone());
-			let mut run = FillServeRun::new(serve.clone(), fill, info);
-			run.walk = true;
-			fetches.push(run);
+			fetches.push(FillServeRun::new(serve.clone(), fill, info));
 		}
 	}
 
@@ -14169,7 +14209,20 @@ impl ServeLoop {
 					};
 					return Poll::Ready(ServeEnd::GiveBack(err));
 				}
-				ServeMode::Tail { settle, requested_end } => {
+				ServeMode::Tail { .. } => {
+					// A reader's miss is history the tail does not settle, such as a group the copy
+					// evicted, so it goes upstream as it would while the subscription is open.
+					match self.dynamic.poll_requested_fill(waiter) {
+						Poll::Ready(Ok(fill)) => {
+							self.take_fill(serve, fill);
+							continue;
+						}
+						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
+						Poll::Pending => {}
+					}
+					let ServeMode::Tail { settle, requested_end } = &mut self.mode else {
+						unreachable!()
+					};
 					// The tail waits for groups, parked ones included.
 					if let Sub::Active(active) = &mut self.sub
 						&& std::mem::take(&mut active.parked)
@@ -14266,26 +14319,7 @@ impl ServeLoop {
 					// subscription churn.
 					match self.dynamic.poll_requested_fill(waiter) {
 						Poll::Ready(Ok(fill)) => {
-							// More than one group is asked through a subscription: lite-07's own, or
-							// earlier, one of its own per run (see `RangeFills`). One group, or a
-							// slice of one, is what FETCH carries.
-							let last = fill.end().saturating_sub(1);
-							let groups = fill.start().frame == 0
-								&& fill.start().group < last
-								&& fill.group(last).frame_end().is_none();
-							if serve.subscriber.version.has_track_stream() && groups {
-								self.range_fills.push(fill);
-							} else if self.supports_fetch {
-								self.fetches.push(FillServeRun::new(
-									serve.clone(),
-									fill,
-									FetchInfo::Known(self.serving.info().clone()),
-								));
-							} else {
-								// No FETCH on the wire: wait for the live feed, which a
-								// subscription arriving alongside may still be opening.
-								self.feed_fetches.push(fill, &self.serving.consume());
-							}
+							self.take_fill(serve, fill);
 							continue;
 						}
 						// A live clone can abort the producer with a specific cause.
@@ -14517,6 +14551,13 @@ fn info_failed(info: &FetchInfo) -> Option<Error> {
 	info.peek()?.err()
 }
 
+/// Whether `fill` asks for more than one whole group, which a subscription carries rather
+/// than FETCH.
+fn spans_groups(fill: &track::FillGroups) -> bool {
+	let last = fill.end().saturating_sub(1);
+	fill.start().frame == 0 && fill.start().group < last && fill.group(last).frame_end().is_none()
+}
+
 /// Serves one fill a group at a time, newest first for a descending reader, each with its
 /// own [`FetchServeRun`], until it is answered or nobody waits on it.
 struct FillServeRun {
@@ -14526,9 +14567,6 @@ struct FillServeRun {
 	run: Option<(u64, FetchServeRun)>,
 	/// The group the last run answered.
 	last: Option<u64>,
-	/// TEMPORARY MIGRATION, see `fills::Recovery::walk`: a reader's fill a stalled recovery
-	/// handed back, which the subscription's tail no longer settles.
-	walk: bool,
 }
 
 impl Drop for FillServeRun {
@@ -14549,7 +14587,6 @@ impl FillServeRun {
 			info,
 			run: None,
 			last: None,
-			walk: false,
 		}
 	}
 }
