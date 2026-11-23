@@ -4,21 +4,21 @@ connected version=moq-transport-16
 subscribe_namespace written: requestId=0
 announced: broadcast=openmoq/ffmpeg/artemis active=true
 announced: broadcast=com/wowza/techdemos/moqrelay/relay1 active=true
-announced: broadcast=smoke-js-web-4233-30199.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4233-30199.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4233-30199.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4233-30199.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-js-web-4233-30199.hang track=video
-subscribe written: id=4 broadcast=smoke-js-web-4233-30199.hang track=video
-subscribe ok: id=4 broadcast=smoke-js-web-4233-30199.hang track=video
-received 6916 bytes from smoke-js-web-4233-30199.hang
+announced: broadcast=smoke-js-web-4730-29701.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4730-29701.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4730-29701.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4730-29701.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4730-29701.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4730-29701.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4730-29701.hang track=video
+received 7046 bytes from smoke-js-web-4730-29701.hang
 adapter: close() called
-subscribe error: id=2 broadcast=smoke-js-web-4233-30199.hang track=catalog.json error=subscribe stream ended without PUBLISH_DONE
-subscribe error: id=4 broadcast=smoke-js-web-4233-30199.hang track=video error=subscribe stream ended without PUBLISH_DONE
+subscribe error: id=2 broadcast=smoke-js-web-4730-29701.hang track=catalog.json error=subscribe stream ended without PUBLISH_DONE
+subscribe error: id=4 broadcast=smoke-js-web-4730-29701.hang track=video error=subscribe stream ended without PUBLISH_DONE
 subscribe_namespace error: remote error: 386759528
 announced: broadcast=openmoq/ffmpeg/artemis active=false
 announced: broadcast=com/wowza/techdemos/moqrelay/relay1 active=false
-announced: broadcast=smoke-js-web-4233-30199.hang active=false
+announced: broadcast=smoke-js-web-4730-29701.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. Stream: remote error: 386759528
  code: 0,
 

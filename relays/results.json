@@ -1,6 +1,6 @@
 {
-  "generated": "2026-11-22T16:07:50Z",
-  "run_url": "https://github.com/moq-dev/moq/actions/runs/45041321305",
+  "generated": "2026-11-23T08:33:38Z",
+  "run_url": "https://github.com/moq-dev/moq/actions/runs/45138480671",
   "registry": "https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json",
   "pairs": [
     "rust → rust",
@@ -539,7 +539,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
+          "reason": "SUBSCRIBE for 0.avc3, no SUBSCRIBE_OK logged, no objects: track failed; ending the reader track=\"0.avc3\" error=Remote(18)",
           "sub_log": "moqt_moq-ng.cloudflare.mediaoverquic.com_443/rust-rust.log",
           "pub_log": "moqt_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         }
@@ -645,7 +645,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects",
+          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
           "sub_log": "https_relay.moqtail.dev/js-web-rust.log",
           "pub_log": "https_relay.moqtail.dev/pub-js-web.log"
         },
@@ -1252,7 +1252,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "connected, nothing subscribed: session severed immediately, retrying peer=moqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 err=unknown code=8",
+          "reason": "connected, nothing subscribed: session error err=unknown code=8",
           "sub_log": "moqt_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/rust-rust.log",
           "pub_log": "moqt_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-rust.log"
         }
@@ -1289,7 +1289,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "no SUBSCRIBE_OK for catalog.json: error: timed out waiting for data",
+          "reason": "connected, nothing subscribed: error: timed out waiting for data",
           "sub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/rust-js-bun.log",
           "pub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-rust.log"
         },
@@ -1313,7 +1313,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "no SUBSCRIBE_OK for catalog.json: error: timed out waiting for data",
+          "reason": "connected, nothing subscribed: error: timed out waiting for data",
           "sub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/js-web-js-bun.log",
           "pub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-js-web.log"
         }

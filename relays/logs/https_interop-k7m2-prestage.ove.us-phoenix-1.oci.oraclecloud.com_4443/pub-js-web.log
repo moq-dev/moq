@@ -1,4 +1,4 @@
-publishing smoke-js-web-4233-22051.hang (fake camera, vite) to https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+publishing smoke-js-web-4730-2214.hang (fake camera, vite) to https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announce refused: broadcast=smoke-js-web-4233-22051.hang error=unauthorized (code=1) 
+[page] announce refused: broadcast=smoke-js-web-4730-2214.hang error=unauthorized (code=1) 
