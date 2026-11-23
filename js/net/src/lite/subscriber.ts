@@ -1582,8 +1582,6 @@ export class Subscriber {
 			if (!("ok" in resp)) {
 				throw new Error("first subscribe response must be SUBSCRIBE_OK");
 			}
-			// It is the only answer: the feed is live from here, so the cache says where its edge is.
-			hooks.answerEdge(entry.track);
 			return { stream, entry };
 		}
 
@@ -2548,7 +2546,6 @@ export class Subscriber {
 					// A tail waits for SUBSCRIBE_START to say where delivery starts.
 					entry.tail.touch();
 					hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
-					hooks.answerEdge(entry.track);
 					// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 					// demand asks later. One that still arrives is delivered.
 					if (entry.requested !== undefined && start !== undefined)
@@ -3069,6 +3066,9 @@ export class Subscriber {
 				offset: group.frameStart,
 				fill: entry.filling,
 			});
+			// Before lite-07 no answer says where the live feed is, so its first group does, once the
+			// copy holds it. Mirrors the Rust `Producer::edge_from_groups`.
+			if (!hasRanges(this.version) && !entry.filling) hooks.answerEdge(track);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
 			// A drop that overtook the header already accounts for the group; a copy served again is

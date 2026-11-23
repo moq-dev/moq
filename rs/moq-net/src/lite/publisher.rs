@@ -9667,6 +9667,38 @@ mod serve_group_test {
 		);
 	}
 
+	/// A copy fed over a wire before lite-07, whose answers say nothing of the live edge, learns
+	/// it from its first live group: until one lands, a range from the oldest group is not
+	/// answered Empty.
+	#[kio::test]
+	async fn lite07_a_copy_from_an_older_wire_learns_its_edge_from_its_first_group() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.edge_from_groups();
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(responses(&mut writer, &log).await.is_empty());
+
+		write_group(&mut track, 5, 5);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let answered = responses(&mut writer, &log).await;
+		assert!(
+			matches!(
+				answered.as_slice(),
+				[lite::SubscribeResponse::Start(lite::SubscribeStart {
+					id: 0,
+					start: Some(5),
+					largest: lite::Edge::Largest(_),
+				})]
+			),
+			"{answered:?}"
+		);
+	}
+
 	/// A relay's copy that placed one range from its upstream's answer, which also asked for
 	/// the oldest group held: that range starts where the copy's feed does, so it is answered
 	/// only once the copy knows, never at the floor delivery started from.

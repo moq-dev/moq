@@ -424,6 +424,23 @@ impl Feed {
 	}
 }
 
+/// How a track's readers learn where its live feed is. A lite copy is accepted live, so its
+/// readers read what lands before its upstream answers, but what it holds then says nothing of
+/// the edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EdgeSource {
+	/// What it holds: a local track, or a copy accepted idle, which readers read nothing from
+	/// until its route answers.
+	#[default]
+	Cache,
+	/// A lite-07 copy: a SUBSCRIBE_START says where the live feed is, or that it holds nothing
+	/// (`answered`), once the copy recorded what it said.
+	Answer { answered: bool },
+	/// A lite copy before lite-07, whose answers say nothing of the edge: its first live group
+	/// does.
+	FirstGroup,
+}
+
 /// How far a track got toward a live [`Producer`]; each step replaces the last.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Publication {
@@ -792,10 +809,8 @@ pub(crate) struct TrackState {
 	// a lite-07 copy, whose ranges carry each join and whose publisher reports where each
 	// starts. Another copy measures the live edge from what it holds and its upstream's Largest.
 	answers_joins: bool,
-	// Whether this is a lite copy its upstream has yet to tell where the live feed is. It is
-	// accepted live, so readers read what arrives before that answer, but what it holds says
-	// nothing of the edge until then. See [`Producer::await_edge`].
-	edge_unanswered: bool,
+	// How readers learn where the live feed is; see [`Subscriber::knows_edge`].
+	edge: EdgeSource,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the
 	// time it asked from (0 for the oldest group): a copy holding part of the track cannot tell
 	// which group contains a time it holds no group at, so a reader's time start it can't place
@@ -5229,24 +5244,33 @@ impl Producer {
 		}
 	}
 
-	/// Have this received copy say nothing of the live edge until [`Self::answer_edge`], for a
-	/// lite copy, which is accepted live so its readers read what arrives before its upstream
-	/// says where the feed is. See [`Subscriber::knows_edge`].
+	/// Have this lite-07 copy say nothing of the live edge until [`Self::answer_edge`]: it is
+	/// accepted live, so its readers read what lands before its upstream says where the feed
+	/// is. See [`Subscriber::knows_edge`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn await_edge(&self) {
 		if let Ok(mut state) = self.modify() {
-			state.edge_unanswered = true;
+			state.edge = EdgeSource::Answer { answered: false };
 		}
 	}
 
-	/// Record that this copy's upstream said where the live feed is, or that it holds nothing;
-	/// see [`Self::await_edge`].
+	/// Have this lite copy from before lite-07 say nothing of the live edge until it holds a live
+	/// group: no answer on those wires says where the feed is, so its first group does.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn edge_from_groups(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.edge = EdgeSource::FirstGroup;
+		}
+	}
+
+	/// Record that this lite-07 copy's upstream said where the live feed is, or that it holds
+	/// nothing, once what it said is recorded; see [`Self::await_edge`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn answer_edge(&self) {
 		if let Ok(mut state) = self.modify()
-			&& state.edge_unanswered
+			&& state.edge == (EdgeSource::Answer { answered: false })
 		{
-			state.edge_unanswered = false;
+			state.edge = EdgeSource::Answer { answered: true };
 		}
 	}
 
@@ -11903,14 +11927,20 @@ impl Subscriber {
 	}
 
 	/// Whether what this subscriber reads says where the live feed is: a local track does, and a
-	/// copy once its upstream answered with the edge or it ended (see
-	/// [`Producer::await_edge`]). `false` while a front's reader has no copy serving.
+	/// lite copy once its upstream answered with the edge, or on a wire before lite-07 once it
+	/// holds a live group, or once it ended (see [`Producer::await_edge`],
+	/// [`Producer::edge_from_groups`]). `false` while a front's reader has no copy serving.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn knows_edge(&mut self, waiter: &kio::Waiter) -> bool {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let state = cursor.state.read();
-				!state.edge_unanswered || state.outcome.is_final() || state.declared().is_some()
+				let ended = state.outcome.is_final() || state.declared().is_some();
+				match state.edge {
+					EdgeSource::Cache => true,
+					EdgeSource::Answer { answered } => answered || ended,
+					EdgeSource::FirstGroup => state.largest().is_some() || ended,
+				}
 			}
 			Inner::Resume(resume, _) => resume.knows_edge(waiter),
 		}

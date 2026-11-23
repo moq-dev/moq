@@ -62,7 +62,7 @@ import {
 } from "./subscribe.ts";
 import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
-import { hasLengthFirst, hasRanges, Version, versionName } from "./version.ts";
+import { hasLengthFirst, hasRanges, hasTrackStream, Version, versionName } from "./version.ts";
 
 /**
  * The SUBSCRIBE_START answering range `id` at `start`: on lite-07 with `largest`, by default that
@@ -3488,18 +3488,30 @@ test.each(
 });
 
 // A relay serving this copy onward over lite-07 answers a range following the live edge only once
-// the copy knows where the edge is. Before lite-05 SUBSCRIBE_OK is the only answer, so it says so.
+// the copy knows where the edge is. Before lite-07 no answer says so, SUBSCRIBE_OK nor
+// SUBSCRIBE_START: the copy's first live group does. Mirrors the Rust `Producer::edge_from_groups`.
 test.each(
-	[Version.DRAFT_01, Version.DRAFT_02, Version.DRAFT_03, Version.DRAFT_04].map((v) => [versionName(v), v] as const),
-)("a %s SUBSCRIBE_OK says where the live feed is", async (_, version) => {
-	const { quic, streams, opened } = fakeSession();
+	[Version.DRAFT_01, Version.DRAFT_02, Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05, Version.DRAFT_06].map(
+		(v) => [versionName(v), v] as const,
+	),
+)("a %s copy learns where the live feed is from its first group", async (_, version) => {
+	const { quic, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
+	const legacy = !hasTrackStream(version);
 	try {
-		const stream = await opened(0);
+		if (!legacy) await answerTrackInfo(await opened(0), version);
+		const stream = await opened(legacy ? 0 : 1);
 		await stream.reading;
-		await respond(streams[0], version, [{ ok: new SubscribeOk({}) }]);
+		await respond(stream, version, [legacy ? { ok: new SubscribeOk({}) } : { start: answer(version, 0n) }]);
+		await drainReactions();
+		expect(hooks.knowsEdge(track)).toBe(false);
+
+		const group = new ReadableStream<Uint8Array>({
+			start: (controller) => controller.enqueue(new Uint8Array([1, 0])),
+		});
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), new Reader(group, undefined, version));
 		await drainReactions();
 		expect(hooks.knowsEdge(track)).toBe(true);
 	} finally {
