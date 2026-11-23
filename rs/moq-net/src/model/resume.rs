@@ -1345,6 +1345,14 @@ impl Subscriber {
 	/// Whether the serving copy places ranges as its publisher would; see
 	/// [`track::Subscriber::places_as_upstream`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn knows_edge(&mut self, waiter: &kio::Waiter) -> bool {
+		let mut reader = self.reader();
+		match reader.poll_serving(waiter) {
+			Poll::Ready(Some(sub)) => sub.knows_edge(waiter),
+			_ => false,
+		}
+	}
+
 	pub(super) fn places_as_upstream(&mut self, waiter: &kio::Waiter) -> bool {
 		let mut reader = self.reader();
 		match reader.poll_serving(waiter) {

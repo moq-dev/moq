@@ -792,6 +792,10 @@ pub(crate) struct TrackState {
 	// a lite-07 copy, whose ranges carry each join and whose publisher reports where each
 	// starts. Another copy measures the live edge from what it holds and its upstream's Largest.
 	answers_joins: bool,
+	// Whether this is a lite copy its upstream has yet to tell where the live feed is. It is
+	// accepted live, so readers read what arrives before that answer, but what it holds says
+	// nothing of the edge until then. See [`Producer::await_edge`].
+	edge_unanswered: bool,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the
 	// time it asked from (0 for the oldest group): a copy holding part of the track cannot tell
 	// which group contains a time it holds no group at, so a reader's time start it can't place
@@ -5222,6 +5226,27 @@ impl Producer {
 		if let Ok(mut state) = self.modify() {
 			state.answers_joins = true;
 			state.placing += 1;
+		}
+	}
+
+	/// Have this received copy say nothing of the live edge until [`Self::answer_edge`], for a
+	/// lite copy, which is accepted live so its readers read what arrives before its upstream
+	/// says where the feed is. See [`Subscriber::knows_edge`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn await_edge(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.edge_unanswered = true;
+		}
+	}
+
+	/// Record that this copy's upstream said where the live feed is, or that it holds nothing;
+	/// see [`Self::await_edge`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn answer_edge(&self) {
+		if let Ok(mut state) = self.modify()
+			&& state.edge_unanswered
+		{
+			state.edge_unanswered = false;
 		}
 	}
 
@@ -11874,6 +11899,20 @@ impl Subscriber {
 					.collect()
 			}
 			Inner::Resume(resume, _) => resume.resolved_keys(keys),
+		}
+	}
+
+	/// Whether what this subscriber reads says where the live feed is: a local track does, and a
+	/// copy once its upstream answered with the edge or it ended (see
+	/// [`Producer::await_edge`]). `false` while a front's reader has no copy serving.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn knows_edge(&mut self, waiter: &kio::Waiter) -> bool {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				let state = cursor.state.read();
+				!state.edge_unanswered || state.outcome.is_final() || state.declared().is_some()
+			}
+			Inner::Resume(resume, _) => resume.knows_edge(waiter),
 		}
 	}
 

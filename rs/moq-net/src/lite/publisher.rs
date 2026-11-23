@@ -6346,7 +6346,8 @@ impl TrackRun {
 	}
 
 	/// What this hop knows of the track's largest position: only what its live feed says, so a
-	/// relay's copy that its route has yet to answer knows nothing, whatever its cache holds.
+	/// relay's copy that its route has yet to answer with the edge knows nothing, whatever its
+	/// cache holds (see [`track::Subscriber::knows_edge`]).
 	/// A relay can hold just the first group of a backlog its source already answered past, so
 	/// the source's largest says where the live feed is. Registers `waiter` for the feed going
 	/// live.
@@ -6354,6 +6355,9 @@ impl TrackRun {
 		let Poll::Ready(live) = self.track.poll_live(waiter) else {
 			return lite::Edge::Unknown;
 		};
+		if !self.track.knows_edge(waiter) {
+			return lite::Edge::Unknown;
+		}
 		match live.max(self.track.peek_largest()) {
 			Some(position) => lite::Edge::Largest(lite::Largest {
 				position,
@@ -6433,10 +6437,7 @@ impl TrackRun {
 			return Ok(false);
 		}
 		// A track that ended before its first group is answered by its end alone.
-		if self.track.peek_largest().is_some()
-			|| self.track.poll_live(waiter) != Poll::Ready(None)
-			|| self.track.poll_finished(&kio::Waiter::noop()).is_ready()
-		{
+		if self.largest(waiter) != lite::Edge::Empty || self.track.poll_finished(&kio::Waiter::noop()).is_ready() {
 			return Ok(false);
 		}
 		self.resolve(0, writer)?;
@@ -9631,6 +9632,39 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let answers = starts(&responses(&mut writer, &log).await);
 		assert_eq!(answers, [(1, Some(1000)), (2, Some(1000)), (3, Some(1000))]);
+	}
+
+	/// A relay's fresh copy is readable before its upstream answers, but says nothing of the live
+	/// edge until then: a range from the oldest group is answered Empty only once the upstream
+	/// says the track holds nothing, never from the empty cache alone.
+	#[kio::test]
+	async fn lite07_a_fresh_copy_answers_empty_only_once_its_upstream_does() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		track.await_edge();
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(responses(&mut writer, &log).await.is_empty());
+
+		track.answer_edge();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let answered = responses(&mut writer, &log).await;
+		assert!(
+			matches!(
+				answered.as_slice(),
+				[lite::SubscribeResponse::Start(lite::SubscribeStart {
+					id: 0,
+					start: Some(0),
+					largest: lite::Edge::Empty,
+				})]
+			),
+			"{answered:?}"
+		);
 	}
 
 	/// A relay's copy that placed one range from its upstream's answer, which also asked for

@@ -26,7 +26,7 @@ import * as Instance from "../instance.ts";
 import { hooks, NO_MAX_DELAY } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
-import { Reader, Writer } from "../stream.ts";
+import { concat, Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
@@ -3021,6 +3021,56 @@ test.each([
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
 	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A burst of lite-07 SUBSCRIBE_STARTs read together, as one per range of a wide SUBSCRIBE arrives, is
+// recorded whole and applied once: each application walks every range, so one per START would cost
+// the square of the ranges. Mirrors the Rust `ServeLoop` draining a burst before `apply_starts`.
+test("a burst of lite-07 SUBSCRIBE_STARTs is applied once", async () => {
+	const version = Version.DRAFT_07;
+	const count = 16;
+	const ranges = Array.from({ length: count }, (_, i) => ({ start: BigInt(i * 10), end: BigInt(i * 10 + 1) }));
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ ranges });
+	const timeStarts = hooks.timeStarts;
+	let applied = 0;
+	hooks.timeStarts = (...args) => {
+		applied++;
+		return timeStarts(...args);
+	};
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		expect((await Subscribe.decode(sent, version)).ranges).toHaveLength(count);
+		await request.reading;
+		// One chunk, as a transport read hands over what arrived together.
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		for (const [i, range] of ranges.entries())
+			await encodeSubscribeResponse(
+				writer,
+				{ start: answer(version, range.start, BigInt(i), "unknown") },
+				version,
+			);
+		applied = 0;
+		request.inbound.enqueue(concat(chunks));
+		await drainReactions();
+		expect(hooks.sourceStart(track)).toBe(0n);
+		expect(applied).toBe(1);
+	} finally {
+		hooks.timeStarts = timeStarts;
 		track.close();
 		broadcast.close();
 		subscriber.close();

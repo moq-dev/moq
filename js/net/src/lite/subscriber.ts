@@ -91,6 +91,7 @@ import {
 	Subscribe,
 	type SubscribeStart,
 	SubscribeUpdate,
+	startBuffered,
 	toWireRanges,
 	type WireAnchor,
 	type WireRange,
@@ -2535,8 +2536,11 @@ export class Subscriber {
 
 			if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
 			if ("start" in resp) {
-				if (hasRanges(this.version)) this.#started(entry, resp.start);
-				else {
+				if (hasRanges(this.version)) {
+					this.#started(entry, resp.start);
+					// The rest of a burst already here is recorded before applying it once.
+					if (!startBuffered(stream.reader, this.version)) this.#applyStarts(entry);
+				} else {
 					// Before lite-07 the one start answers the subscription, and says the feed is live.
 					if (entry.start !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_START");
 					const start = resp.start.start;
@@ -2594,9 +2598,9 @@ export class Subscriber {
 		}
 	}
 
-	// Lite-07: where one range starts, from its SUBSCRIBE_START, along with what the publisher knows
-	// of the live edge. A range following the live edge is answered with where the edge is. Mirrors
-	// the Rust `ServeLoop::record_start` and `apply_starts`.
+	// Lite-07: record where one range starts, from its SUBSCRIBE_START, along with what the publisher
+	// knows of the live edge, which `#applyStarts` then applies. A range following the live edge is
+	// answered with where the edge is. Mirrors the Rust `ServeLoop::record_start`.
 	#started(entry: SubscribeEntry, msg: SubscribeStart): void {
 		const { id, start, largest } = msg;
 		const range = entry.live.get(id);
@@ -2617,6 +2621,13 @@ export class Subscriber {
 				entry.fills?.skip(asked, asked.start, skipped);
 			}
 		}
+	}
+
+	// Apply the lite-07 SUBSCRIBE_STARTs `#started` recorded to what every range shares: where the
+	// feed starts, the tail, and the starts the copy's readers resolve against. Once per burst, since
+	// each pass walks every range, so one per START would cost the square of the ranges. Mirrors the
+	// Rust `ServeLoop::apply_starts`.
+	#applyStarts(entry: SubscribeEntry): void {
 		// The lowest start any range reported is the first group served; none leaves nothing owed.
 		let lowest: bigint | null = null;
 		for (const at of entry.starts.values()) if (at !== undefined && (lowest === null || at < lowest)) lowest = at;

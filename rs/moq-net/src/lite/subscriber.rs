@@ -13021,9 +13021,11 @@ impl ServeLoop {
 			true => request.request_start(None),
 			false => request,
 		};
-		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped,
+		// nor reads the live edge from what lands before the upstream says where it is.
 		let serving = request.stage(info);
 		serving.received();
+		serving.await_edge();
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
 		}
@@ -13180,6 +13182,11 @@ impl ServeLoop {
 		let Sub::Active(active) = &mut self.sub else {
 			return Ok(());
 		};
+		// An answer saying where the live feed is, or that the track holds nothing, tells this
+		// copy's own readers too.
+		if largest != lite::Edge::Unknown {
+			self.serving.answer_edge();
+		}
 		// Where the live feed starts so far: the lowest start the demand's ranges report.
 		let served = active.feed_start().and_then(|(start, _)| start);
 		active.started = Some(served);
@@ -13287,6 +13294,8 @@ impl ServeLoop {
 			// could not serve the requested frame). Record it as a drop signal, so a reader
 			// waiting on a skipped group fails over instead of stalling on a live route.
 			lite::SubscribeResponse::Start(start) => {
+				// It is the one answer, and the feed is live from here.
+				self.serving.answer_edge();
 				let start = start.start;
 				// An update may have retired the range already, whose start says nothing now, though
 				// it still says where the SUBSCRIBE's demand was served from.
@@ -13486,6 +13495,10 @@ impl ServeLoop {
 					self.mode = ServeMode::Select;
 					match res {
 						Ok(active) => {
+							// Older drafts answer with SUBSCRIBE_OK alone: the feed is live from here.
+							if !serve.subscriber.version.has_track_stream() {
+								self.serving.answer_edge();
+							}
 							self.sub = Sub::Active(active);
 							if fills_changed && let Err(err) = self.begin(serve, self.serving.subscription()) {
 								return Poll::Ready(ServeEnd::GiveBack(err));
