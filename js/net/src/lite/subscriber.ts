@@ -217,6 +217,8 @@ interface SubscribeEntry {
 	tail: Tail;
 	// The first group the SUBSCRIBE asked for, if any.
 	requested?: bigint;
+	// Pre-07: an update had the publisher place its join afresh, which its START predates.
+	restated?: boolean;
 	// The first group the publisher serves, once SUBSCRIBE_START says: null when it starts no
 	// range. And the track's exclusive end, once SUBSCRIBE_FINISH declares it.
 	start?: bigint | null;
@@ -2536,7 +2538,12 @@ export class Subscriber {
 				// Lite-07 says where every live range starts, so the declaration follows them
 				// whatever an update changed since.
 				if (hasRanges(this.version)) this.#declare(entry);
-				else hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
+				else
+					hooks.startTrack(entry.track, {
+						start: entry.start,
+						requested: entry.requested,
+						restated: entry.restated,
+					});
 				// Recorded whole, so a relay answers its own readers that the group ended.
 				hooks.reportedLargest(entry.track, resp.start.largest?.position, resp.start.largest?.ended ?? false);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
@@ -2857,10 +2864,21 @@ export class Subscriber {
 				entry.floor = span.start;
 				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.
 				this.#declare(entry);
-			} else if (span.start !== wireSpan(placedAsTimes(last.ranges, last.placed)).start) {
+			} else {
+				const before = wireSpan(placedAsTimes(last.ranges, last.placed));
 				// An update gets no fresh SUBSCRIBE_START, so the floor follows the requested start in
 				// both directions: one that moves back keeps the floor asked, not the stale START.
-				hooks.startTrack(entry.track, { start: null, requested: span.start });
+				if (span.start !== before.start) hooks.startTrack(entry.track, { start: null, requested: span.start });
+				else if (
+					resolvesStart(this.version) &&
+					span.start === undefined &&
+					(span.end !== before.end || maxAge(ranges) !== maxAge(last.ranges))
+				) {
+					// A join with no start is placed afresh within the new max age or end, which may reach
+					// below the START: a reader's join may too, while fills still wait on the re-offer.
+					entry.restated = true;
+					hooks.restateTrack(entry.track);
+				}
 			}
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/delay/etc.

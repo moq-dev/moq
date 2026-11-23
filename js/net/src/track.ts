@@ -864,8 +864,9 @@ type Wire = {
 	starts: FillStarts;
 	// The first group its live feed serves (see `hooks.startTrack`), unset until its START
 	// resolves it, null for a resolved-empty range, and the floor its SUBSCRIBE requested.
-	// `resolved` when the publisher placed the start itself, whatever the wire.
-	served?: { start?: bigint | null; requested?: bigint; resolved?: boolean };
+	// `resolved` when the publisher placed the start itself, whatever the wire, and `restated` once
+	// an update had it placed afresh (see `hooks.restateTrack`).
+	served?: { start?: bigint | null; requested?: bigint; resolved?: boolean; restated?: boolean };
 };
 
 // Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
@@ -1003,6 +1004,8 @@ let wireFed: (producer: Producer) => boolean;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { key: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
+// Whether the wire's start was placed afresh since it was declared; see `hooks.restateTrack`.
+let restated: (producer: Producer) => boolean;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The keys of the groups the producer caches, sorted: what time starts and live joins resolve
@@ -1616,6 +1619,7 @@ export class Producer {
 				(key) => producer.#cached.get(key)?.group.closed.peek() === undefined,
 			);
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
+		restated = (producer) => producer.#wire?.served?.restated === true;
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		keysOf = (producer) => producer.#keys;
 		wholeAt = (producer, key) => {
@@ -1715,6 +1719,11 @@ export class Producer {
 			producer.#wire.served = served;
 			producer.#owe();
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
+		};
+		hooks.restateTrack = (producer) => {
+			const served = producer.#wire?.served;
+			if (!served || served.restated) return;
+			hooks.startTrack(producer, { ...served, restated: true });
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
 		hooks.reportedLargest = (producer, largest, finished) => {
@@ -3524,9 +3533,9 @@ export class Subscriber {
 	// A copy whose upstream answers joins reports the answer that placed it, given under a max at
 	// least as wide: its upstream judged the groups, and those owed from there may not have arrived
 	// yet. Any other copy starts no lower than where its upstream said its feed starts, that wire's
-	// answer for the whole subscription, and skips a stale group only once every key below it is
-	// given up for the reader, since a group still on its way there may be fresh. Mirrors the Rust
-	// `TrackState::join_start`.
+	// answer for the whole subscription unless an update placed it afresh since, and skips a stale
+	// group only once every key below it is given up for the reader, since a group still on its way
+	// there may be fresh. Mirrors the Rust `TrackState::join_start`.
 	#joinStart(placed: bigint, budget: number): bigint {
 		if (this.#resume) return this.#resume.joinStart(placed, budget);
 		const producer = this.#state.producer;
@@ -3534,7 +3543,7 @@ export class Subscriber {
 		const whole = this.#drift(WHOLE);
 		const drift = { ...whole, budget: Budget.uniform(budget).clamped(whole.bound) };
 		const received = receivedCopy(producer);
-		const feed = received ? sourceStart(producer) : undefined;
+		const feed = received && !restated(producer) ? sourceStart(producer) : undefined;
 		let from = typeof feed === "bigint" ? max(placed, feed) : placed;
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, from); i < timeline.length; i++) {

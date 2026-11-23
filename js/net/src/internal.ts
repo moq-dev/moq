@@ -818,9 +818,19 @@ export const hooks: {
 	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
 	 * waits on its START, as the Rust `request_start`. Only after {@link receiveTrack}: the start
 	 * is that subscription's, and ends with it. `resolved` marks a start the publisher placed
-	 * itself, as the Rust `start_resolved`: every older group stays fillable.
+	 * itself, as the Rust `start_resolved`: every older group stays fillable. `restated` marks a
+	 * start its publisher has since placed afresh, as {@link restateTrack} does.
 	 */
-	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint; resolved?: boolean }) => void;
+	startTrack: (
+		producer: Producer,
+		served: { start?: bigint | null; requested?: bigint; resolved?: boolean; restated?: boolean },
+	) => void;
+	/**
+	 * Mark the start a pre-07 copy's wire subscription declared as placed afresh by an update since:
+	 * it still bounds fills, since the publisher's re-offer brings the groups below it, but no longer
+	 * a reader's live join, which may reach lower. Assigned by `track.ts`.
+	 */
+	restateTrack: (producer: Producer) => void;
 	/**
 	 * Mark a track as a copy received over a wire without ranges, whose publisher placed its live
 	 * join already, so its readers start one among the groups held by when each presented rather
@@ -1339,6 +1349,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	startTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	restateTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	dropAnchors: () => {
