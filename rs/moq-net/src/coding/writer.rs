@@ -882,8 +882,9 @@ mod tests {
 
 		writer
 			.buffer(&lite::SubscribeStart {
-				largest: None,
-				starts: vec![Some(3)],
+				id: 0,
+				start: Some(3),
+				largest: lite::Edge::Unknown,
 			})
 			.unwrap();
 		writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 }).unwrap();

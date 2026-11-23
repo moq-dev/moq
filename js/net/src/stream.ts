@@ -364,6 +364,12 @@ export class Reader {
 		return result instanceof Short ? undefined : result;
 	}
 
+	/** Like {@link tryDecode}, but consumes nothing: a look at what is buffered. */
+	tryPeek<T extends NonNullable<unknown>>(decode: (c: Cursor) => T): T | undefined {
+		const result = this.#try(decode, false);
+		return result instanceof Short ? undefined : result;
+	}
+
 	/** Run a synchronous decode, filling from the stream until it has the bytes it needs. */
 	async decode<T>(decode: (c: Cursor) => T): Promise<T> {
 		for (;;) {

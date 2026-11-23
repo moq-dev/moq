@@ -86,8 +86,8 @@ steps, as its own triage on 2026-11-23 found:
   and a live join in one subscription: delivered [1000, 2000]` (the JavaScript relay's warm
   copy drops the live join). The `publish error ... remote error: 1` lines are every case's
   teardown. [moq-dev/moq#9408](https://github.com/moq-dev/moq/pull/9408) has since marked
-  that case known for `relay-warm`, owned by
-  [relayed live join start](/quest/m2/time-addressing/relayed-live-join-start.md).
+  that case known for `relay-warm`, and
+  [moq-dev/moq#9444](https://github.com/moq-dev/moq/pull/9444) fixed it.
 - `Media output and lifecycle`: Chromium's `reattach reaches live` on `moq-lite-06`, not
   `replacement`: the relay aborted the reattached player's live groups `Old`, so it got no
   audio and 14 video frames. A child quest owns it.

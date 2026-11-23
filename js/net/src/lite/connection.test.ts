@@ -27,7 +27,7 @@ import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
 	Subscribe,
-	SubscribeFinish,
+	SubscribeEnd,
 	SubscribeStart,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
@@ -38,6 +38,7 @@ import {
 	ALPN_05,
 	ALPN_06,
 	ALPN_07_WIP,
+	hasRanges,
 	hasTrackStream,
 	keepsSubscribeOpen,
 	Version,
@@ -404,7 +405,7 @@ for (const [alpn, version] of [
 		}
 	});
 
-	// A lite-07 subscriber FINs once it read the tail, which can land while SUBSCRIBE_FINISH's
+	// A lite-07 subscriber FINs once it read the tail, which can land while SUBSCRIBE_END's
 	// write still waits; the final group's FIN still holds the close.
 	if (keepsSubscribeOpen(version)) {
 		test(`a subscriber FIN during the end's write still drains the final group over ${versionName(version)}`, async () => {
@@ -643,9 +644,9 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 	producer.finish();
 	producer.close();
-	// SUBSCRIBE_FINISH, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
+	// SUBSCRIBE_END, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
 	if (keepsSubscribeOpen(version)) {
-		while (!("finish" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 	} else await subscriber.reader.readAll();
 
 	let closed = false;
@@ -665,7 +666,7 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 }
 
 // The publisher's FIN says nothing about whether the subscriber read the tail, and a receiver
-// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_FINISH lets the subscriber settle
+// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_END lets the subscriber settle
 // its tail at once, the subscriber's FIN says so, and close waits for it.
 for (const [alpn, version] of [
 	[ALPN_05, Version.DRAFT_05],
@@ -821,8 +822,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 		producer.finish();
 		producer.close();
-		// SUBSCRIBE_FINISH; lite-07 keeps the stream open past it.
-		while (!("finish" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+		// SUBSCRIBE_END; lite-07 keeps the stream open past it.
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 
 		// The withdrawal completes, but the subscription still waits for the subscriber's FIN.
 		fin.release();
@@ -994,14 +995,24 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 						sub = stream;
 					}
 				}
-				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0n]) }, version);
+				await encodeSubscribeResponse(
+					sub.writer,
+					{
+						start: new SubscribeStart({
+							id: 0n,
+							start: 0n,
+							largest: hasRanges(version) ? "empty" : "unknown",
+						}),
+					},
+					version,
+				);
 
 				let group: GroupMessage;
 				if (violation === "a partial group") {
 					// A received tail uses its wire position even without a locally retained prefix.
 					group = new GroupMessage({ subscribe: 0n, key: 0n, frameStart: 5 });
 				} else {
-					await encodeSubscribeResponse(sub.writer, { finish: new SubscribeFinish(2n) }, version);
+					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2n) }, version);
 					group = new GroupMessage({ subscribe: 0n, key: 2n });
 				}
 				const writer = await Writer.open(pair.server, { version });

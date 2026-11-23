@@ -2172,6 +2172,20 @@ class Reader implements ResumeSource {
 		return serving && hooks.sourceStart(serving.sub);
 	}
 
+	/** Whether the copy serving now places ranges as its publisher would; see `hooks.placesAsUpstream`. */
+	placesAsUpstream(): boolean {
+		this.sync();
+		const serving = this.#serving();
+		return serving !== undefined && hooks.placesAsUpstream(serving.sub);
+	}
+
+	/** Whether the copy serving now knows where the live feed is; see `hooks.knowsEdge`. */
+	knowsEdge(): boolean {
+		this.sync();
+		const serving = this.#serving();
+		return serving !== undefined && hooks.knowsEdge(serving.sub);
+	}
+
 	end(): track.Position | undefined {
 		this.sync();
 		return this.#learnEnd();

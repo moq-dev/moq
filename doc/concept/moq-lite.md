@@ -311,6 +311,10 @@ reach that group like any time start. A moq-lite 07 relay copy asks its upstream
 for each join, with the same lag and end, and places a reader's join only from
 an answer that arrived after the reader asked, so a join reads the same groups
 through a relay as from the publisher. Readers joining alike share one answer.
+Each range is answered on its own, so a relay serves at once a range its copy
+placed where its upstream would, while a join in the same subscription waits on
+its upstream; a range reaching back to the oldest group waits for where the
+copy's feed starts.
 Over older moq-lite and moq-transport, a relay places the join from the groups
 it holds instead.
 

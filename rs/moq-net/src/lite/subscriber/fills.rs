@@ -602,7 +602,7 @@ struct Recovery {
 
 enum RecoveryState {
 	Establish(Box<Establish>),
-	/// Open, recording its SUBSCRIBE_START and SUBSCRIBE_FINISH as a subscription does.
+	/// Open, recording its SUBSCRIBE_START and SUBSCRIBE_END as a subscription does.
 	Active {
 		sub: Box<SubStream>,
 		/// Whether our FIN went out.
@@ -819,15 +819,15 @@ impl Recovery {
 					match res {
 						// One start, for its one range.
 						Recv::Message(lite::SubscribeResponse::Start(start))
-							if active.started.is_none() && start.starts.len() == 1 =>
+							if active.started.is_none() && start.id == 0 =>
 						{
 							// Below its start the publisher delivers nothing.
-							let from = start.starts[0].unwrap_or(groups.end);
+							let from = start.start.unwrap_or(groups.end);
 							given_up(
 								groups.start..from.clamp(groups.start, groups.end),
 								Refusal::passing(StreamError::NotFound),
 							);
-							active.started = Some(start.starts[0]);
+							active.started = Some(start.start);
 							// Starting past the run answers all of it, so nothing more is asked.
 							if !self.capped && from >= groups.end {
 								self.capped = true;
@@ -847,7 +847,7 @@ impl Recovery {
 							}
 						}
 						// Nothing at or past the track's end will be produced.
-						Recv::Message(lite::SubscribeResponse::Finish(finish)) if active.end.is_none() => {
+						Recv::Message(lite::SubscribeResponse::End(finish)) if active.end.is_none() => {
 							given_up(
 								finish.group.max(groups.start)..groups.end,
 								Refusal::dropped(StreamError::NotFound),
@@ -855,7 +855,7 @@ impl Recovery {
 							active.end = Some(finish);
 						}
 						Recv::Message(lite::SubscribeResponse::Ok(_)) => {}
-						// A second START or FINISH, or a STARTED for a range no update added.
+						// A second START or END, or a START for a range it never asked.
 						Recv::Message(msg) => {
 							tracing::warn!(?msg, "unexpected recovery subscribe response");
 							return Poll::Ready(Err(Error::ProtocolViolation));
@@ -873,7 +873,7 @@ impl Recovery {
 						}
 
 						Recv::Ended => {
-							tracing::warn!("recovery subscribe ended without SUBSCRIBE_FINISH");
+							tracing::warn!("recovery subscribe ended without SUBSCRIBE_END");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
 						// Malformed bytes are a violation, as on the subscription itself.
