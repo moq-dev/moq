@@ -5,21 +5,28 @@
 A `moq-transcribe` crate consumes a hang broadcast's audio and publishes a
 derivative broadcast whose catalog carries a transcript rendition. Nothing
 is transcribed until someone subscribes, and the work stops after the last
-subscriber leaves. A fetch transcribes the span it asks for, with a few
-seconds of preceding audio as context. The first backend is OpenAI's
-`gpt-live-transcribe`, configured with the caller's API key.
+subscriber leaves. A fetch or time start transcribes the span it asks for,
+with a few seconds of preceding audio as context. The first backend is
+OpenAI's `gpt-live-transcribe`, configured with the caller's API key.
 
 ## Plan
 
-Follow `moq-transcode`'s structure for the derivative catalog, demand
-tracking, and group mirroring. Decode with `moq-audio` and resample to what
-the backend takes.
+Follow `moq-transcode`'s structure for the derivative catalog and demand
+tracking (`rs/moq-transcode/src/rung.rs`), including its session budget,
+which here caps concurrent hosted sessions. Groups follow
+[the format](/quest/m3/transcribe/format.md)'s pick of what span a group
+covers. Decode with `moq-audio` and resample to what the backend takes.
 
 `gpt-live-transcribe` streams text deltas but has no server-side turn
 detection, so the crate segments speech itself and commits each turn. A
 segment's interim frames follow the deltas, and its final frame lands when
 the turn's transcript completes. Measure the latency from speech to the first
 interim and to the final, and record both in the crate's README.
+
+The transcript rendition is an ordinary catalog text rendition, listed
+beside any captions the source already carries
+([captions path](/quest/m3/transcribe/README.md)). Label it as generated, so
+a player's menu tells it apart from imported captions in the same language.
 
 The backend interface takes audio in and returns transcript events, with no
 callback parameters (the `AGENTS.md` API rules). Keep the interface private
@@ -30,3 +37,15 @@ Public API: a new crate. Wire: none beyond the format.
 ## Required
 
 - [A structured transcript text format](/quest/m3/transcribe/format.md) - the rendition this publishes
+
+## Waiting
+
+- Maintainer: pick the transcript rendition's `role`. Options: `caption` for
+  the source-language transcript and `subtitle` for translations, matching
+  how live captions are offered to viewers who cannot hear the audio and the
+  role imported CEA-608/708 captions carry; or `subtitle` throughout, since
+  the hang draft defines `caption` as all audio (SDH) and speech recognition
+  describes no other sounds. Recommendation: `caption` for the source
+  language, since a viewer looking for captions should find it. An agent
+  cannot take it: it is a product choice about how players present the
+  track.

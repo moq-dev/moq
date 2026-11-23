@@ -12,6 +12,9 @@ Decided 2026-11-17 (maintainer, `/quest-plan`): ✅ one rendition per target
 language (rejected: English-only translation; deferring translation). Why:
 viewers pick a language the way they pick a rendition.
 
+Each translation's `role` follows the [crate](/quest/m3/transcribe/crate.md)'s
+pick for transcripts.
+
 ## Required
 
 - [moq-transcribe with an OpenAI backend](/quest/m3/transcribe/crate.md) - the source transcript it translates

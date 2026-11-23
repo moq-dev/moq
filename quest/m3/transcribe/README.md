@@ -9,8 +9,9 @@ video. Its catalog references a text rendition in a new structured transcript
 format, produced just in time while subscribed. The language is detected
 automatically. A translator later adds one rendition per target language.
 
-Non-goals: speaker diarization, and protected media (a platform never reads
-its payload).
+Non-goals: speaker diarization, protected media (a platform never reads its
+payload), and the captions a source already carries in band (the importer's
+work, below).
 
 This README's own work is the end-user docs, once the children land: a
 `doc/lib/rs/moq-transcribe.md` page, its row in `doc/lib/rs/index.md`, and the
@@ -41,6 +42,16 @@ Decided 2026-11-17 (maintainer, `/quest-plan`):
 - ✅ The translator's runtime is decided later, in
   [its quest](/quest/m3/transcribe/translate.md).
 
-## Related
+Since then, groups are addressed by their start time and never overlap, and a
+time start reads the group containing that time
+([moq-lite](/doc/concept/moq-lite.md)). A source's audio groups are often one
+packet each, so "mirror the source's groups" no longer names a usable
+boundary: the [format](/quest/m3/transcribe/format.md) waits on a pick.
 
-- [Audio renditions carry a language](/quest/m3/audio-lang.md) - the source-side `lang` a transcript can default from
+Decided 2026-11-23 (maintainer, on
+[moq-dev/moq#9443](https://github.com/moq-dev/moq/pull/9443#issuecomment-7091545924)):
+captions reach players only as catalog text tracks. The importer strips
+CEA-608/708 caption SEI from H.264 and H.265 and publishes the captions as a
+text track with `role: "caption"`, so no player parses SEI. A transcript is
+one more source on that path: watch's `captions` attribute lists it beside
+imported captions, and an exporter treats it like any other text rendition.
