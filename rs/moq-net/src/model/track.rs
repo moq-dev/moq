@@ -3973,7 +3973,7 @@ impl TrackState {
 			.find_map(|(&group, slot)| {
 				Some(Position {
 					group,
-					frame: slot.group.last_object()?,
+					frame: slot.group.last_data_object()?,
 				})
 			});
 		self.feed = Feed::Idle { newest, held };
@@ -15049,6 +15049,62 @@ mod test {
 				assert_eq!(producer.subscribe(replay()).largest().now_or_never(), Some(Some(held)));
 			}
 			assert_eq!(answered.is_ok(), ok, "object {object}");
+		}
+	}
+
+	/// Largest never counts the END_OF_GROUP a publisher sends past a group's last object, so
+	/// the answer to a group the copy holds with its terminal object is the object before it.
+	#[cfg(feature = "async")]
+	#[test]
+	fn an_idle_copy_judges_its_answer_below_a_terminal_object() {
+		let wire = group::Wire {
+			sparse: false,
+			first_object: true,
+			first_id: 0,
+			extensions: false,
+			has_end: true,
+			fetchable: true,
+			last: None,
+		};
+		// A group of `objects` objects 0.., then its END_OF_GROUP, offered each answer.
+		for (objects, object, ok) in [(1, 0, true), (1, 1, true), (2, 0, false), (2, 1, true)] {
+			let mut producer = track_producer("test", None);
+			let mut group = producer.create_group(group::Info { start: 2 }).unwrap();
+			group.set_wire(wire.clone()).unwrap();
+			for id in 0..objects {
+				let mut frame = group
+					.create_object(frame::Header {
+						info: frame::Info {
+							size: 1,
+							timestamp: Timestamp::unscaled(2),
+						},
+						fields: Some(Arc::new(super::super::object::Fields {
+							id,
+							properties: Default::default(),
+						})),
+						inflated: None,
+					})
+					.unwrap();
+				frame.write(&b"x"[..]).unwrap();
+				group = frame.finish().unwrap();
+			}
+			group
+				.set_end_object(super::super::object::Fields {
+					id: objects,
+					properties: Default::default(),
+				})
+				.unwrap();
+			group.finish().unwrap();
+			producer.set_idle();
+			let answered = producer.set_live(
+				Some(Position {
+					group: 2,
+					frame: object,
+				}),
+				None,
+				None,
+			);
+			assert_eq!(answered.is_ok(), ok, "{objects} objects, answer {object}");
 		}
 	}
 
