@@ -98,6 +98,11 @@ pub(crate) fn framed(id: u64, body: &[u8], version: Version) -> Vec<u8> {
 pub trait Message<'a>: Sized + std::fmt::Debug {
 	const ID: u64;
 
+	/// The type this message goes out as at `version`, which classifies it for stats.
+	fn wire_id(_version: Version) -> u64 {
+		Self::ID
+	}
+
 	/// Encode this message body (without size prefix).
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError>;
 
@@ -111,7 +116,7 @@ impl<'a, T: Message<'a>> Encode<Version> for T {
 		let prefix = prefix_length(w, version);
 		self.encode_msg(w, version)?;
 		fill_length(w, prefix)?;
-		w.control = Some(control(T::ID));
+		w.control = Some(control(T::wire_id(version)));
 		Ok(())
 	}
 }
@@ -165,7 +170,7 @@ impl<'a, T: Message<'a>> Decode<'a, Version> for T {
 			Err(err) => tracing::warn!(%err, "decode failed"),
 		}
 		if result.is_ok() {
-			r.control = Some(control(T::ID));
+			r.control = Some(control(T::wire_id(version)));
 		}
 		result
 	}

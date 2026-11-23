@@ -362,6 +362,10 @@ impl FetchOk {
 impl<'a> Message<'a> for FetchOk {
 	const ID: u64 = 0x18;
 
+	fn wire_id(version: Version) -> u64 {
+		Self::id(version)
+	}
+
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if Self::is_request_ok(version) {
 			// REQUEST_OK: the parameters, then the Track Properties to the end of the message.
@@ -724,6 +728,27 @@ mod tests {
 
 		assert_eq!(decoded.request_id, RequestId(1));
 		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	/// Draft-23 answers a FETCH with REQUEST_OK, a reply other requests share, so its
+	/// stats class is the shared one rather than FETCH's, on the way out and in.
+	#[test]
+	fn a_draft23_fetch_answer_counts_as_a_shared_reply() {
+		let msg = FetchOk {
+			end_of_track: false,
+			end_location: Location { group: 0, object: 0 },
+			largest: None,
+			properties: Default::default(),
+		};
+		for (version, class) in [
+			(Version::Draft22, crate::stats::Message::Fetch),
+			(Version::Draft23, crate::stats::Message::Other),
+		] {
+			let mut buf = Vec::new();
+			let mut w = Encoder::new(&mut buf, version.into());
+			crate::coding::Encode::encode(&msg, &mut w, version).unwrap();
+			assert_eq!(w.control, Some(class), "{version}");
+		}
 	}
 
 	#[test]
