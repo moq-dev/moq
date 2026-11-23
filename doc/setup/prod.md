@@ -61,6 +61,23 @@ sudo sysctl --system
 
 macOS uses `kern.ipc.maxsockbuf`; Windows sizes each socket directly.
 
+## Transmit queues
+
+On a NIC with more than one transmit queue, such as a cloud VM's virtio-net,
+Linux picks each packet's queue by the CPU that sends it (XPS). The shared
+runtime sends a connection's packets from whichever worker polls it, so they
+leave on different queues, arrive out of order, and QUIC declares them lost:
+retransmits, a lower sending rate, and late groups. Clear the maps so the
+kernel picks a queue per flow instead:
+
+```bash
+for map in /sys/class/net/eth0/queues/tx-*/xps_cpus; do echo 0 | sudo tee "$map"; done
+```
+
+The driver restores its maps when it adds the NIC, so persist this with a boot
+unit or udev rule. A single-queue NIC has nothing to clear and refuses the
+write.
+
 ## Upgrades
 
 On Linux a relay upgrades without cutting its sessions: the new process takes
