@@ -1901,9 +1901,8 @@ fn regressions() {
 			finish: false,
 		},
 		// A group the local floor keeps out of where an earlier copy placed a range, below where
-		// the serving copy places it: the read runs without a stall. The oracle owes nothing
-		// below the serving copy's placement, so it does not check that group yet; see
-		// quest/m0/nightly/resume-model-placement.md.
+		// the serving copy places it: the read runs without a stall, and stays open for that
+		// group, which every live route held when the range placed, so the oracle owes it.
 		Case {
 			ops: vec![
 				Op::Join {
@@ -1982,6 +1981,119 @@ fn regressions() {
 					group: None,
 					down: true,
 				},
+			],
+			finish: false,
+		},
+		// A serving copy whose floor lies above every group the reader's range now names was
+		// asked for nothing, so its own resolution is empty: the copy replacing it, from a lower
+		// boundary, is asked from where the reader placed the range instead.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 3,
+					spec: spec(false, Budget::Hour, Some((0, 1)), false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(8),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::Ranges {
+					reader: 3,
+					range: Some((0, 6)),
+				},
+				Op::Up { instance: 0, slot: 2 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(2),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 2,
+					group: None,
+					frames: 1,
+				},
+			],
+			finish: false,
+		},
+		// The same once a failover moves the boundary below a time start the replaced copy
+		// placed at a lower group.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 2 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((6, 7)), false),
+				},
+				Op::Up { instance: 1, slot: 0 },
+				Op::Write {
+					instance: 1,
+					slot: 2,
+					group: Some(7),
+					frames: 1,
+				},
+				Op::Down { instance: 1, slot: 2 },
+				Op::Up { instance: 1, slot: 2 },
+				Op::Write {
+					instance: 1,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 2,
+					group: Some(1),
+					frames: 1,
+				},
+			],
+			finish: false,
+		},
+		// A backfill passed a group outside the reader's range, which a widening then owes: the
+		// serving route is asked for it, since the backfill will not hand it out again.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((3, 4)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(4),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::Down { instance: 0, slot: 0 },
+				Op::Ranges { reader: 0, range: None },
 			],
 			finish: false,
 		},

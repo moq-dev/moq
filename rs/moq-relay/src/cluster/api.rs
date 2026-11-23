@@ -11,8 +11,8 @@ use std::path::PathBuf;
 pub struct Config {
 	/// Fetch peers from HTTPS, loopback HTTP, or a local file, refusing redirects,
 	/// reloading at runtime without a restart. The source returns a JSON array
-	/// of peers: bare URL strings and/or objects with `url`, `cost`, `egress`,
-	/// `token`, and `upstream`, exactly as `--cluster-connect` accepts, e.g.
+	/// of peers: bare URL strings and/or objects with `url`, `cost`, `token`,
+	/// and `upstream`, exactly as `--cluster-connect` accepts, e.g.
 	/// `["https://a.pop.example/?cost=1", {"url": "https://b.pop.example/", "cost": 2}]`.
 	/// An http(s) URL is re-checked on a fixed cadence, with caching, conditional revalidation
 	/// (`ETag` / `Last-Modified`), and stale-if-error handled by the shared HTTP

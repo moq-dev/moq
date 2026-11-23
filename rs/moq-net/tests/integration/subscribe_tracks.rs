@@ -132,6 +132,7 @@ async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
 /// stream, and the subscription already on the session keeps going.
 #[kio::test]
 async fn subscribe_tracks_is_refused_per_request() {
+	// The request is a hand-built frame with a 16-bit length, so draft-23 is left out.
 	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
 		let mut setup = setup(version.parse().unwrap()).await;
 		deliver(&mut setup, b"before").await;

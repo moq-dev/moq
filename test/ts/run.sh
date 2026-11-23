@@ -34,6 +34,7 @@
 #   ./run.sh --passthrough         # carry the multiplex whole (`import/export ts --passthrough`)
 #   ./run.sh --passthrough --mpts  # the same with two programs whose recovery points rarely line up
 #   ./run.sh --mpts --program 2 --join 5 # import each program as its own broadcast, export one 5 s in
+#   ./run.sh --passthrough --splice [forward] # an unflagged encoder switch, its clock 16,844.5 s back (or on)
 #   ./run.sh --passthrough --restart 10 # SIGKILL the import 10 s in, restart it 0.5 s later
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
@@ -103,14 +104,15 @@ QUEUE=""        # how long a datagram may wait for RATE before the path tail-dro
 PASSTHROUGH=""  # carry the multiplex whole and grade the capture packet by packet against the source
 MPTS=""         # publish two programs, which only --passthrough carries whole
 PROGRAM=""      # with --mpts: import each program as its own broadcast, and export this one late
+SPLICE=""       # back or forward: splice two encodes on unrelated clocks, as an encoder switch does
+RESTART=""      # seconds into the source to SIGKILL the import, restarted 0.5 s after it exits
+EXPORT=()       # extra `export ts` flags (--delay)
 # How far into the run that export starts (5 s under --program): it joins mid-broadcast, on its
 # program's own groups.
 PROGRAM_JOIN=""
 # How soon the late export must write its first byte, in seconds: connecting, its catalog, and
 # the group it joins on.
 FIRST_BYTE_MAX=3
-RESTART=""      # seconds into the source to SIGKILL the import, restarted 0.5 s after it exits
-EXPORT=()       # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
 # exactly the thing under test.
@@ -241,6 +243,14 @@ while [[ $# -gt 0 ]]; do
         --join)
             PROGRAM_JOIN="$2"
             shift 2
+            ;;
+        --splice)
+            SPLICE=back
+            if [[ "${2:-}" == back || "${2:-}" == forward ]]; then
+                SPLICE="$2"
+                shift
+            fi
+            shift
             ;;
         --restart)
             RESTART="$2"
@@ -402,6 +412,10 @@ if [[ -n "$PROGRAM" && ! ("$PROGRAM" =~ ^[12]$ && "$PROGRAM_JOIN" =~ ^[0-9]+$ &&
     echo "error: --program is 1 or 2, and --join whole seconds within the ${DURATION}s run" >&2
     exit 1
 fi
+if [[ -n "$SPLICE" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$MPTS$WITH_EIT$RESTART") ]]; then
+    echo "error: --splice generates its own clip and needs --passthrough, the mode that carries a clock step" >&2
+    exit 1
+fi
 # The killed import's gap is the measurement, so nothing else may cost packets: one program,
 # whose groups passthrough.py can place, on an unimpaired path.
 if [[ -n "$RESTART" ]]; then
@@ -548,6 +562,12 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$SPLICE" ]]; then
+    echo "### generating ~${DURATION}s clip whose clock steps 16,844.5 s $SPLICE halfway, unflagged"
+    # Nothing in the stream marks the switch: every PID's continuity counter breaks once, the
+    # second encode joins mid-GOP, and no packet sets discontinuity_indicator. Passthrough must
+    # carry it as it is, so the source's own continuity breaks are its only verdict.
+    python3 "$DIR/splice.py" "$SRC_TS" "$SPLICE" --duration "$DURATION" --bitrate "$BITRATE"
 elif [[ -n "$MPTS" ]]; then
     echo "### generating ~${DURATION}s two-program clip with ffmpeg"
     # Two services in one multiplex, each with its own PCR PID, their keyframes every 25 and
@@ -1068,7 +1088,7 @@ if [[ -n "$PASSTHROUGH" ]]; then
         exit 1
     fi
     echo
-    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS$RATE$RESTART" ]]; then
+    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS$RATE$SPLICE$RESTART" ]]; then
         python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode" || exit 1
     else
         echo "decoded-content comparison: not covered for this profile"

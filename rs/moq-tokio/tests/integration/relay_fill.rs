@@ -388,6 +388,16 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], frames: u64, warm:
 		None => groups.to_vec(),
 	};
 	let append = case.get("append").and_then(serde_json::Value::as_bool) != Some(false);
+	let span = case.get("span").and_then(serde_json::Value::as_u64);
+	let open: Vec<u64> = (case
+		.get("open")
+		.and_then(serde_json::Value::as_array)
+		.into_iter()
+		.flatten())
+	.filter_map(serde_json::Value::as_u64)
+	.collect();
+	// The groups the case leaves unfinished, held so they stay open.
+	let mut unfinished = Vec::new();
 	for start in starts {
 		let time = Timestamp::from_millis(start)?;
 		let mut group = match append {
@@ -397,7 +407,11 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], frames: u64, warm:
 		for frame in 0..frames {
 			group.write_frame(Timestamp::from_millis(start + frame)?, b"x".to_vec())?;
 		}
-		group.finish()?;
+		match span {
+			_ if open.contains(&start) => unfinished.push(group),
+			Some(span) => drop(group.finish_at(start + span)?),
+			None => drop(group.finish()?),
+		}
 	}
 	broadcast.announce()?;
 	let version = "moq-lite-07-wip".parse().map_err(anyhow::Error::msg)?;

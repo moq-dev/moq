@@ -246,7 +246,6 @@ changelog typo at `drafts/draft-lcurley-moq-lite.md:2380` during the cut
 
 ## Required
 
-- [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
 - [Count lite-07 Path Keep by Path::parts](/quest/m2/lite07-path-keep-parts.md) - removes the temporary `raw_parts` / `base.split("/")` migration before lite-07 freezes
 - [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - bridged routes keep drain and priority, and the draft's rank text matches the code
 - [NodeId drops Start](/quest/m2/node-id-drop-start.md) - NodeId's wire shape
