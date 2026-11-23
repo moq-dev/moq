@@ -231,8 +231,8 @@ interface SubscribeEntry {
 	// The tick the copy recorded each live join range's answer at, by Range ID (see
 	// `hooks.answerJoin`): one with none is still unanswered.
 	joinTicks: Map<bigint, number>;
-	// The narrowest max in milliseconds each live join range was asked under before its answer, by
-	// Range ID, beside the one it asks now: its publisher starts it past the groups that max
+	// The narrowest max in milliseconds each live join range, placed or not, was asked under before
+	// its answer, by Range ID, beside the one it asks now: its publisher starts it past the groups that max
 	// expired, so the answer places only readers within it.
 	joinBudgets: Map<bigint, number>;
 	// The first group the ranges last sent ask for, which a lite-07 declaration answers.
@@ -2836,11 +2836,14 @@ export class Subscriber {
 				// Before a retune moves it: the publisher may answer under the max asked until then.
 				for (const [id, range] of entry.live.entries()) {
 					const live = range.start?.live;
-					if (live === undefined || entry.joinTicks.has(id)) continue;
-					entry.joinBudgets.set(
-						id,
-						Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(live.max)),
-					);
+					const joined = range.start?.joined;
+					const unanswered =
+						live !== undefined
+							? !entry.joinTicks.has(id)
+							: joined !== undefined && !entry.starts.has(id);
+					if (!unanswered) continue;
+					const max = (live ?? joined)?.max ?? null;
+					entry.joinBudgets.set(id, Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max)));
 				}
 				const edited = entry.live.edit(
 					[...fitted.ranges, ...probed, ...fillRanges],
@@ -2938,10 +2941,15 @@ export class Subscriber {
 				}
 				continue;
 			}
-			// A max age may start a placed join past groups the publisher still holds, as stale for
-			// it alone, so its answer proves nothing of history. Its readers are placed already.
+			// A max age, now or under a retune since, may start a placed join past groups the publisher
+			// still holds, as stale for it alone, so its answer proves nothing of history. Its readers
+			// are placed already.
 			const joined = range.start?.joined;
-			if (joined !== undefined && joined.max !== null && joined.max < NO_MAX_DELAY) continue;
+			if (
+				joined !== undefined &&
+				Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(joined.max)) < NO_MAX_DELAY
+			)
+				continue;
 			const asked = range.start?.time ?? range.start?.absolute ?? joined?.absolute ?? 0n;
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if (at !== undefined || reaches(range.end, asked)) times.push([asked, at]);

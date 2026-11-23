@@ -3145,8 +3145,13 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 // A placed join under a max age may be answered past groups the publisher still holds, stale for
 // it alone, so its answer places no history reader at its group; one with no max age skips nothing.
 // Mirrors the Rust `only_an_unbounded_placed_join_answers_for_history`.
-for (const max of [Duration.ZERO, null]) {
-	test(`a placed join with max ${max === null ? "none" : "0"} answers for history only without one`, async () => {
+for (const [max, retuned] of [
+	[Duration.ZERO, false],
+	[null, false],
+	[null, true],
+] as const) {
+	const name = `${max === null ? "none" : "0"}${retuned ? ", retuned from 0 before its answer," : ""}`;
+	test(`a placed join with max ${name} answers for history only without one`, async () => {
 		const version = Version.DRAFT_07;
 		const { quic, streams, opened } = fakeSession();
 		const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -3157,18 +3162,23 @@ for (const max of [Duration.ZERO, null]) {
 			reported.push([...starts]);
 			timeStarts(producer, starts);
 		};
-		const track = broadcast.track("video").subscribe({
+		const asked = (max: Duration | null) => ({
 			ranges: [{ start: { live: { min: Duration.ZERO, max } } }],
 			placed: new Map([[0, 10n]]),
 		});
+		const track = broadcast.track("video").subscribe(asked(retuned ? Duration.ZERO : max));
 		try {
 			await opened(0);
 			await answerTrackInfo(streams[0], version);
 			const request = await opened(1);
 			await request.reading;
+			if (retuned) {
+				track.update(asked(max));
+				await drainReactions();
+			}
 			await respond(request, version, [{ start: new SubscribeStart([20n]) }]);
 			await drainReactions();
-			expect(reported.at(-1)).toEqual(max === null ? [[10n, 20n]] : []);
+			expect(reported.at(-1)).toEqual(max === null && !retuned ? [[10n, 20n]] : []);
 		} finally {
 			hooks.timeStarts = timeStarts;
 			track.close();

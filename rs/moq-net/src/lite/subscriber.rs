@@ -3370,10 +3370,14 @@ mod tests {
 
 	/// A placed join under a max age may be answered past groups the publisher still holds,
 	/// stale for it alone, so its answer places no history reader at its group; one with no
-	/// max age skips nothing, so it does.
+	/// max age skips nothing, so it does, unless it was asked under one before a retune.
 	#[kio::test]
 	async fn only_an_unbounded_placed_join_answers_for_history() {
-		for (max, placed) in [(Some(Duration::ZERO), None), (None, Some(20))] {
+		for (max, retuned_from, placed) in [
+			(Some(Duration::ZERO), None, None),
+			(None, None, Some(20)),
+			(None, Some(Duration::ZERO), None),
+		] {
 			let tail = kio::Producer::new(Tail::default());
 			let Sub::Active(mut active) = feed_sub(&tail).await else {
 				unreachable!("feed_sub is active")
@@ -3389,6 +3393,7 @@ mod tests {
 				}],
 			);
 			active.starts = [(0, Some(20))].into();
+			active.join_budgets = retuned_from.map(|asked| (0, asked)).into_iter().collect();
 			let info = track::Info::default().with_timescale(None).with_max_age(None);
 			let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 			serving.received();
@@ -3415,7 +3420,7 @@ mod tests {
 				None => None,
 				Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
 			};
-			assert_eq!(read, placed, "max {max:?}");
+			assert_eq!(read, placed, "max {max:?}, retuned from {retuned_from:?}");
 		}
 	}
 
@@ -10682,9 +10687,9 @@ struct SubStream {
 	/// The tick the copy recorded each live join range's answer at, by Range ID (see
 	/// [`track::Producer::answer_join`]): one with none is still unanswered.
 	join_ticks: std::collections::BTreeMap<u64, u64>,
-	/// The narrowest max age each live join range was asked under before its answer, by Range
-	/// ID, beside the one it asks now: its publisher starts it past the groups that max
-	/// expired, so the answer places only readers within it.
+	/// The narrowest max age each live join range, placed or not, was asked under before its
+	/// answer, by Range ID, beside the one it asks now: its publisher starts it past the groups
+	/// that max expired, so the answer places only readers within it.
 	join_budgets: std::collections::BTreeMap<u64, Duration>,
 	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
 	/// again: each declaration restarts the grace of the gaps above it.
@@ -10743,10 +10748,17 @@ impl SubStream {
 				continue;
 			};
 			let asked = match range.start {
-				Some(lite::Anchor::Absolute(time) | lite::Anchor::Joined { at: time, max: None }) => time.group,
-				// A max age may start it past groups the publisher still holds, as stale for this
-				// join alone, so its answer proves nothing of history. Its readers are placed already.
-				Some(lite::Anchor::Joined { max: Some(_), .. }) => continue,
+				Some(lite::Anchor::Absolute(time)) => time.group,
+				// A max age, now or under a retune since, may start it past groups the publisher
+				// still holds, as stale for this join alone, so its answer proves nothing of history.
+				// Its readers are placed already.
+				Some(lite::Anchor::Joined { at, max }) => {
+					let asked = self.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
+					if asked.min(crate::track::budget(max)) < Duration::MAX {
+						continue;
+					}
+					at.group
+				}
 				None => 0,
 				Some(lite::Anchor::Live { min, max }) => {
 					// Recorded once, as it arrives: a reader that began waiting since takes only a
@@ -10939,9 +10951,12 @@ impl SubStream {
 		};
 		// Before a retune moves it: the publisher may answer under the max age asked until then.
 		for (id, range) in self.live.iter() {
-			if let Some(lite::Anchor::Live { max, .. }) = range.start
-				&& !self.join_ticks.contains_key(&id)
-			{
+			let unanswered = match range.start {
+				Some(lite::Anchor::Live { max, .. }) if !self.join_ticks.contains_key(&id) => Some(max),
+				Some(lite::Anchor::Joined { max, .. }) if !self.starts.contains_key(&id) => Some(max),
+				_ => None,
+			};
+			if let Some(max) = unanswered {
 				let asked = self.join_budgets.entry(id).or_insert(Duration::MAX);
 				*asked = (*asked).min(crate::track::budget(max));
 			}
