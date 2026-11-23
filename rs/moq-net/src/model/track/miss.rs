@@ -1735,6 +1735,11 @@ impl Lost {
 		}
 	}
 
+	/// Whether it holds no eviction, expired or not.
+	pub fn is_empty(&self) -> bool {
+		self.order.is_empty()
+	}
+
 	/// How many evictions it holds.
 	#[cfg(test)]
 	pub fn len(&self) -> usize {
@@ -2198,7 +2203,7 @@ mod tests {
 			.unwrap()
 			.finish()
 			.unwrap();
-		track.modify().unwrap().evict_group(2, Error::Evicted);
+		track.modify().unwrap().evict_for_debt(2);
 		let state = track.state.read();
 		assert!(!state.lookup.contains_key(&2));
 		let asks = misses.judge(

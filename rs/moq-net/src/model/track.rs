@@ -1653,14 +1653,20 @@ impl TrackState {
 
 	/// [`Self::uncache`] a servable group to free the cache and abort it with `err`, recording
 	/// it for the readers that judged it cached to judge again.
-	fn evict_group(&mut self, key: u64, err: Error) {
-		let slot = self.uncache(key).expect("a cached group");
-		// An expired group is stale for every reader; only the pool's eviction loses one.
-		if slot.visible && matches!(err, Error::Evicted) {
+	/// Evict cached group `key` to pay the pool's debt. A group the live feed delivered is
+	/// lost to the cache, so a reader yet to take it asks again; an expired one is stale for
+	/// every reader instead.
+	fn evict_for_debt(&mut self, key: u64) {
+		if self.lookup.get(&key).is_some_and(|slot| slot.visible) {
 			let now = self.cache.pool().now_wall();
 			self.lost.expire(now, self.miss_grace());
 			self.lost.evicted(key, now);
 		}
+		self.evict_group(key, Error::Evicted);
+	}
+
+	fn evict_group(&mut self, key: u64, err: Error) {
+		let slot = self.uncache(key).expect("a cached group");
 		slot.abort(err);
 		let landed = self
 			.inboxes
@@ -3076,7 +3082,10 @@ impl TrackState {
 			self.arrivals.set_grace(self.arrival_grace());
 			self.arrivals.expire(now);
 		}
-		self.lost.expire(now, self.miss_grace());
+		// Only once something was lost, so an in-order feed still never reads the subscriptions.
+		if !self.lost.is_empty() {
+			self.lost.expire(now, self.miss_grace());
+		}
 		self.bill_arrivals();
 	}
 
@@ -3492,7 +3501,7 @@ impl TrackState {
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
-			self.evict_group(key, Error::Evicted);
+			self.evict_for_debt(key);
 		}
 		// Then the arrivals' oldest gaps, which costs a reader only the wait for a late group, as
 		// the grace passing would.

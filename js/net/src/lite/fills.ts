@@ -106,7 +106,9 @@ export interface FillAsk {
  * refuses a fill. A range start speaks only for its range: once the range retires, a later one
  * asking for the same groups may start lower. A group it drops as stale is officially dropped,
  * and one it already accounted for (delivered before and since evicted) it never sends again, so
- * a recovery asks for either on its own subscription with no max delay, once. Nothing newer
+ * a recovery asks for either on its own subscription with no max delay: a stale run once, and an
+ * accounted group as often as it is evicted again before its fill answers. This cache evicts only
+ * groups idle past their expiry, so each recovery lands a group its fill answers. Nothing newer
  * judges it stale there, so once every hop forgot a run, a narrow reader takes its stale groups.
  *
  * A group stays asked until its stream finishes, since narrowing the subscription under a stream
