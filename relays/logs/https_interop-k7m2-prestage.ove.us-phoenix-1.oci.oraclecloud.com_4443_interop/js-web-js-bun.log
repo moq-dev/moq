@@ -2,13 +2,13 @@ https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443/interop 
 https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443/interop negotiated ALPN: moqt-22
 connected version=moq-transport-22
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-js-web-4286-9291.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4286-9291.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4286-9291.hang track=catalog.json
-subscribe error: id=2 broadcast=smoke-js-web-4286-9291.hang track=catalog.json error=SUBSCRIBE error: not_supported (code=3) 
+announced: broadcast=smoke-js-web-4256-30599.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4256-30599.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4256-30599.hang track=catalog.json
+subscribe error: id=2 broadcast=smoke-js-web-4256-30599.hang track=catalog.json error=SUBSCRIBE error: not_supported (code=3) 
 error: SUBSCRIBE error: not_supported (code=3) 
 subscribe_namespace error: connection error: closed (source=session)
-announced: broadcast=smoke-js-web-4286-9291.hang active=false
+announced: broadcast=smoke-js-web-4256-30599.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,

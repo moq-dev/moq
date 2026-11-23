@@ -1,10 +1,10 @@
-[2m2026-11-23T19:35:13.759205Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m7504096623611217 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-23T19:35:13.761846Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-23T19:35:13.761860Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-23T19:35:13.763575Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://draft-14.cloudflare.mediaoverquic.com:443
-[2m2026-11-23T19:35:13.763599Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-23T19:35:13.878271Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-14
-[2m2026-11-23T19:35:13.878287Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://draft-14.cloudflare.mediaoverquic.com:443
-[2m2026-11-23T19:35:43.809629Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: session error: connection error: closed
-/home/runner/work/moq/moq/test/smoke/smoke.sh: line 719:  7586 Killed                     ffmpeg_h264
-      7588 Done                       | rust_moq "$URL" --broadcast "$broadcast" import "$ANNEXB_IMPORT"
+[2m2026-11-23T19:58:06.370196Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m4735598691923801 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-23T19:58:06.375791Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-23T19:58:06.375807Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-23T19:58:06.381127Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://draft-14.cloudflare.mediaoverquic.com:443
+[2m2026-11-23T19:58:06.381169Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-23T19:58:06.510342Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-14
+[2m2026-11-23T19:58:06.510360Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://draft-14.cloudflare.mediaoverquic.com:443
+[2m2026-11-23T19:58:36.446557Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: session error: connection error: closed
+/home/runner/work/moq/moq/test/smoke/smoke.sh: line 719:  7637 Killed                     ffmpeg_h264
+      7639 Done                       | rust_moq "$URL" --broadcast "$broadcast" import "$ANNEXB_IMPORT"
