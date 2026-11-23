@@ -1,4 +1,4 @@
-# [S] Delete `abort_unwanted` and its forwards
+# [S] Delete abort_unwanted and its forwards
 
 ## Goal
 
