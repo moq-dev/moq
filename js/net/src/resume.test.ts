@@ -1034,7 +1034,8 @@ test("a switch asks a placed live join with its max", async () => {
 		// The copy's aggregate, where a placed join's lag places nothing.
 		const asked = hooks.requested(next.producer).peek();
 		expect(asked?.ranges).toEqual([{ start: { live: { min: Duration.ZERO, max: hour } } }]);
-		expect(asked?.placed).toEqual(new Map([[0, 67n]]));
+		// At the group the reader was in, as Rust's: JS asks it whole, with no frame to resume at.
+		expect(asked?.placed).toEqual(new Map([[0, 66n]]));
 	} finally {
 		live.close();
 		front.consumer.close();
