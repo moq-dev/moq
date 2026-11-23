@@ -361,8 +361,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect((await reader.recvGroup())?.start).toBe(3n);
 		// The reader still asks for the groups below. Unless its fills stop at the start, the copy asks
 		// upstream for them on a SUBSCRIBE of its own, and stays open past the track's end while it is out.
+		// Lite-07 asks its range from a time, which the start lands at group 3, so nothing below is owed.
 		const ended = reader.recvGroup();
-		const recovery = fillsFromStart(version) ? undefined : defined(await accept());
+		const recovery = fillsFromStart(version) || hasRanges(version) ? undefined : defined(await accept());
 		await respond({ finish: new SubscribeFinish(4n) });
 		await fin();
 		if (recovery) {
