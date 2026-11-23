@@ -228,7 +228,7 @@ def probe(path: str) -> dict[str, Stream]:
 def starts(source: dict[str, Stream], capture: dict[str, Stream], join: Fraction) -> dict[str, list[str]]:
     """Where each of a program's streams starts against its source's video groups, by PID: under a
     `join`, no earlier than two groups before it, and in any case no later than one group after
-    the capture's first video keyframe."""
+    the capture's first video keyframe or its source's own start, whichever is later."""
     videos = [pid for pid, src in source.items() if src.info.get("codec_type") == "video"]
     if not videos:
         return {}
