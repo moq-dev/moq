@@ -51,6 +51,7 @@ import { ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import {
 	encodeSubscribeResponse,
+	LiveRanges,
 	Subscribe,
 	SubscribeDrop,
 	SubscribeFinish,
@@ -61,9 +62,21 @@ import {
 	SubscribeStarted,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { Minted, Subscriber } from "./subscriber.ts";
+import { fittedReasks, Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, Version, versionName } from "./version.ts";
+
+// A probe answered before its reader began waiting again, under a narrower max than the reader now
+// waits with, is asked afresh even though its fresh probe asks another max: a retune would keep the
+// old answer, which places no reader that began after it. Mirrors the Rust
+// `a_probe_answered_before_a_restate_is_asked_afresh`.
+test("a reasked probe is renewed whatever max its fresh probe asks", () => {
+	const join = (max: number) => ({ start: { live: { min: 1000, max } } });
+	const live = new LiveRanges(Version.DRAFT_07, [join(120), join(120)]);
+	expect(fittedReasks([1n], live, [join(300)])).toEqual(new Set([1n]));
+	// A fresh probe for another join renews nothing.
+	expect(fittedReasks([1n], live, [{ start: { live: { min: 2000, max: 300 } } }])).toEqual(new Set());
+});
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;

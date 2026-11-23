@@ -3958,6 +3958,75 @@ mod tests {
 		assert_eq!(probes, [probe], "the retired demand range answers nothing");
 	}
 
+	/// A probe answered before its reader began waiting again, under a narrower max than the
+	/// reader now waits with, is retired and asked afresh, not retuned in place: a retune keeps
+	/// the old answer, which places no reader that began after it, so the reader would wait on
+	/// it for good. A lite-06 viewer restating its max as its playout delay settles does this.
+	#[kio::test]
+	async fn a_probe_answered_before_a_restate_is_asked_afresh() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite07)
+			.await
+			.unwrap();
+		let join = |budget, since| track::JoinAsk {
+			min: Duration::from_secs(1),
+			end: None,
+			budget,
+			since,
+		};
+		let narrow = join(Duration::from_millis(120), 12);
+		// The demand range, then the probe asked for the reader at 120 ms, each answered.
+		let demand = join_probe(&narrow);
+		let mut sub = SubStream {
+			order: crate::track::Order::Ascending,
+			stream,
+			id: 0,
+			max_delay: None,
+			stale_budget: Duration::ZERO,
+			start: None,
+			priority: 0,
+			requested: None,
+			live: lite::LiveRanges::new(Version::Lite07, &[demand, join_probe(&narrow)]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			probe_ids: [1].into(),
+			fill_groups: Default::default(),
+			tail: Default::default(),
+			started: None,
+			finishing: None,
+			parked: false,
+			starts: [(0, Some(4000)), (1, Some(4000))].into(),
+			join_ticks: [(0, 13), (1, 14)].into(),
+			join_budgets: [(0, Duration::ZERO), (1, Duration::from_millis(120))].into(),
+			declared: None,
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+
+		// The reader restated at 300 ms after both answers landed.
+		let wide = join(Duration::from_millis(300), 15);
+		let ranges = [join_probe(&wide)];
+		let (probes, reasked) = join_probes(Some(&sub), &[wide], &ranges);
+		assert_eq!(probes, [join_probe(&wide)], "neither answer places the restated reader");
+		let reasked = fitted_reasks(Some(&sub), reasked, &probes);
+		assert_eq!(reasked, [1].into(), "the fresh probe asks the same join");
+
+		let wanted: Vec<_> = ranges.iter().chain(&probes).copied().collect();
+		let (edit, _) = sub.edit(&wanted, (probes.len(), 0), &reasked).unwrap();
+		let lite::RangeEdit::Edit { remove, add, retune } = edit else {
+			panic!("lite-07 edits its ranges");
+		};
+		assert_eq!(remove, [1], "the stale probe is retired");
+		assert_eq!(add, [join_probe(&wide)], "and asked afresh");
+		assert_eq!(
+			retune,
+			[(0, Some(Duration::from_millis(300)))],
+			"the demand range is retuned"
+		);
+	}
+
 	/// The owed groups start at the floor the demand last asked for, which an update can move
 	/// either way after SUBSCRIBE_START answered the SUBSCRIBE.
 	#[kio::test]
@@ -10888,6 +10957,28 @@ fn join_probes(
 	(probes, reasked)
 }
 
+/// The live probes in `reasked` whose join a fresh probe among `probes` still asks, so each is
+/// retired and asked afresh; the rest stay, as no probe that fit replaces them. Matched by the
+/// join each asks, not the whole range: the fresh probe asks the max its readers now wait
+/// with, which may differ from the one the live probe was answered under.
+fn fitted_reasks(
+	active: Option<&SubStream>,
+	reasked: std::collections::BTreeSet<u64>,
+	probes: &[lite::Range],
+) -> std::collections::BTreeSet<u64> {
+	if reasked.is_empty() {
+		return reasked;
+	}
+	let kept: std::collections::HashSet<_> = probes.iter().filter_map(wire_join).collect();
+	(reasked.into_iter())
+		.filter(|id| {
+			(active.and_then(|active| active.live.get(*id)))
+				.and_then(wire_join)
+				.is_some_and(|join| kept.contains(&join))
+		})
+		.collect()
+}
+
 /// The range a copy asks its upstream to place the live join `join` with: the join itself,
 /// under the widest max age its readers wait with, so readers waiting on it share it, as a
 /// demand range asking it goes out (see [`wire_ranges`]).
@@ -11396,18 +11487,7 @@ impl TrackServe {
 				probes.extend(joined);
 				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
-				let reasked = if reasked.is_empty() {
-					reasked
-				} else {
-					let kept: std::collections::HashSet<_> = probes.iter().copied().collect();
-					(reasked.into_iter())
-						.filter(|id| {
-							active
-								.and_then(|active| active.live.get(*id))
-								.is_some_and(|range| kept.contains(range))
-						})
-						.collect()
-				};
+				let reasked = fitted_reasks(active, reasked, &probes);
 				(
 					demand.map(|demand| (demand, demand_ranges, probes, reasked, max_age)),
 					groups,

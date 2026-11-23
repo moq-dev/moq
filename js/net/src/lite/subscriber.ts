@@ -97,7 +97,6 @@ import {
 	inclusiveGroupEnd,
 	LiveRanges,
 	type RangeKind,
-	rangeKey,
 	requestedRange,
 	Subscribe,
 	SubscribeUpdate,
@@ -2822,13 +2821,8 @@ export class Subscriber {
 				const wanted = probes(asks, fitted.ranges);
 				const joined = joinProbes(entry, joins, fitted.ranges);
 				const probed = Fit.fitAfter(budget, [...fitted.ranges, ...fillRanges], [...wanted, ...joined.probes]);
-				const kept = new Set(probed.map(rangeKey));
 				// A live probe asked afresh is retired and added again, which the publisher answers anew.
-				const renew = new Set<bigint>();
-				for (const id of joined.reasked) {
-					const range = entry.live.get(id);
-					if (range && kept.has(rangeKey(range))) renew.add(id);
-				}
+				const renew = fittedReasks(joined.reasked, entry.live, probed);
 				// The demand's ranges, then the probes, then the fills'.
 				const kindOf = (id: bigint): RangeKind =>
 					entry.fillIds.has(id) ? "fill" : entry.probeIds.has(id) ? "probe" : "demand";
@@ -3525,6 +3519,25 @@ function joinProbes(
 function joinProbe(join: JoinAsk): WireRange {
 	const live = { min: join.min, max: join.budget < NO_MAX_DELAY ? join.budget : null };
 	return join.end === undefined ? { start: { live } } : { start: { live }, end: { time: join.end } };
+}
+
+/**
+ * The live probes in `reasked` whose join a fresh probe among `probes` still asks, so each is
+ * retired and asked afresh; the rest stay, as no probe that fit replaces them. Matched by the join
+ * each asks, not the whole range: the fresh probe asks the max its readers now wait with, which may
+ * differ from the one the live probe was answered under. Mirrors the Rust `fitted_reasks`.
+ *
+ * @internal
+ */
+export function fittedReasks(reasked: Iterable<bigint>, live: LiveRanges, probes: readonly WireRange[]): Set<bigint> {
+	const kept = new Set(probes.map(wireJoin).filter((join) => join !== undefined));
+	const renew = new Set<bigint>();
+	for (const id of reasked) {
+		const range = live.get(id);
+		const join = range === undefined ? undefined : wireJoin(range);
+		if (join !== undefined && kept.has(join)) renew.add(id);
+	}
+	return renew;
 }
 
 // A wire live start's max in milliseconds as a budget: {@link NO_MAX_DELAY} for none.
