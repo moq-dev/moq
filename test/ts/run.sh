@@ -388,8 +388,9 @@ if [[ -n "$MPTS" && (-z "$PASSTHROUGH$PROGRAM" || -n "$SOURCE$HRD$HEADROOM$LEAK$
     echo "error: --mpts generates its own clip and needs --passthrough, which carries the multiplex whole, or --program" >&2
     exit 1
 fi
-if [[ -n "$PROGRAM" && (-z "$MPTS" || -n "$PASSTHROUGH$ANALYZE_ONLY$PAIR$LIVE") ]]; then
-    echo "error: --program exports one program of --mpts, and cannot be combined with --passthrough, --analyze-only, --pair, or --live" >&2
+# Its grader allows no loss from the join on, so nothing may shed: an unimpaired path only.
+if [[ -n "$PROGRAM" && (-z "$MPTS" || -n "$PASSTHROUGH$ANALYZE_ONLY$PAIR$LIVE$SHAPED") ]]; then
+    echo "error: --program exports one program of --mpts, and cannot be combined with --passthrough, --analyze-only, --pair, --live, --loss, or --rate" >&2
     exit 1
 fi
 if [[ -n "$PROGRAM_JOIN" && -z "$PROGRAM" ]]; then

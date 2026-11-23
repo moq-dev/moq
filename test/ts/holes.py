@@ -258,10 +258,11 @@ def starts(source: dict[str, Stream], capture: dict[str, Stream], join: Fraction
                 f"starts {float(first - origin):.3f}s into its program, over two {float(group)}s groups "
                 f"before the {float(join)}s join"
             )
-        if opened is not None and first - opened > group:
+        # A stream the source itself starts later than that may start as late in the capture.
+        if opened is not None and first > max(opened + group, source[pid].span[0]):
             reasons.append(
                 f"starts {float(first - opened):.3f}s after the program's first video keyframe, "
-                f"past a {float(group)}s group"
+                f"past a {float(group)}s group and its source's start"
             )
     return found
 

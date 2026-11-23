@@ -310,6 +310,12 @@ class Starts(unittest.TestCase):
         # Both from the start of the source is still a replay.
         self.assertEqual(set(self.grade(0, 0, 8, late=3)), {"0x102", "0x103"})
 
+    def test_a_stream_the_source_starts_late_may_start_as_late(self):
+        # The source's audio from 3 s, past the first group: the whole capture keeps that delay.
+        self.assertEqual(self.grade(0, 0, 0, late=3), {})
+        # Audio from 5.13 s, after both the first group and the source's own start, is missing.
+        self.assertEqual(set(self.grade(0, 100, 0, late=3)), {"0x103"})
+
     def test_audio_missing_after_the_first_keyframe_fails(self):
         # Video from 6.4 s, audio only from 8.53 s: over a group late, though inside the join.
         self.assertEqual(set(self.grade(160, 400, 8)), {"0x103"})
