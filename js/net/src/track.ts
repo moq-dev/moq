@@ -4876,14 +4876,14 @@ export class Subscriber {
 	#askKeptOut(unproven: Run[]): boolean {
 		if (unproven.length === 0 && !this.#keptOut) return true;
 		this.#keptOut ??= this.#keptOutOf();
-		return this.#askUnproven(this.#keptOut, unproven);
+		return this.#askUnproven(this.#keptOut, unproven).length === 0;
 	}
 
 	// Ask `kept`'s fills for the keys of `unproven` it has not asked yet, withdrawing what it no
-	// longer wants, and return whether none of them is still out.
-	#askUnproven(kept: KeptOut, unproven: Run[]): boolean {
+	// longer wants, and return the keys still out: the rest is given up.
+	#askUnproven(kept: KeptOut, unproven: Run[]): Run[] {
 		const producer = this.#state.producer;
-		if (!producer) return true;
+		if (!producer) return [];
 		const fills = fillsOf(producer);
 		const drift = this.#drift();
 		// A wider budget asks again what a narrower one gave up as stale.
@@ -4920,16 +4920,16 @@ export class Subscriber {
 				}
 			}
 		}
-		let out = false;
+		const out: Run[] = [];
 		for (const run of unproven) {
 			for (const covered of [...fills.covered(run.start, run.end, kept.asker)]) {
 				for (const [part, budget] of drift.budget.runs(covered.start, covered.end)) {
 					if (this.#staleAt(part.end - 1n, drift, true)) giveUp(part, budget);
-					else out = true;
+					else insertRun(out, part.start, part.end);
 				}
 			}
 		}
-		return !out;
+		return out;
 	}
 
 	// The end of this read: nothing reads the kept-out keys now, so their fills are withdrawn, and a
@@ -5055,9 +5055,11 @@ export class Subscriber {
 		// asks through its own routes instead.
 		hooks.askUnproven = (subscriber, unproven) => {
 			const producer = subscriber.#state.producer;
-			if (subscriber.#resume || !producer) return;
+			if (subscriber.#resume || !producer) return [];
 			subscriber.#routedOut ??= subscriber.#keptOutOf();
-			subscriber.#askUnproven(subscriber.#routedOut, subscriber.#unfed(producer, unproven));
+			const unfed = subscriber.#unfed(producer, unproven);
+			const out = subscriber.#askUnproven(subscriber.#routedOut, unfed);
+			return unfed.flatMap((run) => runGaps(out, run.start, run.end));
 		};
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
 		// their anchors against the groups it holds, then narrows them to its own local bounds.

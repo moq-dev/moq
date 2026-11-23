@@ -17,3 +17,5 @@ drive, such as a wall-clock read or a task woken by another test's load.
 Reproduce under load first, such as the full lib suite or
 `cargo nextest run -p moq-net --features async --lib refresh_joins_coalesce_upstream --stress-count 200`
 beside a CPU-heavy job, then find what lets the ninth update through.
+
+Decided 2026-11-23 (maintainer, /quest-run): keep.

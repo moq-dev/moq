@@ -937,9 +937,10 @@ export const hooks: {
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
 	/**
 	 * Ask a route copy's fills for the keys of `unproven` a front's resumed reader owes that its
-	 * track cannot prove skipped, once its feed no longer waits for them. Assigned by `track.ts`.
+	 * track cannot prove skipped, once its feed no longer waits for them, returning those its fills
+	 * gave up. Assigned by `track.ts`.
 	 */
-	askUnproven: (subscriber: Subscriber, unproven: Run[]) => void;
+	askUnproven: (subscriber: Subscriber, unproven: Run[]) => Run[];
 	/**
 	 * The runs of `[start, end)` a subscriber reads: inside its ranges and its local bounds.
 	 * Assigned by `track.ts`.

@@ -11816,12 +11816,26 @@ impl Subscriber {
 	/// [`Cursor::ask_kept_out`] does for a cursor's own: its track forgets a skip it was told
 	/// once the pool's expiry window passes, and only a fill asks upstream again. A copy that
 	/// is another front's logical track asks through its own routes instead.
-	pub(super) fn ask_unproven(&mut self, unproven: RangeSet<u64>, waiter: &kio::Waiter) {
-		if let Inner::Plain(cursor) = &mut self.inner {
-			let mut kept = cursor.routed_out.take().unwrap_or_default();
-			cursor.judge_unproven(&mut kept, unproven, waiter);
-			cursor.routed_out = Some(kept);
-		}
+	///
+	/// Returns the keys of `unproven` those fills gave up (refused, unfillable, or stale), which
+	/// the reader counts as accounted, as one cursor does.
+	pub(super) fn ask_unproven(&mut self, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let Inner::Plain(cursor) = &mut self.inner else {
+			return RangeSet::new();
+		};
+		let mut kept = cursor.routed_out.take().unwrap_or_default();
+		cursor.judge_unproven(&mut kept, unproven.clone(), waiter);
+		let given_up = kept.misses.given_up();
+		let given_up = unproven
+			.iter()
+			.flat_map(|run| {
+				given_up
+					.overlapping(run)
+					.map(|gone| gone.start.max(run.start)..gone.end.min(run.end))
+			})
+			.collect();
+		cursor.routed_out = Some(kept);
+		given_up
 	}
 
 	/// Whether a group in `groups` may still land for this subscriber, by the rule
