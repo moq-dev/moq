@@ -2944,7 +2944,7 @@ impl Reader {
 		}
 		if let (Some(first), Some(last)) = (open.iter().next(), open.iter().next_back()) {
 			let keys = first.start..last.end;
-			self.ask(keys, taken[0], waiter);
+			self.ask(keys, &open, taken[0], waiter);
 			return false;
 		}
 		match self.copies.last_mut() {
@@ -2960,8 +2960,16 @@ impl Reader {
 	/// key as it would on one cursor: a skip accounts for it, while a group or a drop leaves it
 	/// owed. A copy of that route already asked for them, kept by [`Self::let_go`] until
 	/// [`Self::skipped`] records them, asks nothing more, so neither a reader waiting on the
-	/// answer nor one a group holds open asks again.
-	fn ask(&mut self, keys: std::ops::Range<u64>, delivered: &Delivered, waiter: &kio::Waiter) {
+	/// answer nor one a group holds open asks again. Its track may forget a skip it answered
+	/// before the rest lands, so it asks its fills for the keys of `open` it cannot prove (see
+	/// [`track::Subscriber::ask_unproven`]).
+	fn ask(
+		&mut self,
+		keys: std::ops::Range<u64>,
+		open: &RangeSet<u64>,
+		delivered: &Delivered,
+		waiter: &kio::Waiter,
+	) {
 		self.backfill(keys.clone(), false, delivered);
 		let groups = self.groups;
 		let Some((serving, copies)) = self.copies.split_last_mut() else {
@@ -2976,6 +2984,9 @@ impl Reader {
 			// Another front's logical track asks its own routes only once subscribed.
 			let _ = copy.poll_ready(groups, waiter);
 			copy.skipped_in(keys.clone(), waiter);
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.ask_unproven(open.clone(), waiter);
+			}
 		}
 	}
 
@@ -13526,6 +13537,71 @@ mod test {
 		b.skip_groups(3..5);
 		assert!(sub.poll_recv_group(&fresh()).is_pending(), "2 is owed");
 		b.skip_groups(2..3);
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A kept-out key the asked copy's track forgot it was told is skipped, once the pool's expiry
+	/// window passed, is asked of that copy's fills: the route answered it once and will not
+	/// again unasked, and the copy kept for the ask would otherwise stand for an answer it lost.
+	#[kio::test]
+	async fn a_kept_out_skip_the_asked_copy_forgot_is_asked_again() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..5, StreamError::NotFound);
+		write(&a, 5);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: track::Start::Time(0),
+				end: Some(6),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 5]);
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let b = track::Producer::new(
+			Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"video",
+			crate::track::Info::timed(),
+		);
+		b.received();
+		let dynamic = b.requests();
+		write(&b, 6);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(5..7);
+		assert_eq!(drain(&mut sub, false), [6]);
+		kio::clock::sleep(HOUR).await;
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 to 4 are owed");
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		// Past the grace, what the route has not answered is asked of a fill too.
+		let Poll::Ready(Ok(overdue)) = dynamic.poll_requested_fill(&fresh()) else {
+			panic!("the overdue keys are asked of the copy's fills");
+		};
+		assert_eq!(overdue.start().group..overdue.end(), 1..5);
+		// The upstream answers part of it.
+		b.skip_groups(3..5);
+		drop(overdue);
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 and 2 are owed");
+
+		pool.step(Duration::from_secs(60));
+		pool.sweep();
+		b.skip_groups(1..3);
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "3 and 4 were forgotten");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&fresh()) else {
+			panic!("the forgotten skip is asked of the copy's fills");
+		};
+		assert_eq!(fill.start().group..fill.end(), 3..5);
+		b.skip_groups(3..5);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
 

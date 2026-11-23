@@ -2,9 +2,10 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, Instant, Wall, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race } from "@moq/signals";
-import { DEFAULT_EXPIRY } from "./cache.ts";
+import { DEFAULT_EXPIRY, Pool } from "./cache.ts";
 import { joinTick } from "./demand.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import type { FillGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks, maxDelayOf, NO_MAX_DELAY, skipHole, staleHole } from "./internal.ts";
@@ -6319,5 +6320,55 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 			expect(producer.subscription.peek()).toEqual(foldSubscriptions(live));
 		}
 		producer.close();
+	}
+});
+
+// A bounded read owes the keys its local floor keeps out until a skip accounts for them. One its
+// track forgot once the pool's idle window passed is unknown again, so the read asks a fill for it
+// rather than wait for good, and ends on the upstream's answer. Mirrors the Rust
+// `a_bounded_read_asks_again_for_a_kept_out_skip_its_track_forgot`.
+test("a bounded read asks again for a kept-out skip its track forgot", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	try {
+		for (const key of [0n, 6n]) {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		const sub = producer.subscribe({ delay: { max: Duration.millis(36_000_000) }, ranges: [{ start: 0n, end: 6n }] });
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });
+		const ended = sub.recvGroup();
+		producer.skipGroups(3n, 6n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		// The feed still owes 1 and 2.
+		expect(fills).toEqual([]);
+
+		await clock.advance(Duration.millis(60_000));
+		producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[3n, 6n]]);
+		// The upstream's answer, which a session records as the subscription's own skip.
+		producer.skipGroups(3n, 6n);
+		expect(await ended).toBeUndefined();
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
 	}
 });

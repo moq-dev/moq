@@ -397,6 +397,17 @@ impl Misses {
 		}
 	}
 
+	/// Let go of every group a fill answered, for a reader that never reads them: the cache
+	/// holds them, and their fills may serve the rest.
+	pub fn let_go_filled(&mut self) {
+		let filled: RangeSet<u64> = std::mem::take(&mut self.filled)
+			.into_iter()
+			.map(|key| key..key + 1)
+			.collect();
+		self.release(&filled);
+		self.pick_up();
+	}
+
 	/// Take `key` as handed out, if a fill answered it. A refill handed out is never
 	/// judged again, so it is forgotten too.
 	pub fn take_filled(&mut self, key: u64) {

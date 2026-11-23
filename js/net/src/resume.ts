@@ -1495,18 +1495,20 @@ class Reader implements ResumeSource {
 		if (window.end() === undefined || window.pending) return false;
 		const resumed = resumePoint(serving) ?? 0n;
 		let open: Run | undefined;
+		const unknowns: Run[] = [];
 		const above: Run[] = [];
 		for (const gap of gaps) {
 			for (const run of this.#keptOut(gap, resumed)) {
 				for (const unknown of this.#unskipped(run)) {
 					open = open ? { start: min(open.start, unknown.start), end: max(open.end, unknown.end) } : unknown;
+					insertRun(unknowns, unknown.start, unknown.end);
 				}
 			}
 			const split = min(max(resumed, gap.start), gap.end);
 			if (split < gap.end) above.push({ start: split, end: gap.end });
 		}
 		if (open) {
-			this.#ask(open);
+			this.#ask(open, unknowns);
 			return false;
 		}
 		return hooks.accountsFor(serving.sub, delivered, above, ordered);
@@ -1537,11 +1539,19 @@ class Reader implements ResumeSource {
 	 * nor declared skipped by a copy held now. Its answer settles each such key as it would on one
 	 * cursor: a skip accounts for it, while a group or a drop leaves it owed. A copy of that route
 	 * already asked for them, kept by {@link #letGo} until {@link #skipped} records them, asks nothing
-	 * more, so neither a reader waiting on the answer nor one a group holds open asks again. Mirrors
-	 * the Rust `Reader::ask`.
+	 * more, so neither a reader waiting on the answer nor one a group holds open asks again. Its
+	 * track may forget a skip it answered before the rest lands, so it asks its fills for the keys of
+	 * `unknowns` it cannot prove. Mirrors the Rust `Reader::ask`.
 	 */
-	#ask(keys: Run): void {
+	#ask(keys: Run, unknowns: Run[]): void {
 		this.#backfill(keys.start, keys.end);
+		const serving = this.#copies.at(-1);
+		if (!serving) return;
+		for (const copy of this.#copies.slice(0, -1)) {
+			const end = copyEnd(copy);
+			if (copyAskedFor(copy, serving, keys.start) && end !== undefined && end >= keys.end)
+				hooks.askUnproven(copy.sub, unknowns);
+		}
 	}
 
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined {

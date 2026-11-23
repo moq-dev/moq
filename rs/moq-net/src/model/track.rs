@@ -9133,6 +9133,12 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
+	/// The keys a bounded window owes that the local floor or cap keeps out and the track
+	/// cannot prove skipped, asked of fills; see [`Self::ask_kept_out`].
+	kept_out: Option<Box<KeptOut>>,
+	/// The same for the keys a front's resumed reader owes and asks this route copy about
+	/// (see [`Subscriber::ask_unproven`]), apart so neither moves what the other asks.
+	routed_out: Option<Box<KeptOut>>,
 	/// Behind an [`Ordered`], whose dropped reports are gaps it has yet to return: the runs a
 	/// widening took back from them, for it to forget. `None` for a wire publisher, which
 	/// told its peer of every drop it reported, for good.
@@ -9148,6 +9154,17 @@ struct Cursor {
 	/// The time starts and live joins this cursor's window waits on that it counts in the
 	/// demand's asks.
 	asked: Asked,
+}
+
+/// What a [`Cursor`] asks fills for of the keys its bounded window owes that its local floor
+/// or cap keeps out.
+#[derive(Default)]
+struct KeptOut {
+	/// The keys asked about, as [`Cursor::unproven`] last found them.
+	unproven: RangeSet<u64>,
+	/// Bumped whenever `unproven` changes, so `misses` judges them again.
+	revision: u64,
+	misses: miss::Misses,
 }
 
 /// The time starts and live joins a [`Cursor`] on a received lite-07 copy counts in its
@@ -9647,6 +9664,8 @@ impl Cursor {
 			record: Record::default(),
 			drops: None,
 			misses: None,
+			kept_out: None,
+			routed_out: None,
 			withdrawn: None,
 			heads: None,
 			idle: None,
@@ -9903,7 +9922,7 @@ impl Cursor {
 
 	/// Whether a bounded window has nothing left to deliver: every group in its ranges was
 	/// handed out, dropped, skipped as stale, or given up as unfillable (see [`Self::accounts`]).
-	fn is_exhausted(&self, ordered: bool) -> bool {
+	fn is_exhausted(&mut self, ordered: bool, waiter: &kio::Waiter) -> bool {
 		let window = &self.filter.window;
 		let Some(end) = window.end() else {
 			return false;
@@ -9916,28 +9935,38 @@ impl Cursor {
 				self.record.delivered.gaps(run)
 			})
 			.collect();
-		self.accounts(&gaps, ordered)
+		self.accounts(&gaps, ordered, waiter)
 	}
 
 	/// Whether this cursor accounts for every key of `gaps` it did not hand out itself: each
 	/// was dropped, skipped as stale, or given up as unfillable, or lies outside its window,
 	/// which it never reads. An open window, or one with a fill still out, accounts for nothing
-	/// yet, and a key the cap keeps out stays owed, since a reader may raise a cap again.
+	/// yet, and a key the local floor or cap keeps out stays owed, since a reader may lower or
+	/// raise them again, until the track proves it gone. One it cannot prove is asked of a fill
+	/// (see [`Self::ask_kept_out`]), parking `waiter` on the answer.
+	fn accounts(&mut self, gaps: &[ops::Range<u64>], ordered: bool, waiter: &kio::Waiter) -> bool {
+		match self.unproven(gaps, ordered) {
+			Some(unproven) => self.ask_kept_out(unproven, waiter),
+			None => false,
+		}
+	}
+
+	/// The keys of `gaps` the local floor or cap keeps out that nothing accounts for, once
+	/// every other key of them is: `None` while one this cursor reads is not.
 	///
 	/// An `ordered` read of the track's own publisher also passes a key below a group that
 	/// publisher created (see [`Self::passes`]). A received copy never does: only what its
 	/// feed proved, such as a whole group's GROUP_END, accounts for a key there.
-	fn accounts(&self, gaps: &[ops::Range<u64>], ordered: bool) -> bool {
+	fn unproven(&self, gaps: &[ops::Range<u64>], ordered: bool) -> Option<RangeSet<u64>> {
 		let window = &self.filter.window;
-		let Some(end) = window.end().filter(|_| !window.is_pending() && !self.awaits_fill()) else {
-			return false;
-		};
+		let end = window.end().filter(|_| !window.is_pending() && !self.awaits_fill())?;
 		let given_up = self.misses.as_ref().map(|misses| misses.given_up());
 		let coverage = self.coverage();
 		let state = self.state.read();
 		let budget = clamp_max_delay(self.subscription.read().budget(), state.max_age_bound());
 		let passes = ordered && !state.anchors.received();
-		let accounted = |gap: ops::Range<u64>| {
+		let mut unproven = RangeSet::new();
+		let mut accounted = |gap: ops::Range<u64>| {
 			let mut left = RangeSet::new();
 			left.insert(gap.clone());
 			for run in self.record.written_off.overlapping(&gap) {
@@ -9960,7 +9989,14 @@ impl Cursor {
 			for key in self.seek_pending.range(gap).map(|(key, _)| *key) {
 				left.remove(key..key + 1);
 			}
-			left.iter().all(|open| passes && Self::passes(&state, open))
+			for open in left.iter().filter(|open| !(passes && Self::passes(&state, open))) {
+				let read = open.start.max(self.min_key)..open.end.min(self.end_key.unwrap_or(u64::MAX));
+				if !read.is_empty() {
+					return false;
+				}
+				unproven.insert(open.clone());
+			}
+			true
 		};
 		gaps.iter()
 			.flat_map(|gap| {
@@ -9971,7 +10007,87 @@ impl Cursor {
 					.map(move |run| (*run.start()).max(gap.start)..run.end().saturating_add(1).min(gap_end))
 			})
 			.flat_map(|gap| self.record.delivered.gaps(gap))
-			.all(accounted)
+			.all(&mut accounted)
+			.then_some(unproven)
+	}
+
+	/// Whether nothing of `unproven`, the kept-out keys [`Self::unproven`] found, is still owed:
+	/// each was given up as unfillable or stale, as a read under a lowered floor or raised cap
+	/// would give it up. The rest is judged as a miss, as for any key the cache cannot answer:
+	/// once the feed is past it, a fill asks upstream, whose skip accounts for it. A track that
+	/// forgot a skip it was told, as its expiry window does, so asks again rather than keep it.
+	/// A group answered stays owed until the floor or cap admits it.
+	fn ask_kept_out(&mut self, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> bool {
+		if unproven.is_empty() && self.kept_out.is_none() {
+			return true;
+		}
+		let mut kept = self.kept_out.take().unwrap_or_default();
+		let settled = self.judge_unproven(&mut kept, unproven, waiter);
+		self.kept_out = Some(kept);
+		settled
+	}
+
+	/// Judge `unproven` as misses of `kept`, asking fills for what the feed no longer
+	/// delivers, and return whether `kept` gave up every key of it with nothing still asked.
+	fn judge_unproven(&mut self, kept: &mut KeptOut, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> bool {
+		let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter) else {
+			return false;
+		};
+		if kept.unproven != unproven {
+			kept.unproven = unproven;
+			kept.revision += 1;
+		}
+		let id = (0, kept.revision, None);
+		let owed = &kept.unproven;
+		let target = |span: ops::RangeInclusive<u64>| -> RangeInclusiveSet<u64> {
+			let span = *span.start()..span.end().saturating_add(1);
+			owed.overlapping(&span)
+				.map(|run| run.start.max(span.start)..=(run.end.min(span.end) - 1))
+				.collect()
+		};
+		let misses = &mut kept.misses;
+		misses.retain(id, None, || target(0..=u64::MAX - 1));
+		// What it gives up is never read, so never reported as dropped.
+		let mut given_up = Vec::new();
+		let (asks, fills) = {
+			let state = self.state.read();
+			let window = &self.filter.window;
+			let asks = misses.judge(
+				&state,
+				id,
+				None,
+				window.named(),
+				window.end(),
+				target,
+				&self.record.delivered,
+				&drift,
+				&mut given_up,
+				waiter,
+			);
+			let fills = (!asks.is_empty()).then(|| state.fills.clone());
+			(asks, fills)
+		};
+		if fills.is_some() || !misses.is_idle() {
+			let asking = asking(&self.subscription);
+			match &fills {
+				Some(fills) => misses.ask(&self.state, fills, &asks, &asking, &mut given_up),
+				None => misses.update(&asking),
+			}
+			loop {
+				let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
+				if retry.is_empty() {
+					break;
+				}
+				let fills = self.state.read().fills.clone();
+				misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
+			}
+		}
+		if misses.is_waiting() {
+			misses.expire(&self.state.read(), &drift, &mut given_up, waiter);
+		}
+		// A group answered is held by the cache, where it stays owed, not by this reader.
+		misses.let_go_filled();
+		!misses.is_waiting() && owed.iter().all(|run| misses.given_up().gaps(run).next().is_none())
 	}
 
 	/// Whether an ordered read of its track's own publisher passes `gap` without a group: that
@@ -11628,7 +11744,7 @@ impl Subscriber {
 						Poll::Pending => {
 							// A read that only skipped since its last hand-out settles its write-offs too.
 							cursor.retire_written_off();
-							break match !self.parks && cursor.is_exhausted(ordered) {
+							break match !self.parks && cursor.is_exhausted(ordered, idle.waiter()) {
 								true => {
 									if ordered && let Some(end) = cursor.filter.window.end() {
 										cursor.pass_end(cursor.end_key.map_or(end, |cap| cap.min(end)));
@@ -11670,7 +11786,7 @@ impl Subscriber {
 		waiter: &kio::Waiter,
 	) -> bool {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.accounts(gaps, ordered),
+			Inner::Plain(cursor) => cursor.accounts(gaps, ordered, waiter),
 			Inner::Resume(resume, own) => {
 				let mut taken = Vec::with_capacity(logical.len() + 1);
 				taken.push(&own.record.delivered);
@@ -11681,6 +11797,19 @@ impl Subscriber {
 					.collect();
 				resume.accounts(&taken, &gaps, ordered, waiter)
 			}
+		}
+	}
+
+	/// Ask this route copy's fills for the keys of `unproven` that a front's resumed reader
+	/// owes and its track cannot prove skipped, once its feed no longer delivers them, as
+	/// [`Cursor::ask_kept_out`] does for a cursor's own: its track forgets a skip it was told
+	/// once the pool's expiry window passes, and only a fill asks upstream again. A copy that
+	/// is another front's logical track asks through its own routes instead.
+	pub(super) fn ask_unproven(&mut self, unproven: RangeSet<u64>, waiter: &kio::Waiter) {
+		if let Inner::Plain(cursor) = &mut self.inner {
+			let mut kept = cursor.routed_out.take().unwrap_or_default();
+			cursor.judge_unproven(&mut kept, unproven, waiter);
+			cursor.routed_out = Some(kept);
 		}
 	}
 
@@ -32195,6 +32324,40 @@ mod test {
 			panic!("the forgotten run is asked of a fill");
 		};
 		assert_eq!(fill.start().group..fill.end(), 1..2);
+	}
+
+	/// A bounded read owes the keys its local floor keeps out until a skip accounts for them.
+	/// One its track forgot once the pool's expiry window passed is unknown again, so the read
+	/// asks a fill for it rather than wait for good, and ends on the upstream's answer.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_bounded_read_asks_again_for_a_kept_out_skip_its_track_forgot() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 6);
+		let budget = Delay::default().with_max(Duration::from_secs(10 * 3600));
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..7).with_delay(budget));
+		assert_eq!(drain_groups(&mut subscriber), [0, 6]);
+		let mut subscriber = subscriber.with_range(6..7);
+		let waiter = kio::Waiter::noop();
+		producer.skip_groups(3..6);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "1 and 2 are owed");
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "the feed still owes them");
+
+		elapse(&producer, Duration::from_secs(60));
+		pool.sweep();
+		producer.skip_groups(1..3);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "3 to 5 were forgotten");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the forgotten skip is asked of a fill");
+		};
+		assert_eq!(fill.start().group..fill.end(), 3..6);
+		// The upstream's answer, which a session records as the subscription's own skip.
+		producer.skip_groups(3..6);
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
 	}
 
 	/// A source refusing a fill in disjoint groups pays for the runs it records, as a drop does.
