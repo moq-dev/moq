@@ -496,7 +496,11 @@ mod test {
 		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the stretch, and the key below it");
 		assert!(record.delivered.contains(3_500) && record.told(3_500));
 		assert!(!record.told(1_500), "below its start stays owed");
-		assert_eq!(forgotten.0, [2_000..4_000], "the stretch, beside the record too");
+		assert_eq!(
+			forgotten.0,
+			std::slice::from_ref(&(2_000..4_000)),
+			"the stretch, beside the record too"
+		);
 	}
 
 	/// What a reader holds beside its record, here only what it was told to forget.

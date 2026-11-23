@@ -33298,11 +33298,12 @@ mod test {
 	/// A frame taken still arriving, partly read when the pool evicts its copy, reads the
 	/// rest of its bytes from a flight of the group from that frame.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_frame_evicted_while_arriving_resumes_on_a_flight() {
 		let noop = kio::Waiter::noop();
 		let producer = track_producer("test", Info::default());
 		let requests = producer.requests();
-		let mut live = producer.append_next().unwrap();
+		let live = producer.append_next().unwrap();
 		let mut reader = live.consume();
 		let handle = live.handle();
 		let payload = numbered(0);
@@ -33342,6 +33343,7 @@ mod test {
 	/// flight for the rest itself, so the flight wakes it and the group ends when the flight
 	/// does.
 	#[test]
+	#[cfg(feature = "async")]
 	fn the_end_of_a_group_evicted_while_arriving_waits_on_its_flight() {
 		let producer = track_producer("test", Info::default());
 		let requests = producer.requests();
