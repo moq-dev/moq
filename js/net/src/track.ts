@@ -38,7 +38,6 @@ import {
 	insertRun,
 	type Land,
 	NO_MAX_DELAY,
-	PAST_EVERY_GROUP,
 	type Recv,
 	type ResumeSource,
 	type Run,
@@ -359,14 +358,15 @@ export interface Live {
 	/**
 	 * How far behind the live edge to join: the group containing the live edge minus this lag, so a
 	 * player's buffer arrives full instead of filling in real time, and zero starts at the latest
-	 * group. The hop serving it measures the live edge in media time, from the newest frame it holds,
+	 * group; `null` sets no lag limit, so the join reaches back past every group and takes each one
+	 * `max` still allows. The hop serving it measures the live edge in media time, from the newest frame it holds,
 	 * rounded up to whole ticks, and on a scale-less track by arrival on its own clock. It resolves
 	 * that time as a time start would, so a publisher looks it up in its history; `max` does not
 	 * move it. A relay copy forwards each join to its upstream as its own range and starts it where
 	 * that range's answer does. A range resolves once, so a live edge that moves later moves nothing
 	 * already started.
 	 */
-	min: Duration;
+	min: Duration | null;
 	/**
 	 * How long a superseded group stays worth delivering, measured from the live edge by the same
 	 * two clocks as {@link Info.maxAge}: it is skipped once its successor arrived this long ago or
@@ -1117,8 +1117,8 @@ type JoinAnswer = {
 	tick: number;
 };
 
-// A live join's lag in milliseconds and end as one map key.
-function joinKey(min: number, end: bigint | undefined): string {
+// A live join's lag in milliseconds, null for no lag limit, and end as one map key.
+function joinKey(min: number | null, end: bigint | undefined): string {
 	return `${min}:${end ?? ""}`;
 }
 
@@ -1787,8 +1787,10 @@ export class Producer {
 		};
 		hooks.retainJoins = (producer, keep) => {
 			for (const key of producer.#joinAnswers.keys()) {
+				// The key's parts as `joinKey` writes them.
 				const [min, end] = key.split(":");
-				if (!keep(Number(min), end === "" ? undefined : BigInt(end))) producer.#joinAnswers.delete(key);
+				const lag = min === "null" ? null : Number(min);
+				if (!keep(lag, end === "" ? undefined : BigInt(end))) producer.#joinAnswers.delete(key);
 			}
 		};
 		hooks.producerLargest = (producer) => producer.#state.largest;
@@ -4057,8 +4059,8 @@ export class Subscriber {
 		// budget at least as wide as the reader's. Mirrors the Rust `TrackState::join_answer`.
 		// The upstream's answer to a live join, recorded after `since` under a budget at least as wide
 		// as the reader's: a start past groups a narrower max expired would skip groups it still wants.
-		const joinAnswer = (min: Duration, end: bigint | undefined, budget: number, since: number) => {
-			const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
+		const joinAnswer = (min: Duration | null, end: bigint | undefined, budget: number, since: number) => {
+			const answer = anchors.joins.get(joinKey(min && Math.ceil(min.asMillis()), end));
 			return answer && answer.tick > since && budget <= answer.budget ? answer : undefined;
 		};
 		// The times from `from` on that the drops from there leave open.
@@ -4182,7 +4184,7 @@ export class Subscriber {
 	// which asks its upstream.
 	// Mirrors the Rust `TrackState::join`.
 	#join(
-		min: Duration,
+		min: Duration | null,
 		containing: (time: bigint) => Containing,
 		wire: boolean,
 		ended: () => boolean,
@@ -4198,12 +4200,12 @@ export class Subscriber {
 		const scale = info.timescale;
 		if (scale == null) {
 			const at = now();
-			const group = newest((group) => at.since(hooks.groupArrived(group)).ge(min));
+			const group = min && newest((group) => at.since(hooks.groupArrived(group)).ge(min));
 			if (group) return { group: group.start };
 			// This copy's arrivals don't reach back that far yet, but its upstream's may.
-			if (wire && !min.ge(PAST_EVERY_GROUP)) return undefined;
+			if (wire && min !== null) return undefined;
 			// It reaches back past every arrival, so it starts where a time start from 0 does, taking a
-			// lower group that arrives late as the oldest group would. One past every group never
+			// lower group that arrives late as the oldest group would. One with no lag limit never
 			// waits: no arrival reaches back that far, and on a copy it asks upstream for any lower
 			// group the copy lacks, as on a timed track.
 			return { time: 0n };
@@ -4216,8 +4218,12 @@ export class Subscriber {
 			return latest && BigInt(floorAt(latest, scale));
 		};
 		const edge = reach(stamped);
-		// The lag rounds up to whole ticks, so the start is never newer than it allows.
-		const back = (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
+		// The lag rounds up to whole ticks, so the start is never newer than it allows; with no lag
+		// limit it reaches back past every timestamp.
+		const back =
+			min === null
+				? undefined
+				: (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
 		const producer = this.#state.producer;
 		if (!this.#state.dropsAnchors.peek() && !(producer && timeAnchors(producer).atKeys)) {
 			// Keys are group starts, so the newest group held starts no later than the edge. A copy's
@@ -4229,7 +4235,7 @@ export class Subscriber {
 				if (at !== undefined && (top === undefined || at > top)) top = at;
 			}
 			if (top === undefined) return undefined;
-			const target = top > back ? top - back : 0n;
+			const target = back !== undefined && top > back ? top - back : 0n;
 			if (target === 0n || !wire || containing(target) !== "unknown") return { time: target };
 			// Groups never overlap in time, so one held starting by the target with a frame at or past
 			// it contains it: every later group starts after that frame.
@@ -4241,10 +4247,10 @@ export class Subscriber {
 		// Keys that aren't times: by when each group's first frame presented. No group presents
 		// before time 0, so a join reaching back that far starts as the oldest group does, taking a
 		// lower group that arrives late rather than starting at the oldest group this hop happens to
-		// hold. One past every group needs no frame to measure it by, so groups whose frames are
+		// hold. One with no lag limit needs no frame to measure it by, so groups whose frames are
 		// still on their way place it all the same.
 		let target: bigint;
-		if (min.ge(PAST_EVERY_GROUP)) target = 0n;
+		if (back === undefined) target = 0n;
 		else if (edge === undefined) return undefined;
 		else target = edge > back ? edge - back : 0n;
 		if (target === 0n) return "oldest";

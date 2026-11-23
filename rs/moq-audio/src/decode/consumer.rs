@@ -1113,7 +1113,7 @@ mod tests {
 		assert_eq!(
 			first.map(|sub| sub.ranges),
 			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Duration::from_millis(400),
+				min: Some(Duration::from_millis(400)),
 				max: Some(Duration::from_millis(600)),
 			})])
 		);
@@ -1445,7 +1445,7 @@ mod tests {
 		{
 			let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_secs(10),
+					min: Some(Duration::from_secs(10)),
 					max: Some(Duration::from_secs(10)),
 				},
 			)]);

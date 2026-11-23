@@ -105,7 +105,7 @@ async fn import_onto(
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: RECORDING_MAX_DELAY,
+					min: Some(RECORDING_MAX_DELAY),
 					max: Some(RECORDING_MAX_DELAY),
 				},
 			)]),

@@ -86,7 +86,7 @@ pub(in crate::model) trait Holdings {
 	/// for a range whose groups go stale past `budget`; see [`Join`]. Only an upstream's answer
 	/// recorded after join tick `since`, when the join's range was added, under a budget at
 	/// least as wide, counts.
-	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
+	fn join(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Join {
 		let _ = (min, end, budget, since);
 		Join::Unknown
 	}
@@ -102,7 +102,7 @@ pub(in crate::model) trait Holdings {
 	/// to deliver. It stands once the end is declared too, when [`Self::answers_joins`] no
 	/// longer holds: a copy holds only the groups from where its feed started, so they can't
 	/// measure a join behind them.
-	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+	fn answered_join(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
 		let _ = (min, end, budget, since);
 		None
 	}
@@ -690,7 +690,7 @@ impl Window {
 	/// The live joins still waiting on an answer, with their lag, end, budget, and the join
 	/// tick each was added at: what a received copy asks its upstream to place.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn joins(&self) -> impl Iterator<Item = (Duration, Option<u64>, Duration, u64)> + '_ {
+	pub fn joins(&self) -> impl Iterator<Item = (Option<Duration>, Option<u64>, Duration, u64)> + '_ {
 		self.reaching.iter().filter_map(|key| {
 			let range = self.ranges.get(key)?;
 			let since = match self.joining.get(key) {
@@ -1131,7 +1131,7 @@ impl Window {
 					}
 					// The latest group holds the live edge. One made before any group then starts at
 					// the first, which was the latest when it was placed.
-					(None, Some(latest)) if min.is_zero() => (Some(latest), false),
+					(None, Some(latest)) if min == Some(Duration::ZERO) => (Some(latest), false),
 					(None, Some(_)) => match holdings.join(min, until, budget, since) {
 						Join::Time(time) => (Some(time), true),
 						Join::Group(group) => (Some(group), false),
@@ -1442,7 +1442,7 @@ mod tests {
 			self.held.range(from..).next().copied()
 		}
 
-		fn join(&self, _: Duration, _: Option<u64>, _: Duration, since: u64) -> Join {
+		fn join(&self, _: Option<Duration>, _: Option<u64>, _: Duration, since: u64) -> Join {
 			match self.answered {
 				Some(tick) if tick <= since => Join::Unknown,
 				_ => self.join.unwrap_or(Join::Unknown),
@@ -1483,7 +1483,7 @@ mod tests {
 			self.0.next_start(from)
 		}
 
-		fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
+		fn join(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Join {
 			self.0.join(min, end, budget, since)
 		}
 
@@ -1491,7 +1491,7 @@ mod tests {
 			self.0.answers_joins()
 		}
 
-		fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+		fn answered_join(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
 			self.0.answered_join(min, end, budget, since)
 		}
 
@@ -1531,10 +1531,10 @@ mod tests {
 			looks_up: bool,
 			join in proptest::option::of(0u64..48),
 		) {
-			// Mostly time starts, with some reaching back and some live joins of a small lag.
+			// Mostly time starts, with some reaching back and some live joins of a small lag or none.
 			let to_range = |(kind, start, end): (u8, u64, Option<u64>)| match kind {
 				0 => range(None, end),
-				1 => live(Duration::from_millis(start % 3), end),
+				1 => live((start % 4 < 3).then(|| Duration::from_millis(start % 4)), end),
 				_ => range(time(start), end),
 			};
 			let ranges: Vec<Range> = ranges.into_iter().map(to_range).collect();
@@ -1592,10 +1592,10 @@ mod tests {
 		Range { start, end: end.into() }
 	}
 
-	/// A live join `min` behind the live edge.
-	fn live(min: Duration, end: impl Into<Option<u64>>) -> Range {
+	/// A live join `min` behind the live edge, or with no lag limit for `None`.
+	fn live(min: impl Into<Option<Duration>>, end: impl Into<Option<u64>>) -> Range {
 		Range {
-			start: Start::Live { min, max: None },
+			start: Start::Live { min: min.into(), max: None },
 			end: end.into(),
 		}
 	}
@@ -1754,11 +1754,11 @@ mod tests {
 				window.is_reaching() && !window.contains(99),
 				"an answer from before it waited"
 			);
-			assert_eq!(window.joins().collect::<Vec<_>>(), [(min, None, Duration::MAX, 3)]);
+			assert_eq!(window.joins().collect::<Vec<_>>(), [(Some(min), None, Duration::MAX, 3)]);
 			// One through the reserved last group asks and waits as an unbounded one, as the wire
 			// carries it.
 			let through = Window::keyed_since([(0, live(min, time(u64::MAX)))], |_| Joining::Since(3), Some(99), &keys);
-			assert_eq!(through.joins().collect::<Vec<_>>(), [(min, None, Duration::MAX, 3)]);
+			assert_eq!(through.joins().collect::<Vec<_>>(), [(Some(min), None, Duration::MAX, 3)]);
 
 			// A newer answer places it, at exactly the group upstream answered.
 			keys.answered = Some(4);
@@ -1790,7 +1790,7 @@ mod tests {
 		keys.answered = Some(3);
 		let max = Duration::from_secs(2);
 		let join = Range::from(Start::Live {
-			min: Duration::from_millis(40),
+			min: Some(Duration::from_millis(40)),
 			max: Some(max),
 		});
 		let placed = |_| Joining::At(33);
@@ -1813,7 +1813,7 @@ mod tests {
 		window.edit_since([0], &[(0, join)], |_| Joining::At(66), Some(99), &keys);
 		assert_eq!(window.start(), Some(66));
 		let wider = Range::from(Start::Live {
-			min: Duration::from_millis(40),
+			min: Some(Duration::from_millis(40)),
 			max: None,
 		});
 		window.edit_since([0], &[(0, wider)], |_| Joining::At(66), Some(99), &keys);
@@ -1832,7 +1832,7 @@ mod tests {
 		let (narrow, reach) = (Duration::from_millis(100), Duration::from_millis(500));
 		let join = |min, max, end| Range {
 			start: Start::Live {
-				min: Duration::from_millis(min),
+				min: Some(Duration::from_millis(min)),
 				max,
 			},
 			end,
@@ -1885,7 +1885,7 @@ mod tests {
 		};
 		let max = Duration::from_secs(1);
 		let join = Range::from(Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(max),
 		});
 		let window = Window::new(&[history, join], None, &Unheld);

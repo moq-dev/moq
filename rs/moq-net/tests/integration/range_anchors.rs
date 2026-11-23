@@ -114,7 +114,7 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	let range = match (range.start, how.min) {
 		(moq_net::track::Start::Oldest, Some(min)) => Range {
 			start: moq_net::track::Start::Live {
-				min,
+				min: Some(min),
 				max: Some(FOREVER),
 			},
 			..range
@@ -294,7 +294,7 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 		.expect("broadcast resolves")
 		.unwrap();
 	let subscription = Subscription::default().with_ranges([Range::from(moq_net::track::Start::Live {
-		min: Duration::ZERO,
+		min: Some(Duration::ZERO),
 		max: Some(FOREVER),
 	})]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
@@ -353,7 +353,7 @@ async fn a_sparse_request_places_its_live_join_as_the_publisher_did() {
 	// The live edge is at 9 ms, so a 2 ms lag joins at group 7.
 	let join = Range {
 		start: moq_net::track::Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: Some(FOREVER),
 		},
 		end: Some(8),

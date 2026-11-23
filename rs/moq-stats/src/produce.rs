@@ -1897,7 +1897,7 @@ mod tests {
 			let consumer = edge.consume().with_hidden(true);
 			let remote = consumer.request(".stats/node", None).await.unwrap();
 			let patient = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			})]);
 			let mut ordered = remote

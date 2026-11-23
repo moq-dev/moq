@@ -1500,7 +1500,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_millis(100),
+					min: Some(Duration::from_millis(100)),
 					max: Some(Duration::from_millis(100)),
 				},
 			)]),

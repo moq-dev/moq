@@ -1,5 +1,4 @@
 import { Duration } from "@moq/clock";
-import { NO_MAX_DELAY } from "./internal.ts";
 import type { Live, Range, Subscription } from "./track.ts";
 
 /** A range as a test states it under one subscription-wide max: a live join may give its lag alone. @internal */
@@ -21,7 +20,7 @@ export function withMax(subscription: LegacySubscription): Subscription {
 	const { delay, ranges, ...rest } = subscription;
 	const max = delay?.max === undefined ? Duration.ZERO : delay.max;
 	const within = (): Range["start"] =>
-		max === null ? undefined : { live: { min: Duration.millis(NO_MAX_DELAY), max } };
+		max === null ? undefined : { live: { min: null, max } };
 	const out = (ranges ?? [{}]).map((range): Range => {
 		const start = range.start;
 		const mapped: Range = {};

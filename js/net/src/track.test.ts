@@ -7,7 +7,7 @@ import { joinTick } from "./demand.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks, NO_MAX_DELAY, PAST_EVERY_GROUP, skipHole, staleHole } from "./internal.ts";
+import { hooks, NO_MAX_DELAY, skipHole, staleHole } from "./internal.ts";
 import { GRACE } from "./ledger.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
@@ -324,7 +324,7 @@ test("an ordered reader owes the groups below a restated START", async () => {
 	for (let key = 5n; key < 10n; key++) putGroup(producer, key, Number(key) * 1000);
 	await clock.advance(10);
 	const reader = producer
-		.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(6500) } } }] })
+		.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.millis(6500) } } }] })
 		.ordered();
 	hooks.restateTrack(producer);
 	try {
@@ -2759,7 +2759,7 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 
 	// A join reaching back past every group under a zero max: the aborted group is no live edge, so
 	// the older one is the newest it judges by.
-	const track = producer.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.ZERO } } }] });
+	const track = producer.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.ZERO } } }] });
 	expect((await track.recvGroup())?.start).toBe(1n);
 	track.close();
 });

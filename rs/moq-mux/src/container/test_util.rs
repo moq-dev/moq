@@ -321,7 +321,7 @@ pub(crate) async fn published<E>(
 	for (name, container) in containers {
 		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: std::time::Duration::from_secs(3600),
+				min: Some(std::time::Duration::from_secs(3600)),
 				max: Some(std::time::Duration::from_secs(3600)),
 			},
 		)]);
@@ -628,13 +628,12 @@ impl std::task::Wake for Woken {
 	}
 }
 
-/// A live join reaching back past every group, so it takes each group still within `max` of the
-/// live edge: what a subscription-wide max age asked before moq-lite-07. Test groups often start
-/// at their sequence, not their time, so a join placed by time alone would land on the newest.
+/// A live join with no lag limit, so it takes each group still within `max` of the live edge:
+/// what a subscription-wide max age asked before moq-lite-07. Test groups often start at their
+/// sequence, not their time, so a join placed by time alone would land on the newest.
 pub(crate) fn within(max: std::time::Duration) -> moq_net::track::Subscription {
 	moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
-		// The largest lag every implementation carries losslessly.
-		min: std::time::Duration::from_millis((1 << 53) - 1),
+		min: None,
 		max: Some(max),
 	})])
 }

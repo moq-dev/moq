@@ -119,7 +119,7 @@ async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 			.track(hang::catalog::Reference::track(config, name))?
 			.subscribe(moq_net::track::Subscription::default().with_priority(1).with_ranges([
 				moq_net::track::Range::from(moq_net::track::Start::Live {
-					min: latency,
+					min: Some(latency),
 					max: Some(latency),
 				}),
 			]))
