@@ -396,7 +396,7 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 test("range fills: an accounted group evicted again is recovered again", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	tail.account(1n, 2n);
 	fills.push(peer.fill);
@@ -421,7 +421,7 @@ test("range fills: an accounted group evicted again is recovered again", async (
 test("range fills: an accounted group past a refused run is recovered", async () => {
 	const peer = await missing();
 	const { opened, recover } = recoveries();
-	const fills = new RangeFills(peer.track, recover);
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
 	const tail = new Tail();
 	tail.account(0n, 4n);
 	fills.push(peer.fill);
