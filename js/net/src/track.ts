@@ -1777,7 +1777,17 @@ export class Producer {
 			});
 		};
 		owedGroup = (producer, start, end) => {
-			for (const run of owedRuns(producer, start, end)) return { key: run.start, folds: run.folds };
+			if (!producer.#wire) return undefined;
+			const floor = feedFloor(producer);
+			const runs = producer.#landing({
+				start: max(start, floor ?? 0n),
+				end,
+				// A START still pending at no floor is waited on: groups arrive newest first, so the
+				// feed may start below the first to arrive. Mirrors the Rust `TrackState::owed`.
+				floor: floor !== undefined || producer.#feedStart() === "pending",
+				grace: producer.#grace(),
+			});
+			for (const run of runs) return { key: run.start, folds: run.folds };
 			return undefined;
 		};
 	}
