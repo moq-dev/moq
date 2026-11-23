@@ -25,9 +25,7 @@ native crates, and public APIs:
 
 - **Wire and drafts.** Delete the temporary `raw_parts` / `base.split("/")`
   `Path Keep` migration before lite-07 finalizes
-  ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)), and bring
-  `draft-lcurley-qmux-websocket` up to `qmux-VV.<alpn>`
-  ([qmux-websocket-draft](/quest/m2/qmux-websocket-draft.md)).
+  ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)).
 - **Vendored native crate soundness.** Fix the unsound public APIs in
   [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md) before `0.22.0`
   publishes them (moq-v4l's and moq-nvenc's are fixed).
