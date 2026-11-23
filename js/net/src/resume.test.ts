@@ -1882,7 +1882,10 @@ for (const [name, end, held, newer, expires] of [
 		const { a, b, swap, active, close } = await setup();
 		const ta = copy(a);
 		const tb = copy(b);
-		const sub = active.track("seq").subscribe({ ranges: [{ start: 0n, end }] });
+		// A live join from the first group, whose groups go stale past its max.
+		const sub = active
+			.track("seq")
+			.subscribe(withMax({ delay: { max: Duration.millis(2_000) }, ranges: [{ end }] }));
 		ta.write(0n, 1, false);
 		const group = sub.tryRecvGroup();
 		if (!group) throw new Error("expected group 0");
@@ -1920,7 +1923,10 @@ for (const [name, end, held, newer, expires] of [
 		const { a, b, swap, active, close } = await setup();
 		const ta = copy(a);
 		const tb = copy(b);
-		const sub = active.track("seq").subscribe({ ranges: [{ start: 0n, end }] });
+		// A live join from the first group, whose groups go stale past its max.
+		const sub = active
+			.track("seq")
+			.subscribe(withMax({ delay: { max: Duration.millis(2_000) }, ranges: [{ end }] }));
 		ta.write(0n, 1, false);
 		const group = sub.tryRecvGroup();
 		if (!group) throw new Error("expected group 0");
