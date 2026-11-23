@@ -4709,7 +4709,7 @@ export class Subscriber {
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
-		hooks.withdrawing = (subscriber) => subscriber.#setWithdrawing();
+		hooks.withdrawing = (subscriber, on) => subscriber.#setWithdrawing(on);
 		hooks.takeWithdrawn = (subscriber) => {
 			subscriber.#takeBack();
 			const withdrawn = subscriber.#withdrawn ?? [];
@@ -5519,11 +5519,12 @@ export class Subscriber {
 		}
 	}
 
-	// Let a widening take back the drops this reports until its owner settles them with #settleGap,
-	// as an ordered read does for the gaps it returns. Mirrors the Rust `Subscriber::set_withdrawing`.
-	#setWithdrawing(): void {
-		this.#withdrawn ??= [];
-		this.#resume?.withdrawing();
+	// Whether a widening may take back the drops this reports until its owner settles them with
+	// #settleGap, as an ordered read does for the gaps it returns. Turned off, what it took back and
+	// was not taken yet is dropped. Mirrors the Rust `Subscriber::set_withdrawing`.
+	#setWithdrawing(on: boolean): void {
+		this.#withdrawn = on ? (this.#withdrawn ?? []) : undefined;
+		this.#resume?.withdrawing(on);
 	}
 
 	// Settle `[start, end)` as reported for good: a gap an ordered read returned. A front's copies are
@@ -5659,7 +5660,7 @@ export class Subscriber {
 		if (!items) {
 			items = this.#items = { gaps: [], at: 0n };
 			// What its copies report it may take back until it returns the gap.
-			this.#resume?.withdrawing();
+			this.#resume?.withdrawing(true);
 			// The drop record starts before the first read, so the cursor keeps what it gives up.
 			this.#findGaps(items);
 		}

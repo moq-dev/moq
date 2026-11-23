@@ -555,8 +555,8 @@ export interface ResumeSource {
 	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
 	 */
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined;
-	/** Let a widening take back what the copies report, until the reader settles it. */
-	withdrawing(): void;
+	/** Whether a widening may take back what the serving copy reports, until the reader settles it. */
+	withdrawing(on: boolean): void;
 	/** The drops the copies took back after a widening since the last call, none of which is reported any more. */
 	takeWithdrawn(): Run[];
 	/** Settle `[start, end)` on every copy, which the reader reported for good. */
@@ -1027,10 +1027,10 @@ export const hooks: {
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/**
-	 * Let a widening take back a route copy's dropped reports until its reader settles them, as an
-	 * ordered read does. Mirrors the Rust crate-private `track::Subscriber::set_withdrawing`.
+	 * Whether a widening may take back a route copy's dropped reports until its reader settles them,
+	 * as an ordered read does. Mirrors the Rust crate-private `track::Subscriber::set_withdrawing`.
 	 */
-	withdrawing: (subscriber: Subscriber) => void;
+	withdrawing: (subscriber: Subscriber, on: boolean) => void;
 	/**
 	 * The runs a route copy took back after a widening since the last call, none of which it reports
 	 * any more. Mirrors the Rust crate-private `track::Subscriber::take_withdrawn`.

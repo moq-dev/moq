@@ -11766,18 +11766,18 @@ impl Subscriber {
 		}
 	}
 
-	/// Let a widening take back the drops this reports until its owner settles them with
-	/// [`Self::settle_gap`], as an [`Ordered`] does for the gaps it returns.
-	pub(super) fn set_withdrawing(&mut self) {
-		match &mut self.inner {
-			Inner::Plain(cursor) => {
-				cursor.withdrawn.get_or_insert_default();
-			}
+	/// Whether a widening may take back the drops this reports until its owner settles them
+	/// with [`Self::settle_gap`], as an [`Ordered`] does for the gaps it returns. Turned off,
+	/// what it took back and was not taken yet is dropped.
+	pub(super) fn set_withdrawing(&mut self, on: bool) {
+		let withdrawn = match &mut self.inner {
+			Inner::Plain(cursor) => &mut cursor.withdrawn,
 			Inner::Resume(resume, logical) => {
-				logical.withdrawn.get_or_insert_default();
-				resume.set_withdrawing();
+				resume.set_withdrawing(on);
+				&mut logical.withdrawn
 			}
-		}
+		};
+		*withdrawn = on.then(|| withdrawn.take().unwrap_or_default());
 	}
 
 	/// Settle `keys` as reported for good: a gap an [`Ordered`] returned. A front's copies are
@@ -11821,7 +11821,7 @@ impl Subscriber {
 	/// The two advance independently, and interleaving them produces a group stream that
 	/// is neither, which is why the choice is a handle rather than a method.
 	pub fn ordered(mut self) -> Ordered {
-		self.set_withdrawing();
+		self.set_withdrawing(true);
 		Ordered {
 			inner: self,
 			held: None,

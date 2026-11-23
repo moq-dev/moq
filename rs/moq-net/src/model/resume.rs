@@ -1455,9 +1455,10 @@ impl Subscriber {
 		self.reader().poll_drop(delivered, probe, waiter)
 	}
 
-	/// Let a widening take back what the copies report; see [`Reader::withdrawing`].
-	pub(super) fn set_withdrawing(&mut self) {
-		self.reader().withdrawing = true;
+	/// Whether a widening may take back what the serving copy reports; see
+	/// [`Reader::withdrawing`]. The copies follow at the reader's next change of preferences.
+	pub(super) fn set_withdrawing(&mut self, on: bool) {
+		self.reader().withdrawing = on;
 	}
 
 	/// The drops the serving copy took back after a widening since the last call, none of
@@ -2222,13 +2223,10 @@ impl Reader {
 				// A widening judges the serving copy again, which may then take back a drop it
 				// reported that the reader's owner has yet to settle. Only the serving copy's
 				// verdicts reach the reader, so only it may: a replaced copy would ask again
-				// what it then answers to nobody. Set first: another front's reader as a copy
-				// mirrors the change into its own copies at once.
-				if self.withdrawing
-					&& Some(index) == serving
-					&& let Sub::Ready(sub) = &mut copy.sub
-				{
-					sub.set_withdrawing();
+				// what it then answers to nobody, so one that served before stops. Set first:
+				// another front's reader as a copy mirrors the change into its own copies at once.
+				if let Sub::Ready(sub) = &mut copy.sub {
+					sub.set_withdrawing(self.withdrawing && Some(index) == serving);
 				}
 				copy.update(&self.mirrored, &change);
 			}
@@ -7865,6 +7863,10 @@ mod test {
 		assert_eq!(fill.start().group..fill.end(), 2..3);
 		fill.refuse_groups(2..3, Error::Old);
 		assert_eq!(read(&mut ordered), [], "the gap waits behind group 1");
+		// A change of preferences while it serves lets the copy take its drops back, until it
+		// stops serving.
+		ordered.update(ordered.subscription().with_priority(1)).unwrap();
+		assert_eq!(read(&mut ordered), []);
 
 		// A newer route gives group 2 up for good, held back while the old one may deliver it.
 		let b = copy();

@@ -1010,10 +1010,10 @@ class Reader implements ResumeSource {
 			for (const copy of [...this.#copies, ...this.#rerouted]) {
 				// A widening judges the serving copy again, which may then take back a drop it reported
 				// that the reader's owner has yet to settle. Only the serving copy's verdicts reach the
-				// reader, so only it may: a replaced copy would ask again what it then answers to nobody.
-				// Set first, so another front's reader as a copy carries it to its own copies as it
-				// follows the change.
-				if (this.#withdrawing && copy === serving) hooks.withdrawing(copy.sub);
+				// reader, so only it may: a replaced copy would ask again what it then answers to nobody,
+				// so one that served before stops. Set first, so another front's reader as a copy carries
+				// it to its own copies as it follows the change.
+				hooks.withdrawing(copy.sub, this.#withdrawing && copy === serving);
 				this.#update(copy);
 			}
 			// A copy just resolved replaced ranges against its cache, before its failover cap raised
@@ -1536,8 +1536,8 @@ class Reader implements ResumeSource {
 		return hooks.accountsFor(serving.sub, delivered, above, ordered);
 	}
 
-	withdrawing(): void {
-		this.#withdrawing = true;
+	withdrawing(on: boolean): void {
+		this.#withdrawing = on;
 	}
 
 	/**
