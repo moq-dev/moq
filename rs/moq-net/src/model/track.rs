@@ -10065,7 +10065,14 @@ impl Cursor {
 			&mut given_up,
 			waiter,
 		);
-		misses.chase(&self.state, &asks, || asking(&self.subscription), &drift, &mut given_up, waiter);
+		misses.chase(
+			&self.state,
+			&asks,
+			|| asking(&self.subscription),
+			&drift,
+			&mut given_up,
+			waiter,
+		);
 		// A group answered is held by the cache, where it stays owed, not by this reader.
 		misses.let_go_filled();
 		!misses.is_waiting() && owed.iter().all(|run| misses.given_up().gaps(run).next().is_none())
@@ -10751,7 +10758,14 @@ impl Cursor {
 				waiter,
 			)
 		};
-		misses.chase(&self.state, &asks, || asking(&self.subscription), drift, &mut given_up, waiter);
+		misses.chase(
+			&self.state,
+			&asks,
+			|| asking(&self.subscription),
+			drift,
+			&mut given_up,
+			waiter,
+		);
 		if self.drops.is_some() {
 			for (run, stale) in given_up {
 				DropCursor::give_up(&mut self.record, run.clone(), Hole::missed(stale));
@@ -32302,12 +32316,18 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		producer.skip_groups(3..6);
 		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "1 and 2 are owed");
-		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "the feed still owes them");
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the feed still owes them"
+		);
 
 		elapse(&producer, Duration::from_secs(60));
 		pool.sweep();
 		producer.skip_groups(1..3);
-		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "3 to 5 were forgotten");
+		assert!(
+			subscriber.poll_recv_group(&waiter).is_pending(),
+			"3 to 5 were forgotten"
+		);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the forgotten skip is asked of a fill");
 		};

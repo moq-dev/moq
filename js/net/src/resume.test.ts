@@ -5,8 +5,8 @@ import { race, Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
-import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { FillGroups } from "./fill.ts";
+import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
@@ -1358,7 +1358,8 @@ test("a kept-out skip the asked copy forgot is asked again", async () => {
 		const requests = tb.producer.requests();
 		const fills: FillGroups[] = [];
 		void (async () => {
-			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill())
+				fills.push(fill);
 		})();
 		const ended = sub.recvGroup();
 		await clock.advance(Duration.millis(3_600_000));

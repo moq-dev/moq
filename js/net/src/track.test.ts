@@ -6346,7 +6346,10 @@ test("a bounded read asks again for a kept-out skip its track forgot", async () 
 			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
 			group.finish();
 		}
-		const sub = producer.subscribe({ delay: { max: Duration.millis(36_000_000) }, ranges: [{ start: 0n, end: 6n }] });
+		const sub = producer.subscribe({
+			delay: { max: Duration.millis(36_000_000) },
+			ranges: [{ start: 0n, end: 6n }],
+		});
 		expect(sub.tryRecvGroup()?.start).toBe(0n);
 		expect(sub.tryRecvGroup()?.start).toBe(6n);
 		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });

@@ -2942,9 +2942,8 @@ impl Reader {
 				above.push(split..gap.end);
 			}
 		}
-		if let (Some(first), Some(last)) = (open.iter().next(), open.iter().next_back()) {
-			let keys = first.start..last.end;
-			self.ask(keys, &open, taken[0], waiter);
+		if !open.is_empty() {
+			self.ask(&open, taken[0], waiter);
 			return false;
 		}
 		match self.copies.last_mut() {
@@ -2955,21 +2954,19 @@ impl Reader {
 		}
 	}
 
-	/// Ask the serving route for `keys`, which hold a key the local floor or cap keeps out that
-	/// is neither recorded nor declared skipped by a copy held now. Its answer settles each such
+	/// Ask the serving route for the hull of `open`, the keys the local floor or cap keeps out
+	/// that are neither recorded nor declared skipped by a copy held now. Its answer settles each such
 	/// key as it would on one cursor: a skip accounts for it, while a group or a drop leaves it
 	/// owed. A copy of that route already asked for them, kept by [`Self::let_go`] until
 	/// [`Self::skipped`] records them, asks nothing more, so neither a reader waiting on the
 	/// answer nor one a group holds open asks again. Its track may forget a skip it answered
-	/// before the rest lands, so it asks its fills for the keys of `open` it cannot prove (see
+	/// before the rest lands, so it asks its fills for those it cannot prove (see
 	/// [`track::Subscriber::ask_unproven`]).
-	fn ask(
-		&mut self,
-		keys: std::ops::Range<u64>,
-		open: &RangeSet<u64>,
-		delivered: &Delivered,
-		waiter: &kio::Waiter,
-	) {
+	fn ask(&mut self, open: &RangeSet<u64>, delivered: &Delivered, waiter: &kio::Waiter) {
+		let (Some(first), Some(last)) = (open.iter().next(), open.iter().next_back()) else {
+			return;
+		};
+		let keys = first.start..last.end;
 		self.backfill(keys.clone(), false, delivered);
 		let groups = self.groups;
 		let Some((serving, copies)) = self.copies.split_last_mut() else {
