@@ -16,23 +16,38 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite up to moq-lite-06, and via the
 [cluster extension](/draft/moq-cluster) on moq-transport.
 
-moq-lite-07-wip carries the list once per publishing node instead of once per
-broadcast. Each publishing node declares a random routing identity, and relays
-keep a route to it per prefix, which every claim of that origin under the prefix
-shares. The route names each relay it crossed and the session it crossed on, and
-a relay never uses one that names itself. A relay that loses a session names it
-to its neighbours, so every route through it is dropped at once, and a relay left
-without a route holds its claims, unavailable, for up to ten seconds while one may
-return.
-The first relay a request reaches picks the origin node, by a hash of the path
-and the node's identity that every relay computes alike, and names it on the
+moq-lite-07-wip carries the list once per relay instead of once per
+broadcast. Each relay declares a random [Node ID](#identity) and announces its
+publishers' broadcasts as its own claims, and other relays keep one route to
+each node, which all of that node's claims share. The route names each relay it
+crossed and the session it crossed on, and a relay never uses one that names
+itself. A relay that loses a session names it to its neighbours, so every route
+through it is dropped at once. There is no hold: a claim left with no route
+shows as unavailable for 800 ms, the time a reroute across the longest path
+(32 hops of 25 ms) takes to settle, and then it is withdrawn.
+The first relay a request reaches picks the claim that serves it, the same one
+every relay would pick ([Link costs](#link-costs)), and names its node on the
 request so later hops follow their own route to that node. A relay running both
 versions translates: a moq-lite-06 peer's routes enter the route layer as the
 relay's own claims, keeping their hop list, which lite-07 carries alongside
 them. A lite-07 route reaches a moq-lite-06 peer as that hop list followed by
 its origin node. A relay drops a route whose hop list names it, by its hop or
-its routing identity, since that is one of its claims coming back, so a
+its Node ID, since that is one of its claims coming back, so a
 rolling upgrade's mix of versions ends a withdrawn broadcast everywhere.
+
+moq-lite-07-wip is opt-in, and `listen.version` replaces the default list
+rather than adding to it. That list serves clients and peers alike, the cluster
+port included, so enable moq-lite-07-wip by listing every default too, or older
+clients and relays are refused. Give `connect.version` the same list, so this
+relay still dials peers that predate it:
+
+```toml
+[listen]
+version = [
+  "moq-lite-07-wip", "moq-lite-06", "moq-lite-05", "moq-lite-04", "moq-lite-03",
+  "moq-lite-02", "moq-lite-01", "moq-transport-22", "moq-transport-20", "moq-transport-18",
+]
+```
 
 A track from a moq-transport publisher keeps its Object IDs, object properties,
 and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
@@ -56,13 +71,11 @@ restarting from group 0, publishes under a new instance, which replaces the
 old broadcast instead of resuming it; the RTMP, SRT, and WHIP ingests mint one
 per connection. Among instances every relay ranks routes in [one
 order](/concept/identity#choosing-a-route), ending in a hash of the path with
-the route's origin node on moq-lite 07, or with the instance on older wires, so
-the relays of a mesh agree on each path's stream and a pool's paths spread over
-its hosts. On moq-lite 07 a path therefore stays on its host when the instance
-changes. Seamless failover needs moq-lite 07 on every link
-the route crosses. Over moq-lite 06 and older, or moq-transport, the receiving
-relay mints an instance per announcement, so failover onto such a route is
-announced as a restart. Viewers re-request on a restart, and a relay drops its
+the instance, so on moq-lite 07 the relays of a mesh agree on each path's
+stream and a pool's paths spread over its hosts. Seamless failover needs
+moq-lite 07 on every link the route crosses. Over moq-lite 06 and older, or
+moq-transport, the receiving relay mints an instance per announcement, so
+failover onto such a route is announced as a restart. Viewers re-request on a restart, and a relay drops its
 copy of the old stream, including every path beneath a prefix claim when one
 of them moves to another worker.
 
@@ -190,18 +203,21 @@ crossed.
 
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one holding an anonymous hop (0), then the lowest cost, then the shortest
-hop list. Remaining ties hash the requested path, so equal-cost advertisers of
-one prefix, such as a transcode pool, split its paths, and every relay picks
-the same one for a given path. A publisher connected straight to the relay is
-not hashed at its own path: its newest session wins, so a publisher that
-restarts takes over from its lingering old session at once.
+hop list. Remaining ties hash the requested path with the publisher's
+instance, so equal-cost advertisers of one prefix, such as a transcode pool,
+split its paths, and every relay picks the same one for a given path. That
+takes instances the publishers name, which only moq-lite-07-wip carries: an
+instance a relay minted for an older-version announcement is not hashed, and
+the route already in use keeps the tie. A publisher connected straight to the
+relay is not hashed at its own path: its newest session wins, so a publisher
+that restarts takes over from its lingering old session at once.
 
-moq-lite-07-wip keeps its hop list on the route to a publishing node, not on
-each broadcast, so both hop-list steps drop out: the first
-relay ranks the origin nodes announcing a path the same way otherwise, and
-remaining ties hash the path with each node's routing identity. Later hops
-follow their own route to the node it picked. Routes learned over an older
-version rank as above.
+moq-lite-07-wip keeps its hop list on the route to a relay, not on each
+broadcast, so both hop-list steps drop out: the first relay ranks the claims
+covering a path the same way otherwise, and breaks remaining ties with the
+draft's [Rendezvous Hash](/draft/moq-lite#resolution) of the path and the
+claim's instance, then by node. Later hops follow their own route to the node
+it picked. Routes learned over an older version rank as above.
 
 ```toml
 [cluster]
