@@ -14710,7 +14710,9 @@ mod filter_tests {
 		assert_eq!(wire_bounds(&from(12), Some(10)), (Some(12), None));
 		assert_eq!(wire_bounds(&from(0), None), (Some(0), None));
 		// A range from the oldest group reaches no further back than a join that began at group 0.
-		let oldest = track::Subscription::default().with_ranges([track::Range::from(track::Start::Oldest)]);
+		let oldest = track::Subscription::default()
+			.with_ranges([track::Range::from(track::Start::Oldest)])
+			.with_delay(track::Delay::default().with_max(None));
 		assert_eq!(wire_bounds(&oldest, Some(0)), (None, None));
 		assert_eq!(wire_bounds(&oldest, Some(10)), (Some(0), None));
 	}
