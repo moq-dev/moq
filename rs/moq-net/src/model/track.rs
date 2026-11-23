@@ -2171,20 +2171,22 @@ impl TrackState {
 		}
 	}
 
-	/// Whether `groups` holds a group [`Self::poll_next_in_range`] would hand out.
-	fn walkable(&self, groups: ops::Range<u64>, end_key: Option<u64>, window: &Window) -> bool {
-		if !self.serves_bounded(window) {
-			return false;
-		}
-		window
-			.runs(groups.start)
-			.take_while(|run| *run.start() < groups.end)
-			.any(|run| {
-				self.lookup
-					.range(run)
-					.take_while(|(key, _)| **key < groups.end && super::subscription::before_end(**key, end_key))
-					.any(|(_, slot)| slot.serves_end() || slot.cut().is_some())
-			})
+	/// The cached groups [`Self::poll_next_in_range`] hands out from `next_key` on, lowest
+	/// first. A cut group counts too, so its reader sees why it ended.
+	fn walk<'a>(
+		&'a self,
+		next_key: u64,
+		end_key: Option<u64>,
+		window: &'a Window,
+	) -> impl Iterator<Item = &'a Slot> + 'a {
+		let serves = self.serves_bounded(window);
+		window.runs(next_key).filter(move |_| serves).flat_map(move |run| {
+			self.lookup
+				.range(run)
+				.map(|(_, slot)| slot)
+				.take_while(move |slot| super::subscription::before_end(slot.group.start, end_key))
+				.filter(|slot| slot.serves_end() || slot.cut().is_some())
+		})
 	}
 
 	/// Find the smallest-key cached group in `window` satisfying
@@ -2232,18 +2234,7 @@ impl TrackState {
 			return Poll::Pending;
 		}
 
-		let best = window
-			.runs(next_key)
-			.filter(|_| self.serves_bounded(window))
-			.find_map(|run| {
-				// A cut group is handed out too, so its reader sees why it ended.
-				self.lookup
-					.range(run)
-					.map(|(_, slot)| slot)
-					.take_while(|slot| super::subscription::before_end(slot.group.start, end_key))
-					.find(|slot| slot.serves_end() || slot.cut().is_some())
-					.map(Slot::serving)
-			});
+		let best = self.walk(next_key, end_key, window).next().map(Slot::serving);
 
 		if let Some(group) = best {
 			// Deliberately no cache refresh here: this is a pure seek, and the caller may
@@ -10130,22 +10121,21 @@ impl Cursor {
 	/// with no deadline waits until the hole resolves: the group lands, or the track learns
 	/// it won't.
 	///
-	/// Ready with `true` once a group the walk found missing from `walked` up has landed:
-	/// groups land on other threads, and one landing after the walk passed its key would
-	/// read as accounted for here, yet never be handed out.
-	fn poll_owed(
-		&self,
-		groups: ops::Range<u64>,
-		walked: u64,
-		drift: &Drift,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<bool>> {
+	/// Ready with `true` once the walk would hand out a group in `groups` cached after
+	/// `seen`, the [`TrackState::cached`] count it began at: groups land on other threads,
+	/// and one landing after the walk passed its key would read as accounted for here, yet
+	/// never be handed out. Each `true` takes a new landing, so walking again cannot spin.
+	fn poll_owed(&self, groups: ops::Range<u64>, seen: u64, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		if groups.is_empty() {
 			return Poll::Ready(Ok(false));
 		}
 		let window = &self.filter.window;
 		self.poll(waiter, |state| {
-			if state.walkable(walked..groups.end, self.end_key, window) {
+			if state
+				.walk(groups.start, self.end_key, window)
+				.take_while(|slot| slot.group.start < groups.end)
+				.any(|slot| slot.cached > seen)
+			{
 				return Poll::Ready(Ok(true));
 			}
 			// An unjudgeable old gap cannot stand in for a fresh gap above the floor.
@@ -10946,15 +10936,24 @@ impl Cursor {
 		self.poll_heads(waiter);
 		// Where the gap below the candidate starts: groups stepped over as stale are cached.
 		let mut from = floor;
+		// The cached count the walk from `from` began at: a group cached past it may sit below
+		// a key the walk already passed.
+		let mut seen = None;
 		let group = loop {
 			let window = &self.filter.window;
-			let polled = self.poll(waiter, |state| state.poll_next_in_range(floor, end, window));
+			let polled = self.poll(waiter, |state| {
+				state
+					.poll_next_in_range(floor, end, window)
+					.map_ok(|group| (group, state.cached))
+			});
 			// A moved window moved the servable edge `drift` was judged against.
 			if polled.is_pending() && self.watch_time() {
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 				continue;
 			}
-			let Some(producer) = ready!(polled)? else {
+			let (producer, cached) = ready!(polled)?;
+			let began = *seen.get_or_insert(cached);
+			let Some(producer) = producer else {
 				// The feed ended, but a fill still owes a group. Its answer wakes us.
 				if self.awaits_fill() {
 					return Poll::Pending;
@@ -11012,8 +11011,13 @@ impl Cursor {
 
 			// In order means a group the live feed still owes below this one comes first,
 			// until the budget gives up on it. Its landing, its drop, or that verdict wakes us.
-			// One that landed since the walk passed its key goes first: walk again.
-			if ready!(self.poll_owed(from..group.start, floor, &drift, waiter))? {
+			// One that landed since the walk passed its key goes first: walk again from the
+			// gap's start, since it may sit below a group stepped over as stale.
+			#[cfg(test)]
+			test::before_owed();
+			if ready!(self.poll_owed(from..group.start, began, &drift, waiter))? {
+				floor = from;
+				seen = None;
 				continue;
 			}
 
@@ -13403,6 +13407,23 @@ mod test {
 	use crate::frame;
 	use crate::test_tracing::count_drop_warnings;
 	use std::time::Duration;
+
+	thread_local! {
+		static BEFORE_OWED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+	}
+
+	/// Runs, once, what [`set_before_owed`] armed: the moment between an ordered walk
+	/// picking its candidate and judging the gap below it, where another thread's landing
+	/// races the read.
+	pub(super) fn before_owed() {
+		if let Some(hook) = BEFORE_OWED.with(|hook| hook.borrow_mut().take()) {
+			hook();
+		}
+	}
+
+	fn set_before_owed(hook: impl FnOnce() + 'static) {
+		BEFORE_OWED.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+	}
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
 	/// normally born from a [`broadcast::Producer`]. `None` is an untimed track with no
@@ -22918,6 +22939,49 @@ mod test {
 			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
 			.ordered();
 		assert_eq!(items(&mut ordered), ["gap 0..1 (old)", "group 1", "group 2", "pending"]);
+	}
+
+	/// A group landing below the walk's candidate after the walk passed its key, but before
+	/// it judged the gap below the candidate, is walked again rather than handed out behind
+	/// it, even below a group the walk stepped over as stale.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_landing_behind_the_walk_is_walked_again() {
+		let every = || Subscription::default().with_delay(Delay::default().with_max(None));
+		let mut producer = received_producer(None);
+		producer.request_start(None).unwrap();
+		producer.start_at(0).unwrap();
+		put(&producer, 1, None);
+		let mut ordered = producer.subscribe(every()).ordered();
+		let landing = producer.clone();
+		set_before_owed(move || put(&landing, 0, None));
+		assert_eq!(items(&mut ordered), ["group 0", "group 1", "pending"]);
+
+		let budget = Duration::from_millis(50);
+		let producer = received_producer(None);
+		put(&producer, 2, None);
+		elapse(&producer, Duration::from_millis(100));
+		put(&producer, 4, None);
+		elapse(&producer, Duration::from_millis(100));
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
+			.ordered();
+		let landing = producer.clone();
+		set_before_owed(move || {
+			put(&landing, 0, None);
+			put(&landing, 1, None);
+		});
+		assert_eq!(
+			items(&mut ordered),
+			[
+				"group 0",
+				"gap 1..2 (old)",
+				"gap 2..3 (old)",
+				"gap 3..4 (old)",
+				"group 4",
+				"pending"
+			]
+		);
 	}
 
 	/// An ordered read whose bounded window runs out past a group it stepped over as stale
