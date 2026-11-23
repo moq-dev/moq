@@ -26,9 +26,10 @@ Check it before building on it: a group is one stream, which delivers in order, 
 Where the skip lives, read from the code at this commit: `Delay::max` is in `rs/moq-mux/src/container/consumer.rs` (`Delay`), and the reader's skip is by group and by timestamp, not by arrival age.
 A blocked group is skipped, its unread frames given up, once the newest content less where the next group begins reaches `max` (`should_skip`, plus an early skip once the group's last frame ends at that start); a missing group is given up by the same measure in moq-net's ordered reader.
 `max` sums with the catalog warmup while the reader warms.
+A third path skips a group with neither timestamp condition met: once the decoded-frame byte cap is full and the cursor's group stalls, the cursor moves on (the `Consumer` docs' pressure skip); tell it apart from a `max` skip in the reproduction.
 What remains open is why that fires early on a lossy link, not its unit.
 
-Recommended order: first reproduce that skip in a test and find what it drops, then check whether [expire-by-higher-min](/quest/m3/expire-by-higher-min.md) already changes it, since it bounds a group that isn't whole by a higher group's lowest timestamp rather than arrival age; if it settles this, make this quest's test that quest's and delete this one.
+Recommended order: first reproduce that skip in a test and find what it drops, then check whether [expire-by-higher-min](/quest/m3/expire-by-higher-min.md) already changes it, since it bounds a group that isn't whole by a higher group's lowest timestamp, keeping arrival age as a separate backstop that can still expire a superseded group; if it settles this, make this quest's test that quest's and delete this one.
 Reproduce with a deterministic test (a paused clock and a scripted late delivery), not the netem harness.
 
 Public API and wire: unknown until the cause is found; say which in the PR.
