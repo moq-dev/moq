@@ -184,19 +184,21 @@ pub struct Config {
 	/// How the encoder trades latency for compression. Defaults to
 	/// [`Preset::LowLatency`].
 	pub preset: Preset,
-	/// The finest quantizer (0-51, lower is finer) the software H.264 encoder's
-	/// rate control may pick. `None` (the default) keeps the encoder's own floor:
-	/// 22 for openh264, which keeps quality constant under the cap, so a calm
-	/// scene spends less than it rather than buying detail no one sees.
+	/// The finest quantizer (0-51, lower is finer) the rate control may pick.
+	/// `None` (the default) keeps the backend's own floor, which keeps quality
+	/// constant under the cap, so a calm scene spends less than it rather than
+	/// buying detail no one sees: 22 for openh264, 25 (H.264) or 23 (H.265) for
+	/// VideoToolbox.
 	///
 	/// Lower it to let the rate control code a picture finer when the cap
 	/// allows, or set `Some(0)` for no floor beyond the codec's own (openh264
 	/// never codes finer than 12). What that costs depends on the content: a
 	/// detailed calm scene spends more of the cap, while very simple content
 	/// can come out smaller and cheaper to encode and decode. Values above 51
-	/// act as 51.
+	/// act as 51. [`Applied`]'s controls name the floor that took effect.
 	///
-	/// Only openh264 reads it. The hardware backends keep their own quality
+	/// openh264 and VideoToolbox read it; VideoToolbox before macOS 13 and iOS
+	/// 16 has no floor at all. The other backends keep their own quality
 	/// controls, tuned per device.
 	pub qp_floor: Option<u8>,
 	/// The color space of the input frames, written into the bitstream's VUI so a
