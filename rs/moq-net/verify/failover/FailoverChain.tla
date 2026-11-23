@@ -35,7 +35,7 @@
 (* Scope: the origin O never fails, writes each group whole, and E never   *)
 (* dies, so the client always has its one hop; a dead relay never returns; *)
 (* every hop subscribes before the first group, and a copy's range is      *)
-(* resolved from its first group (SUBSCRIBE_OK), so a relay knows which    *)
+(* resolved from its first group (SUBSCRIBE_START), so a relay knows which *)
 (* groups its copy owes. A fetch reaches the serving route while that      *)
 (* route lives, and a relay whose track ended still moves to another route *)
 (* for the reads that hold it, forgetting the track only once none does.   *)
