@@ -67,9 +67,9 @@ import {
 	type Join,
 	type Joining,
 	joinsLive,
+	placedAsTimes,
 	rangesOf,
 	UNHELD,
-	placedAsTimes,
 	Window,
 	wireHeld,
 	wireSpan,
@@ -6224,7 +6224,11 @@ export class Subscriber {
 	// Edit the ranges by key, as `hooks.editSubscriber` does: only the ranges it adds resolve, and
 	// every other stays where it resolved. Mirrors the Rust `Subscriber::edit`.
 	#edit(edit: Edit): void {
-		const { ranges: _, placed: __, ...scalars } = subscriptionDefaults({
+		const {
+			ranges: _,
+			placed: __,
+			...scalars
+		} = subscriptionDefaults({
 			priority: edit.priority,
 			order: edit.order,
 			ranges: [],

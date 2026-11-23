@@ -259,7 +259,9 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 	await expect(update([1, 0, 3, 7, 0])).rejects.toThrow(ProtocolViolation);
 	// Type 4 is a placed join's group, a frame that may be 0, then its max as type 3 carries it,
 	// which only a start may carry either.
-	expect((await update([1, 4, 9, 0, 5, 0])).ranges).toEqual([{ start: { joined: { absolute: 9n, frame: 0, max: 4 } } }]);
+	expect((await update([1, 4, 9, 0, 5, 0])).ranges).toEqual([
+		{ start: { joined: { absolute: 9n, frame: 0, max: 4 } } },
+	]);
 	await expect(update([1, 0, 4, 9, 0, 0])).rejects.toThrow(ProtocolViolation);
 	// Any other type is a violation, and so is a Position at frame 0 or as an end.
 	await expect(update([1, 2, 0, 0, 0])).rejects.toThrow(ProtocolViolation);

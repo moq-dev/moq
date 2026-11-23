@@ -49,6 +49,7 @@ import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import * as broadcast from "./broadcast.ts";
 import { Delivered } from "./delivered.ts";
+import { samePlaced } from "./demand.ts";
 import { NotFound, Retry, retry, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
@@ -90,7 +91,6 @@ import {
 	Window,
 	widest,
 } from "./window.ts";
-import { samePlaced } from "./demand.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
@@ -781,7 +781,9 @@ class Reader implements ResumeSource {
 		// placed, so the copy starts it there and still expires it under its max.
 		const wire = asked(ranges, copy.floor, copyEnd(copy), copy.resolved ?? [], preferences.placed);
 		const { placed: _, ...rest } = preferences;
-		return wire.placed.size > 0 ? { ...rest, ranges: wire.ranges, placed: wire.placed } : { ...rest, ranges: wire.ranges };
+		return wire.placed.size > 0
+			? { ...rest, ranges: wire.ranges, placed: wire.placed }
+			: { ...rest, ranges: wire.ranges };
 	}
 
 	/**

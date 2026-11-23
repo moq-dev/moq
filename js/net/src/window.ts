@@ -890,7 +890,8 @@ export class Window {
 		for (const key of this.#reaching) {
 			const range = this.#ranges.get(key);
 			const lag = range && liveMillis(range);
-			if (range && lag !== undefined) joins.push([lag, range.end, rangeBudget(range), this.#joining.get(key)?.since ?? 0]);
+			if (range && lag !== undefined)
+				joins.push([lag, range.end, rangeBudget(range), this.#joining.get(key)?.since ?? 0]);
 		}
 		return joins;
 	}

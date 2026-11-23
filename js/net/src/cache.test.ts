@@ -3,7 +3,7 @@ import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
-import { hooks, staleHole } from "./internal.ts";
+import { hooks } from "./internal.ts";
 import { withMax } from "./subscription.test-util.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";

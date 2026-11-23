@@ -10,6 +10,7 @@ import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import type { JoinAsk } from "../demand.ts";
+import { samePlaced } from "../demand.ts";
 import {
 	error,
 	NotFound,
@@ -56,7 +57,6 @@ import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/deman
 import { max, min, UNBOUNDED } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
-import { samePlaced } from "../demand.ts";
 import {
 	AT_KEYS,
 	EMPTY,
