@@ -1414,9 +1414,11 @@ impl Schedule {
 	///
 	/// The tables otherwise go out only ahead of the media they were muxed with, as far ahead
 	/// of its deadline as its buffers let it go, so their spacing on the wire follows that
-	/// media's send-ahead rather than any clock. The copy is due in its slot and goes out as
-	/// soon as TBsys and Bsys take it, past the copies the media leads when it matches them,
-	/// never past a different version. Periods are absolute on the grid, so two exporters of a
+	/// media's send-ahead rather than any clock. A copy the media leads covers its own period,
+	/// so the grid adds one only to a period without. The copy is due in its slot and goes out
+	/// as soon as TBsys and Bsys take it, past the copies the media leads when it matches them,
+	/// never past a different version; padded, a copy of the same tables still in Bsys covers
+	/// it ([`Self::covered`]). Periods are absolute on the grid, so two exporters of a
 	/// broadcast repeat in the same slots.
 	fn repeat(&mut self, index: u128) {
 		let period = index / REPEAT_SLOTS;
@@ -1446,6 +1448,10 @@ impl Schedule {
 		if !self.grid {
 			return;
 		}
+		// Under a mux rate a revision's copy has a deadline and cannot know of a repeat coming, so
+		// it may find one still in Bsys: only tables Bsys takes three times over (a packet each
+		// of PAT and PMT) repeat, so a copy of up to 1,160 bytes still fits beside one, and a
+		// larger one waits at most the repeat's 38 ms drain.
 		if self.rate.is_some() && 3 * psi.packets.len() as u128 > BSYS {
 			return;
 		}
@@ -1541,18 +1547,12 @@ impl Schedule {
 		}
 		removals.sort_by_key(|event| event.0);
 		let mut removals = removals.into_iter().peekable();
-		// Earliest deadline first, but a repeat not yet begun takes only a position nothing else
-		// can use, so it costs no other unit a packet's time.
-		let rank = |unit: &Unit| match unit.idle() {
-			true => u128::MAX,
-			false => unit.timing.by,
-		};
 		let mut ready: BinaryHeap<Reverse<(u128, usize)>> = lanes
 			.iter()
 			.enumerate()
 			.filter_map(|(lane, units)| {
 				let unit = &self.units[*units.front()?];
-				(self.release(unit) <= index).then_some(Reverse((rank(unit), lane)))
+				(self.release(unit) <= index).then_some(Reverse((unit.timing.by, lane)))
 			})
 			.collect();
 		let mut waiting: BinaryHeap<Reverse<(i128, usize)>> = BinaryHeap::new();
@@ -1570,7 +1570,7 @@ impl Schedule {
 			}
 			while waiting.peek().is_some_and(|Reverse((at, _))| *at <= now) {
 				let Reverse((_, lane)) = waiting.pop().unwrap();
-				ready.push(Reverse((rank(&self.units[*lanes[lane].front().unwrap()]), lane)));
+				ready.push(Reverse((self.units[*lanes[lane].front().unwrap()].timing.by, lane)));
 			}
 			let mut emitted = false;
 			// The slot's PCR opens it. Its PID's next packet carries it there when it can go
@@ -1600,7 +1600,7 @@ impl Schedule {
 					if let Some(&i) = lanes[lane].front()
 						&& self.release(&self.units[i]) <= index
 					{
-						ready.push(Reverse((rank(&self.units[i]), lane)));
+						ready.push(Reverse((self.units[i].timing.by, lane)));
 					}
 					// What it held back may go at this position.
 					ready.extend(passed.drain(..));
@@ -1801,7 +1801,7 @@ impl Schedule {
 				if let Some(&i) = lanes[lane].front() {
 					let unit = &self.units[i];
 					if self.release(unit) <= index {
-						ready.push(Reverse((rank(unit), lane)));
+						ready.push(Reverse((unit.timing.by, lane)));
 					}
 				}
 				emitted = true;
@@ -2451,7 +2451,7 @@ mod tests {
 			|ms| ms % 40 == 0,
 			|_| true,
 		];
-		// Every 520 ms from 1 s, each landing elsewhere in its repeat period, the tables stay as
+		// Every 515 ms from 1 s, each landing elsewhere in its repeat period, the tables stay as
 		// they are, swap with a PMT of 12, 8 or 1 packets, or the rate doubles and halves.
 		#[derive(Clone, Copy, Debug)]
 		enum Change {
@@ -2490,7 +2490,7 @@ mod tests {
 			schedule.set_psi(psi(1, case.count));
 			let (mut mark, mut rate, mut pats) = (1, RATE, 0);
 			for ms in (0..5_000).step_by(step as usize) {
-				let changed = ms >= 1_000 && (ms - 1_000) % 520 < step;
+				let changed = ms >= 1_000 && (ms - 1_000) % 515 < step;
 				if changed {
 					mark += 1;
 					match case.change {
