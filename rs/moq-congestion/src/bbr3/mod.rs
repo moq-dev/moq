@@ -2141,9 +2141,14 @@ impl Controller for Bbr3 {
         // `bw_shortterm` and the delay bound's `bw_delay` both mark the path slower than
         // `max_bw`, so a bandwidth follower, such as an encoder, should follow them. Both are
         // infinite while unset.
-        let estimate = [self.max_bw, self.aged_bw_filter.max(), self.bw_shortterm, self.bw_delay]
-            .into_iter()
-            .fold(f64::INFINITY, f64::min);
+        let estimate = [
+            self.max_bw,
+            self.aged_bw_filter.max(),
+            self.bw_shortterm,
+            self.bw_delay,
+        ]
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
         Metrics {
             congestion_window: self.window(),
             ssthresh: None,
@@ -7784,8 +7789,8 @@ mod test {
     }
 
     /// A flow the application holds below its maximum ages the reported estimate's window once
-    /// per `APP_LIMITED_CYCLE`, so the estimate falls to the rate it delivers after two of them,
-    /// while BBR.max_bw keeps pacing a backlog at the probed rate.
+    /// per `APP_LIMITED_CYCLE`, so the estimate and the probe's fill fall to the rate it delivers
+    /// after two of them, while BBR.max_bw keeps pacing a backlog at the probed rate.
     #[test]
     fn app_limited_flow_ages_the_estimate() {
         let mut sim = probed();
@@ -7804,10 +7809,24 @@ mod test {
                 1_200_000.0
             };
             let estimate = sim.bbr.metrics().bandwidth_estimate;
-            assert_eq!(estimate, Some(expected as u64), "at {}ms", (now + 10 * MS) / MS);
+            assert_eq!(
+                estimate,
+                Some(expected as u64),
+                "at {}ms",
+                (now + 10 * MS) / MS
+            );
             assert_eq!(sim.bbr.max_bw, 12_000_000.0);
             now += 10 * MS;
         }
+
+        // The bandwidth probe fills over the aged estimate, not over the stale maximum.
+        sim.bbr.state = BbrState::ProbeBw(ProbeBwSubstate::Up);
+        sim.bbr.bw_probe_fill = true;
+        let bdp = 1_200_000.0 * sim.bbr.min_rtt.as_secs_f64();
+        let fill = (sim.bbr.probe_bw_up_pacing_gain * bdp) as u64;
+        let fill = fill.max(sim.bbr.offload_budget).max(sim.bbr.min_pipe_cwnd);
+        assert!(fill < (sim.bbr.probe_bw_up_pacing_gain * bdp * 10.0) as u64);
+        assert_eq!(sim.bbr.probe_inflight(), Some(fill));
     }
 
     /// ProbeRTT entered mid-probe ends the probe's feedback: the window ages once, on entry, and
