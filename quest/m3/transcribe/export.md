@@ -1,31 +1,42 @@
-# [L] Export transcripts as WebVTT
+# [L] Export text renditions as WebVTT and SRT
 
 ## Goal
 
-The HLS and fMP4 exporters write a transcript rendition's final segments as
-WebVTT: an HLS subtitles rendition beside the media playlists, and a `wvtt`
-track in fMP4. Interim revisions never reach an export.
+The exporters write every text rendition, whatever its format, as the text
+the container carries: an HLS subtitles rendition and a DASH text adaptation
+set of WebVTT segments beside the media, a `wvtt` track in fMP4, and
+`S_TEXT/WEBVTT` or `S_TEXT/UTF8` (SRT) in Matroska. `moq export vtt` and
+`moq export srt` write one text rendition as a sidecar file, as `moq export
+h264` does for a video one. A transcript exports only its final segments;
+interim revisions never reach an export.
 
 ## Plan
 
-Split out of [the format](/quest/m3/transcribe/format.md): no exporter
-writes any text rendition on main. `rs/moq-mux/src/container/fmp4/text.rs`
-only imports `wvtt` and `stpp`, and `rs/moq-hls` has no subtitles rendition,
-so this builds the text path in both exporters, not just a format
-conversion.
+Decided 2026-11-23 (maintainer, `/quest-run`): ✅ every text format: WebVTT,
+SRT, and CEA-608/708 where the container carries it (rejected: WebVTT for
+transcripts only). This quest covers the text tracks; CEA-608/708 goes back
+into the video, which is [its own quest](/quest/m3/transcribe/caption-export.md).
 
-Public API: none beyond the exporters' output. Wire: none.
+No exporter writes any text rendition on main.
+`rs/moq-mux/src/container/fmp4/text.rs` only imports `wvtt` and `stpp`, and
+`rs/moq-hls` has no subtitles rendition, so this builds the text path in the
+exporters, not just a format conversion. Convert each format to cues once,
+in `rs/moq-mux/src/container/text.rs`: `vtt` passes through, `utf8` becomes
+cues that each end at the next, `ttml` becomes cues of its text, and
+`transcript` becomes one cue per final segment. fMP4 also carries `ttml` as
+IMSC1 (`stpp`) unchanged, since converting it to WebVTT loses its styling.
+
+A segmented exporter writes a subtitle segment once every cue starting in its
+span is final. For a transcript that waits on the segment open at the span's
+end, not on its whole utterance, since the transcriber commits at pauses
+inside an utterance ([crate](/quest/m3/transcribe/crate.md)); only speech
+with no pause at all holds the subtitles back longer. A cue that
+crosses a segment boundary repeats in each segment it overlaps, as HLS
+requires.
+
+Public API: new `moq export` sinks, and text renditions in each exporter's
+output. Wire: none.
 
 ## Required
 
 - [A structured transcript text format](/quest/m3/transcribe/format.md) - the rendition this converts
-
-## Waiting
-
-- Maintainer: pick which text renditions the exporters write. Options: every
-  text format (`vtt` passed through, `utf8` and `transcript` converted to
-  WebVTT, `ttml` as IMSC1 in fMP4), so imported captions, including those the
-  importer will take from CEA-608/708 SEI, export too; or transcripts only, as
-  planned. Recommendation: every text format, since the subtitles rendition
-  and segmenting are the bulk of the work either way. An agent cannot take
-  it, since it widens planned scope.

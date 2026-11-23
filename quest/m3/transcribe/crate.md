@@ -13,39 +13,48 @@ OpenAI's `gpt-live-transcribe`, configured with the caller's API key.
 
 Follow `moq-transcode`'s structure for the derivative catalog and demand
 tracking (`rs/moq-transcode/src/rung.rs`), including its session budget,
-which here caps concurrent hosted sessions. Groups follow
-[the format](/quest/m3/transcribe/format.md)'s pick of what span a group
-covers. Decode with `moq-audio` and resample to what the backend takes.
+which here caps concurrent hosted sessions. Decode with `moq-audio` and
+resample to what the backend takes.
 
 `gpt-live-transcribe` streams text deltas but has no server-side turn
-detection, so the crate segments speech itself and commits each turn. A
-segment's interim frames follow the deltas, and its final frame lands when
-the turn's transcript completes. Measure the latency from speech to the first
-interim and to the final, and record both in the crate's README.
+detection, so the crate detects speech itself. Speech onset opens an
+utterance's group ([the format](/quest/m3/transcribe/format.md)), and the
+silence that ends the utterance finishes it, however long it ran. Inside an
+utterance, the crate also commits the backend's buffer at each shorter pause,
+which ends a segment: its interim frames follow the deltas, and its final
+frame lands when that commit's transcript completes. Committing at pauses
+keeps a final within a segment of the speech even when an utterance runs on,
+which is what lets an exporter write it
+([export](/quest/m3/transcribe/export.md)). Measure the latency from speech to
+the first interim and to the final, and record both in the crate's README.
+
+Groups are keyed by the utterance's start, and where an utterance starts
+depends on where the transcriber began listening, so a fresh run over a span
+can cut it differently, and a hosted model never repeats its text exactly
+either way. The transcriber is the publisher of these groups, not a cache of
+them: it keeps each group it published for as long as the source holds the
+audio beneath it, and answers a later request for that span from what it
+kept. A time start into a span no run covered transcribes from a lead-in
+before that time, and publishes the utterance containing it, or reports the
+silence up to the next one, only within the gaps between kept groups, since
+groups never overlap.
 
 The transcript rendition is an ordinary catalog text rendition, listed
 beside any captions the source already carries
-([captions path](/quest/m3/transcribe/README.md)). Label it as generated, so
-a player's menu tells it apart from imported captions in the same language.
+([caption import](/quest/m3/transcribe/caption-import.md)). It takes
+`role: "caption"` and is labeled as generated, so a player's menu tells it
+apart from imported captions in the same language.
 
 The backend interface takes audio in and returns transcript events, with no
 callback parameters (the `AGENTS.md` API rules). Keep the interface private
 until the second backend needs it.
+
+Decided 2026-11-23 (maintainer, `/quest-run`): ✅ `role: "caption"` for the
+source-language transcript (rejected: a new `transcript` role; `subtitle`
+throughout).
 
 Public API: a new crate. Wire: none beyond the format.
 
 ## Required
 
 - [A structured transcript text format](/quest/m3/transcribe/format.md) - the rendition this publishes
-
-## Waiting
-
-- Maintainer: pick the transcript rendition's `role`. Options: `caption` for
-  the source-language transcript and `subtitle` for translations, matching
-  how live captions are offered to viewers who cannot hear the audio and the
-  role imported CEA-608/708 captions carry; or `subtitle` throughout, since
-  the hang draft defines `caption` as all audio (SDH) and speech recognition
-  describes no other sounds. Recommendation: `caption` for the source
-  language, since a viewer looking for captions should find it. An agent
-  cannot take it: it is a product choice about how players present the
-  track.

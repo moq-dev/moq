@@ -1,0 +1,52 @@
+# [L] Import CEA-608/708 captions as text tracks
+
+## Goal
+
+The H.264 and H.265 importers take the CEA-608/708 captions a source carries
+in its video's SEI and publish each caption channel as a catalog text track
+with `role: "caption"`, so every player gets captions as an ordinary text
+track and none parses SEI. The video track no longer carries them: each SEI
+NAL loses only its A/53 caption message and keeps every other one, and a NAL
+left with no message is dropped.
+
+## Plan
+
+Decided 2026-11-23 (maintainer, on
+[moq-dev/moq#9443](https://github.com/moq-dev/moq/pull/9443#issuecomment-7091545924)):
+✅ the importer strips caption SEI and publishes a `role: "caption"` text track
+(rejected: players parse SEI on decode, which that PR adds to `@moq/watch`).
+Decided 2026-11-23 (maintainer, `/quest-run`): ✅ plan it here (rejected:
+leaving it to that PR's author). That PR's `cc_data` parser and tests
+(`js/watch/src/video/ccdata.ts`) are a starting point for the decode step.
+
+Extract in the codec importers (`rs/moq-mux/src/codec/h264/import.rs`,
+`rs/moq-mux/src/codec/h265/import.rs`), which see every container's frames in
+both framings and already scan SEI for HDR metadata
+(`rs/moq-mux/src/codec/color.rs`). Walk each SEI NAL with `sei_messages`
+(`rs/moq-mux/src/codec/annexb.rs`) and take the ITU-T T.35 registered
+messages (payload type 4) whose A/53 `GA94` user data holds `cc_data`. Frames
+arrive in decode order, so order the `cc_data` by each frame's presentation
+time before decoding, holding back at most the stream's reorder depth.
+
+Decode 608 into `vtt` cues: pop-on gives a cue per displayed caption, and
+roll-up and paint-on give a cue per row as it is displayed, ending when it
+scrolls off or is cleared, with the row and column as WebVTT `line` and
+`position` settings. Decode 708 services the same way. Recommendation: publish
+each 708 service that carries data, and a 608 channel only when no 708
+service does, since broadcasters send the same captions in both; take the
+language from a 708 caption service descriptor when the container carries
+one (MPEG-TS's PMT). Add a track when its channel first carries data, as the
+catalog already grows mid-stream.
+
+Rewriting an SEI NAL re-serializes the remaining messages with their sizes
+and re-applies emulation prevention, and a length-prefixed frame updates the
+NAL's length. Triples with `cc_valid` 0 are padding, and a 608 byte with bad
+parity decodes as the standard says, so real feeds' noise is not an error;
+structurally malformed `cc_data` fails the import like any malformed input.
+
+Public API: none beyond the new text tracks in an import's catalog. Wire:
+none.
+
+## Related
+
+- [Re-insert captions into exported video](/quest/m3/transcribe/caption-export.md) - the reverse, for containers that carry captions in band

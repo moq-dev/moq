@@ -1,4 +1,4 @@
-# Live transcription
+# Live transcription and captions
 
 ## Goal
 
@@ -9,13 +9,18 @@ video. Its catalog references a text rendition in a new structured transcript
 format, produced just in time while subscribed. The language is detected
 automatically. A translator later adds one rendition per target language.
 
-Non-goals: speaker diarization, protected media (a platform never reads its
-payload), and the captions a source already carries in band (the importer's
-work, below).
+Captions a source carries in band reach players the same way: the importer
+takes CEA-608/708 out of the video and publishes them as text tracks, and the
+exporters write every text rendition, transcripts included, in the forms each
+container carries.
+
+Non-goals: speaker diarization, and protected media (a platform never reads
+its payload).
 
 This README's own work is the end-user docs, once the children land: a
-`doc/lib/rs/moq-transcribe.md` page, its row in `doc/lib/rs/index.md`, and the
-transcript in the [MoQ for AI](/doc/concept/use-case/ai.md) page.
+`doc/lib/rs/moq-transcribe.md` page, its row in `doc/lib/rs/index.md`, the
+transcript in the [MoQ for AI](/doc/concept/use-case/ai.md) page, and
+imported and exported captions on the import and export docs.
 
 ## Plan
 
@@ -38,20 +43,34 @@ Decided 2026-11-17 (maintainer, `/quest-plan`):
 - ✅ A fetch of past transcript transcribes the requested span plus a few
   seconds of preceding source audio, and returns only the requested
   segments (rejected: live only, which leaves rewinds without captions).
-  Group fetches mirror the source's, as transcode's do.
-- ✅ The translator's runtime is decided later, in
-  [its quest](/quest/m3/transcribe/translate.md).
-
-Since then, groups are addressed by their start time and never overlap, and a
-time start reads the group containing that time
-([moq-lite](/doc/concept/moq-lite.md)). A source's audio groups are often one
-packet each, so "mirror the source's groups" no longer names a usable
-boundary: the [format](/quest/m3/transcribe/format.md) waits on a pick.
 
 Decided 2026-11-23 (maintainer, on
 [moq-dev/moq#9443](https://github.com/moq-dev/moq/pull/9443#issuecomment-7091545924)):
-captions reach players only as catalog text tracks. The importer strips
-CEA-608/708 caption SEI from H.264 and H.265 and publishes the captions as a
-text track with `role: "caption"`, so no player parses SEI. A transcript is
+✅ captions reach players only as catalog text tracks (rejected: players parse
+SEI on decode). The importer strips CEA-608/708 caption SEI from H.264 and
+H.265 and publishes the captions as a text track with `role: "caption"`
+([caption import](/quest/m3/transcribe/caption-import.md)). A transcript is
 one more source on that path: watch's `captions` attribute lists it beside
 imported captions, and an exporter treats it like any other text rendition.
+
+Decided 2026-11-23 (maintainer, `/quest-run`):
+
+- ✅ One transcript group per utterance, with no cap on its length (rejected:
+  fixed windows on the source clock; following the source video's groups;
+  splitting near 10 s). This replaces "group fetches mirror the source's", as
+  groups are now addressed by their start time and a source's audio groups
+  are often one packet each. [The format](/quest/m3/transcribe/format.md)
+  says how a late joiner gets the open utterance, and
+  [the crate](/quest/m3/transcribe/crate.md) how a fetch answers a past span.
+- ✅ `role: "caption"` for the source-language transcript (rejected: a new
+  `transcript` role).
+- ✅ Exporters write every text format: WebVTT, SRT, and CEA-608/708 where the
+  container carries it (rejected: WebVTT only), split between
+  [text tracks](/quest/m3/transcribe/export.md) and
+  [captions in the video](/quest/m3/transcribe/caption-export.md).
+- ✅ Caption import is planned here (rejected: leaving it to
+  [moq-dev/moq#9443](https://github.com/moq-dev/moq/pull/9443)'s author).
+- ✅ The translator starts on OpenAI's live translation
+  ([translate](/quest/m3/transcribe/translate.md)), and the self-hosted
+  transcriber on whisper.cpp through `whisper-rs`
+  ([transcribe-local](/quest/m4/transcribe-local.md)).
