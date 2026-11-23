@@ -355,10 +355,21 @@ impl Retransmits {
 	const MAX_PENDING_RETIRED_CIDS: u64 = CidQueue::LEN as u64 * 10;
 }
 
+/// Queue CRYPTO frames in offset order, so the lowest the peer may be missing goes first
+///
+/// A peer buffers only so far past the offset it is missing, so a retransmission sent behind
+/// later offsets can exceed its CRYPTO buffer and close the handshake.
+pub(super) fn queue_crypto(queue: &mut VecDeque<frame::Crypto>, frames: impl IntoIterator<Item = frame::Crypto>) {
+	for frame in frames {
+		let at = queue.partition_point(|queued| queued.offset <= frame.offset);
+		queue.insert(at, frame);
+	}
+}
+
 impl ::std::ops::BitOrAssign for Retransmits {
 	fn bitor_assign(&mut self, rhs: Self) {
 		// We reduce in-stream head-of-line blocking by queueing retransmits before other data for
-		// STREAM and CRYPTO frames.
+		// STREAM frames.
 		self.max_data |= rhs.max_data;
 		self.data_blocked |= rhs.data_blocked;
 		for dir in Dir::iter() {
@@ -369,9 +380,7 @@ impl ::std::ops::BitOrAssign for Retransmits {
 		self.stop_sending.extend_from_slice(&rhs.stop_sending);
 		self.max_stream_data.extend(&rhs.max_stream_data);
 		self.stream_data_blocked.extend(&rhs.stream_data_blocked);
-		for crypto in rhs.crypto.into_iter().rev() {
-			self.crypto.push_front(crypto);
-		}
+		queue_crypto(&mut self.crypto, rhs.crypto);
 		self.new_cids.extend(&rhs.new_cids);
 		self.retire_cids.extend(rhs.retire_cids);
 		self.ack_frequency |= rhs.ack_frequency;

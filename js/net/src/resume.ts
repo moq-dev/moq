@@ -472,10 +472,10 @@ class Reader implements ResumeSource {
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: bigint;
 	/**
-	 * What copies declared skipped as they were let go, so a key the cursor keeps out under the
-	 * serving copy's resume point counts as accounted for after the copy that knew it is gone; see
-	 * {@link #accounts} and {@link #lacking}. Only the skipped start and end of each gap the reader
-	 * lacks there, where the cursor keeps keys out, so it holds at most two runs a gap.
+	 * The skipped run from the start of each key run the cursor keeps out of a gap under the serving
+	 * copy's resume point, recorded as the copies declare it, so it outlives the copy and the cache
+	 * that held it. Only that run, at most two a gap however many routes come and go: the rest is
+	 * asked of the serving route again; see {@link #asking}.
 	 */
 	#skipped = new Delivered();
 	/**
@@ -1483,39 +1483,65 @@ class Reader implements ResumeSource {
 	 * Whether every key of `gaps`, which `delivered` lacks, is accounted for.
 	 *
 	 * Under the serving copy's resume point, a key the cursor admits was the copies' it replaced, each
-	 * let go once it had nothing more; one it keeps out stays owed, as on one cursor, unless a copy
-	 * declares it skipped. The serving copy judges the rest by where it placed the reader's ranges
-	 * itself: a time a copy held no group for places the reader's window at the time itself, wider
-	 * than any group the serving copy reads. Mirrors the Rust `Reader::accounts`.
+	 * let go once it had nothing more. One it keeps out stays owed, as on one cursor, until a copy held
+	 * now declares it skipped, and the serving route is asked for those no copy does (see
+	 * {@link #ask}), so its answer settles them however many copies came and went. The serving copy
+	 * judges the rest by where it placed the reader's ranges itself: a time a copy held no group for
+	 * places the reader's window at the time itself, wider than any group the serving copy reads.
+	 * Mirrors the Rust `Reader::accounts`.
 	 */
 	#accounts(serving: Copy, delivered: Delivered, gaps: readonly Run[], ordered: boolean): boolean {
 		const window = this.#window();
 		if (window.end() === undefined || window.pending) return false;
 		const resumed = resumePoint(serving) ?? 0n;
-		const cursor = this.#shell.cursor.peek();
-		// Declared skipped by a copy let go, or by one held now.
-		const skipped = (open: Run) => {
-			const held = new Delivered();
-			for (const copy of this.#copies) {
-				for (const run of copySkips(copy, open.start, open.end)) held.addRun(run.start, run.end);
-			}
-			return held.covers(open.start, open.end);
-		};
+		let open: Run | undefined;
 		const above: Run[] = [];
 		for (const gap of gaps) {
-			const split = min(max(resumed, gap.start), gap.end);
-			// Under the resume point, only what the cursor keeps out.
-			const keptOut = [
-				{ start: gap.start, end: min(split, cursor.start) },
-				{ start: cursor.end === undefined ? split : max(cursor.end, gap.start), end: split },
-			];
-			for (const run of keptOut) {
-				if (run.start >= run.end) continue;
-				if (!this.#skipped.gaps(run.start, run.end).every(skipped)) return false;
+			for (const run of this.#keptOut(gap, resumed)) {
+				for (const unknown of this.#unskipped(run)) {
+					open = open ? { start: min(open.start, unknown.start), end: max(open.end, unknown.end) } : unknown;
+				}
 			}
+			const split = min(max(resumed, gap.start), gap.end);
 			if (split < gap.end) above.push({ start: split, end: gap.end });
 		}
+		if (open) {
+			this.#ask(open);
+			return false;
+		}
 		return hooks.accountsFor(serving.sub, delivered, above, ordered);
+	}
+
+	/**
+	 * The parts of `gap` under the serving copy's resume point `resumed` that the cursor keeps out:
+	 * owed, as on one cursor, until a copy declares them skipped. Mirrors the Rust `Reader::kept_out`.
+	 */
+	#keptOut(gap: Run, resumed: bigint): Run[] {
+		const cursor = this.#shell.cursor.peek();
+		const split = min(max(resumed, gap.start), gap.end);
+		return [
+			{ start: gap.start, end: min(split, cursor.start) },
+			{ start: cursor.end === undefined ? split : max(cursor.end, gap.start), end: split },
+		].filter((run) => run.start < run.end);
+	}
+
+	/** The parts of `run` neither recorded nor declared skipped by a copy held now. */
+	#unskipped(run: Run): Run[] {
+		const held = new Delivered();
+		for (const skip of this.skippedIn(run.start, run.end)) held.addRun(skip.start, skip.end);
+		return held.gaps(run.start, run.end);
+	}
+
+	/**
+	 * Ask the serving route for `keys`, which hold a key the cursor keeps out that is neither recorded
+	 * nor declared skipped by a copy held now. Its answer settles each such key as it would on one
+	 * cursor: a skip accounts for it, while a group or a drop leaves it owed. A copy of that route
+	 * already asked for them, kept by {@link #letGo} until {@link #skipped} records them, asks nothing
+	 * more, so neither a reader waiting on the answer nor one a group holds open asks again. Mirrors
+	 * the Rust `Reader::ask`.
+	 */
+	#ask(keys: Run): void {
+		this.#backfill(keys.start, keys.end);
 	}
 
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined {
@@ -1782,6 +1808,11 @@ class Reader implements ResumeSource {
 	 * replaced stays, even between routes: it is still the newest copy there is, until the track
 	 * ended and it holds nothing left to read. Whether a group the reader lacks may still land on
 	 * a replaced one, which a clean end waits for.
+	 *
+	 * So does the copy of the serving route asked furthest from where {@link #asking} starts: it is
+	 * the ask {@link #accounts} makes, waiting on that route's answer, and letting it go would only
+	 * ask again. Only that one, since every ask starts there: an ask from lower down covers what the
+	 * copies asked before it did, so a range moved again and again keeps one.
 	 */
 	#letGo(delivered: Delivered): boolean {
 		// An end a copy declared outlives the copy.
@@ -1790,9 +1821,15 @@ class Reader implements ResumeSource {
 		const last = this.#copies.at(-1);
 		const edge = last && hooks.latestKey(last.sub);
 		const cursor = this.#shell.cursor.peek();
+		const asking = this.#asking(delivered);
+		let asked: Copy | undefined;
+		if (asking !== undefined && last && !last.replaced) {
+			for (const copy of this.#copies) {
+				if (!copy.replaced || !copyAskedFor(copy, last, asking)) continue;
+				if (!asked || (copyEnd(copy) ?? UNBOUNDED) >= (copyEnd(asked) ?? UNBOUNDED)) asked = copy;
+			}
+		}
 		let waits = false;
-		// Built on the first drop only: a reader no copy leaves pays nothing for it.
-		let lacking: Run[] | undefined;
 		this.#copies = this.#copies.filter((copy) => {
 			if (!copy.replaced) {
 				if (!this.#ended || copy.lease > 0) return true;
@@ -1803,56 +1840,46 @@ class Reader implements ResumeSource {
 			} else {
 				const retains = this.#retains(copy, delivered, edge);
 				if (retains === "wait") waits = true;
-				if (retains) return true;
+				if (retains || copy === asked) return true;
 			}
-			// Before the drop, which closes a front's copy along with its own copies.
-			lacking ??= this.#lacking(delivered);
-			this.#keepSkips(copy, lacking);
 			this.#drop(copy);
 			return false;
 		});
-		// A gap may be skipped in parts no one copy knows whole: merge what the held copies skipped
-		// too.
-		if (lacking) for (const copy of this.#copies) this.#keepSkips(copy, lacking);
 		this.#unroute();
-		// Only the skipped start and end of each gap the reader still lacks, at most two runs a gap, so
-		// what is kept never outgrows the gaps however many routes come and go; a skip inside a gap is
-		// left to the copies that hold it.
-		if (this.#skipped.runs > 0) {
-			const kept = new Delivered();
-			for (const gap of this.#lacking(delivered)) {
-				const runs = runsIn(this.#skipped, gap.start, gap.end);
-				const first = runs[0];
-				if (first?.start === gap.start) kept.addRun(first.start, first.end);
-				const last = runs.at(-1);
-				if (last?.end === gap.end) kept.addRun(last.start, last.end);
-			}
-			this.#skipped = kept;
-		}
 		return waits;
 	}
 
 	/**
-	 * Keep what `copy` skipped of each gap in `lacking`, merged with what earlier
-	 * copies skipped: a skip is final, and only that copy may know it. Mirrors the Rust
-	 * `Reader::let_go`.
+	 * Where {@link #accounts} asks the serving route from: the first key of a bounded window under
+	 * the serving copy's resume point that `delivered` lacks and the cursor keeps out, past the
+	 * skipped run {@link #skipped} records from the start of each run of them. Records those runs
+	 * first, from what every copy held now declares, so an answer is kept before the cache that holds
+	 * it forgets it. A reader whose cursor keeps nothing out, or that follows one route, pays
+	 * nothing. Mirrors the Rust `Reader::asking`.
 	 */
-	#keepSkips(copy: Copy, lacking: readonly Run[]): void {
-		for (const gap of lacking) {
-			for (const skip of copySkips(copy, gap.start, gap.end)) this.#skipped.addRun(skip.start, skip.end);
-		}
-	}
-
-	/**
-	 * The gaps of `delivered` in the reader's window under the serving copy's resume point: where a
-	 * key the cursor keeps out needs a skip to count as accounted for.
-	 * See {@link #accounts}. Mirrors the Rust `Reader::lacking`.
-	 */
-	#lacking(delivered: Delivered): Run[] {
+	#asking(delivered: Delivered): bigint | undefined {
 		const serving = this.#copies.at(-1);
-		const resumed = serving && !serving.replaced ? (resumePoint(serving) ?? 0n) : 0n;
+		const cursor = this.#shell.cursor.peek();
 		const window = this.#window();
-		return window.runs(window.floor() ?? 0n, resumed).flatMap((run) => delivered.gaps(run.start, run.end));
+		const resumed = serving && !serving.replaced ? resumePoint(serving) : undefined;
+		if (resumed === undefined || window.end() === undefined || (cursor.start === 0n && cursor.end === undefined)) {
+			this.#skipped = new Delivered();
+			return undefined;
+		}
+		const kept = new Delivered();
+		let asking: bigint | undefined;
+		for (const run of window.runs(window.floor() ?? 0n, resumed)) {
+			for (const gap of delivered.gaps(run.start, run.end)) {
+				for (const out of this.#keptOut(gap, resumed)) {
+					const first = this.skippedIn(out.start, out.end)[0];
+					const start = first?.start === out.start ? first.end : out.start;
+					if (start > out.start) kept.addRun(out.start, start);
+					if (start < out.end) asking ??= start;
+				}
+			}
+		}
+		this.#skipped = kept;
+		return asking;
 	}
 
 	/**
@@ -2102,8 +2129,9 @@ class Reader implements ResumeSource {
 		return this.#serving() !== undefined;
 	}
 
-	// What any copy held now or let go declared skipped: a skip is final for the whole track, so an
-	// outer front reading this one as a copy keeps what a route this front replaced declared.
+	// What the reader recorded or any copy held now declared skipped: a skip is final for the whole
+	// track, so an outer front reading this one as a copy counts it, and asks for the rest as it would
+	// of any route.
 	skippedIn(start: bigint, end: bigint): Run[] {
 		const skipped = new Delivered();
 		for (const run of runsIn(this.#skipped, start, end)) skipped.addRun(run.start, run.end);
@@ -3330,7 +3358,20 @@ function runsIn(held: Delivered, start: bigint, end: bigint): Run[] {
 	return runs;
 }
 
-/** The parts of `[start, end)` under `copy`'s bound that its publisher skipped: one bound whether it is held or let go. */
+/**
+ * Whether `copy` is of `serving`'s route, did not fail, and was asked for group `key`. Mirrors the
+ * Rust `Copy::asked_for`.
+ */
+function copyAskedFor(copy: Copy, serving: Copy, key: bigint): boolean {
+	return (
+		!(copy.done instanceof Error) &&
+		copy.source.from.closed === serving.source.from.closed &&
+		(copy.floor ?? 0n) <= key &&
+		key < (copyEnd(copy) ?? UNBOUNDED)
+	);
+}
+
+/** The parts of `[start, end)` under `copy`'s bound that its publisher skipped. */
 function copySkips(copy: Copy, start: bigint, end: bigint): Run[] {
 	const bound = copyEnd(copy);
 	const to = bound === undefined ? end : min(end, bound);

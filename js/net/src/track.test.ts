@@ -5992,6 +5992,32 @@ test("track: a declared end resolves an unproven live join", () => {
 	}
 });
 
+// A received lite-07 copy's join answered with a group stays placed there once the end is declared,
+// at any lag: the copy holds only the groups from where its feed started, so the edge it measures may
+// fall behind all of them, and its newest group is past the answer. One joining after the answer
+// can't take it. Mirrors the Rust `a_received_copy_keeps_a_join_answer_past_its_declared_end`.
+test("track: a received copy keeps a join answer past its declared end", () => {
+	for (const min of [0, 1000]) {
+		const producer = receivedTrack({ timescale: Timescale.MILLI });
+		hooks.answersJoins(producer);
+		const join = { delay: { max: Duration.millis(1000) }, ranges: [{ start: { live: Duration.millis(min) } }] };
+		try {
+			const reader = producer.subscribe(join);
+			hooks.answerJoin(producer, min, undefined, 4000n, 1000);
+			// An end past the groups held, still owed the ones between.
+			producer.finishAt({ group: 7001n, frame: 0 });
+			putGroup(producer, 4000n, 4000);
+			putGroup(producer, 6000n, 6000);
+			expect(reader.tryRecvGroup()?.start).toBe(4000n);
+			expect(reader.tryRecvGroup()?.start).toBe(6000n);
+			const later = producer.subscribe(join);
+			expect(later.tryRecvGroup()?.start).not.toBe(4000n);
+		} finally {
+			producer.close();
+		}
+	}
+});
+
 // A declared end may arrive before the groups below it: until it settles the live edge isn't final,
 // so a join the groups held can't prove keeps waiting rather than placing from a stale edge.
 test("track: an unsettled end leaves an unproven live join waiting", () => {
@@ -6027,6 +6053,28 @@ test("track: a bounded join answered empty delivers nothing", () => {
 		putGroup(producer, 3000n, 3000);
 		expect(reader.tryRecvGroup()).toBeUndefined();
 		expect(hooks.requested(producer).joins()).toEqual([]);
+	} finally {
+		producer.close();
+	}
+});
+
+// A bounded join answered empty still delivers nothing once the end is declared, rather than wait on
+// groups that can't measure it. Mirrors the Rust
+// `a_received_copy_keeps_an_empty_join_answer_past_its_declared_end`.
+test("track: a bounded join answered empty delivers nothing past a declared end", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(200) }, end: 500n }],
+		});
+		hooks.answerJoin(producer, 200, 500n, undefined, NO_MAX_DELAY);
+		// An end past the groups held, still owed the ones between.
+		producer.finishAt({ group: 7001n, frame: 0 });
+		putGroup(producer, 1000n, 1000);
+		expect(hooks.servingResolved(reader)).toEqual([{ start: 501n, end: 501n, floored: true }]);
+		expect(reader.tryRecvGroup()).toBeUndefined();
 	} finally {
 		producer.close();
 	}
