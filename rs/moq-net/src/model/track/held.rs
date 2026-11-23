@@ -11,7 +11,7 @@
 //! and no reader took yet, or, while it waits on a run, the first group to land in that run.
 
 use std::{
-	collections::{BTreeMap, HashMap},
+	collections::{BTreeMap, BTreeSet, HashMap},
 	ops::Range,
 };
 
@@ -23,8 +23,9 @@ use super::Order;
 #[derive(Default)]
 pub(super) struct Holds {
 	fills: HashMap<u64, Fill>,
-	/// The fill awaiting each key, so a group landing there is held as it lands.
-	awaiting: RangeMap<u64, u64>,
+	/// The fills awaiting each key, so a group landing there is held as it lands. Fills'
+	/// runs may overlap, and each keeps its own entry until it moves its run.
+	awaiting: RangeMap<u64, BTreeSet<u64>>,
 	/// The fills holding each key.
 	held: BTreeMap<u64, Vec<u64>>,
 }
@@ -76,7 +77,7 @@ impl Holds {
 		let mut fill = self.fills.remove(&id).unwrap_or_default();
 		let before: Vec<u64> = fill.keys().collect();
 		if let Some((run, _)) = &fill.awaiting {
-			self.awaiting.remove(run.clone());
+			self.unawait(id, run.clone());
 		}
 		fill.landed = fill.landed.filter(|landed| {
 			accepted != Some(*landed) && awaiting.as_ref().is_some_and(|(run, _)| run.contains(landed))
@@ -86,7 +87,7 @@ impl Holds {
 		if let Some((run, _)) = &fill.awaiting
 			&& !run.is_empty()
 		{
-			self.awaiting.insert(run.clone(), id);
+			self.await_run(id, run.clone());
 		}
 		let after: Vec<u64> = fill.keys().collect();
 		if !after.is_empty() || fill.awaiting.is_some() {
@@ -95,30 +96,70 @@ impl Holds {
 		self.count(id, &before, &after)
 	}
 
-	/// A group landed at `key`: the fill awaiting it holds it, if it holds nothing landed
+	/// A group landed at `key`: each fill awaiting it holds it, if it holds nothing landed
 	/// that comes before it. Returns the keys whose hold changed.
 	pub fn land(&mut self, key: u64) -> Vec<Flip> {
-		let Some(&id) = self.awaiting.get(&key) else {
+		let Some(ids) = self.awaiting.get(&key).cloned() else {
 			return Vec::new();
 		};
-		let fill = self.fills.get_mut(&id).expect("an awaited key names a fill");
-		let order = fill.awaiting.as_ref().expect("awaited").1;
-		let first = fill.landed.is_none_or(|landed| match order {
-			Order::Ascending => key < landed,
-			Order::Descending => key > landed,
-		});
-		if !first || fill.landed == Some(key) {
-			return Vec::new();
+		let mut flips = Vec::new();
+		for id in ids {
+			let fill = self.fills.get_mut(&id).expect("an awaited key names a fill");
+			let order = fill.awaiting.as_ref().expect("awaited").1;
+			let first = fill.landed.is_none_or(|landed| match order {
+				Order::Ascending => key < landed,
+				Order::Descending => key > landed,
+			});
+			if !first || fill.landed == Some(key) {
+				continue;
+			}
+			let before: Vec<u64> = fill.keys().collect();
+			fill.landed = Some(key);
+			let after: Vec<u64> = fill.keys().collect();
+			flips.extend(self.count(id, &before, &after));
 		}
-		let before: Vec<u64> = fill.keys().collect();
-		fill.landed = Some(key);
-		let after: Vec<u64> = fill.keys().collect();
-		self.count(id, &before, &after)
+		flips
 	}
 
 	/// Fill `id` holds nothing any more. Returns the keys whose hold ended.
 	pub fn release(&mut self, id: u64) -> Vec<Flip> {
 		self.set(id, None, None)
+	}
+
+	/// Index fill `id` as awaiting `run`, beside any other fill awaiting part of it.
+	fn await_run(&mut self, id: u64, run: Range<u64>) {
+		let mut pieces: Vec<(Range<u64>, BTreeSet<u64>)> = self
+			.awaiting
+			.overlapping(&run)
+			.map(|(piece, ids)| {
+				let mut ids = ids.clone();
+				ids.insert(id);
+				(piece.start.max(run.start)..piece.end.min(run.end), ids)
+			})
+			.collect();
+		pieces.extend(self.awaiting.gaps(&run).map(|gap| (gap, BTreeSet::from([id]))));
+		for (piece, ids) in pieces {
+			self.awaiting.insert(piece, ids);
+		}
+	}
+
+	/// Remove fill `id` from awaiting `run`, leaving every other fill's entries.
+	fn unawait(&mut self, id: u64, run: Range<u64>) {
+		let pieces: Vec<(Range<u64>, BTreeSet<u64>)> = self
+			.awaiting
+			.overlapping(&run)
+			.map(|(piece, ids)| {
+				let mut ids = ids.clone();
+				ids.remove(&id);
+				(piece.start.max(run.start)..piece.end.min(run.end), ids)
+			})
+			.collect();
+		for (piece, ids) in pieces {
+			match ids.is_empty() {
+				true => self.awaiting.remove(piece),
+				false => self.awaiting.insert(piece, ids),
+			}
+		}
 	}
 
 	/// Move fill `id` from holding `before` to holding `after`, returning the keys whose
@@ -183,6 +224,25 @@ mod test {
 		// Accepted, it stays held; a fill awaiting nothing holds no landed group.
 		assert!(holds.set(1, Some(12), None).is_empty());
 		assert_eq!(holds.release(1), vec![(12, false)]);
+		assert_eq!(holds.len(), 0);
+	}
+
+	/// Fills awaiting overlapping runs each hold a group landing in both, and one moving its
+	/// run leaves the other awaiting the rest of its own.
+	#[test]
+	fn overlapping_fills_each_await_their_own_run() {
+		let mut holds = Holds::default();
+		assert!(holds.set(1, None, Some((10..20, Order::Ascending))).is_empty());
+		assert!(holds.set(2, None, Some((15..25, Order::Ascending))).is_empty());
+		assert_eq!(holds.land(16), vec![(16, true)]);
+		assert_eq!(holds.holders(16), &[1, 2]);
+
+		// Fill 1 moves on: fill 2 still holds what lands in its run.
+		assert_eq!(holds.release(1), Vec::new());
+		assert_eq!(holds.holders(16), &[2]);
+		assert_eq!(holds.land(15), vec![(15, true), (16, false)]);
+		assert!(holds.land(12).is_empty(), "awaited by no fill any more");
+		assert_eq!(holds.release(2), vec![(15, false)]);
 		assert_eq!(holds.len(), 0);
 	}
 }

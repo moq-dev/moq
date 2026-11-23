@@ -232,7 +232,7 @@ impl Outcome {
 			return Some(TimeStart::Group(run.start));
 		}
 		match self.refused.get(&time) {
-			Some(refusal) if refusal.dropped => Some(TimeStart::Dropped),
+			Some(refusal) if refusal.hole.is_some() => Some(TimeStart::Dropped),
 			Some(refusal) => Some(TimeStart::Refused(refusal.err.clone())),
 			// Answered and forgotten: nobody reads it any more.
 			None if self.resolved.contains(&time) => Some(TimeStart::Unanswered),
@@ -245,8 +245,8 @@ impl Outcome {
 		self.partial.get(&key).filter(|copy| copy.covers(frames)).cloned()
 	}
 
-	/// What was answered within `wanted`: accepted, or refused with why and the budget
-	/// the fill asked with.
+	/// What was answered within `wanted`: accepted, or refused with why, the budget the fill
+	/// asked with, and the hole its source named, if any.
 	#[expect(
 		clippy::type_complexity,
 		reason = "each answer pairs a run with its outcome; naming it would only move the type"
@@ -254,7 +254,10 @@ impl Outcome {
 	pub(super) fn within(
 		&self,
 		wanted: &RangeSet<u64>,
-	) -> Vec<(ops::Range<u64>, std::result::Result<(), (Error, Option<Duration>)>)> {
+	) -> Vec<(
+		ops::Range<u64>,
+		std::result::Result<(), (Error, Option<Duration>, Option<super::Hole>)>,
+	)> {
 		let mut answers = Vec::new();
 		for run in wanted.iter() {
 			for accepted in self.accepted.overlapping(run) {
@@ -262,7 +265,7 @@ impl Outcome {
 			}
 			for (refused, refusal) in self.refused.overlapping(run) {
 				let groups = refused.start.max(run.start)..refused.end.min(run.end);
-				answers.push((groups, Err((refusal.err.clone(), refusal.asked))));
+				answers.push((groups, Err((refusal.err.clone(), refusal.asked, refusal.hole.clone()))));
 			}
 		}
 		answers
@@ -273,21 +276,13 @@ impl Outcome {
 		self.resolved.insert(groups);
 	}
 
-	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>, dropped: bool) {
+	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>, hole: Option<super::Hole>) {
 		if groups.is_empty() {
 			return;
 		}
 		let id = self.refusals;
 		self.refusals += 1;
-		self.refused.insert(
-			groups.clone(),
-			Refusal {
-				id,
-				err,
-				asked,
-				dropped,
-			},
-		);
+		self.refused.insert(groups.clone(), Refusal { id, err, asked, hole });
 		self.resolved.insert(groups);
 	}
 }
@@ -313,8 +308,9 @@ struct Refusal {
 	// The budget its source was asked under, so a looser reader can tell that an
 	// [`Error::Old`] was not its own.
 	asked: Option<Duration>,
-	// Named dropped, the source's word that it has none of them, rather than refused for now.
-	dropped: bool,
+	// The hole the source named, its word that it has none of them (or never produced them),
+	// rather than refused for now.
+	hole: Option<super::Hole>,
 }
 
 impl PartialEq for Refusal {
@@ -1463,17 +1459,28 @@ impl Inner {
 	/// Answer `key` from the cache, for the readers that still read it to take. Returns
 	/// whether the answer went out.
 	fn answer_cached(&self, key: u64) -> bool {
+		// Recorded before the answer goes out, as `accept_from` does: a reader may pick it up
+		// and take it the moment it does, which must clear it.
+		let untaken = {
+			let mut fills = self.fills.lock();
+			match fills.pending.get_mut(&self.id) {
+				Some(pending) if pending.wants.contains_key(&key) => {
+					pending.unseen.insert(key..key + 1);
+					pending.untaken.insert(key..key + 1);
+					true
+				}
+				_ => false,
+			}
+		};
 		let Ok(mut outcome) = self.result.write() else {
+			if untaken && let Some(pending) = self.fills.lock().pending.get_mut(&self.id) {
+				pending.unseen.remove(key..key + 1);
+				pending.untaken.remove(key..key + 1);
+			}
 			return false;
 		};
 		outcome.accept(key..key + 1);
 		drop(outcome);
-		if let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
-			&& pending.wants.contains_key(&key)
-		{
-			pending.unseen.insert(key..key + 1);
-			pending.untaken.insert(key..key + 1);
-		}
 		uncover(&self.fills, self.id, key..key + 1);
 		true
 	}
@@ -1617,7 +1624,7 @@ impl Inner {
 				state.drop_unfed(groups.clone(), hole.clone());
 			}
 		}
-		self.answer(groups, err, asked, true);
+		self.answer(groups, err, asked, Some(hole));
 	}
 
 	/// The part of `groups` inside the fill that a reader still reads and nothing answered yet.
@@ -1646,17 +1653,17 @@ impl Inner {
 	}
 
 	fn refuse(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>) {
-		self.answer(groups, err, asked, false);
+		self.answer(groups, err, asked, None);
 	}
 
-	/// Answer `groups` with `err`, `dropped` when the source has none of them.
-	fn answer(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>, dropped: bool) {
+	/// Answer `groups` with `err`, and the `hole` the source named when it has none of them.
+	fn answer(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>, hole: Option<super::Hole>) {
 		if groups.is_empty() {
 			return;
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			for groups in groups.iter() {
-				outcome.refuse(groups.clone(), err.clone(), asked, dropped);
+				outcome.refuse(groups.clone(), err.clone(), asked, hole.clone());
 			}
 		}
 		for groups in groups.iter() {
@@ -1748,7 +1755,12 @@ impl Drop for Inner {
 			}
 			if let Ok(mut outcome) = self.result.write() {
 				for groups in left.iter() {
-					outcome.refuse(groups.clone(), Error::Dropped, asked, true);
+					outcome.refuse(
+						groups.clone(),
+						Error::Dropped,
+						asked,
+						Some(super::Hole::drop(StreamError::NotFound)),
+					);
 				}
 			}
 		}

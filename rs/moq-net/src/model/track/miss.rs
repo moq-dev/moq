@@ -648,16 +648,16 @@ impl Misses {
 							inbox.saw(state.cached);
 						}
 					}
-					Err((Error::Old, asked)) if looser(max_delay, asked) => retry.insert(groups),
-					// Stale under the budget it was asked with, which this reader's is no wider
-					// than: a stale verdict a wider budget asks again, never a refusal spent for good.
-					Err((Error::Old, Some(asked))) => self.give_up_stale(groups, asked, given_up),
 					// Never produced: passed over, not lost, however soon the cache forgets the skip.
-					Err((Error::Skipped, _)) => {
+					Err((_, _, Some(Hole::Skip))) => {
 						for hole in holes(&state, groups) {
 							self.give_up_skipped(hole, given_up);
 						}
 					}
+					Err((Error::Old, asked, _)) if looser(max_delay, asked) => retry.insert(groups),
+					// Stale under the budget it was asked with, which this reader's is no wider
+					// than: a stale verdict a wider budget asks again, never a refusal spent for good.
+					Err((Error::Old, Some(asked), _)) => self.give_up_stale(groups, asked, given_up),
 					// A drop the track recorded is named by the drop cursor already. The source
 					// answered, so a group lost to the cache since is its verdict too.
 					Err(_) => {
