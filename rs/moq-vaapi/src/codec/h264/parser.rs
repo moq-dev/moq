@@ -789,7 +789,7 @@ pub struct Sps {
 
 	// Calculated
 	/// Same as ExpectedDeltaPerPicOrderCntCycle, see 7-12 in the specification.
-	pub expected_delta_per_pic_order_cnt_cycle: i32,
+	pub expected_delta_per_pic_order_cnt_cycle: i64,
 
 	pub vui_parameters_present_flag: bool,
 	pub vui_parameters: VuiParams,
@@ -2101,15 +2101,14 @@ impl Parser {
 			sps.delta_pic_order_always_zero_flag = r.read_bit()?;
 			sps.offset_for_non_ref_pic = r.read_se()?;
 			sps.offset_for_top_to_bottom_field = r.read_se()?;
-			sps.num_ref_frames_in_pic_order_cnt_cycle = r.read_ue_max(254)?;
+			sps.num_ref_frames_in_pic_order_cnt_cycle = r.read_ue_max(255)?;
 
-			let mut offset_acc = 0;
+			// (7-12) in the spec, which bounds only the order counts derived
+			// from it, so it is kept wide: 255 `i32` offsets never overflow an `i64`.
+			let mut offset_acc: i64 = 0;
 			for i in 0..usize::from(sps.num_ref_frames_in_pic_order_cnt_cycle) {
 				sps.offset_for_ref_frame[i] = r.read_se()?;
-
-				// (7-12) in the spec.
-				offset_acc = i32::checked_add(offset_acc, sps.offset_for_ref_frame[i])
-					.ok_or("ExpectedDeltaPerPicOrderCntCycle overflows")?;
+				offset_acc += i64::from(sps.offset_for_ref_frame[i]);
 			}
 
 			sps.expected_delta_per_pic_order_cnt_cycle = offset_acc;
@@ -2670,5 +2669,44 @@ impl Header for NaluHeader {
 
 	fn len(&self) -> usize {
 		1
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::Cursor;
+
+	use super::*;
+	use crate::codec::h264::synthesizer::Synthesizer;
+
+	/// Writes `sps` as a NAL unit and parses it back.
+	fn round_trip(sps: &Sps) -> Result<Rc<Sps>, String> {
+		let mut bytes = Vec::new();
+		Synthesizer::<Sps, _>::synthesize(3, sps, &mut bytes, true).map_err(|e| e.to_string())?;
+		let nalu = Nalu::next(&mut Cursor::new(&bytes[..]))?;
+		Parser::default().parse_sps(&nalu).cloned()
+	}
+
+	/// (7-12): the cycle's sum is kept whole, whatever range its prefixes or it
+	/// reach, since only the order counts derived from it must fit an `i32`, and
+	/// a cycle may hold the full 255 offsets.
+	#[test]
+	fn the_cycle_sum_is_kept_whole() {
+		let cycle = |offsets: &[i32]| {
+			let mut sps = Sps {
+				profile_idc: 66,
+				chroma_format_idc: 1,
+				frame_mbs_only_flag: true,
+				pic_order_cnt_type: 1,
+				num_ref_frames_in_pic_order_cnt_cycle: offsets.len() as u8,
+				..Default::default()
+			};
+			sps.offset_for_ref_frame[..offsets.len()].copy_from_slice(offsets);
+			round_trip(&sps).map(|sps| sps.expected_delta_per_pic_order_cnt_cycle)
+		};
+		let half = 1 << 30;
+		assert_eq!(cycle(&[half, half, -half, -half]), Ok(0));
+		assert_eq!(cycle(&[half, half]), Ok(1 << 31));
+		assert_eq!(cycle(&[i32::MIN + 1; 255]), Ok(255 * i64::from(i32::MIN + 1)));
 	}
 }

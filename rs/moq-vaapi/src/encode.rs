@@ -805,10 +805,7 @@ fn upload_nv12(
 		let (offset, pitch) = (va_image.offsets[plane] as usize, va_image.pitches[plane] as usize);
 		fill_plane(dest, offset, pitch, src, w, rows)?;
 	}
-	image.put().map_err(|e| anyhow::anyhow!("put image: {e:?}"))?;
-
-	surface.sync().map_err(|e| anyhow::anyhow!("surface sync: {e:?}"))?;
-	Ok(())
+	image.put().map_err(|e| anyhow::anyhow!("put image: {e:?}"))
 }
 
 /// Copies `rows` rows of `width` bytes from tightly packed `src` into the image

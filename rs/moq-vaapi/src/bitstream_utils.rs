@@ -231,13 +231,14 @@ impl<'a> BitReader<'a> {
 	/// integers to negative numbers. The least significant bit indicates the
 	/// sign. See H264 Annex B specification 9.1.1 for details.
 	pub fn read_se<U: TryFrom<i32>>(&mut self) -> Result<U, String> {
-		let ue = self.read_ue::<u32>()? as i32;
+		// Widened, since code numbers from 2^31 up are in range too.
+		let ue = i64::from(self.read_ue::<u32>()?);
+		let se = if ue % 2 == 0 { -(ue / 2) } else { ue / 2 + 1 };
 
-		if ue % 2 == 0 {
-			Ok(U::try_from(-(ue / 2)).map_err(|_| String::from("Conversion error"))?)
-		} else {
-			Ok(U::try_from(ue / 2 + 1).map_err(|_| String::from("Conversion error"))?)
-		}
+		i32::try_from(se)
+			.ok()
+			.and_then(|se| U::try_from(se).ok())
+			.ok_or_else(|| String::from("Conversion error"))
 	}
 
 	pub fn read_se_bounded<U: TryFrom<i32>>(&mut self, min: i32, max: i32) -> Result<U, String> {
@@ -540,6 +541,37 @@ impl<W: Write> Drop for BitWriter<W> {
 	fn drop(&mut self) {
 		if let Err(e) = self.flush() {
 			tracing::error!("Unable to flush bits {e:?}");
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// `code` as an exponential Golomb code, left-aligned and padded with zeros.
+	fn exp_golomb(code: u32) -> Vec<u8> {
+		let value = u128::from(code) + 1;
+		let bits = 128 - value.leading_zeros() as usize;
+		let len = 2 * bits - 1;
+		let aligned = value << (128 - len);
+		aligned.to_be_bytes()[..len.div_ceil(8)].to_vec()
+	}
+
+	/// 9.1.1: every code number up to the largest maps to its signed value,
+	/// those from 2^31 up included.
+	#[test]
+	fn signed_codes_keep_their_sign() {
+		let read = |code| BitReader::new(&exp_golomb(code), false).read_se::<i32>();
+		for (code, value) in [
+			(0, 0),
+			(1, 1),
+			(2, -1),
+			((1 << 31) - 1, 1 << 30),
+			(1 << 31, -(1 << 30)),
+			(u32::MAX - 1, i32::MIN + 1),
+		] {
+			assert_eq!(read(code), Ok(value), "code {code}");
 		}
 	}
 }

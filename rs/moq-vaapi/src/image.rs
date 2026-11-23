@@ -151,12 +151,14 @@ impl<'a> Image<'a> {
 	///
 	/// The view is the surface's own memory, so it borrows the surface mutably:
 	/// nothing, not even a GPU operation taking `&Surface`, can write it while the
-	/// view is alive.
+	/// view is alive. It first waits for any write still in flight.
 	pub fn derive_from<D: SurfaceMemoryDescriptor>(
 		surface: &'a mut Surface<D>,
 		visible_rect: (u32, u32),
 	) -> Result<Self, VaError> {
-		// Safe since the mutable borrow excludes every writer for `'a`.
+		surface.sync()?;
+		// Safe since the mutable borrow excludes every writer for `'a`, and the
+		// sync finished any that came before it.
 		unsafe { Self::derive_shared(surface, visible_rect) }
 	}
 
@@ -165,8 +167,8 @@ impl<'a> Image<'a> {
 	/// # Safety
 	///
 	/// Nothing may write `surface`, through VA-API or otherwise, while the image
-	/// lives, such as a decoded picture the pool hands out again only once every
-	/// reference to it has dropped.
+	/// lives, nor still be writing it, such as a synced decoded picture the pool
+	/// hands out again only once every reference to it has dropped.
 	pub(crate) unsafe fn derive_shared<D: SurfaceMemoryDescriptor>(
 		surface: &'a Surface<D>,
 		visible_rect: (u32, u32),
@@ -304,6 +306,8 @@ impl AsRef<[u8]> for Image<'_> {
 pub struct ImageMut<'a> {
 	mapping: Mapping,
 	surface_id: bindings::VASurfaceID,
+	/// The surface's size, which the driver may have enlarged the image past.
+	size: (u32, u32),
 	surface: PhantomData<&'a mut ()>,
 }
 
@@ -311,8 +315,8 @@ impl<'a> ImageMut<'a> {
 	/// Creates an image in `format` at `surface`'s size without reading the
 	/// surface back first, so every byte starts unspecified.
 	///
-	/// Write every byte [`put`](Self::put) should not leave unspecified: it
-	/// copies the whole image, row padding included, into the surface.
+	/// Write every pixel [`put`](Self::put) should not leave unspecified: it
+	/// copies the image's top-left area, the surface's size, into the surface.
 	pub fn create_uninitialized<D: SurfaceMemoryDescriptor>(
 		surface: &'a mut Surface<D>,
 		format: bindings::VAImageFormat,
@@ -322,6 +326,7 @@ impl<'a> ImageMut<'a> {
 		Ok(Self {
 			mapping: Mapping::new(created, size)?,
 			surface_id: surface.id(),
+			size,
 			surface: PhantomData,
 		})
 	}
@@ -331,21 +336,20 @@ impl<'a> ImageMut<'a> {
 		self.mapping.image()
 	}
 
-	/// Copies the image into its surface with `vaPutImage`.
-	///
-	/// The copy may still be in flight on return; [`Surface::sync`] waits for it.
+	/// Copies the image into its surface with `vaPutImage`, returning once the
+	/// surface holds it.
 	pub fn put(mut self) -> Result<(), VaError> {
 		// libva requires the buffer unmapped before the driver reads it.
 		self.mapping.unmap()?;
-		let image = self.mapping.image();
-		let (width, height) = (u32::from(image.width), u32::from(image.height));
+		let display = self.mapping.created.display.handle();
+		let (width, height) = self.size;
 		// Safe because the display handle is valid, `self.surface_id` is a surface we
-		// borrow, and `image` is a valid, unmapped `VAImage`.
+		// borrow, and the image is a valid, unmapped `VAImage` at least this large.
 		va_check(unsafe {
 			bindings::va().vaPutImage(
-				self.mapping.created.display.handle(),
+				display,
 				self.surface_id,
-				image.image_id,
+				self.mapping.image().image_id,
 				0,
 				0,
 				width,
@@ -355,7 +359,11 @@ impl<'a> ImageMut<'a> {
 				width,
 				height,
 			)
-		})
+		})?;
+		// The copy may still be in flight, and the borrow ends with `self`, so
+		// nothing after would know to wait for it.
+		// Safe for the same reasons as above.
+		va_check(unsafe { bindings::va().vaSyncSurface(display, self.surface_id) })
 	}
 }
 

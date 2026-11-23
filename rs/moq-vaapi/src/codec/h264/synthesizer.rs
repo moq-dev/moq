@@ -323,7 +323,8 @@ impl<'n, W: Write> Synthesizer<'n, Sps, W> {
 			self.se(self.nalu.offset_for_top_to_bottom_field)?;
 			self.ue(self.nalu.num_ref_frames_in_pic_order_cnt_cycle)?;
 
-			for offset_for_ref_frame in &self.nalu.offset_for_ref_frame {
+			let cycle = usize::from(self.nalu.num_ref_frames_in_pic_order_cnt_cycle);
+			for offset_for_ref_frame in &self.nalu.offset_for_ref_frame[..cycle] {
 				self.se(*offset_for_ref_frame)?;
 			}
 		}

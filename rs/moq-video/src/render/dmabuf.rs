@@ -454,9 +454,7 @@ pub(super) mod fixture {
 			source = &source[rows * length..];
 		}
 
-		// The surface has to be idle before anything exports it.
 		image.put().expect("put the uploaded image");
-		surface.sync().expect("sync the uploaded surface");
 		Some(())
 	}
 }

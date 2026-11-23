@@ -488,7 +488,6 @@ pub(crate) mod testing {
 			}
 			image.put().expect("put the image");
 		}
-		surface.sync().ok()?;
 		let mut exported = surface.export_prime().ok()?;
 		let layer = &exported.layers[0];
 		assert_eq!(layer.drm_format, DrmFormat::XRGB8888.as_raw());

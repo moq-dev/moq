@@ -23,7 +23,9 @@ comment.
 Run it with the flake's libva and `intel-media-driver`, as
 `sh/rs/gpu.sh` does for the ladder test:
 `LD_LIBRARY_PATH=<libva>/lib LIBVA_DRIVERS_PATH=<intel-media-driver>/lib/dri
-cargo test -p moq-video --features vaapi,openh264 a_still_scene_turning_busy`.
+cargo test -p moq-video --features vaapi,openh264 a_still_scene_turning_busy -- --nocapture`,
+and confirm it printed no `skipping: no VA-API H264 encoder` line: the test passes
+when it finds no encoder.
 
 Public API: none. Wire: none.
 

@@ -1321,14 +1321,17 @@ fn first_invented(prev_frame_num: u32, frame_num: u32, sps: &Sps) -> u32 {
 	let max_frame_num = sps.max_frame_num();
 	let first = (prev_frame_num + 1) % max_frame_num;
 	let missing = (frame_num + max_frame_num - first) % max_frame_num;
-	let skipped = missing.saturating_sub(u32::from(sps.max_num_ref_frames));
+	// Marking keeps one reference even when the SPS declares none.
+	let window = u32::from(sps.max_num_ref_frames).max(1);
+	let skipped = missing.saturating_sub(window);
 	(first + skipped) % max_frame_num
 }
 
 /// 8.2.1: derives `pic`'s picture order count, which drives output ordering.
 ///
 /// Fails a picture whose order count leaves the `i32` range the
-/// specification bounds it to, as a hostile stream's can.
+/// specification bounds it to, as a hostile stream's can. The specification
+/// bounds only the final counts, so the sums on the way are taken wider.
 fn pic_order_count(
 	prev_ref: &PrevReferencePicInfo,
 	prev: &mut PrevPicInfo,
@@ -1401,7 +1404,9 @@ fn pic_order_count(
 				abs_frame_num -= 1;
 			}
 
-			let mut expected_pic_order_cnt: i32 = 0;
+			// Never overflows: under 2^32 cycles of a cycle sum under 2^39,
+			// plus a few hundred `i32` terms, stays far inside `i128`.
+			let mut expected_pic_order_cnt: i128 = 0;
 
 			if abs_frame_num > 0 {
 				if sps.num_ref_frames_in_pic_order_cnt_cycle == 0 {
@@ -1413,42 +1418,30 @@ fn pic_order_count(
 				// The cycle is only summed up to the position this frame sits
 				// at within it, not all the way round.
 				let position_in_cycle = (abs_frame_num - 1) % cycle_len;
-				expected_pic_order_cnt = i32::try_from(cycles)
-					.ok()
-					.and_then(|cycles| cycles.checked_mul(sps.expected_delta_per_pic_order_cnt_cycle))
-					.ok_or_else(overflow)?;
+				expected_pic_order_cnt = i128::from(cycles) * i128::from(sps.expected_delta_per_pic_order_cnt_cycle);
 
 				for i in 0..=position_in_cycle {
-					expected_pic_order_cnt = expected_pic_order_cnt
-						.checked_add(sps.offset_for_ref_frame[i as usize])
-						.ok_or_else(overflow)?;
+					expected_pic_order_cnt += i128::from(sps.offset_for_ref_frame[i as usize]);
 				}
 			}
 
 			if pic.nal_ref_idc == 0 {
-				expected_pic_order_cnt = expected_pic_order_cnt
-					.checked_add(sps.offset_for_non_ref_pic)
-					.ok_or_else(overflow)?;
+				expected_pic_order_cnt += i128::from(sps.offset_for_non_ref_pic);
 			}
 
-			let top = expected_pic_order_cnt.checked_add(pic.delta_pic_order_cnt0);
+			let count = |cnt: i128| i32::try_from(cnt).map_err(|_| overflow());
+			let top = expected_pic_order_cnt + i128::from(pic.delta_pic_order_cnt0);
+			let to_bottom = i128::from(sps.offset_for_top_to_bottom_field);
 			match pic.field {
 				Field::Frame => {
-					pic.top_field_order_cnt = top.ok_or_else(overflow)?;
-					pic.bottom_field_order_cnt = pic
-						.top_field_order_cnt
-						.checked_add(sps.offset_for_top_to_bottom_field)
-						.and_then(|cnt| cnt.checked_add(pic.delta_pic_order_cnt1))
-						.ok_or_else(overflow)?;
+					pic.top_field_order_cnt = count(top)?;
+					pic.bottom_field_order_cnt = count(top + to_bottom + i128::from(pic.delta_pic_order_cnt1))?;
 				}
 				Field::Top => {
-					pic.top_field_order_cnt = top.ok_or_else(overflow)?;
+					pic.top_field_order_cnt = count(top)?;
 				}
 				Field::Bottom => {
-					pic.bottom_field_order_cnt = expected_pic_order_cnt
-						.checked_add(sps.offset_for_top_to_bottom_field)
-						.and_then(|cnt| cnt.checked_add(pic.delta_pic_order_cnt0))
-						.ok_or_else(overflow)?;
+					pic.bottom_field_order_cnt = count(top + to_bottom)?;
 				}
 			}
 		}
@@ -1464,14 +1457,8 @@ fn pic_order_count(
 			let pic_order_cnt = if matches!(pic.is_idr, IsIdr::Yes { .. }) {
 				0
 			} else {
-				let doubled = pic
-					.frame_num_offset
-					.checked_add(pic.frame_num)
-					.and_then(|abs| i32::try_from(abs).ok())
-					.and_then(|abs| abs.checked_mul(2))
-					.ok_or_else(overflow)?;
-				// Never underflows: `doubled` is not negative.
-				doubled - i32::from(pic.nal_ref_idc == 0)
+				let abs_frame_num = i64::from(pic.frame_num_offset) + i64::from(pic.frame_num);
+				i32::try_from(2 * abs_frame_num - i64::from(pic.nal_ref_idc == 0)).map_err(|_| overflow())?
 			};
 
 			if matches!(pic.field, Field::Frame | Field::Top) {
@@ -1840,6 +1827,14 @@ mod tests {
 		assert_eq!(first_invented(14, 3, &sps), 1);
 		// The largest gap MaxFrameNum allows costs no more than the window.
 		assert_eq!(first_invented(4, 3, &sps), 1);
+
+		// Marking keeps one reference even when the SPS declares none, so the
+		// gap still invents the picture that replaces it.
+		let none = Sps {
+			max_num_ref_frames: 0,
+			..progressive_sps()
+		};
+		assert_eq!(first_invented(0, 3, &none), 2);
 	}
 
 	/// A non-IDR frame of `pic_order_cnt_type` 0 with `lsb`, after a reference
@@ -1910,6 +1905,56 @@ mod tests {
 		assert!(order_count(u32::MAX - 3).is_err());
 		// The offset fits but twice the absolute frame number does not.
 		assert!(order_count(i32::MAX as u32 / 2).is_err());
+	}
+
+	/// 8.2.1.3: only the final order count must fit, so a non-reference picture
+	/// one past where a reference picture overflows still decodes.
+	#[test]
+	fn the_type2_order_count_is_checked_whole() {
+		let sps = Sps {
+			pic_order_cnt_type: 2,
+			..progressive_sps()
+		};
+		let order_count = |nal_ref_idc| {
+			// The wrap from frame_num 5 to 1 makes the absolute frame number 2^30.
+			let mut prev = PrevPicInfo {
+				frame_num: 5,
+				frame_num_offset: (1 << 30) - 17,
+				has_mmco_5: false,
+			};
+			let mut pic = PictureData::default();
+			pic.pic_order_cnt_type = 2;
+			pic.frame_num = 1;
+			pic.nal_ref_idc = nal_ref_idc;
+			pic_order_count(&prev_ref(0, 0), &mut prev, &mut pic, &sps).map(|()| pic.pic_order_cnt)
+		};
+		assert_eq!(order_count(0).unwrap(), i32::MAX);
+		assert!(order_count(1).is_err());
+	}
+
+	/// 8.2.1.2: only the final bottom field order count must fit, not the sum
+	/// on the way to it.
+	#[test]
+	fn the_type1_bottom_field_is_checked_whole() {
+		let sps = Sps {
+			pic_order_cnt_type: 1,
+			offset_for_top_to_bottom_field: i32::MAX,
+			..progressive_sps()
+		};
+		let bottom = |field, delta0, delta1| {
+			let mut pic = PictureData::default();
+			pic.pic_order_cnt_type = 1;
+			pic.nal_ref_idc = 1;
+			pic.field = field;
+			pic.delta_pic_order_cnt0 = delta0;
+			pic.delta_pic_order_cnt1 = delta1;
+			pic_order_count(&prev_ref(0, 0), &mut PrevPicInfo::default(), &mut pic, &sps)
+				.map(|()| pic.bottom_field_order_cnt)
+		};
+		assert_eq!(bottom(Field::Frame, 2, -i32::MAX).unwrap(), 2);
+		assert_eq!(bottom(Field::Bottom, 2 - i32::MAX, 0).unwrap(), 2);
+		assert!(bottom(Field::Frame, 2, 0).is_err());
+		assert!(bottom(Field::Bottom, 2, 0).is_err());
 	}
 
 	#[test]
