@@ -3049,11 +3049,14 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 
@@ -3063,6 +3066,7 @@ mod tests {
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::Start,
 				announce: route,
+				..
 			} => Some(route),
 			other => panic!("expected an announcement: got {other:?}"),
 		}

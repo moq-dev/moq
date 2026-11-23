@@ -1269,6 +1269,8 @@ impl<F: Container> Consumer<F> {
 					}
 					continue;
 				}
+				// An item this version does not know is not a group to read.
+				Some(_) => continue,
 				// Track is finished.
 				None => return Poll::Ready(()),
 			};

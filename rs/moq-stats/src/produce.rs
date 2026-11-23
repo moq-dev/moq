@@ -1927,6 +1927,7 @@ mod tests {
 			match ordered.next_item().await.unwrap().unwrap() {
 				track::Item::Group(group) => assert_eq!(group.start, second.start, "{version}"),
 				track::Item::Gap { range, error, .. } => panic!("{version}: groups {range:?} given up: {error}"),
+				_ => panic!("{version}: unexpected item"),
 			}
 		}
 	}
@@ -1996,11 +1997,14 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 
@@ -3501,14 +3505,17 @@ mod tests {
 				broadcast::TracksEvent::Added {
 					name,
 					info: broadcast::Listed::Track(_),
+					..
 				} => (name, true),
 				broadcast::TracksEvent::Removed {
 					kind: broadcast::Kind::Track,
 					name,
+					..
 				}
 				| broadcast::TracksEvent::Finished {
 					kind: broadcast::Kind::Track,
 					name,
+					..
 				} => (name, false),
 				_ => continue,
 			};

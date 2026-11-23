@@ -48,6 +48,7 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		Some(moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Start,
 			announce,
+			..
 		}) => announce.route.cost(),
 		other => panic!("expected the first route, got {other:?}"),
 	};
@@ -65,10 +66,12 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		Some(moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Update,
 			announce,
+			..
 		}) if carries_instance => announce.route.cost(),
 		Some(moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Restart,
 			announce,
+			..
 		}) if !carries_instance => announce.route.cost(),
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};

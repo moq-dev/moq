@@ -29,8 +29,6 @@ native crates, and public APIs:
 - **Vendored native crate soundness.** Fix the unsound public APIs in
   [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md) before `0.22.0`
   publishes them (moq-v4l's and moq-nvenc's are fixed).
-- **Public API freezes.** Fence `moq-net` event/item types with
-  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)).
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),

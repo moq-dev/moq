@@ -49,15 +49,18 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: update,
+				..
 			} => {
 				live |= update.prefix.as_str() == path;
 			}
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: update,
+				..
 			} => {
 				live &= update.prefix.as_str() != path;
 			}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	live

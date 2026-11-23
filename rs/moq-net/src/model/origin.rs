@@ -2253,6 +2253,7 @@ fn hides(heads: &[Path], prefix: &Path) -> bool {
 
 /// What a [`Routes`] yields: how the route covering a prefix changed, and that route.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RouteEvent {
 	/// How the route changed.
 	pub kind: RouteKind,
@@ -2262,6 +2263,7 @@ pub struct RouteEvent {
 
 /// How the route covering a prefix changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteKind {
 	/// A route now covers the prefix; the cursor had none there.
 	Start,
@@ -2293,6 +2295,7 @@ pub enum RouteKind {
 /// [`Consumer::request`]; the application decides which paths name
 /// broadcasts, and filters with a [`Pattern`] locally when it wants a subset.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Announce {
 	/// The prefix the route covers, relative to the consuming cursor's root.
 	pub prefix: Path,

@@ -112,23 +112,29 @@ pub(super) async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, 
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start,
 				announce: a,
+				..
 			} => ("start", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Update,
 				announce: a,
+				..
 			} => ("update", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce: a,
+				..
 			} => ("restart", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End,
 				announce: a,
+				..
 			} => ("end", a),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Offline,
 				announce: a,
+				..
 			} => ("offline", a),
+			other => panic!("unexpected route event {other:?}"),
 		};
 		events.push((kind, announce.prefix.to_string(), announce.route.instance().clone()));
 	}
