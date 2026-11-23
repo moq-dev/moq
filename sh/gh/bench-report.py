@@ -375,7 +375,7 @@ def callgrind(path):
                 parts[-1]["trigger"] = line[len(b"desc: Trigger: ") :].rstrip(b"\n").decode()
             elif line.startswith(b"events:"):
                 events = parts[-1]["events"] = line.split()[1:]
-            # CodSpeed's Callgrind leaves each part's `summary` 0 and closes it with its `totals`; the file's own follow.
+            # CodSpeed's Callgrind leaves each part's `summary` 0 and closes the part with its `totals`.
             elif line.startswith(b"totals:") and parts[-1]["totals"] is None:
                 parts[-1]["totals"] = line.split()[1:]
     entries = []
