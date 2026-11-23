@@ -52,17 +52,26 @@ import {
 	encodeSubscribeResponse,
 	Subscribe,
 	SubscribeDrop,
-	SubscribeFinish,
+	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeSkip,
 	SubscribeStart,
-	SubscribeStarted,
+	type Edge,
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
-import { hasLengthFirst, Version, versionName } from "./version.ts";
+import { hasLengthFirst, hasRanges, Version, versionName } from "./version.ts";
+
+
+/**
+ * The SUBSCRIBE_START answering range `id` at `start`: on lite-07 with `largest`, by default that
+ * the track has no group yet, which a range following the live edge may be answered with.
+ */
+function answer(version: Version, start: bigint | undefined, id = 0n, largest: Edge = "empty"): SubscribeStart {
+	return new SubscribeStart({ id, start, largest: hasRanges(version) ? largest : "unknown" });
+}
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;
@@ -1580,7 +1589,7 @@ test.each([
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const first = handStream(version);
 		const frame = hasLengthFirst(version)
@@ -1626,7 +1635,7 @@ test("a reset without its code ends the group", async () => {
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const first = handStream(version);
 		first.write(await liteFrame(300, new Uint8Array([1])));
@@ -1665,7 +1674,7 @@ test.each([
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const error = kind === "stale" ? StreamCode.Old : StreamCode.NotFound;
 		const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error }) };
@@ -1681,7 +1690,7 @@ test.each([
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		if (order === "after") await respond(request, version, [drop]);
 		if (kind === "final then stale" && order === "before") await respond(request, version, [stale]);
-		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
 		await drainReactions();
 		// An update reopens neither drop.
 		if (kind === "final then stale") {
@@ -1723,7 +1732,7 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		// The copy still arriving, then a stream of the same group that waits on it.
 		const first = handStream(version);
@@ -1738,7 +1747,7 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 
 		await respond(request, version, [
 			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
-			{ finish: new SubscribeFinish(1n) },
+			{ end: new SubscribeEnd(1n) },
 		]);
 		await drainReactions();
 
@@ -1771,7 +1780,7 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 		// Group 2 opens a gap at 1, which the grace gives up on by the time group 3 arrives.
 		for (const key of [0n, 2n, 3n]) {
 			const stream = handStream(version);
@@ -1784,7 +1793,7 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 		late.write(await liteFrame(0, new Uint8Array([1])));
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 1n }), late.reader);
 		await drainReactions();
-		await respond(request, version, [{ finish: new SubscribeFinish(4n) }]);
+		await respond(request, version, [{ end: new SubscribeEnd(4n) }]);
 		await drainReactions();
 
 		let fin = false;
@@ -1818,7 +1827,7 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const slow = handStream(version);
 		slow.write(await liteFrame(0, new Uint8Array([1])));
@@ -1827,7 +1836,7 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
 		// SUBSCRIBE_FINISH starts the end's grace, and the update then widens the budget.
-		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
 		await drainReactions();
 		track.update({ priority: 0, delay: { max: Duration.millis(60_000) } });
 		await drainReactions();
@@ -2397,7 +2406,7 @@ test.each([
 		await subscribe.reading;
 
 		if (outcome === "answered") {
-			await respond(subscribe, version, [{ start: new SubscribeStart([0n]) }]);
+			await respond(subscribe, version, [{ start: answer(version, 0n) }]);
 			await drainReactions();
 			await pool.replace();
 			await drainReactions();
@@ -2409,7 +2418,7 @@ test.each([
 			await respond(
 				subscribe,
 				version,
-				[{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(0n) }],
+				[{ start: answer(version, 0n) }, { end: new SubscribeEnd(0n) }],
 				true,
 			);
 			expect(await track.closed).toBeNull();
@@ -2987,8 +2996,13 @@ test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscripti
 	}
 });
 
-// Our SUBSCRIBE carries one range, so a lite-07 SUBSCRIBE_START with any other count is malformed.
-test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the protocol", async (starts) => {
+// Our SUBSCRIBE carries one range, which follows the live edge: a lite-07 SUBSCRIBE_START for a Range
+// ID never assigned, a second one for the range, or one not knowing where the edge is, is malformed.
+test.each([
+	["an unassigned range", [{ id: 1n, start: 0n, largest: "empty" }]],
+	["a range twice", [{ id: 0n, start: 0n, largest: "empty" }, { id: 0n, start: 0n, largest: "empty" }]],
+	["no edge for a live range", [{ id: 0n, start: 0n, largest: "unknown" }]],
+] as const)("a lite-07 SUBSCRIBE_START for %s violates the protocol", async (_, starts) => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2998,7 +3012,11 @@ test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, Version.DRAFT_07, [{ start: new SubscribeStart(starts.map(BigInt)) }]);
+		await respond(
+			request,
+			Version.DRAFT_07,
+			starts.map((start) => ({ start: new SubscribeStart(start) })),
+		);
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
@@ -3010,8 +3028,8 @@ test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the
 });
 
 // An empty START resolves the feed's start, and a range an update adds leaves it pending until its
-// SUBSCRIBE_STARTED says where that range starts, which the feed then starts from.
-test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () => {
+// SUBSCRIBE_START says where that range starts, which the feed then starts from.
+test("a widened range's SUBSCRIBE_START resolves the feed's start", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -3026,7 +3044,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		await Subscribe.decode(sent, version);
 		await request.reading;
 		expect(hooks.sourceStart(track)).toBe("pending");
-		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
+		await respond(request, version, [{ start: answer(version, undefined) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
 		track.update({ ranges: [{ start: 0n, end: 1n }] });
@@ -3036,7 +3054,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		// The widened range retires Range ID 0 and takes the next one.
 		expect(update.remove).toEqual([0n]);
 		expect(update.ranges).toHaveLength(1);
-		await respond(request, version, [{ started: new SubscribeStarted(1n, 1n) }]);
+		await respond(request, version, [{ start: answer(version, 1n, 1n) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).toBe(1n);
 	} finally {
@@ -3066,14 +3084,14 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 		await Subscribe.decode(sent, version);
 		await request.reading;
 		// The oldest group's range starts at 5, which may have expired a group at or before 3.
-		await respond(request, version, [{ start: new SubscribeStart([5n]) }]);
+		await respond(request, version, [{ start: answer(version, 5n) }]);
 		await drainReactions();
 		reader = oldest.fork({ delay: { max: null }, ranges: [{ start: 3n }] });
 		const probe = await SubscribeUpdate.decode(sent, version);
 		expect(probe.remove ?? []).toEqual([]);
 		expect(probe.ranges).toEqual([{ start: { time: 3n }, end: { time: 3n } }]);
 		// Answered past its time: no group at or before 3, so the reader starts at the oldest group.
-		await respond(request, version, [{ started: new SubscribeStarted(1n, 5n) }]);
+		await respond(request, version, [{ start: answer(version, 5n, 1n) }]);
 		await drainReactions();
 		expect(hooks.servingResolved(reader)).toEqual([{ start: 0n, end: undefined, floored: false }]);
 		const retired = await SubscribeUpdate.decode(sent, version);
@@ -3109,7 +3127,7 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 		await answerTrackInfo(streams[0], version);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([undefined, undefined]) }]);
+		await respond(request, version, [{ start: answer(version, undefined, 0n) }, { start: answer(version, undefined, 1n) }]);
 		await drainReactions();
 		// Under the budget the range was asked with, here none.
 		expect(reported.at(-1)).toEqual([[10n, undefined, NO_MAX_DELAY]]);
@@ -3168,7 +3186,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 			return { group: hooks.receiveGroup(entry.track, { start: key, offset: 0 }), read };
 		};
 
-		await send({ start: new SubscribeStart([0n]) });
+		await send({ start: answer(version, 0n) });
 		// OLD, then the group, which finishes.
 		await send(old(1n));
 		const one = arrive(1n);
@@ -3278,7 +3296,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 			drop: new SubscribeDrop({ start, end, error: StreamCode.Old }),
 		});
 		for (const resp of [
-			{ start: new SubscribeStart([0n]) },
+			{ start: answer(version, 0n) },
 			old(1n, 3n),
 			old(4n, 5n),
 			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
@@ -3340,7 +3358,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 			await drainReactions();
 		};
 		await send([
-			{ start: new SubscribeStart([0n]) },
+			{ start: answer(version, 0n) },
 			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.NotFound }) },
 		]);
 		if (!entry) throw new Error("no subscription");
@@ -3441,7 +3459,7 @@ test.each([
 		await subscribe.reading;
 		const responses: SubscribeResponse[] = legacy
 			? [{ ok: new SubscribeOk({}) }]
-			: [{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(1n) }];
+			: [{ start: answer(version, 0n) }, { end: new SubscribeEnd(1n) }];
 		await respond(subscribe, version, responses, true);
 		if (settled) {
 			const group = new ReadableStream<Uint8Array>({
@@ -3502,7 +3520,7 @@ test.each([
 				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 				version,
 			);
-			await encodeSubscribeResponse(writer, { finish: new SubscribeFinish(0n) }, version);
+			await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
 			for (const chunk of chunks) stream.inbound.enqueue(chunk);
 			stream.inbound.close();
 			expect(await track.closed).toBeNull();
@@ -3558,7 +3576,7 @@ test("a lite-07 drop with an empty span closes the session", async () => {
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
+		await encodeSubscribeResponse(writer, { start: answer(version, 0n) }, version);
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
 		// Type, length, Group Start 4, Group End 4, OLD.
 		stream.inbound.enqueue(new Uint8Array([2, 3, 4, 4, StreamCode.Old]));
@@ -4027,8 +4045,8 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 			new WritableStream<Uint8Array>({ write: (chunk) => streams[1].inbound.enqueue(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(writer, { finish: new SubscribeFinish(0n) }, version);
+		await encodeSubscribeResponse(writer, { start: answer(version, 0n) }, version);
+		await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
 		streams[1].inbound.close();
 		expect(await grouped.recvGroup()).toBeUndefined();
 	} finally {

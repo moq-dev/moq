@@ -27,7 +27,7 @@ import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
 	Subscribe,
-	SubscribeFinish,
+	SubscribeEnd,
 	SubscribeStart,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
@@ -38,6 +38,7 @@ import {
 	ALPN_05,
 	ALPN_06,
 	ALPN_07_WIP,
+	hasRanges,
 	hasTrackStream,
 	keepsSubscribeOpen,
 	Version,
@@ -994,14 +995,16 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 						sub = stream;
 					}
 				}
-				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0n]) }, version);
+				await encodeSubscribeResponse(sub.writer, {
+					start: new SubscribeStart({ id: 0n, start: 0n, largest: hasRanges(version) ? "empty" : "unknown" }),
+				}, version);
 
 				let group: GroupMessage;
 				if (violation === "a partial group") {
 					// A received tail uses its wire position even without a locally retained prefix.
 					group = new GroupMessage({ subscribe: 0n, key: 0n, frameStart: 5 });
 				} else {
-					await encodeSubscribeResponse(sub.writer, { finish: new SubscribeFinish(2n) }, version);
+					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2n) }, version);
 					group = new GroupMessage({ subscribe: 0n, key: 2n });
 				}
 				const writer = await Writer.open(pair.server, { version });

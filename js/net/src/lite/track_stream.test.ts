@@ -18,7 +18,7 @@ import { StreamId } from "./stream.ts";
 import { encodeSubscribeResponse, Subscribe, SubscribeStart } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, Version } from "./version.ts";
+import { ALPN_05, hasRanges, Version } from "./version.ts";
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
 	/** A subscriber whose publisher the test plays by hand, up to the SUBSCRIBE. */
@@ -50,7 +50,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const fin = track.reader.done();
 		expect(await settlesWithin(fin, clock, Duration.millis(50))).toBe(false);
 
-		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0n]) }, version);
+		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart({ id: 0n, start: 0n, largest: hasRanges(version) ? "empty" : "unknown" }) }, version);
 		expect(await fin).toBe(true);
 
 		reader.close();
