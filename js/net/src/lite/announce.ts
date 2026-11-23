@@ -131,7 +131,7 @@ export type AnnounceBroadcast =
 	| { status: "start"; suffix: Path.Valid; pathBase?: Base; instance: Instance.Valid; claim: Claim }
 	/** Lite07+ ANNOUNCE_UPDATE: the claim with this id now stands as `claim`. */
 	| { status: "change"; id: bigint; claim: Claim }
-	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
+	/** An unknown lite-06 announce type, skipped by length. Does not assign an id. lite-07 rejects it instead. */
 	| { status: "skipped" }
 	/** Lite07+ SYNCED: the initial set of the prefix the receiver assigned this Prefix ID has been
 	 * delivered. */
@@ -513,7 +513,9 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			// Only two nodes that both declared a Node ID exchange routes, and this one declares none.
 			throw new ProtocolViolation(`route message ${typ} to a node that declared no Node ID`);
 	}
-	// Skip the length-prefixed body so an earlier Lite06 build negotiating
+	// lite-07 defines every type its streams carry, so an unknown one is a violation.
+	if (hasRoutes(version)) throw new ProtocolViolation(`unknown announce message type ${typ}`);
+	// Lite06 skips the length-prefixed body so a build that predates a type negotiating
 	// the same ALPN does not kill the announce stream.
 	await r.readAll();
 	return { status: "skipped" };

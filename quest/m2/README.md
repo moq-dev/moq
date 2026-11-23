@@ -32,9 +32,7 @@ native crates, and public APIs:
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),
-[m1/precut-audit](/quest/m1/precut-audit/README.md) (high- and medium-impact
-fixes, TLA+ sync drift, and CI hardening), [m3](/quest/m3/README.md) (softer
-edge cases and low-severity cleanups), and
+[m3](/quest/m3/README.md) (softer edge cases and low-severity cleanups), and
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
 
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
