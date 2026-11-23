@@ -69,6 +69,7 @@ import {
 	LONG_FRAMES,
 	type LongFrame,
 	leakedPlayerStarted,
+	type Resources,
 	reachesLive,
 	SAMPLE_MS,
 	SAMPLE_RATE,
@@ -338,6 +339,8 @@ async function waitForLive(
 	let first: number | undefined;
 	let lag: number | undefined;
 	let frame: number | undefined;
+	// Samples carry the page's clock, so their trace lines count from the first one read.
+	let origin: number | undefined;
 	let moved = false;
 	// Live needs audio playing too, so a failure says whether audio or the picture held it back.
 	let audio = "unread";
@@ -349,13 +352,15 @@ async function waitForLive(
 		);
 		if (state && state.seq !== sampled?.seq) sampled = { seq: state.seq, at: Date.now() };
 		if (fixture && state?.frameId !== undefined) {
+			origin ??= state.at;
+			const start = origin;
 			if (resumed) {
 				const skew = resumeSkew(state, frame);
 				if (skew !== undefined)
 					check(
 						Math.abs(skew) <= MAX_SKEW_STEPS * Pattern.STEP_MS,
 						"resume audio/video sync",
-						() => `${assertion}: offset ${skew}ms; ${traceLine(state, since)}`,
+						() => `${assertion}: offset ${skew}ms; ${traceLine(state, start)}`,
 					);
 			}
 			lag = fixture.frameId - state.frameId;
@@ -413,6 +418,17 @@ async function measurePlayback(player: Page, playerErrors: BrowserErrors, label:
 		predicate: audioPlays,
 	});
 	await (await observe(player, playerErrors, label)).grade();
+}
+
+/** Detach the player and wait until it releases every session, audio graph, and worker it `held`. */
+async function detach(player: Page, playerErrors: BrowserErrors, held: Resources): Promise<void> {
+	await command(player, "detach");
+	await waitForResources(player, playerErrors, {
+		deadline: Date.now() + SETTLE_MS,
+		assertion: "resource baseline",
+		description: `every session, audio graph, and worker to be released (held ${JSON.stringify(held)} while playing)`,
+		predicate: (r) => r.transports === 0 && r.sockets === 0 && r.audioContexts === 0 && r.workers === 0,
+	});
 }
 
 /**
@@ -925,18 +941,23 @@ async function captureDenial(broadcast: string): Promise<void> {
 		() => `denied capture exposed media: ${JSON.stringify(denied)}`,
 	);
 
+	// A viewer reports "connecting" until its session could have seen an announcement, which says
+	// nothing about whether the broadcast is absent, so the window opens once it can tell.
+	await waitForState(viewer, viewerErrors, {
+		deadline: Date.now() + timeoutMs,
+		assertion: "capture denial holds publication",
+		description: "the capture viewer's session to connect",
+		predicate: (state) => state.broadcastStatus !== "connecting",
+	});
 	const absent = await collect(viewer, viewerErrors, 1000);
+	const seen = absent.find(
+		(state) =>
+			state.broadcastActive || state.broadcastStatus !== "offline" || state.hasAudio || state.videoFrames > 0,
+	);
 	check(
-		absent.length > 0 &&
-			absent.every(
-				(state) =>
-					!state.broadcastActive &&
-					state.broadcastStatus === "offline" &&
-					!state.hasAudio &&
-					state.videoFrames === 0,
-			),
+		absent.length > 0 && seen === undefined,
 		"capture denial holds publication",
-		() => `a viewer saw a partial or announced broadcast: ${JSON.stringify(absent.at(-1))}`,
+		() => `a viewer saw a partial or announced broadcast: ${JSON.stringify(seen ?? absent.at(-1))}`,
 	);
 
 	await publisher.context().grantPermissions(["camera"]);
@@ -1286,13 +1307,7 @@ try {
 				predicate: (r) => leakedPlayerStarted(busy.resources, r),
 			});
 		}
-		await command(player, "detach");
-		await waitForResources(player, playerErrors, {
-			deadline: Date.now() + SETTLE_MS,
-			assertion: "resource baseline",
-			description: `every session, audio graph, and worker to be released (held ${JSON.stringify(busy.resources)} while playing)`,
-			predicate: (r) => r.transports === 0 && r.sockets === 0 && r.audioContexts === 0 && r.workers === 0,
-		});
+		await detach(player, playerErrors, busy.resources);
 		console.error("  detach released every session, audio graph, and worker");
 
 		await command(player, "reattach");
@@ -1303,6 +1318,18 @@ try {
 	// These publishers overlap: neither a successful new picture nor fallback
 	// can be explained by the incumbent timing out or closing its session.
 	if (wants("replacement")) {
+		// The section runs three media pages of its own, so the lifecycle pair idles through it: a
+		// 4-vCPU runner decoding in software starved all five past the switch bound at once. The
+		// fixture's video encodes with or without a subscriber, so detaching the player is not enough.
+		const busy = await readPlayerState(player);
+		await detach(player, playerErrors, busy.resources);
+		await command(publisher, "disableVideo");
+		await waitForFixture(publisher, publisherErrors, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "lifecycle fixture idles",
+			description: "the lifecycle fixture to stop encoding video for the replacement section",
+			predicate: (state) => !state.videoActive,
+		});
 		const sourceBrowser = await browserFor("publisher");
 		for (const version of replacementVersions) {
 			console.error(`=== live replacement and fallback: ${version} ===`);
@@ -1415,6 +1442,9 @@ try {
 				await old.context().close();
 			}
 		}
+		await command(publisher, "enableVideo");
+		await command(player, "reattach");
+		await waitForLive(publisher, publisherErrors, player, playerErrors, "lifecycle player returns", true);
 	}
 
 	// ── publisher stop and same-path republish ───────────────────────────────
