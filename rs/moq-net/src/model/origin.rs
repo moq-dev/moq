@@ -9512,7 +9512,10 @@ mod tests {
 	async fn default_config_mints_a_real_hop() {
 		let config = Config::default();
 		let (producer, _driver) = Producer::new(config.clone());
-		assert!(producer.node().get() < 1 << 53, "older JS clients decode it as a number");
+		assert!(
+			producer.node().get() < 1 << 53,
+			"older JS clients decode it as a number"
+		);
 		assert_eq!(producer.consume().node(), producer.node());
 		// One config, or the config an origin reports, builds a new node each time: a
 		// Relay ID names one run.
