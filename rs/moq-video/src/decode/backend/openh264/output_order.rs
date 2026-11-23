@@ -96,7 +96,13 @@ impl Sequences {
 		let mut start = offset + size;
 		while let Some(&header) = data.get(start) {
 			let next = annexb::find_start_code(&data[start..]);
-			let end = next.map_or(data.len(), |(offset, _)| start + offset);
+			let padded = next.map_or(data.len(), |(offset, _)| start + offset);
+			// A NAL unit ends in a nonzero byte (7.4.1): zeros after it are
+			// `trailing_zero_8bits` padding ahead of the next start code (B.1.1).
+			let end = data[start..padded]
+				.iter()
+				.rposition(|&byte| byte != 0)
+				.map_or(start + 1, |last| start + last + 1);
 			let nal = &data[start..end];
 			match header & 0x1f {
 				// The first slice: its PPS names the SPS that sets the output order.
@@ -207,12 +213,7 @@ fn relabel_sps(nal: &[u8], sps: &SeqParameterSet) -> Option<Vec<u8>> {
 		}
 		MAIN => {
 			let (&header, payload) = nal.split_first()?;
-			let mut rbsp = unescape(payload);
-			// Zero bytes after the stop bit are `trailing_zero_8bits`.
-			while rbsp.last() == Some(&0) {
-				rbsp.pop();
-			}
-			let rbsp = main_as_high(&rbsp)?;
+			let rbsp = main_as_high(&unescape(payload))?;
 			let mut out = Vec::with_capacity(rbsp.len() + 4);
 			out.push(header);
 			escape(&rbsp, &mut out);
@@ -476,5 +477,14 @@ mod tests {
 		// A malformed SPS under ID 0, here one cut short, leaves its output order as it was.
 		let malformed = sequences.relabel(&unit(&[&[0x67, BASELINE, 0, 30, 0x80], &slice0]));
 		assert_eq!(malformed.immediate, Some(false), "a malformed SPS replaced a valid one");
+
+		// Zeros between an SPS and the next start code pad the stream
+		// (`trailing_zero_8bits`, B.1.1): a Baseline SPS so padded still
+		// replaces SPS 0.
+		let mut padded = VAAPI_MAIN.to_vec();
+		padded[1] = BASELINE;
+		padded.extend_from_slice(&[0, 0, 0]);
+		let replaced = sequences.relabel(&unit(&[&padded, &pps0, &slice0]));
+		assert_eq!(replaced.immediate, Some(true), "a padded SPS was ignored");
 	}
 }
