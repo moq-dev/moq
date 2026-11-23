@@ -1876,7 +1876,7 @@ mod tests {
 		async fn with_info(info: moq_net::track::Info) -> Self {
 			use crate::container::test_util::{Link, origin};
 
-			let (publisher, subscriber) = (origin(1), origin(2));
+			let (publisher, subscriber) = (origin(), origin());
 			let link = Link::new(&publisher, &subscriber).await;
 			let route = publisher
 				.route("room", moq_net::origin::RouteOptions::hidden())
@@ -2552,7 +2552,7 @@ mod tests {
 	async fn the_join_is_the_answer_though_the_first_group_is_held() {
 		use crate::container::test_util::{Link, origin};
 
-		let (publisher, subscriber) = (origin(1), origin(2));
+		let (publisher, subscriber) = (origin(), origin());
 		// SETUP and the Announce Stream take the first two uni streams, so every group waits.
 		let link = Link::held(&publisher, &subscriber, 2).await;
 		let route = publisher

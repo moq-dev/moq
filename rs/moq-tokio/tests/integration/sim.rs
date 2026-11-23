@@ -153,8 +153,8 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		driver::endpoint::Endpoint::new(endpoint(seed, 1).with_server(server_config), network.bind(SERVER)).unwrap();
 	let client = driver::endpoint::Endpoint::new(endpoint(seed, 2), network.bind(CLIENT)).unwrap();
 
-	let publisher = origin_producer(1);
-	let viewer = origin_producer(2);
+	let publisher = origin_producer();
+	let viewer = origin_producer();
 	let broadcast = publisher
 		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
@@ -284,8 +284,8 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 	)
 }
 
-fn origin_producer(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+fn origin_producer() -> origin::Producer {
+	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	spawn(driver);
 	origin
 }

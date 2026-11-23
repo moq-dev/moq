@@ -1334,9 +1334,9 @@ mod tests {
 		(stamps, frames)
 	}
 
-	/// An origin at `hop`, its driver spawned.
-	fn origin(hop: u64) -> moq_net::origin::Producer {
-		let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	/// An origin, its driver spawned.
+	fn origin() -> moq_net::origin::Producer {
+		let config = moq_net::origin::Config::default();
 		let (producer, driver) = moq_net::origin::Producer::new(config);
 		tokio::spawn(moq_net::time::run(driver));
 		producer
@@ -1384,7 +1384,7 @@ mod tests {
 	/// replaying that backlog.
 	#[tokio::test(start_paused = true)]
 	async fn latest_skips_a_warm_copys_backlog() {
-		let publisher = origin(1);
+		let publisher = origin();
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
@@ -1413,7 +1413,7 @@ mod tests {
 			write(packet);
 		}
 
-		let relay = origin(2);
+		let relay = origin();
 		let _link = link(&publisher, &relay).await;
 		let consumer = relay.consume();
 		let remote = consumer
@@ -1465,7 +1465,7 @@ mod tests {
 	/// behind its newest, a gap no later update recovers.
 	#[tokio::test(start_paused = true)]
 	async fn latest_loses_no_group_the_publisher_bursts_before_its_first_frame() {
-		let publisher = origin(1);
+		let publisher = origin();
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
@@ -1494,7 +1494,7 @@ mod tests {
 		};
 		write(0);
 
-		let subscriber = origin(2);
+		let subscriber = origin();
 		let _link = link(&publisher, &subscriber).await;
 		let consumer = subscriber.consume();
 		let remote = consumer
@@ -3134,7 +3134,7 @@ mod tests {
 	async fn a_hole_waited_out_to_the_max_delay_leaves_the_estimate() {
 		use moq_mux::container::Container as _;
 
-		let publisher = origin(1);
+		let publisher = origin();
 		let route = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
@@ -3158,7 +3158,7 @@ mod tests {
 		};
 
 		// A received copy: its feed owes the missing group, so the reader waits for it.
-		let relay = origin(2);
+		let relay = origin();
 		let _link = link(&publisher, &relay).await;
 		let remote = relay
 			.consume()

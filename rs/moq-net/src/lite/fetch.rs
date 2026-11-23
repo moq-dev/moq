@@ -186,14 +186,12 @@ mod test {
 		let mut msg = fetch_sample();
 		msg.node = Some(crate::route::NodeId {
 			relay: 0x7a3f,
-			start: 9,
 			marked: false,
 		});
 		assert_eq!(
 			fetch_roundtrip(Version::Lite07, &msg).node,
 			Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9,
 				marked: false,
 			})
 		);

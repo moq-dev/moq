@@ -11,1480 +11,1445 @@ open import Relation.Binary.PropositionalEquality using (_≡_; refl)
 
 open import Named
 
-_ : extend (link true 0 0 false (4003 ∷ []) ([]) true false true 0) (2000 , 3000) (valid (route tt false 0 0 false [] []))
-  ≡ valid (route tt false 0 0 true ((2000 , 3000) ∷ []) (0 ∷ []))
+_ : extend (link true 0 0 false (3 ∷ []) ([]) true false true 0) (0 , 1000) (valid (route tt false 0 0 false [] []))
+  ≡ valid (route tt false 0 0 true ((0 , 1000) ∷ []) (0 ∷ []))
 _ = refl
 
-_ : extend (link true 0 0 false ([]) (floor 3 2 1 2 ∷ floor 3 3 2 0 ∷ []) true false false 0) (2000 , 3000) (valid (route tt false 0 0 false [] []))
+_ : extend (link true 0 0 false ([]) (floor 1 1 2 ∷ floor 3 4 0 ∷ floor 6 4 0 ∷ []) true false false 0) (0 , 1000) (valid (route tt false 0 0 false [] []))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 255 false (2002 ∷ []) ([]) false true true 3) (2000 , 2006) (valid (route tt false 122 10 false ((2006 , 2000) ∷ (2000 , 2001) ∷ (2001 , 4003) ∷ (4003 , 2004) ∷ []) (2 ∷ 3 ∷ 1 ∷ 1 ∷ [])))
+_ : extend (link true 1 255 false (2 ∷ []) ([]) true true true 1) (0 , 5) (valid (route tt false 127 4 true ((5 , 6) ∷ (6 , 4) ∷ (4 , 3) ∷ []) (2 ∷ 2 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 122 false (2002 ∷ []) (floor 4 4 2 2 ∷ []) true true true 2) (2000 , 4001) (valid (route tt false 255 10 false ((4001 , 2000) ∷ (2000 , 2002) ∷ (2002 , 4006) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
+_ : extend (link true 4 255 true ([]) (floor 2 3 0 ∷ floor 2 6 1 ∷ []) true false false 1) (0 , 1) (valid (route tt true 128 1 false ((1 , 0) ∷ (0 , 4) ∷ (4 , 2) ∷ (2 , 5) ∷ []) (2 ∷ 2 ∷ 1 ∷ 3 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 127 true ([]) ([]) true false true 3) (2000 , 2002) (valid (route tt false 0 0 true ((2002 , 3002) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt true 127 1 true ((2000 , 2002) ∷ (2002 , 3002) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 1 122 false ([]) (floor 5 5 3 ∷ []) true false false 1) (0 , 3) (valid (route tt false 0 0 true ((3 , 1003) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 122 1 true ((0 , 3) ∷ (3 , 1003) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (2002 ∷ []) ([]) true true false 2) (2000 , 4002) (valid (route tt false 128 3 false ((4002 , 4005) ∷ (4005 , 4006) ∷ (4006 , 2003) ∷ []) (2 ∷ 2 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 128 5 true ((2000 , 4002) ∷ (4002 , 4005) ∷ (4005 , 4006) ∷ (4006 , 2003) ∷ []) (2 ∷ 2 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 1 0 false (2 ∷ []) (floor 2 2 1 ∷ []) false true false 1) (0 , 2) (valid (route tt false 255 6 true ((2 , 5) ∷ (5 , 6) ∷ (6 , 1) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 0 false (2006 ∷ []) ([]) false false true 3) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 3003) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 0 1 true ((2000 , 2003) ∷ (2003 , 3003) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 3 127 false (1 ∷ 5 ∷ []) (floor 1 1 1 ∷ floor 1 4 0 ∷ []) true false true 3) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 127 3 true ((0 , 1) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false ([]) (floor 1 1 1 1 ∷ floor 4 0 2 0 ∷ floor 6 1 2 0 ∷ []) false true true 2) (2000 , 4005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 1 false ((2000 , 4005) ∷ []) (2 ∷ []))
+_ : extend (link true 3 122 false ([]) ([]) false true true 3) (0 , 3) (valid (route tt false 122 1 false ((3 , 2) ∷ (2 , 6) ∷ (6 , 0) ∷ (0 , 5) ∷ []) (1 ∷ 2 ∷ 1 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 127 false ([]) ([]) false false true 3) (2000 , 4005) (valid (route tt false 127 3 false ((4005 , 4000) ∷ (4000 , 4001) ∷ (4001 , 2003) ∷ []) (2 ∷ 2 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 0 true ([]) ([]) true true false 1) (0 , 1) (valid (route tt true 128 1 false ((1 , 6) ∷ (6 , 4) ∷ (4 , 3) ∷ []) (3 ∷ 1 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 128 5 true ((0 , 1) ∷ (1 , 6) ∷ (6 , 4) ∷ (4 , 3) ∷ []) (1 ∷ 3 ∷ 1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false (2006 ∷ []) ([]) true false true 3) (2000 , 4001) (valid (route tt false 0 7 true ((4001 , 2004) ∷ (2004 , 4002) ∷ (4002 , 4005) ∷ []) (3 ∷ 2 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 128 11 true ((2000 , 4001) ∷ (4001 , 2004) ∷ (2004 , 4002) ∷ (4002 , 4005) ∷ []) (3 ∷ 3 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 2 127 false (2 ∷ []) (floor 5 4 1 ∷ []) true false true 1) (0 , 5) (valid (route tt false 127 5 false ((5 , 3) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt false 127 7 true ((0 , 5) ∷ (5 , 3) ∷ []) (1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false ([]) (floor 1 1 1 3 ∷ floor 3 0 2 3 ∷ floor 6 5 2 3 ∷ []) true true false 2) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
+_ : extend (link true 3 255 true (1 ∷ 6 ∷ []) (floor 1 4 1 ∷ floor 4 6 0 ∷ floor 6 0 2 ∷ []) true true true 1) (0 , 5) (valid (route tt false 122 1 true ((5 , 1) ∷ (1 , 4) ∷ (4 , 3) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 4 127 false ([]) ([]) true false false 3) (2000 , 2003) (valid (route tt false 128 8 true ((2003 , 4000) ∷ []) (2 ∷ [])))
+_ : extend (link true 1 0 true ([]) (floor 4 5 0 ∷ []) false true true 3) (0 , 5) (valid (route tt true 255 6 true ((5 , 4) ∷ (4 , 6) ∷ (6 , 1) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 false ([]) (floor 1 1 2 2 ∷ floor 5 4 2 3 ∷ []) false false true 2) (2000 , 2004) (valid (route tt true 255 3 false ((2004 , 4005) ∷ (4005 , 4001) ∷ (4001 , 2003) ∷ []) (3 ∷ 1 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 255 4 false ((2000 , 2004) ∷ (2004 , 4005) ∷ (4005 , 4001) ∷ (4001 , 2003) ∷ []) (2 ∷ 3 ∷ 1 ∷ 3 ∷ []))
+_ : extend (link true 3 128 true (4 ∷ []) ([]) true false true 2) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 128 3 true ((0 , 1) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false (4006 ∷ []) (floor 2 4 2 2 ∷ []) false false true 2) (2000 , 2001) (valid (route tt false 0 1 true ((2001 , 4002) ∷ (4002 , 4004) ∷ []) (1 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 255 5 true ((2000 , 2001) ∷ (2001 , 4002) ∷ (4002 , 4004) ∷ []) (2 ∷ 1 ∷ 3 ∷ []))
+_ : extend (link true 3 128 false ([]) (floor 2 4 3 ∷ floor 2 6 1 ∷ []) false false true 1) (0 , 5) (valid (route tt false 122 9 true ((5 , 2) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt false 128 12 true ((0 , 5) ∷ (5 , 2) ∷ []) (1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 true (2002 ∷ 2006 ∷ []) (floor 4 5 1 2 ∷ []) false true true 2) (2000 , 4002) (valid (route tt false 127 11 false ((4002 , 4003) ∷ (4003 , 4000) ∷ (4000 , 4001) ∷ (4001 , 5001) ∷ []) (1 ∷ 3 ∷ 1 ∷ 0 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 122 true (3 ∷ []) (floor 2 4 3 ∷ floor 4 0 3 ∷ floor 6 2 3 ∷ []) false true true 2) (0 , 2) (valid (route tt true 127 8 false ((2 , 3) ∷ (3 , 5) ∷ []) (3 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 127 12 false ((0 , 2) ∷ (2 , 3) ∷ (3 , 5) ∷ []) (2 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 true (4001 ∷ []) (floor 3 5 1 0 ∷ floor 5 6 2 0 ∷ []) false false true 2) (2000 , 4004) (valid (route tt true 122 0 false ((4004 , 4006) ∷ (4006 , 2000) ∷ (2000 , 2001) ∷ []) (2 ∷ 2 ∷ 3 ∷ [])))
+_ : extend (link true 2 255 false (2 ∷ 6 ∷ []) (floor 1 4 3 ∷ floor 2 0 0 ∷ floor 4 5 3 ∷ []) true false false 3) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
-_ = refl
-
-_ : extend (link true 1 127 true (4006 ∷ []) (floor 3 6 1 2 ∷ floor 5 2 1 1 ∷ floor 6 2 1 0 ∷ []) true false true 3) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 127 1 true ((2000 , 2003) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false ([]) (floor 1 4 1 1 ∷ floor 3 6 2 3 ∷ []) true true false 3) (2000 , 4004) (valid (route tt false 127 10 false ((4004 , 2006) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt false 127 12 true ((2000 , 4004) ∷ (4004 , 2006) ∷ []) (3 ∷ 3 ∷ []))
+_ : extend (link true 1 255 false (1 ∷ []) (floor 3 2 0 ∷ floor 3 3 0 ∷ []) false false true 3) (0 , 4) (valid (route tt true 122 8 false ((4 , 1) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt true 255 9 false ((0 , 4) ∷ (4 , 1) ∷ []) (3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (4003 ∷ []) ([]) true false true 1) (2000 , 4001) (valid (route tt false 128 9 false ((4001 , 2002) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt false 128 10 true ((2000 , 4001) ∷ (4001 , 2002) ∷ []) (1 ∷ 1 ∷ []))
+_ : extend (link true 4 122 true (2 ∷ []) ([]) false false true 1) (0 , 6) (valid (route tt true 127 11 false ((6 , 4) ∷ (4 , 3) ∷ (3 , 2) ∷ []) (2 ∷ 3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 127 15 false ((0 , 6) ∷ (6 , 4) ∷ (4 , 3) ∷ (3 , 2) ∷ []) (1 ∷ 2 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 true ([]) (floor 3 4 2 3 ∷ []) false false true 3) (2000 , 2004) (valid (route tt false 255 8 false ((2004 , 2005) ∷ (2005 , 2006) ∷ []) (3 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 255 11 false ((2000 , 2004) ∷ (2004 , 2005) ∷ (2005 , 2006) ∷ []) (3 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 2 128 true ([]) (floor 3 0 3 ∷ []) false false true 1) (0 , 5) (valid (route tt true 0 8 false ((5 , 4) ∷ (4 , 6) ∷ (6 , 3) ∷ []) (1 ∷ 3 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 128 10 false ((0 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ (6 , 3) ∷ []) (1 ∷ 1 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false ([]) (floor 5 6 1 0 ∷ []) false false true 1) (2000 , 2004) (valid (route tt false 255 3 true ((2004 , 4006) ∷ (4006 , 4005) ∷ []) (1 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 255 7 true ((2000 , 2004) ∷ (2004 , 4006) ∷ (4006 , 4005) ∷ []) (1 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 2 0 false (4 ∷ 6 ∷ []) (floor 2 0 1 ∷ floor 5 4 0 ∷ []) true true true 2) (0 , 5) (valid (route tt false 128 7 false ((5 , 0) ∷ (0 , 4) ∷ []) (2 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 128 false (4002 ∷ 4005 ∷ []) ([]) false false true 2) (2000 , 4003) (valid (route tt false 0 0 true ((4003 , 5003) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 128 4 true ((2000 , 4003) ∷ (4003 , 5003) ∷ []) (2 ∷ 0 ∷ []))
+_ : extend (link true 1 127 true (3 ∷ []) (floor 3 5 3 ∷ []) false false true 3) (0 , 6) (valid (route tt false 122 5 false ((6 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 127 6 false ((0 , 6) ∷ (6 , 1) ∷ (1 , 1001) ∷ []) (3 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 255 true (2004 ∷ []) (floor 1 4 1 3 ∷ floor 2 6 2 2 ∷ floor 6 0 1 0 ∷ []) false false true 3) (2000 , 4001) (valid (route tt false 127 0 false ((4001 , 4000) ∷ []) (3 ∷ [])))
+_ : extend (link true 2 0 true (5 ∷ []) (floor 3 3 2 ∷ floor 4 2 1 ∷ []) false false true 2) (0 , 2) (valid (route tt false 127 0 true ((2 , 0) ∷ (0 , 3) ∷ (3 , 1003) ∷ []) (1 ∷ 1 ∷ 0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 122 true (2002 ∷ []) ([]) false false true 2) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 122 2 false ((2000 , 2005) ∷ []) (2 ∷ []))
+_ : extend (link true 3 128 false ([]) ([]) false false false 3) (0 , 1) (valid (route tt false 255 10 false ((1 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 255 13 false ((0 , 1) ∷ (1 , 6) ∷ (6 , 1006) ∷ []) (3 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 false ([]) (floor 1 4 2 0 ∷ floor 3 1 2 1 ∷ floor 5 4 1 0 ∷ []) false false true 3) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 3 false ((2000 , 4001) ∷ []) (3 ∷ []))
+_ : extend (link true 4 122 false (4 ∷ []) (floor 5 5 2 ∷ []) false true true 1) (0 , 6) (valid (route tt false 122 2 false ((6 , 1) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt false 122 6 false ((0 , 6) ∷ (6 , 1) ∷ []) (1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (2006 ∷ []) (floor 4 2 2 2 ∷ []) false true true 2) (2000 , 4004) (valid (route tt false 0 0 true ((4004 , 5004) ∷ []) (0 ∷ [])))
+_ : extend (link true 2 127 false ([]) (floor 3 5 0 ∷ []) false false true 2) (0 , 3) (valid (route tt false 127 8 false ((3 , 2) ∷ (2 , 0) ∷ (0 , 5) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 4 255 true ([]) (floor 6 2 2 1 ∷ []) true false true 1) (2000 , 2001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 255 4 true ((2000 , 2001) ∷ []) (1 ∷ []))
+_ : extend (link true 4 0 false (1 ∷ 5 ∷ []) (floor 3 1 3 ∷ floor 3 5 0 ∷ []) true true true 1) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 0 4 true ((0 , 1) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 false (2004 ∷ []) (floor 4 4 1 2 ∷ []) false true true 2) (2000 , 2006) (valid (route tt false 255 0 false ((2006 , 4000) ∷ (4000 , 4004) ∷ (4004 , 2003) ∷ []) (3 ∷ 3 ∷ 1 ∷ [])))
+_ : extend (link true 2 0 false (3 ∷ []) ([]) false false false 1) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 255 false ([]) (floor 2 2 1 2 ∷ floor 6 6 1 0 ∷ []) false false false 2) (2000 , 4001) (valid (route tt false 0 1 false ((4001 , 2000) ∷ (2000 , 4002) ∷ (4002 , 4004) ∷ []) (2 ∷ 1 ∷ 2 ∷ [])))
-  ≡ invalid
-_ = refl
-
-_ : extend (link true 1 122 false (4004 ∷ []) (floor 3 2 2 3 ∷ floor 4 2 2 3 ∷ []) false false true 1) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 122 1 false ((2000 , 2002) ∷ []) (1 ∷ []))
+_ : extend (link true 4 0 false (3 ∷ []) (floor 5 3 1 ∷ []) true true true 3) (0 , 6) (valid (route tt false 128 0 false ((6 , 4) ∷ (4 , 5) ∷ []) (1 ∷ 1 ∷ [])))
+  ≡ valid (route tt false 128 4 true ((0 , 6) ∷ (6 , 4) ∷ (4 , 5) ∷ []) (3 ∷ 1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false ([]) ([]) true false false 2) (2000 , 2006) (valid (route tt false 122 4 false ((2006 , 4002) ∷ (4002 , 4003) ∷ (4003 , 4001) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 122 6 true ((2000 , 2006) ∷ (2006 , 4002) ∷ (4002 , 4003) ∷ (4003 , 4001) ∷ []) (2 ∷ 3 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 1 127 false (4 ∷ []) (floor 4 3 2 ∷ []) false true true 3) (0 , 3) (valid (route tt true 122 4 false ((3 , 33) ∷ (33 , 37) ∷ (37 , 23) ∷ (23 , 31) ∷ (31 , 38) ∷ (38 , 40) ∷ (40 , 1) ∷ (1 , 14) ∷ (14 , 30) ∷ (30 , 34) ∷ (34 , 26) ∷ (26 , 27) ∷ (27 , 28) ∷ (28 , 21) ∷ (21 , 11) ∷ (11 , 12) ∷ (12 , 5) ∷ (5 , 10) ∷ (10 , 35) ∷ (35 , 13) ∷ (13 , 6) ∷ (6 , 2) ∷ (2 , 4) ∷ (4 , 32) ∷ (32 , 17) ∷ (17 , 8) ∷ (8 , 7) ∷ (7 , 25) ∷ (25 , 15) ∷ (15 , 36) ∷ []) (2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 127 5 false ((0 , 3) ∷ (3 , 33) ∷ (33 , 37) ∷ (37 , 23) ∷ (23 , 31) ∷ (31 , 38) ∷ (38 , 40) ∷ (40 , 1) ∷ (1 , 14) ∷ (14 , 30) ∷ (30 , 34) ∷ (34 , 26) ∷ (26 , 27) ∷ (27 , 28) ∷ (28 , 21) ∷ (21 , 11) ∷ (11 , 12) ∷ (12 , 5) ∷ (5 , 10) ∷ (10 , 35) ∷ (35 , 13) ∷ (13 , 6) ∷ (6 , 2) ∷ (2 , 4) ∷ (4 , 32) ∷ (32 , 17) ∷ (17 , 8) ∷ (8 , 7) ∷ (7 , 25) ∷ (25 , 15) ∷ (15 , 36) ∷ []) (3 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 true ([]) (floor 4 5 2 2 ∷ []) false false true 3) (2000 , 2002) (valid (route tt false 127 1 false ((2002 , 4006) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 127 5 false ((2000 , 2002) ∷ (2002 , 4006) ∷ []) (3 ∷ 3 ∷ []))
+_ : extend (link true 1 122 false (2 ∷ 3 ∷ []) (floor 4 5 0 ∷ floor 6 1 2 ∷ []) false false false 2) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 0 false (2005 ∷ []) (floor 5 4 2 2 ∷ []) false true true 1) (2000 , 4003) (valid (route tt false 0 0 true ((4003 , 5003) ∷ []) (0 ∷ [])))
+_ : extend (link true 2 127 true (2 ∷ []) (floor 4 0 1 ∷ []) false false false 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 127 true ([]) ([]) false false true 2) (2000 , 2006) (valid (route tt false 127 3 true ((2006 , 2003) ∷ (2003 , 2004) ∷ []) (1 ∷ 1 ∷ [])))
-  ≡ valid (route tt true 127 6 true ((2000 , 2006) ∷ (2006 , 2003) ∷ (2003 , 2004) ∷ []) (2 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 2 127 false (5 ∷ []) (floor 2 1 3 ∷ floor 4 2 0 ∷ []) true false true 3) (0 , 1) (valid (route tt false 127 7 false ((1 , 6) ∷ (6 , 2) ∷ []) (2 ∷ 1 ∷ [])))
+  ≡ valid (route tt false 127 9 true ((0 , 1) ∷ (1 , 6) ∷ (6 , 2) ∷ []) (3 ∷ 2 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false (2006 ∷ []) (floor 4 4 2 1 ∷ floor 6 1 1 1 ∷ []) false false true 2) (2000 , 4006) (valid (route tt false 128 1 true ((4006 , 4004) ∷ (4004 , 2003) ∷ (2003 , 4002) ∷ (4002 , 2001) ∷ []) (1 ∷ 3 ∷ 3 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 128 2 true ((2000 , 4006) ∷ (4006 , 4004) ∷ (4004 , 2003) ∷ (2003 , 4002) ∷ (4002 , 2001) ∷ []) (2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 2 0 false ([]) (floor 3 0 2 ∷ floor 3 3 2 ∷ []) false true false 3) (0 , 3) (valid (route tt false 122 2 false ((3 , 6) ∷ (6 , 1) ∷ (1 , 4) ∷ []) (3 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt false 122 4 false ((0 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 4) ∷ []) (3 ∷ 3 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 false (4002 ∷ 4005 ∷ []) (floor 1 2 1 3 ∷ floor 5 5 1 2 ∷ floor 6 4 1 3 ∷ []) true true true 1) (2000 , 4005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 0 4 true ((2000 , 4005) ∷ []) (1 ∷ []))
+_ : extend (link true 1 128 false ([]) (floor 1 3 2 ∷ floor 3 1 2 ∷ floor 5 3 2 ∷ []) false false true 2) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 128 1 true ((0 , 6) ∷ (6 , 1006) ∷ []) (2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 true (4006 ∷ []) ([]) false true true 3) (2000 , 2003) (valid (route tt true 127 8 false ((2003 , 4032) ∷ (4032 , 4012) ∷ (4012 , 4031) ∷ (4031 , 2004) ∷ (2004 , 2018) ∷ (2018 , 2039) ∷ (2039 , 4022) ∷ (4022 , 2007) ∷ (2007 , 4035) ∷ (4035 , 4030) ∷ (4030 , 4024) ∷ (4024 , 4023) ∷ (4023 , 4014) ∷ (4014 , 2021) ∷ (2021 , 4026) ∷ (4026 , 4037) ∷ (4037 , 4027) ∷ (4027 , 2020) ∷ (2020 , 2015) ∷ (2015 , 4019) ∷ (4019 , 4034) ∷ (4034 , 4036) ∷ (4036 , 2040) ∷ (2040 , 4025) ∷ (4025 , 4016) ∷ (4016 , 4001) ∷ (4001 , 2010) ∷ (2010 , 2028) ∷ (2028 , 4009) ∷ (4009 , 4033) ∷ (4033 , 2029) ∷ []) (3 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 0 true (4 ∷ []) ([]) false false true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 0 4 false ((0 , 5) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 true (4005 ∷ []) ([]) true false true 3) (2000 , 2005) (valid (route tt false 128 2 true ((2005 , 2001) ∷ (2001 , 2004) ∷ (2004 , 4006) ∷ (4006 , 2003) ∷ []) (1 ∷ 1 ∷ 2 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 128 6 true ((2000 , 2005) ∷ (2005 , 2001) ∷ (2001 , 2004) ∷ (2004 , 4006) ∷ (4006 , 2003) ∷ []) (3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 2 122 true ([]) (floor 1 1 0 ∷ floor 2 2 2 ∷ floor 4 5 3 ∷ []) false false true 3) (0 , 1) (valid (route tt false 255 6 false ((1 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ (6 , 3) ∷ []) (2 ∷ 3 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 255 8 false ((0 , 1) ∷ (1 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ (6 , 3) ∷ []) (3 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false ([]) ([]) false true false 2) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 3003) ∷ []) (0 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 128 false (4 ∷ []) (floor 3 5 0 ∷ floor 5 3 3 ∷ []) false false false 1) (0 , 3) (valid (route tt false 0 0 true ((3 , 1003) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 128 4 true ((0 , 3) ∷ (3 , 1003) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 127 false (2001 ∷ 4002 ∷ []) (floor 4 2 1 2 ∷ []) false true true 2) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 2 false ((2000 , 2002) ∷ []) (2 ∷ []))
+_ : extend (link true 1 122 true (2 ∷ 3 ∷ []) (floor 1 6 1 ∷ floor 2 5 0 ∷ floor 4 2 1 ∷ []) false false true 1) (0 , 5) (valid (route tt false 128 6 true ((5 , 22) ∷ (22 , 6) ∷ (6 , 23) ∷ (23 , 39) ∷ (39 , 21) ∷ (21 , 27) ∷ (27 , 30) ∷ (30 , 25) ∷ (25 , 37) ∷ (37 , 18) ∷ (18 , 26) ∷ (26 , 1) ∷ (1 , 15) ∷ (15 , 14) ∷ (14 , 17) ∷ (17 , 28) ∷ (28 , 34) ∷ (34 , 4) ∷ (4 , 2) ∷ (2 , 40) ∷ (40 , 12) ∷ (12 , 7) ∷ (7 , 16) ∷ (16 , 32) ∷ (32 , 20) ∷ (20 , 10) ∷ (10 , 31) ∷ (31 , 3) ∷ (3 , 24) ∷ (24 , 33) ∷ (33 , 29) ∷ []) (3 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 127 false (4006 ∷ []) (floor 1 4 2 2 ∷ []) false true true 3) (2000 , 2002) (valid (route tt false 127 10 false ((2002 , 2004) ∷ (2004 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2006) ∷ []) (1 ∷ 1 ∷ 3 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 127 14 false ((2000 , 2002) ∷ (2002 , 2004) ∷ (2004 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2006) ∷ []) (3 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 4 122 false ([]) (floor 2 0 3 ∷ []) false false true 1) (0 , 3) (valid (route tt false 122 1 false ((3 , 2) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt false 122 5 false ((0 , 3) ∷ (3 , 2) ∷ []) (1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false ([]) (floor 4 6 2 3 ∷ []) true false true 2) (2000 , 4001) (valid (route tt false 128 7 false ((4001 , 2002) ∷ (2002 , 3002) ∷ []) (2 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 128 8 true ((2000 , 4001) ∷ (4001 , 2002) ∷ (2002 , 3002) ∷ []) (2 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 1 255 true (2 ∷ []) (floor 3 6 3 ∷ []) false false false 3) (0 , 6) (valid (route tt true 122 0 true ((6 , 0) ∷ []) (3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 128 false (4006 ∷ []) (floor 3 1 2 3 ∷ []) false false true 2) (2000 , 4002) (valid (route tt false 255 2 true ((4002 , 4003) ∷ (4003 , 4004) ∷ (4004 , 2001) ∷ []) (3 ∷ 2 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 255 4 true ((2000 , 4002) ∷ (4002 , 4003) ∷ (4003 , 4004) ∷ (4004 , 2001) ∷ []) (2 ∷ 3 ∷ 2 ∷ 3 ∷ []))
+_ : extend (link true 4 128 false (1 ∷ []) (floor 3 2 2 ∷ floor 4 2 0 ∷ []) true true true 1) (0 , 2) (valid (route tt false 127 7 false ((2 , 3) ∷ (3 , 1) ∷ []) (3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 128 11 true ((0 , 2) ∷ (2 , 3) ∷ (3 , 1) ∷ []) (1 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 128 true (2005 ∷ []) (floor 1 1 2 3 ∷ floor 3 1 1 3 ∷ floor 6 4 1 3 ∷ []) false false true 3) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 128 2 false ((2000 , 4006) ∷ []) (3 ∷ []))
+_ : extend (link true 4 0 false (1 ∷ 3 ∷ []) (floor 6 3 2 ∷ []) true false false 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 128 true ([]) (floor 2 0 1 1 ∷ floor 4 4 1 3 ∷ []) false true true 3) (2000 , 2005) (valid (route tt true 127 7 false ((2005 , 4001) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 128 10 false ((2000 , 2005) ∷ (2005 , 4001) ∷ []) (3 ∷ 3 ∷ []))
+_ : extend (link true 2 0 false (6 ∷ []) (floor 1 6 3 ∷ floor 2 5 0 ∷ floor 3 5 3 ∷ []) false true true 3) (0 , 6) (valid (route tt false 128 0 false ((6 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 128 2 false ((0 , 6) ∷ (6 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false ([]) (floor 1 5 2 3 ∷ []) false false true 2) (2000 , 4003) (valid (route tt true 122 11 false ((4003 , 2006) ∷ (2006 , 2005) ∷ (2005 , 2000) ∷ (2000 , 2002) ∷ []) (2 ∷ 1 ∷ 2 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 127 false (4 ∷ []) (floor 4 6 3 ∷ []) false true true 3) (0 , 2) (valid (route tt false 127 10 false ((2 , 3) ∷ (3 , 1) ∷ (1 , 6) ∷ (6 , 5) ∷ []) (1 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
+  ≡ valid (route tt false 127 14 false ((0 , 2) ∷ (2 , 3) ∷ (3 , 1) ∷ (1 , 6) ∷ (6 , 5) ∷ []) (3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 127 true ([]) (floor 1 6 1 0 ∷ floor 4 3 2 0 ∷ []) false false false 2) (2000 , 2004) (valid (route tt false 122 9 false ((2004 , 2001) ∷ (2001 , 4002) ∷ (4002 , 4006) ∷ []) (3 ∷ 1 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 127 11 false ((2000 , 2004) ∷ (2004 , 2001) ∷ (2001 , 4002) ∷ (4002 , 4006) ∷ []) (2 ∷ 3 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 4 127 false (1 ∷ 4 ∷ []) (floor 4 6 3 ∷ []) true false true 2) (0 , 6) (valid (route tt true 255 0 false ((6 , 2) ∷ (2 , 1002) ∷ []) (3 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 255 4 true ((0 , 6) ∷ (6 , 2) ∷ (2 , 1002) ∷ []) (2 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false (2005 ∷ []) (floor 4 4 1 1 ∷ []) false true false 3) (2000 , 4003) (valid (route tt true 127 6 true ((4003 , 4000) ∷ (4000 , 2006) ∷ (2006 , 2004) ∷ []) (2 ∷ 1 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 127 false ([]) (floor 6 5 3 ∷ []) true true true 2) (0 , 2) (valid (route tt true 127 4 false ((2 , 6) ∷ (6 , 1) ∷ (1 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 127 8 true ((0 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false (2002 ∷ []) (floor 4 2 2 2 ∷ floor 4 5 2 2 ∷ []) false false true 1) (2000 , 2002) (valid (route tt true 127 11 true ((2002 , 4006) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt true 127 14 true ((2000 , 2002) ∷ (2002 , 4006) ∷ []) (1 ∷ 1 ∷ []))
+_ : extend (link true 4 128 false (3 ∷ 6 ∷ []) (floor 1 1 1 ∷ floor 2 6 3 ∷ []) true false false 2) (0 , 5) (valid (route tt true 0 5 false ((5 , 2) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt true 128 9 true ((0 , 5) ∷ (5 , 2) ∷ []) (2 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 false (2002 ∷ []) (floor 1 4 2 0 ∷ []) true false true 2) (2000 , 2003) (valid (route tt true 128 1 false ((2003 , 2001) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 255 3 true ((2000 , 2003) ∷ (2003 , 2001) ∷ []) (2 ∷ 3 ∷ []))
+_ : extend (link true 3 0 false (2 ∷ 5 ∷ []) ([]) true false true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 0 3 true ((0 , 5) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 false ([]) (floor 4 1 1 1 ∷ floor 5 4 1 3 ∷ floor 6 0 2 0 ∷ []) true false true 1) (2000 , 4002) (valid (route tt false 122 9 false ((4002 , 2006) ∷ (2006 , 2004) ∷ (2004 , 4001) ∷ []) (1 ∷ 1 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 122 12 true ((2000 , 4002) ∷ (4002 , 2006) ∷ (2006 , 2004) ∷ (2004 , 4001) ∷ []) (1 ∷ 1 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 2 128 false ([]) (floor 3 0 2 ∷ []) false false true 2) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 2 false ((0 , 2) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 false ([]) (floor 1 4 2 2 ∷ floor 6 2 1 1 ∷ []) false false false 3) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 3003) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 122 3 true ((2000 , 2003) ∷ (2003 , 3003) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 2 122 true ([]) ([]) true true true 3) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 122 2 true ((0 , 3) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 false (4002 ∷ []) (floor 5 4 1 1 ∷ []) false false true 1) (2000 , 2001) (valid (route tt true 255 2 false ((2001 , 4004) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 255 5 false ((2000 , 2001) ∷ (2001 , 4004) ∷ []) (1 ∷ 3 ∷ []))
+_ : extend (link true 3 128 false (5 ∷ []) (floor 4 5 1 ∷ []) true false true 1) (0 , 1) (valid (route tt true 122 8 false ((1 , 4) ∷ (4 , 5) ∷ (5 , 2) ∷ []) (3 ∷ 3 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 128 11 true ((0 , 1) ∷ (1 , 4) ∷ (4 , 5) ∷ (5 , 2) ∷ []) (1 ∷ 3 ∷ 3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 false (4001 ∷ 2006 ∷ []) (floor 1 1 2 3 ∷ floor 4 5 1 0 ∷ []) false false true 1) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 4 false ((2000 , 2002) ∷ []) (1 ∷ []))
+_ : extend (link true 4 255 false (3 ∷ 5 ∷ []) (floor 2 3 0 ∷ []) false false true 2) (0 , 4) (valid (route tt false 128 2 false ((4 , 1) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt false 255 6 false ((0 , 4) ∷ (4 , 1) ∷ []) (2 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false (4006 ∷ []) ([]) false true true 3) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 122 4 false ((2000 , 2006) ∷ []) (3 ∷ []))
+_ : extend (link true 3 127 false ([]) (floor 1 0 1 ∷ []) false true false 3) (0 , 3) (valid (route tt false 0 6 true ((3 , 5) ∷ (5 , 2) ∷ (2 , 6) ∷ (6 , 0) ∷ []) (2 ∷ 3 ∷ 3 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 255 true ([]) (floor 3 0 2 2 ∷ floor 3 6 1 0 ∷ floor 4 2 1 1 ∷ []) false false false 1) (2000 , 2006) (valid (route tt false 127 7 false ((2006 , 2003) ∷ (2003 , 2001) ∷ (2001 , 2005) ∷ []) (3 ∷ 3 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 255 10 false ((2000 , 2006) ∷ (2006 , 2003) ∷ (2003 , 2001) ∷ (2001 , 2005) ∷ []) (1 ∷ 3 ∷ 3 ∷ 2 ∷ []))
+_ : extend (link true 1 122 true (4 ∷ []) (floor 3 1 2 ∷ floor 4 4 0 ∷ []) false false true 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 122 1 false ((0 , 6) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 true ([]) (floor 4 4 2 3 ∷ floor 5 3 1 3 ∷ []) true false false 2) (2000 , 2005) (valid (route tt true 127 5 true ((2005 , 4001) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 127 8 true ((2000 , 2005) ∷ (2005 , 4001) ∷ []) (2 ∷ 3 ∷ []))
+_ : extend (link true 3 128 false (6 ∷ []) (floor 6 6 1 ∷ []) false false true 1) (0 , 1) (valid (route tt true 128 6 true ((1 , 3) ∷ (3 , 2) ∷ (2 , 5) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 128 9 true ((0 , 1) ∷ (1 , 3) ∷ (3 , 2) ∷ (2 , 5) ∷ []) (1 ∷ 1 ∷ 1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false ([]) ([]) false true true 3) (2000 , 2004) (valid (route tt false 0 0 true ((2004 , 3004) ∷ []) (0 ∷ [])))
-  ≡ invalid
+_ : extend (link true 2 0 false (3 ∷ 5 ∷ []) ([]) false true true 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 2 false ((0 , 2) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false (2006 ∷ []) (floor 5 4 2 1 ∷ floor 6 3 2 0 ∷ []) false false true 1) (2000 , 2001) (valid (route tt true 255 9 false ((2001 , 2002) ∷ (2002 , 2003) ∷ (2003 , 2006) ∷ (2006 , 4004) ∷ []) (2 ∷ 2 ∷ 3 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 255 13 false ((2000 , 2001) ∷ (2001 , 2002) ∷ (2002 , 2003) ∷ (2003 , 2006) ∷ (2006 , 4004) ∷ []) (1 ∷ 2 ∷ 2 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 1 255 true (5 ∷ []) (floor 1 4 2 ∷ floor 2 6 1 ∷ floor 4 0 0 ∷ []) false true true 2) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 255 1 false ((0 , 2) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false (4001 ∷ 2004 ∷ []) (floor 2 6 1 1 ∷ floor 4 0 1 3 ∷ floor 4 1 2 0 ∷ []) false true true 1) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 1 false ((2000 , 4006) ∷ []) (1 ∷ []))
+_ : extend (link true 4 122 false (2 ∷ []) (floor 2 6 2 ∷ floor 5 3 2 ∷ []) false false true 1) (0 , 6) (valid (route tt false 127 1 true ((6 , 3) ∷ (3 , 1) ∷ (1 , 5) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt false 127 5 true ((0 , 6) ∷ (6 , 3) ∷ (3 , 1) ∷ (1 , 5) ∷ []) (1 ∷ 2 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 255 true (4002 ∷ []) (floor 3 0 2 1 ∷ []) false false true 3) (2000 , 2003) (valid (route tt false 127 0 false ((2003 , 4000) ∷ (4000 , 4005) ∷ []) (3 ∷ 1 ∷ [])))
+_ : extend (link true 2 0 false (1 ∷ 4 ∷ []) (floor 5 0 1 ∷ []) true true true 3) (0 , 6) (valid (route tt false 128 0 true ((6 , 2) ∷ (2 , 4) ∷ []) (2 ∷ 3 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 128 false (2001 ∷ 4002 ∷ []) (floor 4 6 2 3 ∷ floor 6 1 2 1 ∷ []) false false true 1) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 2 false ((2000 , 4004) ∷ []) (1 ∷ []))
+_ : extend (link true 3 122 false ([]) (floor 1 4 3 ∷ []) false true true 3) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 122 3 false ((0 , 6) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false (4001 ∷ 4002 ∷ []) ([]) false true true 1) (2000 , 2002) (valid (route tt false 122 1 false ((2002 , 2004) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt false 122 5 false ((2000 , 2002) ∷ (2002 , 2004) ∷ []) (1 ∷ 1 ∷ []))
+_ : extend (link true 4 127 true (3 ∷ 6 ∷ []) ([]) false false false 3) (0 , 3) (valid (route tt true 0 2 true ((3 , 1) ∷ (1 , 4) ∷ (4 , 6) ∷ (6 , 2) ∷ []) (1 ∷ 3 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 127 6 true ((0 , 3) ∷ (3 , 1) ∷ (1 , 4) ∷ (4 , 6) ∷ (6 , 2) ∷ []) (3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false ([]) ([]) false false true 2) (2000 , 2002) (valid (route tt false 127 3 false ((2002 , 4001) ∷ (4001 , 2004) ∷ []) (3 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 127 4 false ((2000 , 2002) ∷ (2002 , 4001) ∷ (4001 , 2004) ∷ []) (2 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 4 122 false ([]) (floor 3 6 2 ∷ []) false true true 3) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 127 false (2003 ∷ 2004 ∷ []) (floor 1 0 1 0 ∷ floor 4 5 1 3 ∷ floor 6 1 1 1 ∷ []) false false true 2) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 2 false ((2000 , 4004) ∷ []) (2 ∷ []))
+_ : extend (link true 2 128 false (4 ∷ []) (floor 2 6 0 ∷ floor 6 2 0 ∷ []) false false false 3) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 127 true ([]) ([]) false false true 2) (2000 , 2003) (valid (route tt false 127 9 true ((2003 , 2001) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 127 12 true ((2000 , 2003) ∷ (2003 , 2001) ∷ []) (2 ∷ 3 ∷ []))
+_ : extend (link true 3 0 false (4 ∷ []) (floor 2 2 1 ∷ floor 4 1 3 ∷ []) false true true 2) (0 , 3) (valid (route tt false 128 7 true ((3 , 1) ∷ (1 , 4) ∷ []) (1 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 255 false (4005 ∷ 2006 ∷ []) (floor 1 1 1 2 ∷ floor 2 1 2 3 ∷ []) true false true 2) (2000 , 4004) (valid (route tt true 127 11 true ((4004 , 2001) ∷ (2001 , 4005) ∷ (4005 , 2003) ∷ (2003 , 2002) ∷ []) (2 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 255 13 true ((2000 , 4004) ∷ (4004 , 2001) ∷ (2001 , 4005) ∷ (4005 , 2003) ∷ (2003 , 2002) ∷ []) (2 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ []))
+_ : extend (link true 4 122 false (4 ∷ []) ([]) true false false 2) (0 , 5) (valid (route tt true 127 6 false ((5 , 2) ∷ (2 , 3) ∷ (3 , 6) ∷ []) (2 ∷ 3 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 127 10 true ((0 , 5) ∷ (5 , 2) ∷ (2 , 3) ∷ (3 , 6) ∷ []) (2 ∷ 2 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 true ([]) (floor 3 3 2 0 ∷ floor 3 4 2 2 ∷ floor 4 1 1 2 ∷ []) false true true 2) (2000 , 2006) (valid (route tt false 0 8 false ((2006 , 2005) ∷ (2005 , 2004) ∷ []) (1 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 122 11 false ((2000 , 2006) ∷ (2006 , 2005) ∷ (2005 , 2004) ∷ []) (2 ∷ 1 ∷ 3 ∷ []))
+_ : extend (link true 4 255 true (4 ∷ []) (floor 2 5 0 ∷ floor 5 3 0 ∷ floor 5 5 2 ∷ []) true false false 3) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 255 4 true ((0 , 6) ∷ (6 , 1006) ∷ []) (3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 false ([]) (floor 3 0 1 1 ∷ floor 4 1 2 2 ∷ []) false false true 3) (2000 , 4005) (valid (route tt false 0 9 false ((4005 , 4004) ∷ (4004 , 4003) ∷ (4003 , 4006) ∷ []) (2 ∷ 3 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 0 13 false ((2000 , 4005) ∷ (4005 , 4004) ∷ (4004 , 4003) ∷ (4003 , 4006) ∷ []) (3 ∷ 2 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 4 122 false ([]) (floor 1 5 0 ∷ floor 5 1 2 ∷ []) false true true 3) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 false ([]) (floor 5 2 1 1 ∷ floor 5 4 2 2 ∷ []) false false true 2) (2000 , 2005) (valid (route tt true 0 2 false ((2005 , 4003) ∷ (4003 , 2004) ∷ (2004 , 2001) ∷ []) (1 ∷ 2 ∷ 1 ∷ [])))
-  ≡ valid (route tt true 128 3 false ((2000 , 2005) ∷ (2005 , 4003) ∷ (4003 , 2004) ∷ (2004 , 2001) ∷ []) (2 ∷ 1 ∷ 2 ∷ 1 ∷ []))
+_ : extend (link true 4 128 false (2 ∷ 5 ∷ []) (floor 5 4 2 ∷ floor 6 3 1 ∷ []) false false true 1) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 128 4 true ((0 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (4005 ∷ 2006 ∷ []) (floor 1 1 2 2 ∷ floor 4 0 2 3 ∷ floor 5 4 2 1 ∷ []) false true true 3) (2000 , 2006) (valid (route tt false 0 0 true ((2006 , 3006) ∷ []) (0 ∷ [])))
+_ : extend (link true 4 127 true ([]) (floor 6 6 0 ∷ []) true false true 3) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 255 true ([]) (floor 6 2 2 3 ∷ []) true false true 3) (2000 , 4001) (valid (route tt true 255 6 false ((4001 , 2005) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt true 255 8 true ((2000 , 4001) ∷ (4001 , 2005) ∷ []) (3 ∷ 1 ∷ []))
+_ : extend (link true 4 122 false (3 ∷ []) (floor 3 1 0 ∷ floor 5 6 0 ∷ []) true true true 3) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 122 4 true ((0 , 2) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false ([]) (floor 3 3 2 2 ∷ []) false false true 3) (2000 , 2003) (valid (route tt true 128 7 true ((2003 , 2005) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 128 10 true ((2000 , 2003) ∷ (2003 , 2005) ∷ []) (3 ∷ 3 ∷ []))
+_ : extend (link true 1 0 false ([]) (floor 2 2 3 ∷ floor 2 6 0 ∷ floor 6 3 0 ∷ []) false true true 1) (0 , 1) (valid (route tt true 255 9 false ((1 , 4) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt true 255 10 false ((0 , 1) ∷ (1 , 4) ∷ []) (1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 false (2004 ∷ []) (floor 6 0 2 1 ∷ []) false true true 1) (2000 , 4004) (valid (route tt false 255 1 true ((4004 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2005) ∷ []) (3 ∷ 3 ∷ 1 ∷ [])))
+_ : extend (link true 4 127 false (2 ∷ []) (floor 3 0 1 ∷ []) false false false 3) (0 , 4) (valid (route tt true 0 8 false ((4 , 2) ∷ (2 , 0) ∷ (0 , 5) ∷ (5 , 6) ∷ []) (2 ∷ 1 ∷ 3 ∷ 2 ∷ [])))
   ≡ invalid
-_ = refl
-
-_ : extend (link true 1 127 false ([]) (floor 3 5 1 0 ∷ floor 5 1 1 1 ∷ floor 6 1 1 2 ∷ []) false true false 1) (2000 , 4002) (valid (route tt true 127 4 false ((4002 , 2001) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt true 127 5 false ((2000 , 4002) ∷ (4002 , 2001) ∷ []) (1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false (2003 ∷ 4003 ∷ []) (floor 1 0 2 3 ∷ floor 3 0 1 2 ∷ floor 5 0 1 1 ∷ []) true false true 1) (2000 , 4003) (valid (route tt false 122 7 true ((4003 , 4006) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt true 128 11 true ((2000 , 4003) ∷ (4003 , 4006) ∷ []) (1 ∷ 1 ∷ []))
+_ : extend (link true 2 127 false (2 ∷ []) (floor 4 5 3 ∷ floor 6 1 3 ∷ []) false false true 2) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 127 2 true ((0 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false (4005 ∷ []) (floor 3 0 1 0 ∷ floor 5 3 1 1 ∷ []) true false true 2) (2000 , 4003) (valid (route tt false 0 0 true ((4003 , 5003) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 0 3 true ((2000 , 4003) ∷ (4003 , 5003) ∷ []) (2 ∷ 0 ∷ []))
+_ : extend (link true 4 122 false ([]) (floor 3 5 0 ∷ floor 6 1 1 ∷ []) false true true 1) (0 , 2) (valid (route tt false 122 1 false ((2 , 4) ∷ (4 , 5) ∷ []) (1 ∷ 1 ∷ [])))
+  ≡ valid (route tt false 122 5 false ((0 , 2) ∷ (2 , 4) ∷ (4 , 5) ∷ []) (1 ∷ 1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false ([]) (floor 5 0 1 2 ∷ []) false false true 1) (2000 , 4002) (valid (route tt true 255 0 true ((4002 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2006) ∷ (2006 , 2004) ∷ []) (1 ∷ 3 ∷ 3 ∷ 1 ∷ [])))
-  ≡ valid (route tt true 255 4 true ((2000 , 4002) ∷ (4002 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2006) ∷ (2006 , 2004) ∷ []) (1 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 3 127 true ([]) ([]) false false false 2) (0 , 2) (valid (route tt false 128 7 false ((2 , 1) ∷ (1 , 4) ∷ (4 , 3) ∷ []) (1 ∷ 1 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 128 10 false ((0 , 2) ∷ (2 , 1) ∷ (1 , 4) ∷ (4 , 3) ∷ []) (2 ∷ 1 ∷ 1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 false ([]) (floor 1 3 2 0 ∷ floor 1 4 2 2 ∷ floor 2 5 2 2 ∷ []) false true true 3) (2000 , 4002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 4 false ((2000 , 4002) ∷ []) (3 ∷ []))
+_ : extend (link true 4 0 false (2 ∷ []) ([]) true false false 3) (0 , 6) (valid (route tt true 0 3 false ((6 , 0) ∷ (0 , 1) ∷ []) (3 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 255 false (2001 ∷ []) (floor 1 4 1 0 ∷ floor 4 6 2 2 ∷ floor 6 3 1 0 ∷ []) true true true 3) (2000 , 2005) (valid (route tt true 128 5 false ((2005 , 2002) ∷ (2002 , 2000) ∷ (2000 , 4006) ∷ []) (1 ∷ 1 ∷ 3 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 255 true (1 ∷ 3 ∷ []) (floor 2 1 1 ∷ floor 2 5 3 ∷ []) true true true 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 255 3 true ((0 , 4) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 true (2006 ∷ []) (floor 6 0 1 1 ∷ floor 6 2 2 1 ∷ []) false false true 1) (2000 , 2003) (valid (route tt false 255 11 true ((2003 , 2001) ∷ (2001 , 3001) ∷ []) (2 ∷ 0 ∷ [])))
-  ≡ valid (route tt true 255 15 true ((2000 , 2003) ∷ (2003 , 2001) ∷ (2001 , 3001) ∷ []) (1 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 2 0 false ([]) (floor 2 2 3 ∷ floor 5 2 1 ∷ floor 6 4 3 ∷ []) false false true 1) (0 , 4) (valid (route tt true 255 2 false ((4 , 2) ∷ (2 , 5) ∷ (5 , 3) ∷ []) (1 ∷ 2 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 255 4 false ((0 , 4) ∷ (4 , 2) ∷ (2 , 5) ∷ (5 , 3) ∷ []) (1 ∷ 1 ∷ 2 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 true (2001 ∷ 4004 ∷ []) (floor 4 4 1 2 ∷ []) false false true 1) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 122 4 false ((2000 , 2002) ∷ []) (1 ∷ []))
+_ : extend (link true 3 0 false (3 ∷ []) ([]) false false false 2) (0 , 5) (valid (route tt false 128 0 false ((5 , 1) ∷ (1 , 2) ∷ (2 , 0) ∷ (0 , 4) ∷ []) (1 ∷ 3 ∷ 1 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 127 false (4003 ∷ []) ([]) false false true 3) (2000 , 4003) (valid (route tt true 122 3 true ((4003 , 2005) ∷ (2005 , 4004) ∷ (4004 , 2001) ∷ (2001 , 2006) ∷ []) (2 ∷ 3 ∷ 1 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 127 5 true ((2000 , 4003) ∷ (4003 , 2005) ∷ (2005 , 4004) ∷ (4004 , 2001) ∷ (2001 , 2006) ∷ []) (3 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ []))
+_ : extend (link true 3 0 true (3 ∷ []) (floor 4 6 1 ∷ []) true true true 1) (0 , 4) (valid (route tt false 127 2 true ((4 , 6) ∷ (6 , 1) ∷ (1 , 2) ∷ []) (3 ∷ 1 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 0 false ([]) (floor 3 0 1 1 ∷ floor 5 1 2 0 ∷ floor 6 6 2 1 ∷ []) false true true 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 2 false ((2000 , 2003) ∷ []) (1 ∷ []))
+_ : extend (link true 3 127 false (4 ∷ 6 ∷ []) ([]) false true false 3) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 0 false ([]) (floor 1 3 2 2 ∷ floor 4 0 2 2 ∷ floor 5 4 1 1 ∷ []) true true true 1) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 2 true ((2000 , 2006) ∷ []) (1 ∷ []))
+_ : extend (link true 1 128 false ([]) (floor 3 0 0 ∷ floor 4 2 2 ∷ []) false false true 3) (0 , 2) (valid (route tt false 127 5 true ((2 , 6) ∷ (6 , 3) ∷ (3 , 1003) ∷ []) (2 ∷ 3 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 128 6 true ((0 , 2) ∷ (2 , 6) ∷ (6 , 3) ∷ (3 , 1003) ∷ []) (3 ∷ 2 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 false ([]) (floor 3 0 1 2 ∷ floor 4 0 2 3 ∷ floor 4 2 1 1 ∷ []) true false false 3) (2000 , 2001) (valid (route tt false 127 10 true ((2001 , 4002) ∷ (4002 , 2003) ∷ (2003 , 4004) ∷ (4004 , 4000) ∷ []) (1 ∷ 2 ∷ 3 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 2 128 false (4 ∷ []) (floor 4 2 2 ∷ []) false false true 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 2 false ((0 , 2) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false ([]) (floor 1 5 1 1 ∷ floor 3 3 2 2 ∷ floor 3 5 2 3 ∷ []) false false false 1) (2000 , 4002) (valid (route tt false 122 3 false ((4002 , 2003) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt false 128 6 false ((2000 , 4002) ∷ (4002 , 2003) ∷ []) (1 ∷ 1 ∷ []))
+_ : extend (link true 1 122 false (3 ∷ []) (floor 3 3 2 ∷ floor 5 1 0 ∷ []) true true true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 122 1 true ((0 , 5) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false ([]) ([]) false false true 3) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 3 false ((2000 , 2005) ∷ []) (3 ∷ []))
+_ : extend (link true 1 127 false (3 ∷ 4 ∷ []) (floor 6 3 0 ∷ floor 6 4 0 ∷ []) false true true 3) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 127 1 false ((0 , 1) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 false ([]) (floor 1 2 1 0 ∷ []) false false true 3) (2000 , 4004) (valid (route tt false 0 8 true ((4004 , 2001) ∷ (2001 , 2003) ∷ (2003 , 4005) ∷ []) (1 ∷ 2 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 255 10 true ((2000 , 4004) ∷ (4004 , 2001) ∷ (2001 , 2003) ∷ (2003 , 4005) ∷ []) (3 ∷ 1 ∷ 2 ∷ 1 ∷ []))
+_ : extend (link true 2 0 true (6 ∷ []) (floor 1 4 0 ∷ floor 2 2 3 ∷ []) false false true 2) (0 , 5) (valid (route tt false 127 11 false ((5 , 4) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt true 127 13 false ((0 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false ([]) (floor 1 4 2 0 ∷ floor 3 6 2 1 ∷ floor 6 1 1 0 ∷ []) true false true 2) (2000 , 4006) (valid (route tt true 255 10 false ((4006 , 2033) ∷ (2033 , 2001) ∷ (2001 , 4031) ∷ (4031 , 4024) ∷ (4024 , 4002) ∷ (4002 , 2022) ∷ (2022 , 2014) ∷ (2014 , 2003) ∷ (2003 , 4038) ∷ (4038 , 2007) ∷ (2007 , 4039) ∷ (4039 , 4029) ∷ (4029 , 4019) ∷ (4019 , 2008) ∷ (2008 , 4004) ∷ (4004 , 4037) ∷ (4037 , 2026) ∷ (2026 , 4005) ∷ (4005 , 2021) ∷ (2021 , 2040) ∷ (2040 , 4013) ∷ (4013 , 4025) ∷ (4025 , 4015) ∷ (4015 , 4011) ∷ (4011 , 2028) ∷ (2028 , 4017) ∷ (4017 , 2034) ∷ (2034 , 4035) ∷ (4035 , 2009) ∷ (2009 , 4027) ∷ (4027 , 2012) ∷ (2012 , 2023) ∷ []) (3 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ [])))
+_ : extend (link true 1 0 false (6 ∷ []) (floor 1 5 0 ∷ floor 3 1 0 ∷ floor 3 3 0 ∷ []) false false true 3) (0 , 5) (valid (route tt false 128 3 true ((5 , 0) ∷ (0 , 1) ∷ (1 , 3) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 127 false (4004 ∷ []) (floor 1 1 1 1 ∷ floor 2 5 2 1 ∷ floor 5 3 2 2 ∷ []) false true true 1) (2000 , 2003) (valid (route tt false 128 8 true ((2003 , 2004) ∷ []) (3 ∷ [])))
-  ≡ invalid
+_ : extend (link true 1 255 false (3 ∷ []) (floor 5 4 1 ∷ floor 5 6 1 ∷ []) true false true 1) (0 , 5) (valid (route tt false 122 11 false ((5 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ []) (2 ∷ 3 ∷ 2 ∷ [])))
+  ≡ valid (route tt false 255 12 true ((0 , 5) ∷ (5 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ []) (1 ∷ 2 ∷ 3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 false (2003 ∷ 2004 ∷ []) (floor 5 4 1 2 ∷ floor 5 6 2 1 ∷ floor 6 1 1 3 ∷ []) false false true 3) (2000 , 2005) (valid (route tt true 128 2 false ((2005 , 2002) ∷ (2002 , 2000) ∷ []) (3 ∷ 1 ∷ [])))
+_ : extend (link true 2 122 false (3 ∷ []) (floor 4 6 3 ∷ []) false true false 2) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 128 false ([]) (floor 3 3 1 3 ∷ floor 3 6 2 3 ∷ floor 5 2 1 2 ∷ []) false false true 2) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 2 false ((2000 , 4001) ∷ []) (2 ∷ []))
+_ : extend (link true 4 122 true (6 ∷ []) (floor 1 0 3 ∷ []) false false true 3) (0 , 3) (valid (route tt false 0 0 true ((3 , 1003) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 122 4 true ((0 , 3) ∷ (3 , 1003) ∷ []) (3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false (2001 ∷ 2006 ∷ []) (floor 2 1 1 0 ∷ floor 5 0 2 0 ∷ floor 5 6 2 0 ∷ []) false false true 2) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 122 2 false ((2000 , 2005) ∷ []) (2 ∷ []))
+_ : extend (link true 1 122 true (5 ∷ []) (floor 1 2 1 ∷ floor 3 5 1 ∷ floor 5 5 0 ∷ []) true false true 1) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 122 1 true ((0 , 1) ∷ (1 , 1001) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 128 false (2003 ∷ []) (floor 1 2 1 2 ∷ floor 5 2 2 3 ∷ floor 5 5 2 2 ∷ []) true false true 3) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 1 true ((2000 , 2005) ∷ []) (3 ∷ []))
+_ : extend (link true 3 127 true (2 ∷ []) ([]) false false true 2) (0 , 2) (valid (route tt false 255 1 true ((2 , 4) ∷ (4 , 0) ∷ (0 , 3) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 255 false (4004 ∷ []) ([]) false false true 3) (2000 , 4002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 255 3 false ((2000 , 4002) ∷ []) (3 ∷ []))
+_ : extend (link true 3 255 false ([]) (floor 2 1 3 ∷ floor 4 4 2 ∷ []) false false true 1) (0 , 6) (valid (route tt false 122 9 true ((6 , 1) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt false 255 12 true ((0 , 6) ∷ (6 , 1) ∷ []) (1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 false (2006 ∷ []) (floor 2 3 1 1 ∷ floor 5 2 1 0 ∷ floor 6 5 1 2 ∷ []) false true false 1) (2000 , 4004) (valid (route tt true 0 2 true ((4004 , 4001) ∷ (4001 , 2002) ∷ (2002 , 3002) ∷ []) (3 ∷ 1 ∷ 0 ∷ [])))
+_ : extend (link true 4 128 false (1 ∷ 5 ∷ []) ([]) false true true 3) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 4 128 false (2003 ∷ []) (floor 1 1 2 2 ∷ floor 1 3 2 0 ∷ floor 6 6 2 3 ∷ []) false true true 2) (2000 , 2005) (valid (route tt true 128 10 false ((2005 , 2001) ∷ (2001 , 2006) ∷ (2006 , 4003) ∷ []) (1 ∷ 3 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 128 14 false ((2000 , 2005) ∷ (2005 , 2001) ∷ (2001 , 2006) ∷ (2006 , 4003) ∷ []) (2 ∷ 1 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 3 128 true (4 ∷ []) (floor 1 2 1 ∷ floor 1 4 1 ∷ floor 6 5 2 ∷ []) false false false 1) (0 , 5) (valid (route tt false 0 5 false ((5 , 4) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt true 128 8 false ((0 , 5) ∷ (5 , 4) ∷ []) (1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 true (4003 ∷ []) (floor 2 3 2 0 ∷ floor 4 2 2 2 ∷ floor 5 1 2 2 ∷ []) false true true 2) (2000 , 2004) (valid (route tt true 127 9 true ((2004 , 4005) ∷ (4005 , 2006) ∷ (2006 , 3006) ∷ []) (1 ∷ 1 ∷ 0 ∷ [])))
+_ : extend (link true 4 128 false ([]) ([]) true false false 2) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
-_ = refl
-
-_ : extend (link true 4 0 false ([]) (floor 5 1 2 1 ∷ floor 5 2 1 0 ∷ floor 5 5 1 2 ∷ []) false false true 1) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 4 false ((2000 , 2004) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (2002 ∷ []) (floor 2 2 2 0 ∷ floor 6 0 1 1 ∷ []) false false true 1) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 2 false ((2000 , 2004) ∷ []) (1 ∷ []))
+_ : extend (link true 3 127 false (5 ∷ []) (floor 2 1 2 ∷ []) true false true 2) (0 , 2) (valid (route tt false 122 2 true ((2 , 1) ∷ (1 , 5) ∷ (5 , 0) ∷ []) (3 ∷ 2 ∷ 1 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 122 false (4005 ∷ []) ([]) true false true 3) (2000 , 2006) (valid (route tt false 0 0 true ((2006 , 3006) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 122 3 true ((2000 , 2006) ∷ (2006 , 3006) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 3 127 false (1 ∷ []) ([]) false false false 1) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 127 3 true ((0 , 5) ∷ (5 , 1005) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 false ([]) ([]) true true true 1) (2000 , 4002) (valid (route tt false 0 8 false ((4002 , 2005) ∷ (2005 , 2004) ∷ (2004 , 2001) ∷ (2001 , 3001) ∷ []) (2 ∷ 3 ∷ 1 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 255 9 true ((2000 , 4002) ∷ (4002 , 2005) ∷ (2005 , 2004) ∷ (2004 , 2001) ∷ (2001 , 3001) ∷ []) (1 ∷ 2 ∷ 3 ∷ 1 ∷ 0 ∷ []))
+_ : extend (link true 2 255 true ([]) (floor 1 5 2 ∷ floor 4 1 0 ∷ []) false false true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 255 2 false ((0 , 5) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 false ([]) (floor 1 0 1 1 ∷ []) true false true 2) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 4 true ((2000 , 2005) ∷ []) (2 ∷ []))
+_ : extend (link true 2 0 false (5 ∷ 6 ∷ []) ([]) false false true 2) (0 , 3) (valid (route tt false 128 10 false ((3 , 1) ∷ (1 , 5) ∷ (5 , 6) ∷ []) (2 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 128 12 false ((0 , 3) ∷ (3 , 1) ∷ (1 , 5) ∷ (5 , 6) ∷ []) (2 ∷ 2 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2001 ∷ []) (floor 2 5 2 1 ∷ floor 5 6 2 2 ∷ []) false false true 3) (2000 , 4005) (valid (route tt false 255 1 false ((4005 , 2000) ∷ (2000 , 2004) ∷ (2004 , 4006) ∷ (4006 , 2003) ∷ []) (1 ∷ 3 ∷ 1 ∷ 1 ∷ [])))
+_ : extend (link true 3 127 true (3 ∷ []) (floor 1 0 0 ∷ floor 2 0 0 ∷ floor 2 3 0 ∷ []) true false true 2) (0 , 6) (valid (route tt true 0 9 false ((6 , 1) ∷ (1 , 0) ∷ []) (2 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 255 true (2004 ∷ []) (floor 1 4 1 3 ∷ floor 3 6 2 2 ∷ floor 4 5 2 2 ∷ []) false false true 2) (2000 , 2005) (valid (route tt false 0 0 true ((2005 , 3005) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt true 255 1 true ((2000 , 2005) ∷ (2005 , 3005) ∷ []) (2 ∷ 0 ∷ []))
+_ : extend (link true 2 122 false (3 ∷ 4 ∷ []) ([]) true false true 1) (0 , 4) (valid (route tt false 127 3 false ((4 , 3) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt true 127 5 true ((0 , 4) ∷ (4 , 3) ∷ []) (1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 true ([]) ([]) false false true 3) (2000 , 4006) (valid (route tt true 255 8 true ((4006 , 4002) ∷ (4002 , 2004) ∷ []) (2 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 255 10 true ((2000 , 4006) ∷ (4006 , 4002) ∷ (4002 , 2004) ∷ []) (3 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 3 0 true (3 ∷ 4 ∷ []) (floor 1 2 0 ∷ floor 3 6 3 ∷ []) false true true 2) (0 , 4) (valid (route tt false 255 4 false ((4 , 3) ∷ (3 , 5) ∷ []) (3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 255 7 false ((0 , 4) ∷ (4 , 3) ∷ (3 , 5) ∷ []) (2 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false (4005 ∷ []) (floor 4 1 2 1 ∷ floor 6 4 2 2 ∷ []) true false true 3) (2000 , 2001) (valid (route tt true 128 1 false ((2001 , 4002) ∷ (4002 , 4006) ∷ []) (2 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 255 5 true ((2000 , 2001) ∷ (2001 , 4002) ∷ (4002 , 4006) ∷ []) (3 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 2 0 false (4 ∷ []) (floor 6 4 3 ∷ []) false true true 3) (0 , 6) (valid (route tt false 127 0 false ((6 , 28) ∷ (28 , 1) ∷ (1 , 33) ∷ (33 , 17) ∷ (17 , 9) ∷ (9 , 8) ∷ (8 , 5) ∷ (5 , 19) ∷ (19 , 40) ∷ (40 , 10) ∷ (10 , 34) ∷ (34 , 16) ∷ (16 , 2) ∷ (2 , 26) ∷ (26 , 29) ∷ (29 , 7) ∷ (7 , 36) ∷ (36 , 30) ∷ (30 , 3) ∷ (3 , 31) ∷ (31 , 35) ∷ (35 , 20) ∷ (20 , 24) ∷ (24 , 25) ∷ (25 , 14) ∷ (14 , 4) ∷ (4 , 27) ∷ (27 , 13) ∷ (13 , 38) ∷ []) (2 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 3 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 127 2 false ((0 , 6) ∷ (6 , 28) ∷ (28 , 1) ∷ (1 , 33) ∷ (33 , 17) ∷ (17 , 9) ∷ (9 , 8) ∷ (8 , 5) ∷ (5 , 19) ∷ (19 , 40) ∷ (40 , 10) ∷ (10 , 34) ∷ (34 , 16) ∷ (16 , 2) ∷ (2 , 26) ∷ (26 , 29) ∷ (29 , 7) ∷ (7 , 36) ∷ (36 , 30) ∷ (30 , 3) ∷ (3 , 31) ∷ (31 , 35) ∷ (35 , 20) ∷ (20 , 24) ∷ (24 , 25) ∷ (25 , 14) ∷ (14 , 4) ∷ (4 , 27) ∷ (27 , 13) ∷ (13 , 38) ∷ []) (3 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 3 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false (2002 ∷ []) ([]) false true false 1) (2000 , 4003) (valid (route tt false 127 7 false ((4003 , 2001) ∷ (2001 , 2002) ∷ (2002 , 4006) ∷ (4006 , 5006) ∷ []) (3 ∷ 1 ∷ 1 ∷ 0 ∷ [])))
-  ≡ valid (route tt true 128 10 false ((2000 , 4003) ∷ (4003 , 2001) ∷ (2001 , 2002) ∷ (2002 , 4006) ∷ (4006 , 5006) ∷ []) (1 ∷ 3 ∷ 1 ∷ 1 ∷ 0 ∷ []))
+_ : extend (link true 2 128 false ([]) (floor 2 2 0 ∷ floor 3 3 3 ∷ floor 4 5 1 ∷ []) true false false 1) (0 , 4) (valid (route tt false 255 3 false ((4 , 0) ∷ (0 , 6) ∷ (6 , 5) ∷ (5 , 1005) ∷ []) (1 ∷ 3 ∷ 3 ∷ 0 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 255 true ([]) ([]) false true true 2) (2000 , 2002) (valid (route tt true 0 5 true ((2002 , 2004) ∷ (2004 , 4005) ∷ (4005 , 4006) ∷ (4006 , 4001) ∷ []) (3 ∷ 1 ∷ 1 ∷ 3 ∷ [])))
+_ : extend (link true 4 0 false ([]) (floor 4 2 3 ∷ floor 6 1 1 ∷ []) true true true 3) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 122 false (4005 ∷ []) (floor 4 4 1 1 ∷ []) false false false 3) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
+_ : extend (link true 3 0 true (3 ∷ 4 ∷ []) (floor 4 1 2 ∷ floor 5 5 2 ∷ []) false true true 1) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 122 true (4001 ∷ 4002 ∷ []) ([]) false false false 3) (2000 , 2001) (valid (route tt false 0 6 true ((2001 , 4004) ∷ []) (2 ∷ [])))
-  ≡ valid (route tt true 122 7 true ((2000 , 2001) ∷ (2001 , 4004) ∷ []) (3 ∷ 2 ∷ []))
+_ : extend (link true 3 0 true (3 ∷ 6 ∷ []) (floor 6 1 1 ∷ []) false false true 3) (0 , 3) (valid (route tt false 0 0 true ((3 , 1003) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 0 3 true ((0 , 3) ∷ (3 , 1003) ∷ []) (3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 true (4006 ∷ []) ([]) false false true 1) (2000 , 4006) (valid (route tt true 127 0 false ((4006 , 4004) ∷ []) (2 ∷ [])))
-  ≡ valid (route tt true 127 4 false ((2000 , 4006) ∷ (4006 , 4004) ∷ []) (1 ∷ 2 ∷ []))
+_ : extend (link true 3 128 false (5 ∷ []) (floor 1 5 3 ∷ floor 4 2 0 ∷ []) true true false 2) (0 , 6) (valid (route tt true 128 0 false ((6 , 1) ∷ (1 , 4) ∷ (4 , 3) ∷ []) (3 ∷ 3 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 128 3 true ((0 , 6) ∷ (6 , 1) ∷ (1 , 4) ∷ (4 , 3) ∷ []) (2 ∷ 3 ∷ 3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 false (2001 ∷ 4001 ∷ []) (floor 2 3 1 1 ∷ floor 5 3 2 3 ∷ floor 6 1 2 2 ∷ []) true false true 3) (2000 , 2005) (valid (route tt false 0 0 true ((2005 , 3005) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 127 4 true ((2000 , 2005) ∷ (2005 , 3005) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 1 127 false (6 ∷ []) (floor 2 2 1 ∷ floor 2 4 1 ∷ []) true true false 2) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 true ([]) (floor 4 1 1 3 ∷ floor 4 3 1 1 ∷ []) true true true 2) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 128 1 true ((2000 , 4006) ∷ []) (2 ∷ []))
+_ : extend (link true 3 122 true (4 ∷ []) (floor 3 1 0 ∷ floor 3 4 0 ∷ floor 4 1 3 ∷ []) false true true 3) (0 , 1) (valid (route tt true 122 5 false ((1 , 5) ∷ (5 , 2) ∷ (2 , 4) ∷ (4 , 1004) ∷ []) (2 ∷ 1 ∷ 2 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 122 8 false ((0 , 1) ∷ (1 , 5) ∷ (5 , 2) ∷ (2 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 2 ∷ 1 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false ([]) (floor 5 0 1 3 ∷ floor 5 3 2 3 ∷ []) false true true 3) (2000 , 4006) (valid (route tt false 255 7 false ((4006 , 4002) ∷ (4002 , 4001) ∷ []) (3 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 255 8 false ((2000 , 4006) ∷ (4006 , 4002) ∷ (4002 , 4001) ∷ []) (3 ∷ 3 ∷ 2 ∷ []))
+_ : extend (link true 3 122 false (1 ∷ []) ([]) false false true 3) (0 , 1) (valid (route tt true 122 2 false ((1 , 2) ∷ (2 , 6) ∷ (6 , 5) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 122 5 false ((0 , 1) ∷ (1 , 2) ∷ (2 , 6) ∷ (6 , 5) ∷ []) (3 ∷ 1 ∷ 1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false (4005 ∷ []) (floor 1 4 1 2 ∷ floor 6 3 2 3 ∷ []) false false true 2) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 122 4 false ((2000 , 4006) ∷ []) (2 ∷ []))
+_ : extend (link true 1 122 false ([]) (floor 6 1 0 ∷ []) false false true 2) (0 , 5) (valid (route tt false 0 11 true ((5 , 3) ∷ (3 , 1) ∷ []) (2 ∷ 2 ∷ [])))
+  ≡ valid (route tt false 122 12 true ((0 , 5) ∷ (5 , 3) ∷ (3 , 1) ∷ []) (2 ∷ 2 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false ([]) (floor 5 5 1 2 ∷ floor 6 6 2 0 ∷ []) false false false 1) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ invalid
+_ : extend (link true 4 255 true ([]) (floor 5 0 1 ∷ floor 6 2 1 ∷ []) false false true 1) (0 , 1) (valid (route tt true 255 3 false ((1 , 3) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt true 255 7 false ((0 , 1) ∷ (1 , 3) ∷ []) (1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false ([]) (floor 1 1 2 3 ∷ []) true false true 1) (2000 , 4002) (valid (route tt false 255 2 false ((4002 , 4004) ∷ (4004 , 2005) ∷ (2005 , 2001) ∷ []) (2 ∷ 3 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 255 3 true ((2000 , 4002) ∷ (4002 , 4004) ∷ (4004 , 2005) ∷ (2005 , 2001) ∷ []) (1 ∷ 2 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 4 122 true (4 ∷ 5 ∷ []) ([]) false true true 2) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 122 4 false ((0 , 6) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false ([]) (floor 6 2 1 3 ∷ floor 6 6 1 1 ∷ []) false false false 2) (2000 , 2002) (valid (route tt false 122 1 false ((2002 , 2000) ∷ (2000 , 2004) ∷ (2004 , 4001) ∷ (4001 , 5001) ∷ []) (3 ∷ 3 ∷ 2 ∷ 0 ∷ [])))
-  ≡ invalid
+_ : extend (link true 2 128 true (5 ∷ []) (floor 6 3 1 ∷ []) true false false 3) (0 , 4) (valid (route tt false 0 8 false ((4 , 2) ∷ (2 , 1) ∷ (1 , 5) ∷ []) (3 ∷ 2 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 128 10 true ((0 , 4) ∷ (4 , 2) ∷ (2 , 1) ∷ (1 , 5) ∷ []) (3 ∷ 3 ∷ 2 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 true ([]) (floor 3 3 2 2 ∷ floor 3 6 1 3 ∷ floor 4 6 2 0 ∷ []) false false true 1) (2000 , 4001) (valid (route tt false 255 2 false ((4001 , 4002) ∷ (4002 , 2005) ∷ []) (2 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 255 3 false ((2000 , 4001) ∷ (4001 , 4002) ∷ (4002 , 2005) ∷ []) (1 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 3 255 false (3 ∷ 4 ∷ []) (floor 3 1 0 ∷ floor 6 6 1 ∷ []) true true true 3) (0 , 3) (valid (route tt false 255 1 false ((3 , 1) ∷ (1 , 0) ∷ (0 , 5) ∷ (5 , 2) ∷ []) (3 ∷ 3 ∷ 2 ∷ 1 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 false (4003 ∷ 2005 ∷ []) (floor 1 3 1 3 ∷ floor 5 0 2 3 ∷ floor 5 5 1 3 ∷ []) true false true 1) (2000 , 2001) (valid (route tt false 122 0 false ((2001 , 2003) ∷ (2003 , 4004) ∷ (4004 , 5004) ∷ []) (1 ∷ 3 ∷ 0 ∷ [])))
+_ : extend (link true 2 0 false (2 ∷ []) (floor 2 5 1 ∷ floor 6 5 1 ∷ []) true true false 3) (0 , 1) (valid (route tt false 0 10 false ((1 , 2) ∷ (2 , 4) ∷ (4 , 0) ∷ []) (3 ∷ 2 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 122 false ([]) (floor 2 2 1 3 ∷ []) false true true 3) (2000 , 4005) (valid (route tt false 0 4 false ((4005 , 2001) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt false 122 6 false ((2000 , 4005) ∷ (4005 , 2001) ∷ []) (3 ∷ 1 ∷ []))
+_ : extend (link true 1 122 true ([]) (floor 3 3 1 ∷ floor 4 2 1 ∷ []) false false true 2) (0 , 6) (valid (route tt false 0 9 false ((6 , 4) ∷ (4 , 5) ∷ (5 , 1005) ∷ []) (2 ∷ 2 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 122 10 false ((0 , 6) ∷ (6 , 4) ∷ (4 , 5) ∷ (5 , 1005) ∷ []) (2 ∷ 2 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2001 ∷ 4003 ∷ []) (floor 2 0 2 1 ∷ floor 2 3 2 1 ∷ floor 2 5 2 1 ∷ []) false false true 2) (2000 , 4006) (valid (route tt true 122 1 false ((4006 , 4005) ∷ (4005 , 2004) ∷ []) (1 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 127 2 false ((2000 , 4006) ∷ (4006 , 4005) ∷ (4005 , 2004) ∷ []) (2 ∷ 1 ∷ 3 ∷ []))
+_ : extend (link true 2 128 false ([]) (floor 1 4 3 ∷ floor 5 4 2 ∷ floor 6 0 2 ∷ []) false false false 1) (0 , 2) (valid (route tt false 0 0 true ((2 , 1002) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 128 2 true ((0 , 2) ∷ (2 , 1002) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false ([]) (floor 5 0 2 2 ∷ []) false false false 2) (2000 , 2002) (valid (route tt false 255 10 false ((2002 , 2011) ∷ (2011 , 2022) ∷ (2022 , 2009) ∷ (2009 , 4019) ∷ (4019 , 2040) ∷ (2040 , 4004) ∷ (4004 , 2010) ∷ (2010 , 4029) ∷ (4029 , 4027) ∷ (4027 , 4001) ∷ (4001 , 2012) ∷ (2012 , 2036) ∷ (2036 , 4021) ∷ (4021 , 2024) ∷ (2024 , 2013) ∷ (2013 , 2038) ∷ (2038 , 2014) ∷ (2014 , 4039) ∷ (4039 , 4028) ∷ (4028 , 4031) ∷ (4031 , 4016) ∷ (4016 , 2037) ∷ (2037 , 4005) ∷ (4005 , 4026) ∷ (4026 , 4034) ∷ (4034 , 2023) ∷ (2023 , 2018) ∷ (2018 , 2033) ∷ (2033 , 2032) ∷ (2032 , 4030) ∷ (4030 , 2035) ∷ (2035 , 4007) ∷ []) (1 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ 2 ∷ 2 ∷ 2 ∷ 2 ∷ [])))
+_ : extend (link true 1 128 false (6 ∷ []) (floor 1 0 1 ∷ []) false false true 3) (0 , 1) (valid (route tt false 0 6 true ((1 , 0) ∷ (0 , 6) ∷ (6 , 3) ∷ (3 , 2) ∷ []) (3 ∷ 3 ∷ 2 ∷ 2 ∷ [])))
   ≡ invalid
-_ = refl
-
-_ : extend (link true 3 0 false (2004 ∷ []) (floor 1 3 2 3 ∷ floor 3 1 2 0 ∷ []) true true true 3) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 3 true ((2000 , 2002) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false ([]) (floor 4 1 2 2 ∷ []) true false true 2) (2000 , 2003) (valid (route tt false 255 5 false ((2003 , 4001) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt false 255 8 true ((2000 , 2003) ∷ (2003 , 4001) ∷ []) (2 ∷ 3 ∷ []))
+_ : extend (link true 3 127 false (1 ∷ 5 ∷ []) (floor 6 0 0 ∷ floor 6 3 3 ∷ []) false false true 2) (0 , 3) (valid (route tt true 0 11 false ((3 , 27) ∷ (27 , 24) ∷ (24 , 6) ∷ (6 , 34) ∷ (34 , 26) ∷ (26 , 18) ∷ (18 , 11) ∷ (11 , 17) ∷ (17 , 10) ∷ (10 , 8) ∷ (8 , 5) ∷ (5 , 16) ∷ (16 , 38) ∷ (38 , 13) ∷ (13 , 40) ∷ (40 , 15) ∷ (15 , 35) ∷ (35 , 19) ∷ (19 , 21) ∷ (21 , 22) ∷ (22 , 33) ∷ (33 , 1) ∷ (1 , 4) ∷ (4 , 39) ∷ (39 , 29) ∷ (29 , 32) ∷ (32 , 7) ∷ (7 , 2) ∷ (2 , 31) ∷ (31 , 9) ∷ (9 , 23) ∷ []) (3 ∷ 1 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 true (2003 ∷ []) (floor 3 0 2 1 ∷ floor 4 0 1 1 ∷ floor 6 3 2 2 ∷ []) false false false 3) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
+_ : extend (link true 1 122 false ([]) (floor 3 4 1 ∷ floor 4 5 2 ∷ []) false false true 3) (0 , 1) (valid (route tt true 127 9 true ((1 , 0) ∷ (0 , 6) ∷ (6 , 2) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 4 0 true ([]) (floor 5 0 1 2 ∷ []) true true false 3) (2000 , 4001) (valid (route tt false 122 0 false ((4001 , 4002) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt true 122 4 true ((2000 , 4001) ∷ (4001 , 4002) ∷ []) (3 ∷ 1 ∷ []))
+_ : extend (link true 3 122 false (2 ∷ 4 ∷ []) (floor 2 4 0 ∷ []) false true true 1) (0 , 4) (valid (route tt false 122 5 false ((4 , 3) ∷ (3 , 2) ∷ (2 , 5) ∷ []) (3 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 122 8 false ((0 , 4) ∷ (4 , 3) ∷ (3 , 2) ∷ (2 , 5) ∷ []) (1 ∷ 3 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false (2001 ∷ []) (floor 1 1 2 2 ∷ floor 2 2 1 3 ∷ floor 6 0 1 3 ∷ []) true false true 3) (2000 , 2001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 0 1 true ((2000 , 2001) ∷ []) (3 ∷ []))
+_ : extend (link true 2 122 true ([]) (floor 2 1 3 ∷ floor 5 0 3 ∷ []) false true true 3) (0 , 1) (valid (route tt false 255 3 true ((1 , 2) ∷ (2 , 0) ∷ (0 , 5) ∷ (5 , 4) ∷ []) (3 ∷ 1 ∷ 3 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 false ([]) (floor 4 3 2 3 ∷ floor 5 5 2 0 ∷ []) true false true 1) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 1 true ((2000 , 2006) ∷ []) (1 ∷ []))
+_ : extend (link true 3 255 true ([]) ([]) false false true 2) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 255 3 false ((0 , 3) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 false (4004 ∷ []) (floor 2 4 1 0 ∷ floor 3 6 2 0 ∷ floor 5 2 2 1 ∷ []) false true false 1) (2000 , 4006) (valid (route tt false 255 6 false ((4006 , 2004) ∷ (2004 , 4002) ∷ []) (1 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 255 9 false ((2000 , 4006) ∷ (4006 , 2004) ∷ (2004 , 4002) ∷ []) (1 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 1 122 false ([]) (floor 3 4 2 ∷ []) false true true 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 122 1 false ((0 , 2) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 128 false (4001 ∷ 2006 ∷ []) ([]) false false false 2) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
+_ : extend (link true 2 0 false ([]) (floor 6 3 2 ∷ []) false true false 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 4 255 false ([]) (floor 2 2 2 0 ∷ []) true false true 3) (2000 , 2003) (valid (route tt true 122 6 true ((2003 , 2005) ∷ (2005 , 2006) ∷ (2006 , 4000) ∷ []) (3 ∷ 2 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 122 false ([]) ([]) false true true 1) (0 , 2) (valid (route tt false 128 10 false ((2 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 3 ∷ 1 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 128 13 false ((0 , 2) ∷ (2 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 1001) ∷ []) (1 ∷ 2 ∷ 3 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false (4004 ∷ 2005 ∷ []) (floor 5 2 2 0 ∷ floor 6 5 2 0 ∷ floor 6 6 1 1 ∷ []) false true true 1) (2000 , 4003) (valid (route tt false 0 6 false ((4003 , 4006) ∷ (4006 , 4004) ∷ (4004 , 4000) ∷ []) (2 ∷ 3 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 255 false (3 ∷ 6 ∷ []) (floor 1 0 0 ∷ floor 1 5 0 ∷ floor 6 3 3 ∷ []) true false true 1) (0 , 6) (valid (route tt false 122 8 false ((6 , 4) ∷ (4 , 5) ∷ (5 , 2) ∷ (2 , 1) ∷ []) (2 ∷ 2 ∷ 3 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 255 11 true ((0 , 6) ∷ (6 , 4) ∷ (4 , 5) ∷ (5 , 2) ∷ (2 , 1) ∷ []) (1 ∷ 2 ∷ 2 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false ([]) (floor 5 5 2 0 ∷ floor 6 5 1 3 ∷ []) false false true 3) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 3 false ((2000 , 2006) ∷ []) (3 ∷ []))
+_ : extend (link true 4 127 false ([]) (floor 1 1 3 ∷ floor 2 2 3 ∷ floor 3 5 1 ∷ []) true false true 1) (0 , 1) (valid (route tt false 0 6 false ((1 , 2) ∷ (2 , 5) ∷ []) (2 ∷ 2 ∷ [])))
+  ≡ valid (route tt false 127 10 true ((0 , 1) ∷ (1 , 2) ∷ (2 , 5) ∷ []) (1 ∷ 2 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 127 false (4001 ∷ 2003 ∷ []) (floor 4 2 1 1 ∷ floor 6 5 1 3 ∷ []) false false true 2) (2000 , 2001) (valid (route tt false 122 6 false ((2001 , 2000) ∷ (2000 , 4002) ∷ (4002 , 4004) ∷ []) (2 ∷ 3 ∷ 3 ∷ [])))
+_ : extend (link true 3 255 true (4 ∷ []) (floor 5 6 2 ∷ []) true true true 1) (0 , 3) (valid (route tt false 0 2 true ((3 , 1) ∷ (1 , 1001) ∷ []) (3 ∷ 0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 127 false ([]) (floor 1 3 2 2 ∷ floor 2 6 2 1 ∷ floor 3 4 1 3 ∷ []) true false true 3) (2000 , 4006) (valid (route tt false 127 8 false ((4006 , 2000) ∷ []) (2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 122 false ([]) ([]) false true true 3) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 122 4 false ((0 , 4) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 false (4002 ∷ 2005 ∷ []) ([]) false false false 1) (2000 , 4002) (valid (route tt false 122 0 true ((4002 , 4000) ∷ (4000 , 2005) ∷ (2005 , 4003) ∷ []) (3 ∷ 3 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 1 255 false (4 ∷ []) (floor 3 2 3 ∷ floor 3 6 0 ∷ []) true false true 1) (0 , 1) (valid (route tt true 0 1 true ((1 , 4) ∷ (4 , 1004) ∷ []) (2 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 255 2 true ((0 , 1) ∷ (1 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 true (2006 ∷ []) (floor 6 1 2 2 ∷ floor 6 2 2 1 ∷ []) false true true 2) (2000 , 2006) (valid (route tt true 122 1 false ((2006 , 2000) ∷ []) (1 ∷ [])))
+_ : extend (link true 1 0 true (3 ∷ []) ([]) false false true 2) (0 , 6) (valid (route tt false 128 3 false ((6 , 5) ∷ (5 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) (1 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 4 255 false ([]) (floor 6 2 1 0 ∷ floor 6 5 2 3 ∷ []) true false true 2) (2000 , 4006) (valid (route tt true 0 0 false ((4006 , 4000) ∷ (4000 , 4002) ∷ (4002 , 2005) ∷ (2005 , 4003) ∷ []) (2 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 122 false (4 ∷ []) ([]) false false true 1) (0 , 4) (valid (route tt false 127 6 false ((4 , 3) ∷ (3 , 5) ∷ (5 , 1) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 127 9 false ((0 , 4) ∷ (4 , 3) ∷ (3 , 5) ∷ (5 , 1) ∷ []) (1 ∷ 2 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 true (4003 ∷ 2004 ∷ []) ([]) true false true 3) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 255 2 true ((2000 , 4003) ∷ []) (3 ∷ []))
+_ : extend (link true 1 0 false (1 ∷ 3 ∷ []) (floor 1 3 0 ∷ floor 5 3 2 ∷ floor 6 1 1 ∷ []) false true true 3) (0 , 1) (valid (route tt true 128 1 false ((1 , 2) ∷ (2 , 5) ∷ (5 , 1005) ∷ []) (3 ∷ 1 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 128 2 false ((0 , 1) ∷ (1 , 2) ∷ (2 , 5) ∷ (5 , 1005) ∷ []) (3 ∷ 3 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 false ([]) (floor 1 2 2 3 ∷ floor 3 0 1 0 ∷ floor 6 0 1 0 ∷ []) true false true 3) (2000 , 2002) (valid (route tt false 127 9 false ((2002 , 4003) ∷ (4003 , 4006) ∷ (4006 , 4004) ∷ (4004 , 5004) ∷ []) (2 ∷ 2 ∷ 1 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 255 10 true ((2000 , 2002) ∷ (2002 , 4003) ∷ (4003 , 4006) ∷ (4006 , 4004) ∷ (4004 , 5004) ∷ []) (3 ∷ 2 ∷ 2 ∷ 1 ∷ 0 ∷ []))
+_ : extend (link true 3 255 true (4 ∷ []) ([]) false false true 2) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 255 3 true ((0 , 5) ∷ (5 , 1005) ∷ []) (2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false ([]) (floor 1 5 2 2 ∷ []) false false false 1) (2000 , 2002) (valid (route tt false 128 3 true ((2002 , 4005) ∷ (4005 , 2006) ∷ (2006 , 2004) ∷ (2004 , 2003) ∷ []) (1 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 128 6 true ((2000 , 2002) ∷ (2002 , 4005) ∷ (4005 , 2006) ∷ (2006 , 2004) ∷ (2004 , 2003) ∷ []) (1 ∷ 1 ∷ 2 ∷ 2 ∷ 3 ∷ []))
+_ : extend (link true 4 128 false ([]) (floor 4 4 2 ∷ []) false false true 3) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 128 4 true ((0 , 6) ∷ (6 , 1006) ∷ []) (3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 128 true ([]) (floor 1 5 2 2 ∷ floor 4 1 2 0 ∷ []) false false false 1) (2000 , 4003) (valid (route tt true 127 3 false ((4003 , 4000) ∷ (4000 , 4004) ∷ (4004 , 4006) ∷ []) (2 ∷ 3 ∷ 3 ∷ [])))
+_ : extend (link true 2 255 false ([]) (floor 2 2 2 ∷ []) false false true 3) (0 , 2) (valid (route tt false 0 0 true ((2 , 1002) ∷ []) (0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 255 false (4002 ∷ 2004 ∷ []) ([]) true false true 3) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 255 3 true ((2000 , 2002) ∷ []) (3 ∷ []))
+_ : extend (link true 3 255 true (4 ∷ []) ([]) true false true 1) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 255 3 true ((0 , 5) ∷ (5 , 1005) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 true (4001 ∷ 2003 ∷ []) (floor 2 5 1 2 ∷ floor 2 6 1 1 ∷ floor 4 0 2 3 ∷ []) true false true 1) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 255 4 true ((2000 , 4004) ∷ []) (1 ∷ []))
+_ : extend (link true 3 128 false ([]) (floor 6 3 1 ∷ floor 6 5 1 ∷ []) true true true 2) (0 , 4) (valid (route tt false 255 5 true ((4 , 3) ∷ (3 , 2) ∷ (2 , 6) ∷ (6 , 1006) ∷ []) (3 ∷ 3 ∷ 2 ∷ 0 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 127 false ([]) (floor 5 3 1 3 ∷ floor 6 3 2 3 ∷ []) false false true 3) (2000 , 2006) (valid (route tt false 127 4 false ((2006 , 2004) ∷ (2004 , 3004) ∷ []) (2 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 127 8 false ((2000 , 2006) ∷ (2006 , 2004) ∷ (2004 , 3004) ∷ []) (3 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 1 127 false (3 ∷ []) (floor 1 4 2 ∷ floor 3 3 2 ∷ floor 3 5 2 ∷ []) false true true 2) (0 , 4) (valid (route tt false 0 0 true ((4 , 1004) ∷ []) (0 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 0 false (4004 ∷ []) (floor 3 1 2 3 ∷ []) false false true 1) (2000 , 4004) (valid (route tt false 0 0 true ((4004 , 5004) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt true 0 1 true ((2000 , 4004) ∷ (4004 , 5004) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 3 255 false ([]) (floor 2 2 1 ∷ []) false false false 3) (0 , 2) (valid (route tt false 128 2 false ((2 , 0) ∷ []) (2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 127 true ([]) (floor 4 2 2 0 ∷ floor 5 1 2 2 ∷ floor 5 3 2 2 ∷ []) false false true 1) (2000 , 4001) (valid (route tt true 127 8 true ((4001 , 4006) ∷ (4006 , 2002) ∷ []) (1 ∷ 1 ∷ [])))
-  ≡ valid (route tt true 127 11 true ((2000 , 4001) ∷ (4001 , 4006) ∷ (4006 , 2002) ∷ []) (1 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 2 0 true ([]) (floor 4 2 2 ∷ floor 5 5 0 ∷ []) false false true 2) (0 , 1) (valid (route tt false 128 7 false ((1 , 4) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt true 128 9 false ((0 , 1) ∷ (1 , 4) ∷ []) (2 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 true (2003 ∷ 2004 ∷ []) (floor 1 3 1 1 ∷ floor 5 6 1 0 ∷ []) false false true 1) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 122 4 false ((2000 , 4004) ∷ []) (1 ∷ []))
+_ : extend (link true 1 127 false (5 ∷ 6 ∷ []) (floor 5 1 2 ∷ []) true false true 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 127 1 true ((0 , 4) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 255 true (2002 ∷ []) ([]) false false false 2) (2000 , 2002) (valid (route tt false 122 5 false ((2002 , 4005) ∷ (4005 , 4004) ∷ []) (1 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 255 8 false ((2000 , 2002) ∷ (2002 , 4005) ∷ (4005 , 4004) ∷ []) (2 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 1 122 true (3 ∷ []) (floor 2 2 0 ∷ floor 6 6 0 ∷ []) true false true 2) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 122 1 true ((0 , 6) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 false (2006 ∷ []) (floor 4 2 1 2 ∷ floor 4 5 1 3 ∷ []) false false true 2) (2000 , 4001) (valid (route tt false 128 1 false ((4001 , 2004) ∷ (2004 , 2005) ∷ (2005 , 4003) ∷ []) (2 ∷ 2 ∷ 1 ∷ [])))
+_ : extend (link true 2 122 false (1 ∷ 5 ∷ []) (floor 1 5 0 ∷ floor 6 6 1 ∷ []) true false true 2) (0 , 1) (valid (route tt true 127 4 true ((1 , 4) ∷ (4 , 2) ∷ (2 , 0) ∷ (0 , 5) ∷ []) (2 ∷ 2 ∷ 3 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 128 true ([]) (floor 2 4 2 1 ∷ floor 4 3 2 0 ∷ floor 6 5 1 2 ∷ []) false false true 3) (2000 , 4005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 128 3 false ((2000 , 4005) ∷ []) (3 ∷ []))
+_ : extend (link true 2 127 false (6 ∷ []) (floor 1 6 3 ∷ floor 4 5 1 ∷ floor 5 3 2 ∷ []) true false true 3) (0 , 2) (valid (route tt false 255 1 true ((2 , 1) ∷ (1 , 3) ∷ (3 , 6) ∷ []) (1 ∷ 3 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 255 3 true ((0 , 2) ∷ (2 , 1) ∷ (1 , 3) ∷ (3 , 6) ∷ []) (3 ∷ 1 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 false ([]) (floor 1 1 1 3 ∷ floor 1 5 2 3 ∷ floor 5 3 1 2 ∷ []) false false true 3) (2000 , 2005) (valid (route tt false 255 10 false ((2005 , 2004) ∷ (2004 , 2003) ∷ []) (2 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 255 11 false ((2000 , 2005) ∷ (2005 , 2004) ∷ (2004 , 2003) ∷ []) (3 ∷ 2 ∷ 1 ∷ []))
+_ : extend (link true 3 128 true (4 ∷ []) (floor 1 4 1 ∷ []) true false true 1) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 128 3 true ((0 , 3) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (4004 ∷ []) (floor 1 6 2 3 ∷ floor 3 1 2 2 ∷ floor 6 4 1 3 ∷ []) true false false 1) (2000 , 2005) (valid (route tt false 127 6 false ((2005 , 2016) ∷ (2016 , 4037) ∷ (4037 , 2030) ∷ (2030 , 4022) ∷ (4022 , 4040) ∷ (4040 , 2023) ∷ (2023 , 4024) ∷ (4024 , 4028) ∷ (4028 , 2035) ∷ (2035 , 4033) ∷ (4033 , 2038) ∷ (2038 , 2014) ∷ (2014 , 4008) ∷ (4008 , 2007) ∷ (2007 , 4032) ∷ (4032 , 4011) ∷ (4011 , 2015) ∷ (2015 , 2002) ∷ (2002 , 4004) ∷ (4004 , 4029) ∷ (4029 , 2021) ∷ (2021 , 4010) ∷ (4010 , 4027) ∷ (4027 , 4039) ∷ (4039 , 2013) ∷ (2013 , 2020) ∷ (2020 , 4003) ∷ (4003 , 4012) ∷ (4012 , 4019) ∷ (4019 , 4017) ∷ (4017 , 4036) ∷ (4036 , 4025) ∷ []) (3 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 2 128 false ([]) (floor 1 0 0 ∷ floor 6 1 3 ∷ []) false false false 2) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 128 2 true ((0 , 6) ∷ (6 , 1006) ∷ []) (2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 127 false (2003 ∷ []) (floor 4 6 2 0 ∷ floor 5 4 1 3 ∷ []) false false true 2) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 2 false ((2000 , 2002) ∷ []) (2 ∷ []))
+_ : extend (link true 4 0 false (3 ∷ 5 ∷ []) (floor 2 4 1 ∷ floor 2 6 2 ∷ floor 3 2 0 ∷ []) false true true 3) (0 , 1) (valid (route tt false 128 2 false ((1 , 5) ∷ (5 , 6) ∷ (6 , 2) ∷ (2 , 1002) ∷ []) (1 ∷ 2 ∷ 2 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 128 6 false ((0 , 1) ∷ (1 , 5) ∷ (5 , 6) ∷ (6 , 2) ∷ (2 , 1002) ∷ []) (3 ∷ 1 ∷ 2 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false (4001 ∷ []) (floor 4 6 2 0 ∷ floor 6 6 2 0 ∷ []) false true true 3) (2000 , 4001) (valid (route tt false 128 0 true ((4001 , 2002) ∷ []) (1 ∷ [])))
+_ : extend (link true 1 122 false ([]) (floor 2 2 1 ∷ floor 2 5 0 ∷ floor 4 0 2 ∷ []) false true true 1) (0 , 1) (valid (route tt false 255 0 true ((1 , 2) ∷ (2 , 0) ∷ []) (3 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 122 false (4002 ∷ []) (floor 2 6 2 3 ∷ []) false false false 3) (2000 , 2006) (valid (route tt false 0 9 false ((2006 , 2003) ∷ (2003 , 4005) ∷ (4005 , 5005) ∷ []) (1 ∷ 2 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 122 10 false ((2000 , 2006) ∷ (2006 , 2003) ∷ (2003 , 4005) ∷ (4005 , 5005) ∷ []) (3 ∷ 1 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 2 128 false (2 ∷ []) ([]) false false true 2) (0 , 1) (valid (route tt false 0 0 false ((1 , 2) ∷ (2 , 5) ∷ (5 , 1005) ∷ []) (1 ∷ 1 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 128 2 false ((0 , 1) ∷ (1 , 2) ∷ (2 , 5) ∷ (5 , 1005) ∷ []) (2 ∷ 1 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 false (2006 ∷ []) ([]) true false true 2) (2000 , 4004) (valid (route tt false 255 0 true ((4004 , 2005) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt false 255 3 true ((2000 , 4004) ∷ (4004 , 2005) ∷ []) (2 ∷ 1 ∷ []))
+_ : extend (link true 1 128 false ([]) (floor 1 1 0 ∷ floor 1 2 2 ∷ floor 3 6 1 ∷ []) false false false 3) (0 , 1) (valid (route tt false 255 2 false ((1 , 3) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt false 255 3 false ((0 , 1) ∷ (1 , 3) ∷ []) (3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (2002 ∷ 4005 ∷ []) ([]) false true true 1) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 2 false ((2000 , 4004) ∷ []) (1 ∷ []))
+_ : extend (link true 3 127 false (6 ∷ []) (floor 1 4 3 ∷ floor 2 4 3 ∷ []) false true true 3) (0 , 5) (valid (route tt true 122 7 false ((5 , 3) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt true 127 10 false ((0 , 5) ∷ (5 , 3) ∷ []) (3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false ([]) (floor 4 0 1 2 ∷ floor 4 4 1 1 ∷ floor 6 2 1 2 ∷ []) true false true 2) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 3003) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 122 2 true ((2000 , 2003) ∷ (2003 , 3003) ∷ []) (2 ∷ 0 ∷ []))
-_ = refl
-
-_ : extend (link true 4 128 true ([]) ([]) false true true 2) (2000 , 4002) (valid (route tt false 255 9 true ((4002 , 2005) ∷ (2005 , 4004) ∷ []) (3 ∷ 2 ∷ [])))
+_ : extend (link true 3 255 true ([]) (floor 1 1 0 ∷ floor 5 0 1 ∷ []) false true true 3) (0 , 5) (valid (route tt true 255 9 false ((5 , 0) ∷ (0 , 6) ∷ []) (1 ∷ 3 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 255 false ([]) (floor 2 6 2 3 ∷ floor 3 0 2 2 ∷ []) false true true 2) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 255 3 false ((2000 , 4003) ∷ []) (2 ∷ []))
+_ : extend (link true 2 255 false (2 ∷ 3 ∷ []) (floor 1 2 0 ∷ floor 3 3 0 ∷ []) false false true 1) (0 , 5) (valid (route tt false 128 5 true ((5 , 0) ∷ (0 , 2) ∷ (2 , 3) ∷ (3 , 4) ∷ []) (3 ∷ 3 ∷ 1 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 122 true ([]) (floor 1 6 1 3 ∷ []) false true true 3) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 122 4 false ((2000 , 4001) ∷ []) (3 ∷ []))
+_ : extend (link true 3 255 false (2 ∷ 3 ∷ []) (floor 3 0 3 ∷ []) false true true 1) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 255 3 false ((0 , 1) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false (4001 ∷ []) ([]) true false true 2) (2000 , 4002) (valid (route tt false 122 9 true ((4002 , 4000) ∷ (4000 , 2003) ∷ []) (1 ∷ 2 ∷ [])))
+_ : extend (link true 2 0 false (2 ∷ 6 ∷ []) ([]) false true false 3) (0 , 1) (valid (route tt false 255 3 true ((1 , 4) ∷ (4 , 3) ∷ []) (1 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 128 false (4005 ∷ []) (floor 1 1 2 2 ∷ floor 1 3 2 3 ∷ floor 6 1 1 1 ∷ []) true false true 1) (2000 , 4004) (valid (route tt false 0 1 true ((4004 , 4003) ∷ (4003 , 2006) ∷ (2006 , 4005) ∷ (4005 , 5005) ∷ []) (1 ∷ 2 ∷ 3 ∷ 0 ∷ [])))
-  ≡ valid (route tt true 128 4 true ((2000 , 4004) ∷ (4004 , 4003) ∷ (4003 , 2006) ∷ (2006 , 4005) ∷ (4005 , 5005) ∷ []) (1 ∷ 1 ∷ 2 ∷ 3 ∷ 0 ∷ []))
+_ : extend (link true 3 0 false ([]) (floor 5 6 1 ∷ []) false false true 2) (0 , 3) (valid (route tt true 0 6 true ((3 , 2) ∷ (2 , 6) ∷ (6 , 5) ∷ (5 , 0) ∷ []) (3 ∷ 2 ∷ 3 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 true ([]) (floor 1 4 2 2 ∷ floor 3 6 2 2 ∷ []) false true true 1) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 128 1 false ((2000 , 2002) ∷ []) (1 ∷ []))
+_ : extend (link true 4 128 false ([]) (floor 1 1 3 ∷ floor 4 0 1 ∷ floor 6 3 3 ∷ []) false true true 2) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 255 true ([]) (floor 1 2 1 1 ∷ floor 3 6 1 0 ∷ floor 6 3 1 3 ∷ []) true false false 3) (2000 , 4001) (valid (route tt false 127 0 false ((4001 , 4002) ∷ (4002 , 4000) ∷ (4000 , 2005) ∷ (2005 , 3005) ∷ []) (3 ∷ 2 ∷ 1 ∷ 0 ∷ [])))
+_ : extend (link true 3 127 false (3 ∷ 6 ∷ []) (floor 2 0 0 ∷ []) false true false 1) (0 , 1) (valid (route tt false 255 6 false ((1 , 0) ∷ (0 , 6) ∷ (6 , 4) ∷ (4 , 3) ∷ []) (1 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 true (2005 ∷ []) (floor 4 1 1 0 ∷ floor 4 6 1 2 ∷ []) true false false 1) (2000 , 4001) (valid (route tt false 122 7 false ((4001 , 4005) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt true 128 8 true ((2000 , 4001) ∷ (4001 , 4005) ∷ []) (1 ∷ 1 ∷ []))
+_ : extend (link true 2 0 false (5 ∷ 6 ∷ []) ([]) false true true 2) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 2 false ((0 , 1) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 true (4005 ∷ []) (floor 2 6 1 1 ∷ floor 3 3 1 0 ∷ floor 6 1 2 1 ∷ []) false true false 3) (2000 , 4002) (valid (route tt false 255 9 false ((4002 , 2003) ∷ (2003 , 4001) ∷ []) (1 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 255 13 false ((2000 , 4002) ∷ (4002 , 2003) ∷ (2003 , 4001) ∷ []) (3 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 2 127 false (3 ∷ 4 ∷ []) (floor 2 2 1 ∷ floor 3 0 1 ∷ []) false true true 2) (0 , 1) (valid (route tt false 255 0 true ((1 , 5) ∷ (5 , 6) ∷ (6 , 0) ∷ []) (1 ∷ 1 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 128 true ([]) (floor 1 2 2 0 ∷ floor 6 2 2 1 ∷ []) false false true 3) (2000 , 2004) (valid (route tt false 0 9 true ((2004 , 4001) ∷ (4001 , 2006) ∷ (2006 , 2002) ∷ []) (3 ∷ 1 ∷ 2 ∷ [])))
+_ : extend (link true 1 128 false (2 ∷ 6 ∷ []) ([]) false false false 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
+_ = refl
+
+_ : extend (link true 4 255 false (1 ∷ 4 ∷ []) (floor 3 5 3 ∷ floor 4 6 0 ∷ []) false false true 1) (0 , 2) (valid (route tt false 0 0 true ((2 , 1002) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 255 4 true ((0 , 2) ∷ (2 , 1002) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 128 false ([]) ([]) false false false 2) (2000 , 4004) (valid (route tt false 0 0 true ((4004 , 5004) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 128 1 true ((2000 , 4004) ∷ (4004 , 5004) ∷ []) (2 ∷ 0 ∷ []))
+_ : extend (link true 4 0 false ([]) (floor 6 2 3 ∷ []) false false true 2) (0 , 5) (valid (route tt false 0 3 true ((5 , 1) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt false 0 7 true ((0 , 5) ∷ (5 , 1) ∷ []) (2 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false (4003 ∷ []) (floor 4 5 2 0 ∷ []) true false false 3) (2000 , 4004) (valid (route tt true 127 1 false ((4004 , 2005) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt true 127 3 true ((2000 , 4004) ∷ (4004 , 2005) ∷ []) (3 ∷ 1 ∷ []))
+_ : extend (link true 1 128 false ([]) ([]) false true true 3) (0 , 6) (valid (route tt false 0 4 true ((6 , 3) ∷ (3 , 4) ∷ []) (3 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 0 false (2006 ∷ []) (floor 1 1 1 2 ∷ floor 6 1 1 0 ∷ floor 6 6 1 0 ∷ []) false false true 1) (2000 , 2002) (valid (route tt false 122 8 true ((2002 , 4005) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt false 122 11 true ((2000 , 2002) ∷ (2002 , 4005) ∷ []) (1 ∷ 3 ∷ []))
+_ : extend (link true 3 127 false (1 ∷ 6 ∷ []) (floor 1 1 1 ∷ floor 5 0 0 ∷ []) false false true 2) (0 , 2) (valid (route tt true 255 10 false ((2 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 255 13 false ((0 , 2) ∷ (2 , 4) ∷ (4 , 1004) ∷ []) (2 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false ([]) (floor 4 5 1 0 ∷ []) true false false 3) (2000 , 2002) (valid (route tt true 122 11 false ((2002 , 4006) ∷ (4006 , 2003) ∷ (2003 , 2000) ∷ (2000 , 2005) ∷ []) (1 ∷ 3 ∷ 2 ∷ 3 ∷ [])))
+_ : extend (link true 3 127 false (2 ∷ []) (floor 4 1 2 ∷ []) true false true 3) (0 , 6) (valid (route tt false 127 8 false ((6 , 0) ∷ (0 , 5) ∷ (5 , 1) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 122 true (2002 ∷ []) (floor 1 2 2 3 ∷ floor 1 3 1 1 ∷ floor 3 3 2 2 ∷ []) false true true 2) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 122 2 false ((2000 , 2002) ∷ []) (2 ∷ []))
+_ : extend (link true 1 127 false (2 ∷ 4 ∷ []) ([]) false false true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 127 1 false ((0 , 5) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false (4004 ∷ 2005 ∷ []) ([]) false false true 1) (2000 , 2005) (valid (route tt false 128 3 false ((2005 , 2001) ∷ (2001 , 4006) ∷ (4006 , 4003) ∷ (4003 , 2004) ∷ []) (3 ∷ 1 ∷ 2 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 128 7 false ((2000 , 2005) ∷ (2005 , 2001) ∷ (2001 , 4006) ∷ (4006 , 4003) ∷ (4003 , 2004) ∷ []) (1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 4 0 true (5 ∷ []) (floor 1 0 1 ∷ floor 1 2 2 ∷ floor 4 2 2 ∷ []) false false false 2) (0 , 2) (valid (route tt false 128 2 false ((2 , 6) ∷ (6 , 3) ∷ (3 , 1) ∷ (1 , 1001) ∷ []) (3 ∷ 3 ∷ 2 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 128 6 false ((0 , 2) ∷ (2 , 6) ∷ (6 , 3) ∷ (3 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 3 ∷ 3 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 false ([]) (floor 4 4 1 1 ∷ []) false false true 1) (2000 , 4003) (valid (route tt false 122 1 true ((4003 , 2004) ∷ (2004 , 2002) ∷ []) (1 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 255 2 true ((2000 , 4003) ∷ (4003 , 2004) ∷ (2004 , 2002) ∷ []) (1 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 4 0 false (1 ∷ []) (floor 2 4 1 ∷ floor 5 0 2 ∷ []) false false true 3) (0 , 5) (valid (route tt false 0 4 false ((5 , 6) ∷ []) (3 ∷ [])))
+  ≡ valid (route tt false 0 8 false ((0 , 5) ∷ (5 , 6) ∷ []) (3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false ([]) ([]) false false true 1) (2000 , 4005) (valid (route tt false 128 3 true ((4005 , 2002) ∷ (2002 , 2004) ∷ []) (1 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 128 5 true ((2000 , 4005) ∷ (4005 , 2002) ∷ (2002 , 2004) ∷ []) (1 ∷ 1 ∷ 3 ∷ []))
+_ : extend (link true 4 255 false (5 ∷ 6 ∷ []) (floor 2 6 3 ∷ floor 6 1 0 ∷ floor 6 6 0 ∷ []) false true true 2) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 255 4 false ((0 , 5) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 true (4005 ∷ []) (floor 2 0 2 3 ∷ floor 2 2 1 3 ∷ floor 4 0 1 1 ∷ []) false false true 1) (2000 , 2006) (valid (route tt false 0 0 true ((2006 , 3006) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt true 255 4 true ((2000 , 2006) ∷ (2006 , 3006) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 2 128 false ([]) (floor 1 2 0 ∷ []) false false true 3) (0 , 2) (valid (route tt false 127 1 false ((2 , 6) ∷ (6 , 4) ∷ (4 , 1) ∷ []) (2 ∷ 3 ∷ 3 ∷ [])))
+  ≡ valid (route tt false 128 3 false ((0 , 2) ∷ (2 , 6) ∷ (6 , 4) ∷ (4 , 1) ∷ []) (3 ∷ 2 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 true ([]) (floor 2 2 2 1 ∷ []) true false false 2) (2000 , 2002) (valid (route tt false 128 3 false ((2002 , 2006) ∷ (2006 , 4001) ∷ (4001 , 4000) ∷ []) (3 ∷ 2 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 0 true (1 ∷ 2 ∷ []) (floor 1 1 3 ∷ floor 1 2 1 ∷ floor 2 0 0 ∷ []) false false true 1) (0 , 3) (valid (route tt true 255 4 false ((3 , 1) ∷ (1 , 6) ∷ (6 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 2 ∷ 3 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 255 7 false ((0 , 3) ∷ (3 , 1) ∷ (1 , 6) ∷ (6 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 1 ∷ 2 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 true ([]) (floor 5 2 1 1 ∷ []) true false true 3) (2000 , 4002) (valid (route tt true 0 3 true ((4002 , 4001) ∷ (4001 , 4003) ∷ (4003 , 2005) ∷ (2005 , 2000) ∷ []) (2 ∷ 1 ∷ 3 ∷ 3 ∷ [])))
+_ : extend (link true 2 128 false ([]) (floor 1 3 1 ∷ floor 1 5 1 ∷ floor 3 4 1 ∷ []) true false false 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 122 false ([]) (floor 2 5 2 3 ∷ floor 6 4 1 2 ∷ floor 6 5 2 2 ∷ []) true false false 1) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ invalid
+_ : extend (link true 4 0 false ([]) ([]) false false true 1) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 0 4 true ((0 , 5) ∷ (5 , 1005) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false (2004 ∷ 2005 ∷ []) (floor 1 4 1 2 ∷ floor 4 4 2 3 ∷ floor 4 6 2 3 ∷ []) false false true 2) (2000 , 4005) (valid (route tt false 0 3 false ((4005 , 2006) ∷ (2006 , 4004) ∷ []) (2 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 122 5 false ((2000 , 4005) ∷ (4005 , 2006) ∷ (2006 , 4004) ∷ []) (2 ∷ 2 ∷ 1 ∷ []))
+_ : extend (link true 4 128 false ([]) (floor 1 2 1 ∷ floor 5 4 0 ∷ floor 6 0 1 ∷ []) true true false 1) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 true ([]) (floor 1 4 2 1 ∷ floor 4 0 1 3 ∷ []) false true false 3) (2000 , 4006) (valid (route tt false 128 5 false ((4006 , 4005) ∷ (4005 , 4003) ∷ []) (2 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 128 6 false ((2000 , 4006) ∷ (4006 , 4005) ∷ (4005 , 4003) ∷ []) (3 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 3 122 true (1 ∷ 5 ∷ []) (floor 1 0 3 ∷ floor 3 2 0 ∷ floor 4 2 3 ∷ []) false true true 3) (0 , 2) (valid (route tt true 127 8 false ((2 , 6) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt true 127 11 false ((0 , 2) ∷ (2 , 6) ∷ []) (3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 true (2003 ∷ 2005 ∷ []) (floor 1 1 1 2 ∷ floor 6 3 1 3 ∷ []) false false true 3) (2000 , 4002) (valid (route tt true 128 5 false ((4002 , 4003) ∷ []) (2 ∷ [])))
-  ≡ valid (route tt true 128 9 false ((2000 , 4002) ∷ (4002 , 4003) ∷ []) (3 ∷ 2 ∷ []))
+_ : extend (link true 4 0 false (4 ∷ []) ([]) false false true 2) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 4 false ((0 , 5) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 true (2001 ∷ []) (floor 1 1 1 3 ∷ floor 3 0 2 3 ∷ floor 4 0 2 3 ∷ []) true false true 2) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 127 1 true ((2000 , 4006) ∷ []) (2 ∷ []))
+_ : extend (link true 4 127 false (1 ∷ 2 ∷ []) (floor 3 0 1 ∷ floor 3 1 2 ∷ floor 4 5 0 ∷ []) false true true 1) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 127 4 false ((0 , 5) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 true (2001 ∷ 4006 ∷ []) (floor 3 2 1 1 ∷ floor 4 5 2 2 ∷ floor 5 0 1 3 ∷ []) false true true 2) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 127 1 false ((2000 , 2005) ∷ []) (2 ∷ []))
+_ : extend (link true 3 0 false (6 ∷ []) (floor 1 5 1 ∷ floor 3 2 2 ∷ []) true false true 2) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 3 true ((0 , 1) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 false (2002 ∷ 2004 ∷ []) (floor 1 4 2 2 ∷ floor 6 5 1 2 ∷ []) true false true 3) (2000 , 4001) (valid (route tt false 255 10 false ((4001 , 2005) ∷ []) (2 ∷ [])))
-  ≡ valid (route tt false 255 13 true ((2000 , 4001) ∷ (4001 , 2005) ∷ []) (3 ∷ 2 ∷ []))
+_ : extend (link true 1 255 true (4 ∷ []) ([]) true false true 3) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 255 1 true ((0 , 6) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false ([]) (floor 3 4 2 1 ∷ floor 6 2 1 0 ∷ []) true false true 3) (2000 , 2002) (valid (route tt false 127 10 false ((2002 , 4003) ∷ (4003 , 2004) ∷ []) (3 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 127 12 true ((2000 , 2002) ∷ (2002 , 4003) ∷ (4003 , 2004) ∷ []) (3 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 1 127 false (5 ∷ []) ([]) false false true 1) (0 , 5) (valid (route tt false 0 11 false ((5 , 1) ∷ (1 , 6) ∷ (6 , 3) ∷ (3 , 2) ∷ []) (3 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 127 12 false ((0 , 5) ∷ (5 , 1) ∷ (1 , 6) ∷ (6 , 3) ∷ (3 , 2) ∷ []) (1 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 true (4001 ∷ 4002 ∷ []) (floor 4 5 2 3 ∷ floor 4 6 2 2 ∷ floor 6 5 2 3 ∷ []) true false true 3) (2000 , 2005) (valid (route tt false 0 6 false ((2005 , 4000) ∷ (4000 , 4003) ∷ []) (2 ∷ 2 ∷ [])))
+_ : extend (link true 1 127 false (1 ∷ []) (floor 4 2 1 ∷ floor 4 6 2 ∷ []) false true false 3) (0 , 2) (valid (route tt true 127 7 false ((2 , 4) ∷ (4 , 6) ∷ []) (2 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 128 false ([]) ([]) false false false 1) (2000 , 4001) (valid (route tt true 122 9 false ((4001 , 4003) ∷ (4003 , 2005) ∷ (2005 , 2002) ∷ []) (3 ∷ 3 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 128 11 false ((2000 , 4001) ∷ (4001 , 4003) ∷ (4003 , 2005) ∷ (2005 , 2002) ∷ []) (1 ∷ 3 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 1 0 false ([]) (floor 1 0 0 ∷ floor 5 4 2 ∷ []) false false true 2) (0 , 2) (valid (route tt true 127 0 true ((2 , 3) ∷ (3 , 5) ∷ (5 , 1005) ∷ []) (2 ∷ 1 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 127 1 true ((0 , 2) ∷ (2 , 3) ∷ (3 , 5) ∷ (5 , 1005) ∷ []) (2 ∷ 2 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 true (2003 ∷ 4005 ∷ []) (floor 2 2 2 0 ∷ floor 6 4 2 1 ∷ []) false false true 2) (2000 , 2006) (valid (route tt false 127 10 true ((2006 , 4001) ∷ (4001 , 4003) ∷ []) (1 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 127 14 true ((2000 , 2006) ∷ (2006 , 4001) ∷ (4001 , 4003) ∷ []) (2 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 4 255 true (5 ∷ []) (floor 1 6 1 ∷ []) false true true 2) (0 , 2) (valid (route tt false 122 10 false ((2 , 0) ∷ []) (2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 128 false (2004 ∷ 4006 ∷ []) ([]) false false false 2) (2000 , 4004) (valid (route tt false 0 4 false ((4004 , 4003) ∷ (4003 , 4005) ∷ []) (3 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 128 7 false ((2000 , 4004) ∷ (4004 , 4003) ∷ (4003 , 4005) ∷ []) (2 ∷ 3 ∷ 2 ∷ []))
+_ : extend (link true 3 122 true ([]) (floor 2 0 3 ∷ []) false false false 1) (0 , 5) (valid (route tt false 127 3 false ((5 , 25) ∷ (25 , 11) ∷ (11 , 19) ∷ (19 , 30) ∷ (30 , 29) ∷ (29 , 20) ∷ (20 , 8) ∷ (8 , 10) ∷ (10 , 17) ∷ (17 , 6) ∷ (6 , 35) ∷ (35 , 31) ∷ (31 , 37) ∷ (37 , 36) ∷ (36 , 4) ∷ (4 , 40) ∷ (40 , 38) ∷ (38 , 3) ∷ (3 , 28) ∷ (28 , 39) ∷ (39 , 23) ∷ (23 , 14) ∷ (14 , 13) ∷ (13 , 26) ∷ (26 , 15) ∷ (15 , 22) ∷ (22 , 32) ∷ (32 , 2) ∷ (2 , 7) ∷ (7 , 24) ∷ (24 , 33) ∷ []) (2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 255 false (4006 ∷ []) (floor 2 5 1 1 ∷ floor 6 1 2 1 ∷ floor 6 5 2 0 ∷ []) false true true 2) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 3003) ∷ []) (0 ∷ [])))
+_ : extend (link true 4 122 false (3 ∷ []) (floor 6 2 3 ∷ floor 6 4 0 ∷ []) true false false 3) (0 , 4) (valid (route tt true 127 11 false ((4 , 0) ∷ (0 , 2) ∷ []) (1 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 128 false (2002 ∷ 2006 ∷ []) (floor 3 6 1 1 ∷ floor 4 6 1 1 ∷ floor 6 6 2 3 ∷ []) false false false 1) (2000 , 2002) (valid (route tt false 255 8 false ((2002 , 4005) ∷ (4005 , 5005) ∷ []) (2 ∷ 0 ∷ [])))
-  ≡ valid (route tt true 255 10 false ((2000 , 2002) ∷ (2002 , 4005) ∷ (4005 , 5005) ∷ []) (1 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 3 255 false (1 ∷ []) (floor 1 4 0 ∷ floor 3 1 1 ∷ floor 6 0 3 ∷ []) false false true 2) (0 , 2) (valid (route tt false 128 10 true ((2 , 1) ∷ (1 , 3) ∷ (3 , 6) ∷ []) (3 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 255 13 true ((0 , 2) ∷ (2 , 1) ∷ (1 , 3) ∷ (3 , 6) ∷ []) (2 ∷ 3 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false (4005 ∷ 4006 ∷ []) (floor 1 2 1 3 ∷ floor 2 3 1 3 ∷ []) false false false 1) (2000 , 4001) (valid (route tt false 0 5 false ((4001 , 2002) ∷ (2002 , 2004) ∷ []) (3 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 128 9 false ((2000 , 4001) ∷ (4001 , 2002) ∷ (2002 , 2004) ∷ []) (1 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 2 128 false ([]) (floor 3 2 1 ∷ floor 3 5 2 ∷ []) true false true 2) (0 , 1) (valid (route tt false 128 10 true ((1 , 3) ∷ (3 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 2 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 128 12 true ((0 , 1) ∷ (1 , 3) ∷ (3 , 4) ∷ (4 , 1004) ∷ []) (2 ∷ 1 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false ([]) (floor 2 4 1 0 ∷ floor 3 3 2 0 ∷ floor 6 5 2 3 ∷ []) true false true 2) (2000 , 4001) (valid (route tt false 128 1 false ((4001 , 2002) ∷ (2002 , 3002) ∷ []) (1 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 128 5 true ((2000 , 4001) ∷ (4001 , 2002) ∷ (2002 , 3002) ∷ []) (2 ∷ 1 ∷ 0 ∷ []))
+_ : extend (link true 4 127 false (2 ∷ 3 ∷ []) (floor 1 5 1 ∷ floor 2 1 1 ∷ floor 3 3 2 ∷ []) true true false 1) (0 , 4) (valid (route tt true 127 11 false ((4 , 5) ∷ []) (3 ∷ [])))
+  ≡ valid (route tt true 127 15 true ((0 , 4) ∷ (4 , 5) ∷ []) (1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2003 ∷ []) (floor 1 4 1 2 ∷ floor 3 2 2 2 ∷ floor 5 2 2 3 ∷ []) false false false 3) (2000 , 2002) (valid (route tt false 127 3 true ((2002 , 2005) ∷ (2005 , 2006) ∷ (2006 , 4003) ∷ (4003 , 4001) ∷ []) (3 ∷ 3 ∷ 3 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 127 4 true ((2000 , 2002) ∷ (2002 , 2005) ∷ (2005 , 2006) ∷ (2006 , 4003) ∷ (4003 , 4001) ∷ []) (3 ∷ 3 ∷ 3 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 2 127 true ([]) (floor 1 0 1 ∷ floor 3 5 2 ∷ []) true false true 2) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 127 2 true ((0 , 3) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 false ([]) (floor 1 5 1 1 ∷ floor 6 5 1 0 ∷ []) false false true 2) (2000 , 4006) (valid (route tt false 255 8 false ((4006 , 4002) ∷ []) (2 ∷ [])))
-  ≡ valid (route tt false 255 9 false ((2000 , 4006) ∷ (4006 , 4002) ∷ []) (2 ∷ 2 ∷ []))
+_ : extend (link true 3 0 false (1 ∷ []) (floor 3 6 0 ∷ floor 4 2 3 ∷ floor 6 1 3 ∷ []) false true false 1) (0 , 1) (valid (route tt true 127 0 false ((1 , 6) ∷ (6 , 3) ∷ (3 , 5) ∷ (5 , 2) ∷ []) (3 ∷ 3 ∷ 3 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 127 3 false ((0 , 1) ∷ (1 , 6) ∷ (6 , 3) ∷ (3 , 5) ∷ (5 , 2) ∷ []) (1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false (4004 ∷ []) (floor 1 1 2 3 ∷ floor 2 4 1 3 ∷ floor 4 2 2 0 ∷ []) false true false 3) (2000 , 2003) (valid (route tt false 127 10 true ((2003 , 2006) ∷ (2006 , 2001) ∷ (2001 , 3001) ∷ []) (1 ∷ 1 ∷ 0 ∷ [])))
+_ : extend (link true 4 127 false (2 ∷ []) (floor 3 5 1 ∷ floor 4 3 3 ∷ []) false false true 2) (0 , 3) (valid (route tt true 0 6 true ((3 , 5) ∷ (5 , 1) ∷ []) (1 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 122 false ([]) (floor 1 6 2 0 ∷ floor 2 5 2 0 ∷ floor 3 6 1 3 ∷ []) false false true 3) (2000 , 2001) (valid (route tt false 0 0 true ((2001 , 3001) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 3 122 false ([]) (floor 1 6 2 0 ∷ floor 2 5 2 0 ∷ floor 3 6 1 3 ∷ []) false false true 3) (2000 , 4005) (valid (route tt false 0 0 true ((4005 , 5005) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 122 3 true ((2000 , 2001) ∷ (2001 , 3001) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 3 128 false ([]) (floor 1 4 0 ∷ floor 4 0 2 ∷ []) false false true 2) (0 , 1) (valid (route tt true 127 5 false ((1 , 6) ∷ (6 , 2) ∷ []) (3 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 128 8 false ((0 , 1) ∷ (1 , 6) ∷ (6 , 2) ∷ []) (2 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false (2001 ∷ []) ([]) false false false 2) (2000 , 2002) (valid (route tt false 255 10 false ((2002 , 2003) ∷ (2003 , 2000) ∷ (2000 , 2004) ∷ []) (2 ∷ 2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 2 0 false (2001 ∷ []) ([]) true false true 3) (2000 , 2005) (valid (route tt false 128 0 false ((2005 , 2003) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt false 128 2 true ((2000 , 2005) ∷ (2005 , 2003) ∷ []) (3 ∷ 3 ∷ []))
+_ : extend (link true 3 122 false (3 ∷ []) (floor 3 0 1 ∷ []) true false true 1) (0 , 2) (valid (route tt false 122 11 false ((2 , 4) ∷ (4 , 3) ∷ []) (2 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 122 14 true ((0 , 2) ∷ (2 , 4) ∷ (4 , 3) ∷ []) (1 ∷ 2 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2003 ∷ 4006 ∷ []) (floor 6 1 1 2 ∷ floor 6 3 1 1 ∷ floor 6 6 2 3 ∷ []) false false true 2) (2000 , 2001) (valid (route tt false 122 4 false ((2001 , 4000) ∷ (4000 , 4003) ∷ []) (1 ∷ 3 ∷ [])))
-  ⊕ extend (link true 1 127 false (2003 ∷ 4006 ∷ []) (floor 6 1 1 2 ∷ floor 6 3 1 1 ∷ floor 6 6 2 3 ∷ []) true false true 2) (2000 , 2002) (valid (route tt false 122 4 false ((2002 , 4000) ∷ (4000 , 4003) ∷ []) (1 ∷ 3 ∷ [])))
-  ≡ invalid
-_ = refl
-
-_ : extend (link true 3 122 true (4002 ∷ []) (floor 2 5 2 3 ∷ floor 6 6 1 1 ∷ []) false true true 3) (2000 , 4006) (valid (route tt false 127 5 true ((4006 , 2003) ∷ (2003 , 4005) ∷ (4005 , 4002) ∷ []) (1 ∷ 1 ∷ 2 ∷ [])))
-  ⊕ extend (link true 3 122 true (4002 ∷ []) (floor 2 5 2 3 ∷ floor 6 6 1 1 ∷ []) false true true 3) (2000 , 4005) (valid (route tt false 127 5 true ((4005 , 2003) ∷ (2003 , 4005) ∷ (4005 , 4002) ∷ []) (1 ∷ 1 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 127 true (1 ∷ []) (floor 6 0 2 ∷ []) true true true 1) (0 , 1) (valid (route tt false 255 8 false ((1 , 4) ∷ (4 , 3) ∷ (3 , 6) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 255 12 true ((0 , 1) ∷ (1 , 4) ∷ (4 , 3) ∷ (3 , 6) ∷ []) (1 ∷ 2 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false (4005 ∷ []) (floor 2 3 1 1 ∷ floor 3 3 1 0 ∷ []) true false true 2) (2000 , 4002) (valid (route tt true 128 0 true ((4002 , 2004) ∷ (2004 , 2001) ∷ (2001 , 2003) ∷ (2003 , 4000) ∷ []) (2 ∷ 2 ∷ 2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 4 128 false (4005 ∷ []) (floor 2 3 1 1 ∷ floor 3 3 1 0 ∷ []) true false true 2) (2000 , 2006) (valid (route tt true 128 0 true ((2006 , 2004) ∷ (2004 , 2001) ∷ (2001 , 2003) ∷ (2003 , 4000) ∷ []) (2 ∷ 2 ∷ 2 ∷ 1 ∷ [])))
+_ : extend (link true 1 127 false (1 ∷ 4 ∷ []) ([]) false false true 1) (0 , 4) (valid (route tt false 122 0 false ((4 , 0) ∷ (0 , 3) ∷ (3 , 5) ∷ (5 , 1005) ∷ []) (3 ∷ 1 ∷ 3 ∷ 0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 127 false (4004 ∷ []) (floor 2 0 1 3 ∷ floor 3 5 1 1 ∷ []) false true true 2) (2000 , 2003) (valid (route tt false 128 8 true ((2003 , 4005) ∷ (4005 , 4004) ∷ []) (3 ∷ 1 ∷ [])))
-  ⊕ extend (link true 1 127 false (4004 ∷ []) (floor 2 0 1 3 ∷ floor 3 5 1 1 ∷ []) true true true 2) (2000 , 4006) (valid (route tt false 128 8 true ((4006 , 4005) ∷ (4005 , 4004) ∷ []) (3 ∷ 1 ∷ [])))
+_ : extend (link true 3 0 false (3 ∷ []) (floor 1 3 1 ∷ []) true true true 1) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 128 false ([]) (floor 4 0 2 2 ∷ floor 5 2 2 3 ∷ []) false true true 2) (2000 , 2003) (valid (route tt false 128 0 false ((2003 , 2001) ∷ (2001 , 2005) ∷ []) (2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 3 128 false ([]) (floor 4 0 2 2 ∷ floor 5 2 2 3 ∷ []) false true true 2) (2000 , 2004) (valid (route tt false 128 0 false ((2004 , 2001) ∷ (2001 , 2005) ∷ []) (2 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 128 3 false ((2000 , 2003) ∷ (2003 , 2001) ∷ (2001 , 2005) ∷ []) (2 ∷ 2 ∷ 1 ∷ []))
+_ : extend (link true 4 128 false (4 ∷ []) (floor 5 4 3 ∷ floor 5 6 0 ∷ []) false false true 2) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 128 false (4 ∷ []) (floor 5 4 3 ∷ floor 5 6 0 ∷ []) true false true 2) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 4 false ((0 , 1) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false ([]) (floor 1 1 2 3 ∷ floor 6 2 1 0 ∷ []) false false false 3) (2000 , 2002) (valid (route tt false 0 3 false ((2002 , 4006) ∷ []) (2 ∷ [])))
-  ⊕ extend (link true 4 0 false ([]) (floor 1 1 2 3 ∷ floor 6 2 1 0 ∷ []) false false true 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 4 false ((2000 , 2003) ∷ []) (1 ∷ []))
+_ : extend (link true 1 127 true (2 ∷ []) ([]) true false true 2) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 1 127 true (2 ∷ []) ([]) true false true 2) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 127 1 true ((0 , 1) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false (2002 ∷ 4002 ∷ []) (floor 3 1 2 1 ∷ floor 6 1 1 3 ∷ []) false true true 3) (2000 , 4003) (valid (route tt false 255 5 false ((4003 , 2004) ∷ (2004 , 2006) ∷ []) (3 ∷ 1 ∷ [])))
-  ⊕ extend (link true 4 122 false (2002 ∷ 4002 ∷ []) (floor 3 1 2 1 ∷ floor 6 1 1 3 ∷ []) false true true 3) (2000 , 2006) (valid (route tt false 255 5 false ((2006 , 2115) ∷ (2115 , 2004) ∷ (2004 , 2006) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 255 9 false ((2000 , 4003) ∷ (4003 , 2004) ∷ (2004 , 2006) ∷ []) (3 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 2 0 false ([]) (floor 6 4 1 ∷ []) true false true 1) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 127 false ([]) (floor 6 4 1 ∷ []) false true true 1) (0 , 3) (valid (route tt false 122 0 true ((3 , 4) ∷ (4 , 0) ∷ (0 , 1) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
+  ≡ valid (route tt false 0 2 true ((0 , 1) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false (2001 ∷ 2003 ∷ []) (floor 1 1 1 3 ∷ floor 1 5 1 3 ∷ floor 5 4 1 3 ∷ []) false true false 2) (2000 , 2005) (valid (route tt false 0 6 true ((2005 , 4000) ∷ []) (2 ∷ [])))
-  ⊕ extend (link true 3 0 false (2001 ∷ 2003 ∷ []) (floor 1 1 1 3 ∷ floor 1 5 1 3 ∷ floor 5 4 1 3 ∷ []) false true false 2) (2000 , 4003) (valid (route tt false 0 6 true ((4003 , 4000) ∷ []) (2 ∷ [])))
-  ≡ invalid
-_ = refl
-
-_ : extend (link true 4 128 false (4005 ∷ []) ([]) false false true 1) (2000 , 2006) (valid (route tt false 127 1 false ((2006 , 4004) ∷ (4004 , 4005) ∷ []) (3 ∷ 3 ∷ [])))
-  ⊕ extend (link true 3 127 false (4005 ∷ []) ([]) true true false 3) (2000 , 2001) (valid (route tt false 0 10 false ((2001 , 2004) ∷ (2004 , 2006) ∷ (2006 , 2002) ∷ (2002 , 4003) ∷ []) (3 ∷ 2 ∷ 3 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 127 13 true ((2000 , 2001) ∷ (2001 , 2004) ∷ (2004 , 2006) ∷ (2006 , 2002) ∷ (2002 , 4003) ∷ []) (3 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 3 122 false (1 ∷ 6 ∷ []) (floor 4 1 3 ∷ floor 4 6 1 ∷ floor 5 4 2 ∷ []) true true true 3) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 1 128 true (1 ∷ 6 ∷ []) (floor 4 1 3 ∷ floor 4 6 1 ∷ floor 5 4 2 ∷ []) false false false 3) (0 , 3) (valid (route tt false 127 6 true ((3 , 5) ∷ (5 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 3 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 122 3 true ((0 , 1) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 false (4005 ∷ []) (floor 1 0 2 1 ∷ []) false false true 1) (2000 , 4006) (valid (route tt false 127 7 false ((4006 , 2005) ∷ (2005 , 3005) ∷ []) (1 ∷ 0 ∷ [])))
-  ⊕ extend (link true 2 255 false (4005 ∷ []) (floor 1 0 2 1 ∷ []) true false true 1) (2000 , 4005) (valid (route tt false 127 7 false ((4005 , 2005) ∷ (2005 , 3005) ∷ []) (1 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 255 9 false ((2000 , 4006) ∷ (4006 , 2005) ∷ (2005 , 3005) ∷ []) (1 ∷ 1 ∷ 0 ∷ []))
+_ : extend (link true 2 255 false (2 ∷ 4 ∷ []) (floor 1 5 3 ∷ floor 4 0 1 ∷ floor 5 5 3 ∷ []) false true true 3) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 255 false (2 ∷ 4 ∷ []) (floor 1 5 3 ∷ floor 4 0 1 ∷ floor 5 5 3 ∷ []) true true true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 255 2 false ((0 , 3) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 128 false ([]) ([]) false false true 2) (2000 , 4001) (valid (route tt true 122 0 false ((4001 , 2004) ∷ (2004 , 2006) ∷ []) (2 ∷ 3 ∷ [])))
-  ⊕ extend (link true 1 128 false ([]) ([]) false false true 2) (2000 , 4005) (valid (route tt true 122 0 false ((4005 , 2128) ∷ (2128 , 2004) ∷ (2004 , 2006) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 128 1 false ((2000 , 4001) ∷ (4001 , 2004) ∷ (2004 , 2006) ∷ []) (2 ∷ 2 ∷ 3 ∷ []))
+_ : extend (link true 2 255 false (6 ∷ []) ([]) false true true 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 255 false (6 ∷ []) ([]) true true true 1) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 255 2 false ((0 , 2) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false ([]) (floor 2 3 1 0 ∷ floor 2 5 1 2 ∷ floor 3 4 1 1 ∷ []) false true true 3) (2000 , 2004) (valid (route tt false 127 11 true ((2004 , 4005) ∷ []) (2 ∷ [])))
-  ⊕ extend (link true 1 122 false ([]) (floor 2 3 1 0 ∷ floor 2 5 1 2 ∷ floor 3 4 1 1 ∷ []) false true true 3) (2000 , 4001) (valid (route tt false 127 11 true ((4001 , 4005) ∷ []) (2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 2 128 true (3 ∷ 4 ∷ []) ([]) false false true 3) (0 , 3) (valid (route tt false 127 8 true ((3 , 5) ∷ []) (3 ∷ [])))
+  ⊕ extend (link true 2 128 true (3 ∷ 4 ∷ []) ([]) true false true 3) (0 , 1) (valid (route tt false 127 8 true ((1 , 5) ∷ []) (3 ∷ [])))
+  ≡ valid (route tt true 128 10 true ((0 , 1) ∷ (1 , 5) ∷ []) (3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 true (4001 ∷ 2005 ∷ []) ([]) false false true 1) (2000 , 4006) (valid (route tt false 0 0 true ((4006 , 5006) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 1 0 false (4001 ∷ 2005 ∷ []) ([]) false false true 3) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 1 false ((2000 , 4004) ∷ []) (3 ∷ []))
+_ : extend (link true 1 0 true (6 ∷ []) (floor 1 3 3 ∷ floor 3 3 2 ∷ floor 6 0 0 ∷ []) false false true 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 1 0 true (6 ∷ []) (floor 1 3 3 ∷ floor 3 3 2 ∷ floor 6 0 0 ∷ []) false false true 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 0 1 false ((0 , 2) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 128 false (4002 ∷ []) (floor 2 6 2 1 ∷ []) false false true 2) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 128 false (4002 ∷ []) (floor 2 6 2 1 ∷ []) true false true 2) (2000 , 4002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 1 false ((2000 , 2005) ∷ []) (2 ∷ []))
+_ : extend (link true 4 255 false ([]) (floor 2 2 3 ∷ floor 6 4 1 ∷ []) true true true 3) (0 , 5) (valid (route tt false 127 9 false ((5 , 6) ∷ (6 , 4) ∷ (4 , 1) ∷ (1 , 3) ∷ []) (3 ∷ 3 ∷ 3 ∷ 1 ∷ [])))
+  ⊕ extend (link true 4 255 false ([]) (floor 2 2 3 ∷ floor 6 4 1 ∷ []) true true true 3) (0 , 1) (valid (route tt false 127 9 false ((1 , 114) ∷ (114 , 6) ∷ (6 , 4) ∷ (4 , 1) ∷ (1 , 3) ∷ []) (3 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ [])))
+  ≡ valid (route tt false 255 13 true ((0 , 5) ∷ (5 , 6) ∷ (6 , 4) ∷ (4 , 1) ∷ (1 , 3) ∷ []) (3 ∷ 3 ∷ 3 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false (4001 ∷ 2003 ∷ []) (floor 2 6 1 1 ∷ floor 5 3 1 3 ∷ []) false true true 2) (2000 , 4005) (valid (route tt false 0 0 true ((4005 , 5005) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 3 0 false (4001 ∷ 2003 ∷ []) (floor 2 6 1 1 ∷ floor 5 3 1 3 ∷ []) false true true 2) (2000 , 4003) (valid (route tt false 0 0 true ((4003 , 5003) ∷ []) (0 ∷ [])))
+_ : extend (link true 2 0 false ([]) (floor 2 6 0 ∷ floor 6 5 0 ∷ []) false false false 3) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 0 false ([]) (floor 2 6 0 ∷ floor 6 5 0 ∷ []) false false false 3) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 128 true (2001 ∷ []) (floor 4 6 1 1 ∷ []) false true false 1) (2000 , 2001) (valid (route tt true 255 9 false ((2001 , 4006) ∷ (4006 , 4002) ∷ (4002 , 5002) ∷ []) (3 ∷ 2 ∷ 0 ∷ [])))
-  ⊕ extend (link true 3 128 true (2001 ∷ []) (floor 4 6 1 1 ∷ []) true true false 1) (2000 , 2006) (valid (route tt true 255 9 false ((2006 , 4006) ∷ (4006 , 4002) ∷ (4002 , 5002) ∷ []) (3 ∷ 2 ∷ 0 ∷ [])))
-  ≡ valid (route tt true 255 12 false ((2000 , 2001) ∷ (2001 , 4006) ∷ (4006 , 4002) ∷ (4002 , 5002) ∷ []) (1 ∷ 3 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 4 122 false (1 ∷ 3 ∷ []) ([]) false false true 1) (0 , 1) (valid (route tt false 0 5 false ((1 , 3) ∷ []) (1 ∷ [])))
+  ⊕ extend (link true 2 0 false (1 ∷ 3 ∷ []) ([]) true false true 1) (0 , 4) (valid (route tt true 122 10 true ((4 , 3) ∷ (3 , 5) ∷ []) (3 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 122 9 false ((0 , 1) ∷ (1 , 3) ∷ []) (1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false (4001 ∷ []) ([]) false false true 3) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 255 false (4001 ∷ []) ([]) false false true 3) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 255 4 false ((2000 , 4004) ∷ []) (3 ∷ []))
+_ : extend (link true 4 255 false (4 ∷ 6 ∷ []) (floor 3 2 2 ∷ floor 6 6 0 ∷ []) false false true 2) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 1 128 false (4 ∷ 6 ∷ []) (floor 3 2 2 ∷ floor 6 6 0 ∷ []) true true true 1) (0 , 1) (valid (route tt false 127 3 true ((1 , 5) ∷ (5 , 4) ∷ []) (1 ∷ 3 ∷ [])))
+  ≡ valid (route tt false 255 4 false ((0 , 3) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false (4006 ∷ []) (floor 2 2 2 2 ∷ floor 5 1 2 0 ∷ []) false false false 1) (2000 , 4001) (valid (route tt false 128 11 true ((4001 , 4005) ∷ (4005 , 2003) ∷ []) (2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 2 122 false (4006 ∷ []) (floor 2 2 2 2 ∷ floor 5 1 2 0 ∷ []) false false false 1) (2000 , 4002) (valid (route tt false 128 11 true ((4002 , 4005) ∷ (4005 , 2003) ∷ []) (2 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 128 13 true ((2000 , 4001) ∷ (4001 , 4005) ∷ (4005 , 2003) ∷ []) (1 ∷ 2 ∷ 1 ∷ []))
+_ : extend (link true 1 127 true (2 ∷ []) ([]) false false false 3) (0 , 3) (valid (route tt false 0 0 true ((3 , 1003) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 1 127 true (2 ∷ []) ([]) true false false 3) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 127 1 true ((0 , 3) ∷ (3 , 1003) ∷ []) (3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false ([]) (floor 5 3 2 1 ∷ floor 5 5 2 2 ∷ floor 6 5 2 1 ∷ []) false false true 1) (2000 , 2001) (valid (route tt false 0 0 true ((2001 , 3001) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 2 0 false ([]) (floor 5 3 2 1 ∷ floor 5 5 2 2 ∷ floor 6 5 2 1 ∷ []) false false true 1) (2000 , 4005) (valid (route tt false 0 0 true ((4005 , 5005) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 0 2 true ((2000 , 2001) ∷ (2001 , 3001) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 3 0 false (4 ∷ 6 ∷ []) (floor 6 3 3 ∷ []) true false true 2) (0 , 3) (valid (route tt false 127 5 false ((3 , 5) ∷ (5 , 4) ∷ (4 , 0) ∷ (0 , 2) ∷ []) (2 ∷ 3 ∷ 1 ∷ 1 ∷ [])))
+  ⊕ extend (link true 1 0 false (4 ∷ 6 ∷ []) (floor 6 3 3 ∷ []) true false false 2) (0 , 4) (valid (route tt false 0 2 true ((4 , 3) ∷ []) (3 ∷ [])))
+  ≡ valid (route tt true 0 3 true ((0 , 4) ∷ (4 , 3) ∷ []) (2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2002 ∷ []) ([]) true false true 1) (2000 , 4006) (valid (route tt false 0 0 true ((4006 , 5006) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 1 128 false (2002 ∷ []) ([]) false false true 1) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 1 true ((2000 , 4006) ∷ (4006 , 5006) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 2 127 false (5 ∷ 6 ∷ []) (floor 4 6 1 ∷ floor 5 6 0 ∷ floor 6 2 3 ∷ []) false false false 1) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 127 false (5 ∷ 6 ∷ []) (floor 4 6 1 ∷ floor 5 6 0 ∷ floor 6 2 3 ∷ []) false false false 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 122 false (2006 ∷ []) (floor 5 6 1 3 ∷ floor 6 2 2 3 ∷ floor 6 5 1 1 ∷ []) false false false 1) (2000 , 4005) (valid (route tt false 128 6 true ((4005 , 4001) ∷ (4001 , 2004) ∷ (2004 , 4002) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
-  ⊕ extend (link true 2 122 false (2006 ∷ []) (floor 5 6 1 3 ∷ floor 6 2 2 3 ∷ floor 6 5 1 1 ∷ []) false false false 1) (2000 , 4003) (valid (route tt false 128 6 true ((4003 , 2181) ∷ (2181 , 4001) ∷ (4001 , 2004) ∷ (2004 , 4002) ∷ []) (1 ∷ 1 ∷ 1 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 128 8 true ((2000 , 4005) ∷ (4005 , 4001) ∷ (4001 , 2004) ∷ (2004 , 4002) ∷ []) (1 ∷ 1 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 4 128 false ([]) (floor 1 0 1 ∷ []) false false true 1) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 128 false ([]) (floor 1 0 1 ∷ []) true false true 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 4 false ((0 , 3) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false (2001 ∷ []) ([]) false false false 1) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 3 255 false (2001 ∷ []) ([]) false false true 1) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 255 3 false ((2000 , 2002) ∷ []) (1 ∷ []))
+_ : extend (link true 3 122 true (2 ∷ 6 ∷ []) (floor 1 2 3 ∷ floor 1 5 1 ∷ floor 6 6 1 ∷ []) false true true 3) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 3 122 true (2 ∷ 6 ∷ []) (floor 1 2 3 ∷ floor 1 5 1 ∷ floor 6 6 1 ∷ []) true true true 3) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 122 3 false ((0 , 1) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false (2003 ∷ 2006 ∷ []) (floor 2 5 1 1 ∷ floor 6 0 2 1 ∷ floor 6 1 2 3 ∷ []) true true true 2) (2000 , 4005) (valid (route tt true 255 2 false ((4005 , 2002) ∷ []) (3 ∷ [])))
-  ⊕ extend (link true 4 255 false (2003 ∷ 2006 ∷ []) (floor 2 5 1 1 ∷ floor 6 0 2 1 ∷ floor 6 1 2 3 ∷ []) true true true 2) (2000 , 2005) (valid (route tt true 255 2 false ((2005 , 2002) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 255 6 true ((2000 , 2005) ∷ (2005 , 2002) ∷ []) (2 ∷ 3 ∷ []))
+_ : extend (link true 3 0 true (5 ∷ []) ([]) false false true 2) (0 , 5) (valid (route tt false 122 5 false ((5 , 12) ∷ (12 , 13) ∷ (13 , 40) ∷ (40 , 35) ∷ (35 , 29) ∷ (29 , 10) ∷ (10 , 9) ∷ (9 , 23) ∷ (23 , 31) ∷ (31 , 11) ∷ (11 , 7) ∷ (7 , 8) ∷ (8 , 34) ∷ (34 , 1) ∷ (1 , 16) ∷ (16 , 17) ∷ (17 , 36) ∷ (36 , 6) ∷ (6 , 38) ∷ (38 , 22) ∷ (22 , 14) ∷ (14 , 37) ∷ (37 , 4) ∷ (4 , 20) ∷ (20 , 19) ∷ (19 , 28) ∷ (28 , 26) ∷ (26 , 39) ∷ (39 , 32) ∷ []) (3 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 3 0 true (5 ∷ []) ([]) false false true 2) (0 , 4) (valid (route tt false 122 5 false ((4 , 12) ∷ (12 , 13) ∷ (13 , 40) ∷ (40 , 35) ∷ (35 , 29) ∷ (29 , 10) ∷ (10 , 9) ∷ (9 , 23) ∷ (23 , 31) ∷ (31 , 11) ∷ (11 , 7) ∷ (7 , 8) ∷ (8 , 34) ∷ (34 , 1) ∷ (1 , 16) ∷ (16 , 17) ∷ (17 , 36) ∷ (36 , 6) ∷ (6 , 38) ∷ (38 , 22) ∷ (22 , 14) ∷ (14 , 37) ∷ (37 , 4) ∷ (4 , 20) ∷ (20 , 19) ∷ (19 , 28) ∷ (28 , 26) ∷ (26 , 39) ∷ (39 , 32) ∷ []) (3 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 122 8 false ((0 , 4) ∷ (4 , 12) ∷ (12 , 13) ∷ (13 , 40) ∷ (40 , 35) ∷ (35 , 29) ∷ (29 , 10) ∷ (10 , 9) ∷ (9 , 23) ∷ (23 , 31) ∷ (31 , 11) ∷ (11 , 7) ∷ (7 , 8) ∷ (8 , 34) ∷ (34 , 1) ∷ (1 , 16) ∷ (16 , 17) ∷ (17 , 36) ∷ (36 , 6) ∷ (6 , 38) ∷ (38 , 22) ∷ (22 , 14) ∷ (14 , 37) ∷ (37 , 4) ∷ (4 , 20) ∷ (20 , 19) ∷ (19 , 28) ∷ (28 , 26) ∷ (26 , 39) ∷ (39 , 32) ∷ []) (2 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false (4002 ∷ 4003 ∷ []) (floor 2 2 1 1 ∷ floor 6 6 1 1 ∷ []) false false true 3) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 0 false (4002 ∷ 4003 ∷ []) (floor 2 2 1 1 ∷ floor 6 6 1 1 ∷ []) true false true 3) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 1 true ((2000 , 2005) ∷ []) (3 ∷ []))
+_ : extend (link true 4 255 false (4 ∷ 5 ∷ []) (floor 2 0 3 ∷ floor 2 1 3 ∷ []) true true true 2) (0 , 1) (valid (route tt false 0 5 false ((1 , 6) ∷ (6 , 0) ∷ []) (2 ∷ 2 ∷ [])))
+  ⊕ extend (link true 4 255 false (4 ∷ 5 ∷ []) (floor 2 0 3 ∷ floor 2 1 3 ∷ []) true true true 2) (0 , 6) (valid (route tt false 0 5 false ((6 , 6) ∷ (6 , 0) ∷ []) (2 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 255 false (2001 ∷ []) (floor 2 0 1 2 ∷ []) false false false 3) (2000 , 2002) (valid (route tt true 0 0 false ((2002 , 4005) ∷ (4005 , 2003) ∷ (2003 , 2001) ∷ []) (1 ∷ 3 ∷ 3 ∷ [])))
-  ⊕ extend (link true 2 0 false (2001 ∷ []) (floor 2 0 1 2 ∷ []) false false true 1) (2000 , 2006) (valid (route tt false 128 8 false ((2006 , 2005) ∷ (2005 , 4002) ∷ (4002 , 4001) ∷ (4001 , 5001) ∷ []) (1 ∷ 2 ∷ 3 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 128 10 false ((2000 , 2006) ∷ (2006 , 2005) ∷ (2005 , 4002) ∷ (4002 , 4001) ∷ (4001 , 5001) ∷ []) (1 ∷ 1 ∷ 2 ∷ 3 ∷ 0 ∷ []))
+_ : extend (link true 3 255 false ([]) (floor 1 3 1 ∷ floor 2 4 1 ∷ floor 4 5 1 ∷ []) false false true 3) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 3 255 false ([]) (floor 1 3 1 ∷ floor 2 4 1 ∷ floor 4 5 1 ∷ []) false false true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 255 3 false ((0 , 4) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false ([]) ([]) true false true 1) (2000 , 4003) (valid (route tt false 122 6 true ((4003 , 4005) ∷ (4005 , 2001) ∷ (2001 , 4006) ∷ []) (2 ∷ 3 ∷ 3 ∷ [])))
-  ⊕ extend (link true 4 128 false ([]) ([]) false false true 3) (2000 , 4004) (valid (route tt false 0 8 false ((4004 , 2001) ∷ (2001 , 2002) ∷ []) (1 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 128 10 true ((2000 , 4003) ∷ (4003 , 4005) ∷ (4005 , 2001) ∷ (2001 , 4006) ∷ []) (1 ∷ 2 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 2 122 false ([]) (floor 1 3 2 ∷ []) true true true 1) (0 , 2) (valid (route tt false 0 5 false ((2 , 3) ∷ (3 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 3 ∷ 0 ∷ [])))
+  ⊕ extend (link true 2 122 false ([]) (floor 1 3 2 ∷ []) true true true 1) (0 , 6) (valid (route tt false 0 5 false ((6 , 181) ∷ (181 , 3) ∷ (3 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 1 ∷ 3 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 122 7 true ((0 , 2) ∷ (2 , 3) ∷ (3 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 1 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (2002 ∷ 4006 ∷ []) (floor 3 5 2 2 ∷ floor 6 6 2 2 ∷ []) false false true 3) (2000 , 2002) (valid (route tt false 0 0 true ((2002 , 3002) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 2 0 false (2002 ∷ 4006 ∷ []) (floor 3 5 2 2 ∷ floor 6 6 2 2 ∷ []) true false true 3) (2000 , 4003) (valid (route tt false 0 0 true ((4003 , 5003) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 0 2 true ((2000 , 4003) ∷ (4003 , 5003) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 4 0 true (2 ∷ 4 ∷ []) (floor 1 2 0 ∷ floor 5 3 0 ∷ []) false false true 2) (0 , 1) (valid (route tt true 122 5 true ((1 , 4) ∷ (4 , 6) ∷ []) (3 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 0 true (2 ∷ 4 ∷ []) (floor 1 2 0 ∷ floor 5 3 0 ∷ []) true false true 2) (0 , 5) (valid (route tt true 122 5 true ((5 , 4) ∷ (4 , 6) ∷ []) (3 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 122 9 true ((0 , 1) ∷ (1 , 4) ∷ (4 , 6) ∷ []) (2 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 true ([]) (floor 3 5 2 1 ∷ floor 4 0 2 1 ∷ []) false true true 1) (2000 , 4005) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 255 true ([]) (floor 3 5 2 1 ∷ floor 4 0 2 1 ∷ []) true true true 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 255 2 false ((2000 , 4005) ∷ []) (1 ∷ []))
+_ : extend (link true 2 0 true (4 ∷ 6 ∷ []) ([]) false true false 2) (0 , 6) (valid (route tt false 255 9 false ((6 , 0) ∷ (0 , 3) ∷ []) (1 ∷ 1 ∷ [])))
+  ⊕ extend (link true 2 0 true (4 ∷ 6 ∷ []) ([]) false true false 2) (0 , 2) (valid (route tt false 255 9 false ((2 , 102) ∷ (102 , 0) ∷ (0 , 3) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 0 false (2002 ∷ 4002 ∷ []) (floor 3 3 2 3 ∷ []) true false true 3) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 0 false (2002 ∷ 4002 ∷ []) (floor 3 3 2 3 ∷ []) true false true 3) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 2 true ((2000 , 4003) ∷ []) (3 ∷ []))
+_ : extend (link true 3 255 true (5 ∷ []) (floor 1 5 1 ∷ []) false false true 3) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 3 255 true (5 ∷ []) (floor 1 5 1 ∷ []) true false true 3) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 255 3 true ((0 , 5) ∷ (5 , 1005) ∷ []) (3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false ([]) (floor 1 4 1 0 ∷ floor 4 0 1 2 ∷ []) false false true 2) (2000 , 2001) (valid (route tt false 122 1 true ((2001 , 4002) ∷ (4002 , 2004) ∷ []) (3 ∷ 3 ∷ [])))
-  ⊕ extend (link true 2 128 true ([]) (floor 1 4 1 0 ∷ floor 4 0 1 2 ∷ []) false false true 1) (2000 , 4006) (valid (route tt false 128 5 false ((4006 , 2005) ∷ (2005 , 2004) ∷ []) (1 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 122 2 true ((2000 , 2001) ∷ (2001 , 4002) ∷ (4002 , 2004) ∷ []) (2 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 4 128 false (3 ∷ 4 ∷ []) (floor 5 4 3 ∷ []) false false true 1) (0 , 1) (valid (route tt false 122 7 true ((1 , 0) ∷ (0 , 4) ∷ (4 , 6) ∷ (6 , 2) ∷ []) (3 ∷ 1 ∷ 2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 0 false (3 ∷ 4 ∷ []) (floor 5 4 3 ∷ []) false false true 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 4 false ((0 , 6) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 true (2002 ∷ []) (floor 1 3 2 0 ∷ floor 4 1 1 2 ∷ floor 6 4 1 0 ∷ []) true true true 2) (2000 , 4006) (valid (route tt false 127 11 false ((4006 , 2002) ∷ (2002 , 4001) ∷ (4001 , 5001) ∷ []) (1 ∷ 2 ∷ 0 ∷ [])))
-  ⊕ extend (link true 4 122 false (2002 ∷ []) (floor 1 3 2 0 ∷ floor 4 1 1 2 ∷ floor 6 4 1 0 ∷ []) false false true 2) (2000 , 2002) (valid (route tt false 255 9 false ((2002 , 4006) ∷ (4006 , 4003) ∷ (4003 , 2005) ∷ []) (3 ∷ 3 ∷ 3 ∷ [])))
-  ≡ valid (route tt true 255 13 false ((2000 , 2002) ∷ (2002 , 4006) ∷ (4006 , 4003) ∷ (4003 , 2005) ∷ []) (2 ∷ 3 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 1 255 false (4 ∷ 6 ∷ []) (floor 1 4 3 ∷ floor 4 1 2 ∷ []) false false false 1) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 3 127 false (4 ∷ 6 ∷ []) (floor 1 4 3 ∷ floor 4 1 2 ∷ []) false true true 2) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 127 3 false ((0 , 3) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false ([]) (floor 1 1 1 2 ∷ floor 2 2 1 2 ∷ []) false false false 3) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 122 false ([]) (floor 1 1 1 2 ∷ floor 2 2 1 2 ∷ []) false false false 3) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
+_ : extend (link true 1 0 false ([]) (floor 2 2 0 ∷ floor 3 2 2 ∷ []) true false false 1) (0 , 2) (valid (route tt false 127 2 false ((2 , 0) ∷ (0 , 3) ∷ (3 , 5) ∷ []) (3 ∷ 3 ∷ 1 ∷ [])))
+  ⊕ extend (link true 1 0 false ([]) (floor 2 2 0 ∷ floor 3 2 2 ∷ []) true false false 1) (0 , 4) (valid (route tt false 127 2 false ((4 , 0) ∷ (0 , 3) ∷ (3 , 5) ∷ []) (3 ∷ 3 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 122 false (2004 ∷ 2005 ∷ []) (floor 4 3 1 0 ∷ floor 5 4 2 0 ∷ []) true true false 1) (2000 , 2004) (valid (route tt false 0 0 true ((2004 , 3004) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 2 122 false (2004 ∷ 2005 ∷ []) (floor 4 3 1 0 ∷ floor 5 4 2 0 ∷ []) true true false 1) (2000 , 4001) (valid (route tt false 0 0 true ((4001 , 5001) ∷ []) (0 ∷ [])))
+_ : extend (link true 3 127 false (4 ∷ []) ([]) false true true 3) (0 , 4) (valid (route tt false 255 11 true ((4 , 1) ∷ (1 , 6) ∷ (6 , 3) ∷ []) (1 ∷ 1 ∷ 2 ∷ [])))
+  ⊕ extend (link true 3 127 false (4 ∷ []) ([]) false true true 3) (0 , 2) (valid (route tt false 255 11 true ((2 , 1) ∷ (1 , 6) ∷ (6 , 3) ∷ []) (1 ∷ 1 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 0 false ([]) (floor 1 6 1 1 ∷ floor 2 1 1 2 ∷ []) false true true 1) (2000 , 2004) (valid (route tt true 128 11 false ((2004 , 2002) ∷ (2002 , 4005) ∷ (4005 , 4006) ∷ (4006 , 4001) ∷ []) (1 ∷ 3 ∷ 1 ∷ 2 ∷ [])))
-  ⊕ extend (link true 2 0 false ([]) (floor 1 6 1 1 ∷ floor 2 1 1 2 ∷ []) false true true 1) (2000 , 2001) (valid (route tt true 128 11 false ((2001 , 2002) ∷ (2002 , 4005) ∷ (4005 , 4006) ∷ (4006 , 4001) ∷ []) (1 ∷ 3 ∷ 1 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 128 13 false ((2000 , 2001) ∷ (2001 , 2002) ∷ (2002 , 4005) ∷ (4005 , 4006) ∷ (4006 , 4001) ∷ []) (1 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 4 127 false (1 ∷ 2 ∷ []) (floor 2 1 3 ∷ floor 5 3 3 ∷ floor 6 4 3 ∷ []) false true true 2) (0 , 2) (valid (route tt true 128 8 true ((2 , 1) ∷ (1 , 3) ∷ (3 , 0) ∷ []) (1 ∷ 2 ∷ 1 ∷ [])))
+  ⊕ extend (link true 2 122 true (1 ∷ 2 ∷ []) (floor 2 1 3 ∷ floor 5 3 3 ∷ floor 6 4 3 ∷ []) false true true 1) (0 , 3) (valid (route tt false 122 6 false ((3 , 2) ∷ (2 , 6) ∷ (6 , 5) ∷ []) (3 ∷ 3 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 122 8 false ((0 , 3) ∷ (3 , 2) ∷ (2 , 6) ∷ (6 , 5) ∷ []) (1 ∷ 3 ∷ 3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (4006 ∷ []) ([]) false false true 3) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 0 false (4006 ∷ []) ([]) true false true 3) (2000 , 4005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 2 false ((2000 , 2005) ∷ []) (3 ∷ []))
+_ : extend (link true 2 122 false (2 ∷ []) ([]) true false true 1) (0 , 1) (valid (route tt false 127 8 false ((1 , 2) ∷ (2 , 4) ∷ []) (3 ∷ 1 ∷ [])))
+  ⊕ extend (link true 2 122 false (2 ∷ []) ([]) true false true 1) (0 , 4) (valid (route tt false 127 8 false ((4 , 2) ∷ (2 , 4) ∷ []) (3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 127 10 true ((0 , 1) ∷ (1 , 2) ∷ (2 , 4) ∷ []) (1 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 true (2005 ∷ []) (floor 2 0 1 0 ∷ floor 4 1 2 2 ∷ floor 4 6 1 0 ∷ []) true false true 3) (2000 , 4003) (valid (route tt false 122 9 false ((4003 , 4002) ∷ []) (3 ∷ [])))
-  ⊕ extend (link true 1 127 false (2005 ∷ []) (floor 2 0 1 0 ∷ floor 4 1 2 2 ∷ floor 4 6 1 0 ∷ []) true false false 2) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 122 11 true ((2000 , 4003) ∷ (4003 , 4002) ∷ []) (3 ∷ 3 ∷ []))
-_ = refl
-
-_ : extend (link true 4 128 false ([]) ([]) false false false 1) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 128 false ([]) ([]) true true true 2) (2000 , 2003) (valid (route tt true 127 4 true ((2003 , 2005) ∷ []) (1 ∷ [])))
+_ : extend (link true 2 122 true (3 ∷ 6 ∷ []) (floor 5 6 3 ∷ []) false false true 1) (0 , 2) (valid (route tt false 0 11 false ((2 , 0) ∷ (0 , 3) ∷ []) (3 ∷ 3 ∷ [])))
+  ⊕ extend (link true 2 122 true (3 ∷ 6 ∷ []) (floor 5 6 3 ∷ []) true false true 1) (0 , 1) (valid (route tt false 0 11 false ((1 , 0) ∷ (0 , 3) ∷ []) (3 ∷ 3 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 4 0 false (4001 ∷ []) (floor 1 3 1 3 ∷ floor 5 4 1 1 ∷ floor 5 6 2 0 ∷ []) false false true 2) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 0 false (4001 ∷ []) (floor 1 3 1 3 ∷ floor 5 4 1 1 ∷ floor 5 6 2 0 ∷ []) false false true 2) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 4 false ((2000 , 4004) ∷ []) (2 ∷ []))
+_ : extend (link true 1 128 false (3 ∷ 6 ∷ []) ([]) false true true 3) (0 , 5) (valid (route tt false 128 1 false ((5 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 0 ∷ [])))
+  ⊕ extend (link true 1 128 false (3 ∷ 6 ∷ []) ([]) false true true 3) (0 , 3) (valid (route tt false 128 1 false ((3 , 181) ∷ (181 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 1 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 128 2 false ((0 , 5) ∷ (5 , 6) ∷ (6 , 1006) ∷ []) (3 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false (2002 ∷ []) (floor 2 0 2 3 ∷ floor 4 2 1 2 ∷ floor 6 5 1 3 ∷ []) true true true 3) (2000 , 4006) (valid (route tt false 255 6 false ((4006 , 2004) ∷ (2004 , 3004) ∷ []) (3 ∷ 0 ∷ [])))
-  ⊕ extend (link true 3 128 false (2002 ∷ []) (floor 2 0 2 3 ∷ floor 4 2 1 2 ∷ floor 6 5 1 3 ∷ []) true true true 3) (2000 , 2005) (valid (route tt false 255 6 false ((2005 , 2157) ∷ (2157 , 2004) ∷ (2004 , 3004) ∷ []) (3 ∷ 1 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 255 9 true ((2000 , 4006) ∷ (4006 , 2004) ∷ (2004 , 3004) ∷ []) (3 ∷ 3 ∷ 0 ∷ []))
+_ : extend (link true 1 122 false ([]) (floor 3 0 0 ∷ floor 3 4 2 ∷ floor 6 5 1 ∷ []) true false true 1) (0 , 4) (valid (route tt true 0 6 false ((4 , 2) ∷ (2 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) (3 ∷ 2 ∷ 2 ∷ 1 ∷ [])))
+  ⊕ extend (link true 1 122 false ([]) (floor 3 0 0 ∷ floor 3 4 2 ∷ floor 6 5 1 ∷ []) false false true 1) (0 , 5) (valid (route tt true 0 6 false ((5 , 2) ∷ (2 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) (3 ∷ 2 ∷ 2 ∷ 1 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 122 false ([]) (floor 3 2 2 3 ∷ []) false false false 3) (2000 , 4006) (valid (route tt true 122 0 false ((4006 , 4003) ∷ []) (2 ∷ [])))
-  ⊕ extend (link true 4 122 false ([]) (floor 3 2 2 3 ∷ []) false false false 3) (2000 , 4005) (valid (route tt true 122 0 false ((4005 , 4003) ∷ []) (2 ∷ [])))
-  ≡ valid (route tt true 122 4 false ((2000 , 4005) ∷ (4005 , 4003) ∷ []) (3 ∷ 2 ∷ []))
+_ : extend (link true 4 255 false (4 ∷ []) ([]) false false false 2) (0 , 5) (valid (route tt false 128 5 false ((5 , 3) ∷ (3 , 6) ∷ []) (3 ∷ 1 ∷ [])))
+  ⊕ extend (link true 4 255 false (4 ∷ []) ([]) false false false 2) (0 , 4) (valid (route tt false 128 5 false ((4 , 152) ∷ (152 , 3) ∷ (3 , 6) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
+  ≡ valid (route tt false 255 9 false ((0 , 5) ∷ (5 , 3) ∷ (3 , 6) ∷ []) (2 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false ([]) (floor 4 3 1 2 ∷ floor 5 3 1 2 ∷ []) false true true 3) (2000 , 4005) (valid (route tt false 128 7 true ((4005 , 2004) ∷ (2004 , 2001) ∷ (2001 , 2003) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
-  ⊕ extend (link true 4 122 false ([]) (floor 4 3 1 2 ∷ floor 5 3 1 2 ∷ []) false true true 3) (2000 , 2003) (valid (route tt false 128 7 true ((2003 , 2113) ∷ (2113 , 2004) ∷ (2004 , 2001) ∷ (2001 , 2003) ∷ []) (3 ∷ 1 ∷ 1 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 128 false ([]) (floor 3 5 3 ∷ []) true true true 2) (0 , 1) (valid (route tt false 0 0 false ((1 , 2) ∷ (2 , 1002) ∷ []) (2 ∷ 0 ∷ [])))
+  ⊕ extend (link true 4 128 false ([]) (floor 3 5 3 ∷ []) true true true 2) (0 , 6) (valid (route tt false 0 0 false ((6 , 2) ∷ (2 , 1002) ∷ []) (2 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 128 4 true ((0 , 1) ∷ (1 , 2) ∷ (2 , 1002) ∷ []) (2 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 false ([]) ([]) false true true 2) (2000 , 2005) (valid (route tt false 255 4 true ((2005 , 2003) ∷ (2003 , 4006) ∷ (4006 , 2002) ∷ (2002 , 4000) ∷ []) (2 ∷ 2 ∷ 1 ∷ 2 ∷ [])))
-  ⊕ extend (link true 4 255 false ([]) ([]) false false true 1) (2000 , 2001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 255 4 false ((2000 , 2001) ∷ []) (1 ∷ []))
+_ : extend (link true 2 122 false (5 ∷ []) (floor 3 2 1 ∷ floor 5 6 1 ∷ []) true false true 1) (0 , 2) (valid (route tt true 122 4 false ((2 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 0 ∷ [])))
+  ⊕ extend (link true 2 122 false (5 ∷ []) (floor 3 2 1 ∷ floor 5 6 1 ∷ []) false false true 1) (0 , 1) (valid (route tt true 122 4 false ((1 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 122 6 false ((0 , 1) ∷ (1 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 true ([]) ([]) false false true 1) (2000 , 4005) (valid (route tt false 255 8 false ((4005 , 4003) ∷ (4003 , 2004) ∷ []) (2 ∷ 2 ∷ [])))
-  ⊕ extend (link true 3 0 true ([]) ([]) true false true 1) (2000 , 2006) (valid (route tt false 255 8 false ((2006 , 4003) ∷ (4003 , 2004) ∷ []) (2 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 255 11 false ((2000 , 4005) ∷ (4005 , 4003) ∷ (4003 , 2004) ∷ []) (1 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 1 127 false (1 ∷ 3 ∷ []) ([]) false false false 3) (0 , 2) (valid (route tt false 127 8 false ((2 , 4) ∷ (4 , 1004) ∷ []) (2 ∷ 0 ∷ [])))
+  ⊕ extend (link true 1 127 false (1 ∷ 3 ∷ []) ([]) false false false 3) (0 , 4) (valid (route tt false 127 8 false ((4 , 4) ∷ (4 , 1004) ∷ []) (2 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 127 9 false ((0 , 2) ∷ (2 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false (2003 ∷ 4006 ∷ []) ([]) false false false 1) (2000 , 4002) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 122 false (2003 ∷ 4006 ∷ []) ([]) true false false 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ invalid
+_ : extend (link true 1 255 false (2 ∷ []) ([]) false false false 1) (0 , 2) (valid (route tt false 255 8 false ((2 , 31) ∷ (31 , 39) ∷ (39 , 33) ∷ (33 , 5) ∷ (5 , 22) ∷ (22 , 1) ∷ (1 , 9) ∷ (9 , 32) ∷ (32 , 6) ∷ (6 , 13) ∷ (13 , 35) ∷ (35 , 23) ∷ (23 , 11) ∷ (11 , 19) ∷ (19 , 29) ∷ (29 , 3) ∷ (3 , 37) ∷ (37 , 7) ∷ (7 , 40) ∷ (40 , 17) ∷ (17 , 34) ∷ (34 , 36) ∷ (36 , 24) ∷ (24 , 8) ∷ (8 , 27) ∷ (27 , 26) ∷ (26 , 4) ∷ (4 , 21) ∷ (21 , 16) ∷ (16 , 18) ∷ []) (1 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ [])))
+  ⊕ extend (link true 1 255 false (2 ∷ []) ([]) true false false 1) (0 , 5) (valid (route tt false 255 8 false ((5 , 31) ∷ (31 , 39) ∷ (39 , 33) ∷ (33 , 5) ∷ (5 , 22) ∷ (22 , 1) ∷ (1 , 9) ∷ (9 , 32) ∷ (32 , 6) ∷ (6 , 13) ∷ (13 , 35) ∷ (35 , 23) ∷ (23 , 11) ∷ (11 , 19) ∷ (19 , 29) ∷ (29 , 3) ∷ (3 , 37) ∷ (37 , 7) ∷ (7 , 40) ∷ (40 , 17) ∷ (17 , 34) ∷ (34 , 36) ∷ (36 , 24) ∷ (24 , 8) ∷ (8 , 27) ∷ (27 , 26) ∷ (26 , 4) ∷ (4 , 21) ∷ (21 , 16) ∷ (16 , 18) ∷ []) (1 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ [])))
+  ≡ valid (route tt false 255 9 true ((0 , 5) ∷ (5 , 31) ∷ (31 , 39) ∷ (39 , 33) ∷ (33 , 5) ∷ (5 , 22) ∷ (22 , 1) ∷ (1 , 9) ∷ (9 , 32) ∷ (32 , 6) ∷ (6 , 13) ∷ (13 , 35) ∷ (35 , 23) ∷ (23 , 11) ∷ (11 , 19) ∷ (19 , 29) ∷ (29 , 3) ∷ (3 , 37) ∷ (37 , 7) ∷ (7 , 40) ∷ (40 , 17) ∷ (17 , 34) ∷ (34 , 36) ∷ (36 , 24) ∷ (24 , 8) ∷ (8 , 27) ∷ (27 , 26) ∷ (26 , 4) ∷ (4 , 21) ∷ (21 , 16) ∷ (16 , 18) ∷ []) (1 ∷ 1 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 128 false ([]) ([]) false false false 3) (2000 , 2005) (valid (route tt true 122 2 false ((2005 , 2001) ∷ (2001 , 2000) ∷ (2000 , 2002) ∷ []) (3 ∷ 2 ∷ 3 ∷ [])))
-  ⊕ extend (link true 2 128 false ([]) ([]) false false false 3) (2000 , 2001) (valid (route tt true 122 2 false ((2001 , 2170) ∷ (2170 , 2001) ∷ (2001 , 2000) ∷ (2000 , 2002) ∷ []) (3 ∷ 1 ∷ 2 ∷ 3 ∷ [])))
+_ : extend (link true 1 0 false (3 ∷ []) ([]) false true false 1) (0 , 2) (valid (route tt false 0 0 true ((2 , 6) ∷ (6 , 4) ∷ []) (2 ∷ 2 ∷ [])))
+  ⊕ extend (link true 3 255 false (3 ∷ []) ([]) false false true 2) (0 , 4) (valid (route tt false 0 6 true ((4 , 0) ∷ (0 , 5) ∷ []) (3 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 127 true ([]) (floor 3 6 2 1 ∷ []) true false false 2) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 3003) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 2 127 true ([]) (floor 3 6 2 1 ∷ []) true false false 2) (2000 , 4001) (valid (route tt false 0 0 true ((4001 , 5001) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt true 127 2 true ((2000 , 4001) ∷ (4001 , 5001) ∷ []) (2 ∷ 0 ∷ []))
+_ : extend (link true 1 127 true (5 ∷ []) (floor 1 5 0 ∷ floor 6 5 2 ∷ []) false true true 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 1 127 true (5 ∷ []) (floor 1 5 0 ∷ floor 6 5 2 ∷ []) true true true 1) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 127 1 false ((0 , 6) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 false (4006 ∷ []) (floor 6 1 1 0 ∷ []) false true true 1) (2000 , 4003) (valid (route tt false 0 2 false ((4003 , 4001) ∷ []) (1 ∷ [])))
-  ⊕ extend (link true 4 127 false (4006 ∷ []) (floor 6 1 1 0 ∷ []) false false true 2) (2000 , 2001) (valid (route tt false 128 7 false ((2001 , 4000) ∷ (4000 , 4003) ∷ []) (1 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 0 6 false ((2000 , 4003) ∷ (4003 , 4001) ∷ []) (1 ∷ 1 ∷ []))
+_ : extend (link true 3 127 false ([]) ([]) true false true 1) (0 , 2) (valid (route tt true 122 2 false ((2 , 1) ∷ (1 , 3) ∷ (3 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 3 ∷ 3 ∷ 0 ∷ [])))
+  ⊕ extend (link true 3 127 false ([]) ([]) true false true 1) (0 , 5) (valid (route tt true 122 2 false ((5 , 107) ∷ (107 , 1) ∷ (1 , 3) ∷ (3 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 1 ∷ 3 ∷ 3 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 127 5 true ((0 , 2) ∷ (2 , 1) ∷ (1 , 3) ∷ (3 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 1 ∷ 3 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 128 false ([]) (floor 1 4 1 3 ∷ []) true true false 2) (2000 , 2002) (valid (route tt true 127 10 false ((2002 , 4001) ∷ (4001 , 4000) ∷ (4000 , 4003) ∷ (4003 , 4004) ∷ []) (3 ∷ 3 ∷ 3 ∷ 3 ∷ [])))
-  ⊕ extend (link true 4 122 false ([]) (floor 1 4 1 3 ∷ []) false false false 2) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ invalid
+_ : extend (link true 4 0 false ([]) (floor 6 1 2 ∷ []) false false false 1) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 4 0 false ([]) (floor 6 1 2 ∷ []) false false false 1) (0 , 5) (valid (route tt false 0 0 true ((5 , 1005) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 0 4 true ((0 , 5) ∷ (5 , 1005) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2006 ∷ []) (floor 2 2 2 2 ∷ floor 4 0 1 3 ∷ floor 5 5 1 1 ∷ []) false true false 1) (2000 , 2002) (valid (route tt false 122 4 true ((2002 , 4000) ∷ []) (2 ∷ [])))
-  ⊕ extend (link true 1 127 false (2006 ∷ []) (floor 2 2 2 2 ∷ floor 4 0 1 3 ∷ floor 5 5 1 1 ∷ []) false true false 1) (2000 , 2003) (valid (route tt false 122 4 true ((2003 , 4000) ∷ []) (2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 255 false ([]) (floor 2 1 0 ∷ []) false true false 3) (0 , 1) (valid (route tt false 128 4 false ((1 , 2) ∷ (2 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ []) (1 ∷ 3 ∷ 2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 255 false ([]) (floor 2 1 0 ∷ []) false true false 3) (0 , 5) (valid (route tt false 128 4 false ((5 , 2) ∷ (2 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ []) (1 ∷ 3 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt false 255 8 false ((0 , 1) ∷ (1 , 2) ∷ (2 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ []) (3 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 255 false (4002 ∷ []) (floor 1 2 2 2 ∷ floor 6 0 2 1 ∷ floor 6 1 1 3 ∷ []) false true false 1) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 3 0 false (4002 ∷ []) (floor 1 2 2 2 ∷ floor 6 0 2 1 ∷ floor 6 1 1 3 ∷ []) false false true 1) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 3 false ((2000 , 4003) ∷ []) (1 ∷ []))
+_ : extend (link true 4 0 true ([]) (floor 3 0 2 ∷ floor 3 3 3 ∷ floor 4 5 0 ∷ []) false true true 2) (0 , 5) (valid (route tt false 128 9 false ((5 , 4) ∷ []) (3 ∷ [])))
+  ⊕ extend (link true 4 0 true ([]) (floor 3 0 2 ∷ floor 3 3 3 ∷ floor 4 5 0 ∷ []) false true true 2) (0 , 2) (valid (route tt false 128 9 false ((2 , 126) ∷ (126 , 4) ∷ []) (3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 128 13 false ((0 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 true (4001 ∷ 4003 ∷ []) (floor 2 1 1 0 ∷ floor 5 1 2 1 ∷ []) false false false 1) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 3003) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 4 255 true (4001 ∷ 4003 ∷ []) (floor 2 1 1 0 ∷ floor 5 1 2 1 ∷ []) false false false 1) (2000 , 2001) (valid (route tt false 0 0 true ((2001 , 3001) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt true 255 4 true ((2000 , 2001) ∷ (2001 , 3001) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 2 0 false (5 ∷ 6 ∷ []) (floor 5 6 1 ∷ []) false true true 2) (0 , 6) (valid (route tt false 128 8 false ((6 , 3) ∷ (3 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
+  ⊕ extend (link true 2 128 false (5 ∷ 6 ∷ []) (floor 5 6 1 ∷ []) false false true 3) (0 , 4) (valid (route tt false 255 3 false ((4 , 3) ∷ (3 , 5) ∷ []) (2 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 128 10 false ((0 , 6) ∷ (6 , 3) ∷ (3 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 2 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false (2003 ∷ 4006 ∷ []) (floor 2 1 1 2 ∷ []) true true true 3) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 3 0 false (2003 ∷ 4006 ∷ []) (floor 2 1 1 2 ∷ []) false true true 3) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 3 false ((2000 , 4001) ∷ []) (3 ∷ []))
+_ : extend (link true 4 255 false (1 ∷ []) (floor 1 1 1 ∷ floor 3 0 0 ∷ floor 6 3 2 ∷ []) false false true 2) (0 , 2) (valid (route tt false 127 8 false ((2 , 0) ∷ (0 , 4) ∷ (4 , 1) ∷ []) (1 ∷ 3 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 255 false (1 ∷ []) (floor 1 1 1 ∷ floor 3 0 0 ∷ floor 6 3 2 ∷ []) false false true 2) (0 , 6) (valid (route tt false 127 8 false ((6 , 118) ∷ (118 , 0) ∷ (0 , 4) ∷ (4 , 1) ∷ []) (1 ∷ 1 ∷ 3 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 127 false ([]) (floor 1 2 2 0 ∷ []) false false true 3) (2000 , 2001) (valid (route tt false 128 1 true ((2001 , 4006) ∷ []) (1 ∷ [])))
-  ⊕ extend (link true 1 122 true ([]) (floor 1 2 2 0 ∷ []) true true true 2) (2000 , 4004) (valid (route tt true 128 7 true ((4004 , 4005) ∷ (4005 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2006) ∷ []) (3 ∷ 1 ∷ 2 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 128 2 true ((2000 , 2001) ∷ (2001 , 4006) ∷ []) (3 ∷ 1 ∷ []))
+_ : extend (link true 4 128 true (1 ∷ []) (floor 2 5 3 ∷ floor 4 2 0 ∷ floor 6 1 1 ∷ []) false false false 2) (0 , 3) (valid (route tt false 0 0 true ((3 , 1003) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 4 128 true (1 ∷ []) (floor 2 5 3 ∷ floor 4 2 0 ∷ floor 6 1 1 ∷ []) true false false 2) (0 , 4) (valid (route tt false 0 0 true ((4 , 1004) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 128 4 true ((0 , 3) ∷ (3 , 1003) ∷ []) (2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 122 true (2005 ∷ []) (floor 1 0 2 1 ∷ floor 1 2 2 2 ∷ floor 4 4 2 1 ∷ []) true true true 2) (2000 , 4002) (valid (route tt false 0 0 true ((4002 , 5002) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 3 122 true (2005 ∷ []) (floor 1 0 2 1 ∷ floor 1 2 2 2 ∷ floor 4 4 2 1 ∷ []) false true true 2) (2000 , 4006) (valid (route tt false 0 0 true ((4006 , 5006) ∷ []) (0 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 127 false (5 ∷ []) (floor 1 3 1 ∷ floor 3 5 3 ∷ floor 4 1 2 ∷ []) false false true 2) (0 , 2) (valid (route tt false 0 0 true ((2 , 1002) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 3 127 false (5 ∷ []) (floor 1 3 1 ∷ floor 3 5 3 ∷ floor 4 1 2 ∷ []) true false true 2) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 127 3 true ((0 , 2) ∷ (2 , 1002) ∷ []) (2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false ([]) ([]) false false true 2) (2000 , 2005) (valid (route tt true 122 3 true ((2005 , 2002) ∷ (2002 , 2006) ∷ (2006 , 2001) ∷ (2001 , 2000) ∷ []) (3 ∷ 1 ∷ 3 ∷ 2 ∷ [])))
-  ⊕ extend (link true 2 122 true ([]) ([]) false false true 3) (2000 , 4005) (valid (route tt false 128 0 false ((4005 , 4006) ∷ (4006 , 4001) ∷ (4001 , 2003) ∷ []) (2 ∷ 1 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 128 2 false ((2000 , 4005) ∷ (4005 , 4006) ∷ (4006 , 4001) ∷ (4001 , 2003) ∷ []) (3 ∷ 2 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 3 122 true (3 ∷ 6 ∷ []) (floor 1 4 2 ∷ floor 4 1 0 ∷ []) false true true 1) (0 , 2) (valid (route tt true 127 9 false ((2 , 0) ∷ (0 , 3) ∷ (3 , 5) ∷ (5 , 1) ∷ []) (1 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
+  ⊕ extend (link true 3 122 true (3 ∷ 6 ∷ []) (floor 1 4 2 ∷ floor 4 1 0 ∷ []) false true true 1) (0 , 5) (valid (route tt true 127 9 false ((5 , 0) ∷ (0 , 3) ∷ (3 , 5) ∷ (5 , 1) ∷ []) (1 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 128 true (2002 ∷ 4005 ∷ []) ([]) false true true 2) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 128 true (2002 ∷ 4005 ∷ []) ([]) true true true 2) (2000 , 4002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 128 1 false ((2000 , 2003) ∷ []) (2 ∷ []))
+_ : extend (link true 3 255 false (1 ∷ 5 ∷ []) (floor 2 1 0 ∷ floor 2 6 1 ∷ []) false true true 2) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 3 255 false (1 ∷ 5 ∷ []) (floor 2 1 0 ∷ floor 2 6 1 ∷ []) true true true 2) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 255 3 false ((0 , 3) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (4006 ∷ []) (floor 1 3 2 1 ∷ floor 4 2 2 3 ∷ []) false false true 1) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 0 false (4006 ∷ []) (floor 1 3 2 1 ∷ floor 4 2 2 3 ∷ []) true false true 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 2 false ((2000 , 2004) ∷ []) (1 ∷ []))
+_ : extend (link true 4 127 true (4 ∷ []) (floor 3 6 3 ∷ floor 5 4 1 ∷ floor 6 0 1 ∷ []) false false false 1) (0 , 4) (valid (route tt true 128 5 false ((4 , 6) ∷ (6 , 0) ∷ (0 , 2) ∷ []) (3 ∷ 2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 127 true (4 ∷ []) (floor 3 6 3 ∷ floor 5 4 1 ∷ floor 6 0 1 ∷ []) false false false 1) (0 , 1) (valid (route tt true 128 5 false ((1 , 149) ∷ (149 , 6) ∷ (6 , 0) ∷ (0 , 2) ∷ []) (3 ∷ 1 ∷ 2 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 255 false (2001 ∷ []) (floor 2 0 2 3 ∷ floor 2 2 2 1 ∷ floor 4 0 1 3 ∷ []) false false true 2) (2000 , 2002) (valid (route tt false 127 4 false ((2002 , 4005) ∷ []) (3 ∷ [])))
-  ⊕ extend (link true 3 255 false (2001 ∷ []) (floor 2 0 2 3 ∷ floor 2 2 2 1 ∷ floor 4 0 1 3 ∷ []) true false false 2) (2000 , 4006) (valid (route tt false 255 9 false ((4006 , 4000) ∷ (4000 , 2002) ∷ []) (1 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 255 5 false ((2000 , 2002) ∷ (2002 , 4005) ∷ []) (2 ∷ 3 ∷ []))
+_ : extend (link true 4 0 false (1 ∷ []) ([]) false false true 1) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 0 false (1 ∷ []) ([]) false false true 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 4 false ((0 , 2) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 128 false (2004 ∷ 4005 ∷ []) (floor 1 1 1 2 ∷ floor 3 5 2 1 ∷ floor 5 0 2 1 ∷ []) true true true 2) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 3 128 false (2004 ∷ 4005 ∷ []) (floor 1 1 1 2 ∷ floor 3 5 2 1 ∷ floor 5 0 2 1 ∷ []) true true true 2) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 3 true ((2000 , 2003) ∷ []) (2 ∷ []))
+_ : extend (link true 1 0 false (3 ∷ 5 ∷ []) ([]) false false false 1) (0 , 2) (valid (route tt true 255 4 false ((2 , 3) ∷ (3 , 1) ∷ (1 , 4) ∷ (4 , 6) ∷ []) (1 ∷ 1 ∷ 1 ∷ 3 ∷ [])))
+  ⊕ extend (link true 1 0 false (3 ∷ 5 ∷ []) ([]) true false false 1) (0 , 5) (valid (route tt true 255 4 false ((5 , 3) ∷ (3 , 1) ∷ (1 , 4) ∷ (4 , 6) ∷ []) (1 ∷ 1 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 255 5 false ((0 , 2) ∷ (2 , 3) ∷ (3 , 1) ∷ (1 , 4) ∷ (4 , 6) ∷ []) (1 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false (4006 ∷ []) (floor 6 0 1 3 ∷ floor 6 2 1 1 ∷ []) true true true 1) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 122 false (4006 ∷ []) (floor 6 0 1 3 ∷ floor 6 2 1 1 ∷ []) false true true 1) (2000 , 4002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 122 1 false ((2000 , 4002) ∷ []) (1 ∷ []))
+_ : extend (link true 3 127 false (3 ∷ []) (floor 1 6 3 ∷ floor 2 3 2 ∷ []) true false false 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 3 127 false (3 ∷ []) (floor 1 6 3 ∷ floor 2 3 2 ∷ []) true false false 1) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 127 false (2001 ∷ 2006 ∷ []) (floor 2 1 2 1 ∷ floor 4 6 2 2 ∷ floor 5 0 2 0 ∷ []) false true true 2) (2000 , 4003) (valid (route tt false 127 9 false ((4003 , 2005) ∷ (2005 , 4001) ∷ (4001 , 4002) ∷ (4002 , 2000) ∷ []) (3 ∷ 3 ∷ 3 ∷ 1 ∷ [])))
-  ⊕ extend (link true 4 255 false (2001 ∷ 2006 ∷ []) (floor 2 1 2 1 ∷ floor 4 6 2 2 ∷ floor 5 0 2 0 ∷ []) false false true 3) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 255 4 false ((2000 , 4004) ∷ []) (3 ∷ []))
+_ : extend (link true 3 127 true ([]) (floor 2 0 0 ∷ floor 4 0 3 ∷ []) false true true 3) (0 , 3) (valid (route tt false 255 9 true ((3 , 1) ∷ []) (1 ∷ [])))
+  ⊕ extend (link true 2 127 true ([]) (floor 2 0 0 ∷ floor 4 0 3 ∷ []) false false true 1) (0 , 5) (valid (route tt true 255 11 false ((5 , 24) ∷ (24 , 22) ∷ (22 , 35) ∷ (35 , 15) ∷ (15 , 23) ∷ (23 , 13) ∷ (13 , 37) ∷ (37 , 6) ∷ (6 , 8) ∷ (8 , 39) ∷ (39 , 7) ∷ (7 , 20) ∷ (20 , 28) ∷ (28 , 30) ∷ (30 , 19) ∷ (19 , 12) ∷ (12 , 11) ∷ (11 , 21) ∷ (21 , 9) ∷ (9 , 26) ∷ (26 , 32) ∷ (32 , 1) ∷ (1 , 34) ∷ (34 , 38) ∷ (38 , 14) ∷ (14 , 2) ∷ (2 , 29) ∷ (29 , 3) ∷ (3 , 33) ∷ (33 , 16) ∷ []) (2 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 255 13 false ((0 , 5) ∷ (5 , 24) ∷ (24 , 22) ∷ (22 , 35) ∷ (35 , 15) ∷ (15 , 23) ∷ (23 , 13) ∷ (13 , 37) ∷ (37 , 6) ∷ (6 , 8) ∷ (8 , 39) ∷ (39 , 7) ∷ (7 , 20) ∷ (20 , 28) ∷ (28 , 30) ∷ (30 , 19) ∷ (19 , 12) ∷ (12 , 11) ∷ (11 , 21) ∷ (21 , 9) ∷ (9 , 26) ∷ (26 , 32) ∷ (32 , 1) ∷ (1 , 34) ∷ (34 , 38) ∷ (38 , 14) ∷ (14 , 2) ∷ (2 , 29) ∷ (29 , 3) ∷ (3 , 33) ∷ (33 , 16) ∷ []) (1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 true (4001 ∷ 4005 ∷ []) (floor 3 3 2 0 ∷ floor 5 1 1 1 ∷ []) false false false 1) (2000 , 2002) (valid (route tt false 122 5 false ((2002 , 4005) ∷ (4005 , 2006) ∷ (2006 , 4004) ∷ []) (3 ∷ 3 ∷ 2 ∷ [])))
-  ⊕ extend (link true 1 255 true (4001 ∷ 4005 ∷ []) (floor 3 3 2 0 ∷ floor 5 1 1 1 ∷ []) false false true 1) (2000 , 2003) (valid (route tt false 122 2 false ((2003 , 2006) ∷ []) (1 ∷ [])))
-  ≡ valid (route tt true 122 9 false ((2000 , 2002) ∷ (2002 , 4005) ∷ (4005 , 2006) ∷ (2006 , 4004) ∷ []) (1 ∷ 3 ∷ 3 ∷ 2 ∷ []))
+_ : extend (link true 3 255 false ([]) (floor 1 6 0 ∷ floor 5 6 1 ∷ floor 6 1 0 ∷ []) true true true 3) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 3 255 false ([]) (floor 1 6 0 ∷ floor 5 6 1 ∷ floor 6 1 0 ∷ []) false true true 3) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 255 3 false ((0 , 1) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 false (2006 ∷ []) (floor 1 6 2 3 ∷ floor 2 3 1 2 ∷ floor 3 4 1 1 ∷ []) false false true 1) (2000 , 4001) (valid (route tt false 255 2 false ((4001 , 2003) ∷ (2003 , 2005) ∷ (2005 , 2006) ∷ []) (3 ∷ 3 ∷ 2 ∷ [])))
-  ⊕ extend (link true 4 0 false (2006 ∷ []) (floor 1 6 2 3 ∷ floor 2 3 1 2 ∷ floor 3 4 1 1 ∷ []) false false true 1) (2000 , 2003) (valid (route tt false 255 2 false ((2003 , 2003) ∷ (2003 , 2005) ∷ (2005 , 2006) ∷ []) (3 ∷ 3 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 255 6 false ((2000 , 4001) ∷ (4001 , 2003) ∷ (2003 , 2005) ∷ (2005 , 2006) ∷ []) (1 ∷ 3 ∷ 3 ∷ 2 ∷ []))
+_ : extend (link true 2 127 false (2 ∷ 5 ∷ []) ([]) false false false 3) (0 , 2) (valid (route tt false 122 0 false ((2 , 1) ∷ (1 , 6) ∷ []) (1 ∷ 3 ∷ [])))
+  ⊕ extend (link true 1 255 true (2 ∷ 5 ∷ []) ([]) true true true 2) (0 , 1) (valid (route tt false 127 2 false ((1 , 4) ∷ (4 , 6) ∷ (6 , 2) ∷ (2 , 3) ∷ []) (2 ∷ 3 ∷ 1 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 127 2 false ((0 , 2) ∷ (2 , 1) ∷ (1 , 6) ∷ []) (3 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 255 false (2003 ∷ []) (floor 2 1 1 3 ∷ floor 5 5 1 0 ∷ floor 6 5 2 2 ∷ []) false true false 2) (2000 , 2003) (valid (route tt false 127 11 false ((2003 , 2001) ∷ (2001 , 2005) ∷ (2005 , 2000) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
-  ⊕ extend (link true 3 255 false (2003 ∷ []) (floor 2 1 1 3 ∷ floor 5 5 1 0 ∷ floor 6 5 2 2 ∷ []) false true false 2) (2000 , 2002) (valid (route tt false 127 11 false ((2002 , 2001) ∷ (2001 , 2005) ∷ (2005 , 2000) ∷ []) (1 ∷ 1 ∷ 1 ∷ [])))
+_ : extend (link true 2 0 false (1 ∷ 4 ∷ []) ([]) false true true 3) (0 , 3) (valid (route tt false 255 7 true ((3 , 1) ∷ (1 , 6) ∷ (6 , 5) ∷ []) (2 ∷ 1 ∷ 1 ∷ [])))
+  ⊕ extend (link true 2 0 false (1 ∷ 4 ∷ []) ([]) false true true 3) (0 , 4) (valid (route tt false 255 7 true ((4 , 167) ∷ (167 , 1) ∷ (1 , 6) ∷ (6 , 5) ∷ []) (2 ∷ 1 ∷ 1 ∷ 1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 4 255 true (4001 ∷ 2004 ∷ []) (floor 2 1 2 0 ∷ floor 3 2 2 1 ∷ floor 6 2 1 1 ∷ []) false false false 2) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 255 true (4001 ∷ 2004 ∷ []) (floor 2 1 2 0 ∷ floor 3 2 2 1 ∷ floor 6 2 1 1 ∷ []) false false false 2) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ invalid
+_ : extend (link true 3 0 true ([]) ([]) false false true 1) (0 , 6) (valid (route tt false 128 1 false ((6 , 3) ∷ (3 , 1) ∷ (1 , 4) ∷ (4 , 5) ∷ []) (3 ∷ 2 ∷ 3 ∷ 3 ∷ [])))
+  ⊕ extend (link true 3 0 true ([]) ([]) false false true 1) (0 , 5) (valid (route tt false 128 1 false ((5 , 178) ∷ (178 , 3) ∷ (3 , 1) ∷ (1 , 4) ∷ (4 , 5) ∷ []) (3 ∷ 1 ∷ 2 ∷ 3 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 128 4 false ((0 , 6) ∷ (6 , 3) ∷ (3 , 1) ∷ (1 , 4) ∷ (4 , 5) ∷ []) (1 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false ([]) (floor 2 1 1 1 ∷ floor 4 1 2 1 ∷ floor 6 0 2 0 ∷ []) false false true 1) (2000 , 4005) (valid (route tt false 127 7 true ((4005 , 4003) ∷ []) (3 ∷ [])))
-  ⊕ extend (link true 4 128 false ([]) (floor 2 1 1 1 ∷ floor 4 1 2 1 ∷ floor 6 0 2 0 ∷ []) false false true 1) (2000 , 4003) (valid (route tt false 127 7 true ((4003 , 4003) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt false 128 11 true ((2000 , 4003) ∷ (4003 , 4003) ∷ []) (1 ∷ 3 ∷ []))
+_ : extend (link true 2 128 false (1 ∷ 4 ∷ []) (floor 1 0 1 ∷ floor 1 1 2 ∷ floor 3 5 3 ∷ []) false true false 3) (0 , 2) (valid (route tt false 0 0 true ((2 , 1002) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 4 0 false (1 ∷ 4 ∷ []) (floor 1 0 1 ∷ floor 1 1 2 ∷ floor 3 5 3 ∷ []) false false true 3) (0 , 1) (valid (route tt false 255 11 false ((1 , 6) ∷ (6 , 2) ∷ (2 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 2 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 255 15 false ((0 , 1) ∷ (1 , 6) ∷ (6 , 2) ∷ (2 , 5) ∷ (5 , 4) ∷ []) (3 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false (2002 ∷ []) (floor 1 4 1 3 ∷ floor 3 5 1 0 ∷ floor 5 3 2 2 ∷ []) false true false 3) (2000 , 4004) (valid (route tt false 122 5 false ((4004 , 2002) ∷ (2002 , 2005) ∷ (2005 , 4000) ∷ []) (1 ∷ 3 ∷ 1 ∷ [])))
-  ⊕ extend (link true 4 128 false (2002 ∷ []) (floor 1 4 1 3 ∷ floor 3 5 1 0 ∷ floor 5 3 2 2 ∷ []) true true false 3) (2000 , 2002) (valid (route tt false 122 5 false ((2002 , 2002) ∷ (2002 , 2005) ∷ (2005 , 4000) ∷ []) (1 ∷ 3 ∷ 1 ∷ [])))
+_ : extend (link true 2 128 false (5 ∷ []) ([]) false true true 3) (0 , 4) (valid (route tt true 128 6 true ((4 , 6) ∷ (6 , 2) ∷ (2 , 3) ∷ (3 , 1003) ∷ []) (2 ∷ 3 ∷ 3 ∷ 0 ∷ [])))
+  ⊕ extend (link true 2 128 false (5 ∷ []) ([]) false true true 3) (0 , 5) (valid (route tt true 128 6 true ((5 , 6) ∷ (6 , 2) ∷ (2 , 3) ∷ (3 , 1003) ∷ []) (2 ∷ 3 ∷ 3 ∷ 0 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 0 false ([]) (floor 5 3 2 2 ∷ []) false false true 2) (2000 , 2002) (valid (route tt false 255 2 false ((2002 , 2000) ∷ (2000 , 4004) ∷ (4004 , 2005) ∷ (2005 , 4001) ∷ []) (2 ∷ 2 ∷ 3 ∷ 1 ∷ [])))
-  ⊕ extend (link true 3 0 false ([]) (floor 5 3 2 2 ∷ []) false false true 2) (2000 , 2006) (valid (route tt false 255 2 false ((2006 , 2000) ∷ (2000 , 4004) ∷ (4004 , 2005) ∷ (2005 , 4001) ∷ []) (2 ∷ 2 ∷ 3 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 122 false (4 ∷ []) (floor 4 0 0 ∷ floor 5 5 1 ∷ []) false true true 1) (0 , 3) (valid (route tt false 122 9 false ((3 , 1) ∷ []) (2 ∷ [])))
+  ⊕ extend (link true 1 0 true (4 ∷ []) (floor 4 0 0 ∷ floor 5 5 1 ∷ []) true true false 3) (0 , 6) (valid (route tt true 122 6 false ((6 , 3) ∷ (3 , 1) ∷ (1 , 5) ∷ []) (2 ∷ 3 ∷ 1 ∷ [])))
+  ≡ valid (route tt false 122 12 false ((0 , 3) ∷ (3 , 1) ∷ []) (1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 true ([]) (floor 3 2 1 2 ∷ floor 6 3 1 1 ∷ floor 6 4 1 1 ∷ []) false true true 3) (2000 , 4002) (valid (route tt false 0 0 true ((4002 , 5002) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 4 127 true ([]) (floor 3 2 1 2 ∷ floor 6 3 1 1 ∷ floor 6 4 1 1 ∷ []) true true true 3) (2000 , 4001) (valid (route tt false 0 0 true ((4001 , 5001) ∷ []) (0 ∷ [])))
+_ : extend (link true 3 122 false (1 ∷ []) (floor 1 0 2 ∷ floor 6 4 0 ∷ []) false true false 3) (0 , 6) (valid (route tt true 0 1 true ((6 , 0) ∷ (0 , 1) ∷ (1 , 2) ∷ (2 , 3) ∷ []) (3 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 255 false (1 ∷ []) (floor 1 0 2 ∷ floor 6 4 0 ∷ []) false false false 2) (0 , 4) (valid (route tt false 127 0 true ((4 , 0) ∷ []) (1 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 127 true ([]) (floor 4 5 1 2 ∷ floor 5 0 1 2 ∷ []) false true true 3) (2000 , 2001) (valid (route tt false 122 6 false ((2001 , 2039) ∷ (2039 , 2002) ∷ (2002 , 2027) ∷ (2027 , 4035) ∷ (4035 , 2015) ∷ (2015 , 4003) ∷ (4003 , 2008) ∷ (2008 , 2030) ∷ (2030 , 2013) ∷ (2013 , 4012) ∷ (4012 , 2038) ∷ (2038 , 4033) ∷ (4033 , 2007) ∷ (2007 , 2025) ∷ (2025 , 2017) ∷ (2017 , 2040) ∷ (2040 , 2026) ∷ (2026 , 2037) ∷ (2037 , 4011) ∷ (4011 , 4006) ∷ (4006 , 2031) ∷ (2031 , 2021) ∷ (2021 , 4036) ∷ (4036 , 2019) ∷ (2019 , 4004) ∷ (4004 , 4023) ∷ (4023 , 4022) ∷ (4022 , 4028) ∷ (4028 , 2020) ∷ (2020 , 2010) ∷ (2010 , 4018) ∷ []) (1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 1 127 true ([]) (floor 4 5 1 2 ∷ floor 5 0 1 2 ∷ []) true true true 3) (2000 , 4004) (valid (route tt false 122 6 false ((4004 , 2039) ∷ (2039 , 2002) ∷ (2002 , 2027) ∷ (2027 , 4035) ∷ (4035 , 2015) ∷ (2015 , 4003) ∷ (4003 , 2008) ∷ (2008 , 2030) ∷ (2030 , 2013) ∷ (2013 , 4012) ∷ (4012 , 2038) ∷ (2038 , 4033) ∷ (4033 , 2007) ∷ (2007 , 2025) ∷ (2025 , 2017) ∷ (2017 , 2040) ∷ (2040 , 2026) ∷ (2026 , 2037) ∷ (2037 , 4011) ∷ (4011 , 4006) ∷ (4006 , 2031) ∷ (2031 , 2021) ∷ (2021 , 4036) ∷ (4036 , 2019) ∷ (2019 , 4004) ∷ (4004 , 4023) ∷ (4023 , 4022) ∷ (4022 , 4028) ∷ (4028 , 2020) ∷ (2020 , 2010) ∷ (2010 , 4018) ∷ []) (1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 1 255 false (6 ∷ []) (floor 4 2 0 ∷ []) true true true 1) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 4 128 false (6 ∷ []) (floor 4 2 0 ∷ []) true false true 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 4 true ((0 , 4) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false (4004 ∷ 2005 ∷ []) (floor 1 6 1 0 ∷ floor 2 6 2 0 ∷ floor 5 3 2 1 ∷ []) false false true 2) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 122 false (4004 ∷ 2005 ∷ []) (floor 1 6 1 0 ∷ floor 2 6 2 0 ∷ floor 5 3 2 1 ∷ []) true false true 2) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 122 4 false ((2000 , 2003) ∷ []) (2 ∷ []))
+_ : extend (link true 4 0 false ([]) ([]) false false true 2) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 0 false ([]) ([]) true false true 2) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 4 false ((0 , 6) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (2004 ∷ []) (floor 1 3 2 2 ∷ floor 3 0 1 0 ∷ floor 5 6 2 3 ∷ []) true false true 1) (2000 , 4001) (valid (route tt false 122 5 false ((4001 , 2005) ∷ (2005 , 2003) ∷ (2003 , 2002) ∷ (2002 , 4004) ∷ []) (3 ∷ 2 ∷ 1 ∷ 2 ∷ [])))
-  ⊕ extend (link true 2 0 false (2004 ∷ []) (floor 1 3 2 2 ∷ floor 3 0 1 0 ∷ floor 5 6 2 3 ∷ []) true false true 1) (2000 , 2001) (valid (route tt false 122 5 false ((2001 , 2005) ∷ (2005 , 2003) ∷ (2003 , 2002) ∷ (2002 , 4004) ∷ []) (3 ∷ 2 ∷ 1 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 122 7 true ((2000 , 2001) ∷ (2001 , 2005) ∷ (2005 , 2003) ∷ (2003 , 2002) ∷ (2002 , 4004) ∷ []) (1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 3 0 false (5 ∷ 6 ∷ []) ([]) true true true 1) (0 , 3) (valid (route tt false 128 2 false ((3 , 6) ∷ (6 , 5) ∷ []) (3 ∷ 1 ∷ [])))
+  ⊕ extend (link true 3 0 false (5 ∷ 6 ∷ []) ([]) false true true 1) (0 , 2) (valid (route tt false 128 2 false ((2 , 6) ∷ (6 , 5) ∷ []) (3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 128 5 false ((0 , 2) ∷ (2 , 6) ∷ (6 , 5) ∷ []) (1 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 false ([]) ([]) false false true 2) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 0 false ([]) ([]) true false true 2) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 4 false ((2000 , 4004) ∷ []) (2 ∷ []))
+_ : extend (link true 1 128 true (1 ∷ []) (floor 4 0 3 ∷ []) true false true 3) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 1 128 true (1 ∷ []) (floor 4 0 3 ∷ []) false false true 3) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 128 1 false ((0 , 4) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false (4002 ∷ 4005 ∷ []) ([]) false true true 3) (2000 , 2005) (valid (route tt true 122 10 false ((2005 , 2004) ∷ (2004 , 4006) ∷ (4006 , 4001) ∷ (4001 , 2000) ∷ []) (1 ∷ 3 ∷ 2 ∷ 2 ∷ [])))
-  ⊕ extend (link true 1 128 false (4002 ∷ 4005 ∷ []) ([]) false false true 2) (2000 , 4001) (valid (route tt false 0 4 false ((4001 , 2002) ∷ (2002 , 3002) ∷ []) (3 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 128 5 false ((2000 , 4001) ∷ (4001 , 2002) ∷ (2002 , 3002) ∷ []) (2 ∷ 3 ∷ 0 ∷ []))
+_ : extend (link true 3 128 false ([]) (floor 6 0 1 ∷ []) false true true 2) (0 , 2) (valid (route tt false 0 0 true ((2 , 1002) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 4 0 true ([]) (floor 6 0 1 ∷ []) true false true 1) (0 , 5) (valid (route tt false 122 0 true ((5 , 4) ∷ (4 , 3) ∷ (3 , 1) ∷ []) (3 ∷ 2 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 122 4 true ((0 , 5) ∷ (5 , 4) ∷ (4 , 3) ∷ (3 , 1) ∷ []) (1 ∷ 3 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 false (4001 ∷ 4002 ∷ []) (floor 5 5 1 2 ∷ floor 6 1 1 3 ∷ []) true false true 2) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 127 false (4001 ∷ 4002 ∷ []) (floor 5 5 1 2 ∷ floor 6 1 1 3 ∷ []) false false true 2) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 4 true ((2000 , 2002) ∷ []) (2 ∷ []))
+_ : extend (link true 3 255 false (1 ∷ 5 ∷ []) (floor 2 4 0 ∷ floor 5 5 3 ∷ []) false false false 1) (0 , 2) (valid (route tt false 0 0 true ((2 , 1002) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 3 255 false (1 ∷ 5 ∷ []) (floor 2 4 0 ∷ floor 5 5 3 ∷ []) false false false 1) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 255 3 true ((0 , 2) ∷ (2 , 1002) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false ([]) (floor 4 3 2 3 ∷ floor 5 4 1 3 ∷ floor 6 5 2 1 ∷ []) true true true 3) (2000 , 4002) (valid (route tt true 122 9 false ((4002 , 4006) ∷ (4006 , 4000) ∷ (4000 , 2003) ∷ (2003 , 2004) ∷ []) (3 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 1 122 false ([]) (floor 4 3 2 3 ∷ floor 5 4 1 3 ∷ floor 6 5 2 1 ∷ []) true true true 3) (2000 , 2002) (valid (route tt true 122 9 false ((2002 , 4006) ∷ (4006 , 4000) ∷ (4000 , 2003) ∷ (2003 , 2004) ∷ []) (3 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
+_ : extend (link true 3 127 true (1 ∷ []) (floor 4 5 0 ∷ floor 6 6 3 ∷ []) false false false 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 3 127 true (1 ∷ []) (floor 4 5 0 ∷ floor 6 6 3 ∷ []) false false false 1) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 2 255 false (2005 ∷ 4006 ∷ []) (floor 6 5 2 0 ∷ []) false false true 3) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 255 false (2005 ∷ 4006 ∷ []) (floor 6 5 2 0 ∷ []) false false true 3) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 255 2 false ((2000 , 4003) ∷ []) (3 ∷ []))
+_ : extend (link true 4 122 true ([]) ([]) false false true 2) (0 , 6) (valid (route tt true 128 4 false ((6 , 2) ∷ (2 , 5) ∷ (5 , 0) ∷ (0 , 1) ∷ []) (3 ∷ 2 ∷ 2 ∷ 1 ∷ [])))
+  ⊕ extend (link true 3 255 false ([]) ([]) true true true 3) (0 , 4) (valid (route tt false 127 2 true ((4 , 18) ∷ (18 , 25) ∷ (25 , 31) ∷ (31 , 10) ∷ (10 , 33) ∷ (33 , 37) ∷ (37 , 28) ∷ (28 , 13) ∷ (13 , 34) ∷ (34 , 26) ∷ (26 , 24) ∷ (24 , 39) ∷ (39 , 1) ∷ (1 , 19) ∷ (19 , 23) ∷ (23 , 30) ∷ (30 , 20) ∷ (20 , 32) ∷ (32 , 11) ∷ (11 , 7) ∷ (7 , 6) ∷ (6 , 3) ∷ (3 , 35) ∷ (35 , 21) ∷ (21 , 9) ∷ (9 , 14) ∷ (14 , 29) ∷ (29 , 15) ∷ (15 , 2) ∷ (2 , 16) ∷ []) (1 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 3 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 128 true ([]) ([]) true false true 2) (2000 , 2006) (valid (route tt false 128 3 false ((2006 , 4000) ∷ (4000 , 2002) ∷ (2002 , 4001) ∷ []) (3 ∷ 3 ∷ 2 ∷ [])))
-  ⊕ extend (link true 1 0 false ([]) ([]) false false true 1) (2000 , 2002) (valid (route tt false 122 7 false ((2002 , 4005) ∷ (4005 , 4001) ∷ (4001 , 2000) ∷ (2000 , 4003) ∷ []) (2 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 1 122 false (4 ∷ []) (floor 1 1 1 ∷ floor 4 1 0 ∷ floor 6 0 2 ∷ []) false false true 1) (0 , 5) (valid (route tt true 128 0 false ((5 , 1) ∷ []) (2 ∷ [])))
+  ⊕ extend (link true 1 122 false (4 ∷ []) (floor 1 1 1 ∷ floor 4 1 0 ∷ floor 6 0 2 ∷ []) false false true 1) (0 , 6) (valid (route tt true 128 0 false ((6 , 1) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt true 128 1 false ((0 , 5) ∷ (5 , 1) ∷ []) (1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false ([]) (floor 1 4 1 1 ∷ floor 6 3 1 2 ∷ []) false true false 1) (2000 , 4003) (valid (route tt false 0 0 true ((4003 , 5003) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 2 127 false ([]) (floor 1 4 1 1 ∷ floor 6 3 1 2 ∷ []) false false true 3) (2000 , 2004) (valid (route tt false 0 4 false ((2004 , 4003) ∷ (4003 , 2005) ∷ (2005 , 4006) ∷ (4006 , 5006) ∷ []) (2 ∷ 1 ∷ 2 ∷ 0 ∷ [])))
-  ≡ valid (route tt false 127 6 false ((2000 , 2004) ∷ (2004 , 4003) ∷ (4003 , 2005) ∷ (2005 , 4006) ∷ (4006 , 5006) ∷ []) (3 ∷ 2 ∷ 1 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 4 128 true ([]) (floor 6 3 2 ∷ []) false true true 3) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 128 true ([]) (floor 6 3 2 ∷ []) false true true 3) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 128 4 false ((0 , 2) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 false ([]) (floor 1 3 1 1 ∷ floor 4 1 1 0 ∷ floor 5 3 2 2 ∷ []) false true false 3) (2000 , 2001) (valid (route tt false 127 6 false ((2001 , 2002) ∷ (2002 , 2004) ∷ (2004 , 4003) ∷ (4003 , 4006) ∷ []) (2 ∷ 1 ∷ 2 ∷ 2 ∷ [])))
-  ⊕ extend (link true 4 127 false ([]) (floor 1 3 1 1 ∷ floor 4 1 1 0 ∷ floor 5 3 2 2 ∷ []) true true false 3) (2000 , 4003) (valid (route tt false 127 6 false ((4003 , 2002) ∷ (2002 , 2004) ∷ (2004 , 4003) ∷ (4003 , 4006) ∷ []) (2 ∷ 1 ∷ 2 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 127 10 false ((2000 , 2001) ∷ (2001 , 2002) ∷ (2002 , 2004) ∷ (2004 , 4003) ∷ (4003 , 4006) ∷ []) (3 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 1 122 true (1 ∷ 3 ∷ []) (floor 3 3 1 ∷ floor 4 1 3 ∷ floor 4 4 2 ∷ []) false false true 3) (0 , 4) (valid (route tt false 127 9 false ((4 , 5) ∷ (5 , 3) ∷ []) (1 ∷ 2 ∷ [])))
+  ⊕ extend (link true 1 122 true (1 ∷ 3 ∷ []) (floor 3 3 1 ∷ floor 4 1 3 ∷ floor 4 4 2 ∷ []) false false true 3) (0 , 2) (valid (route tt false 127 9 false ((2 , 5) ∷ (5 , 3) ∷ []) (1 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 127 10 false ((0 , 2) ∷ (2 , 5) ∷ (5 , 3) ∷ []) (3 ∷ 1 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 128 false (2002 ∷ []) (floor 4 3 1 0 ∷ []) false false true 1) (2000 , 2001) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 128 false (2002 ∷ []) (floor 4 3 1 0 ∷ []) true false true 1) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 128 2 false ((2000 , 2001) ∷ []) (1 ∷ []))
+_ : extend (link true 3 255 true (6 ∷ []) (floor 6 4 1 ∷ []) false false false 1) (0 , 6) (valid (route tt false 255 11 false ((6 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 2 ∷ 3 ∷ 0 ∷ [])))
+  ⊕ extend (link true 3 255 true (6 ∷ []) (floor 6 4 1 ∷ []) false false false 1) (0 , 4) (valid (route tt false 255 11 false ((4 , 182) ∷ (182 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 1 ∷ 2 ∷ 3 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 255 14 false ((0 , 6) ∷ (6 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 1001) ∷ []) (1 ∷ 2 ∷ 2 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 false ([]) (floor 3 1 1 1 ∷ floor 5 0 2 0 ∷ floor 6 6 2 2 ∷ []) false false true 1) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 3 127 false ([]) (floor 3 1 1 1 ∷ floor 5 0 2 0 ∷ floor 6 6 2 2 ∷ []) true false true 1) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 3 false ((2000 , 4003) ∷ []) (1 ∷ []))
+_ : extend (link true 4 255 false (2 ∷ []) (floor 1 4 2 ∷ floor 4 4 0 ∷ floor 6 5 1 ∷ []) false false true 2) (0 , 5) (valid (route tt true 0 1 false ((5 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ (1 , 3) ∷ []) (2 ∷ 2 ∷ 2 ∷ 1 ∷ [])))
+  ⊕ extend (link true 1 127 false (2 ∷ []) (floor 1 4 2 ∷ floor 4 4 0 ∷ floor 6 5 1 ∷ []) true false true 1) (0 , 4) (valid (route tt false 127 2 true ((4 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 127 3 true ((0 , 4) ∷ (4 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false (2003 ∷ []) (floor 1 5 2 0 ∷ floor 2 4 2 0 ∷ floor 5 1 1 0 ∷ []) false false true 1) (2000 , 4004) (valid (route tt false 0 0 true ((4004 , 5004) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 4 255 false (2003 ∷ []) (floor 1 5 2 0 ∷ floor 2 4 2 0 ∷ floor 5 1 1 0 ∷ []) true false true 1) (2000 , 2004) (valid (route tt false 0 0 true ((2004 , 3004) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 255 4 true ((2000 , 2004) ∷ (2004 , 3004) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 4 122 false (1 ∷ 5 ∷ []) (floor 3 5 2 ∷ []) true true false 3) (0 , 4) (valid (route tt true 122 3 false ((4 , 33) ∷ (33 , 10) ∷ (10 , 11) ∷ (11 , 5) ∷ (5 , 16) ∷ (16 , 15) ∷ (15 , 12) ∷ (12 , 31) ∷ (31 , 25) ∷ (25 , 18) ∷ (18 , 24) ∷ (24 , 19) ∷ (19 , 35) ∷ (35 , 37) ∷ (37 , 22) ∷ (22 , 27) ∷ (27 , 2) ∷ (2 , 3) ∷ (3 , 9) ∷ (9 , 17) ∷ (17 , 21) ∷ (21 , 34) ∷ (34 , 8) ∷ (8 , 14) ∷ (14 , 13) ∷ (13 , 7) ∷ (7 , 28) ∷ (28 , 6) ∷ (6 , 39) ∷ (39 , 30) ∷ []) (3 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 122 false (1 ∷ 5 ∷ []) (floor 3 5 2 ∷ []) true true false 3) (0 , 6) (valid (route tt true 122 3 false ((6 , 33) ∷ (33 , 10) ∷ (10 , 11) ∷ (11 , 5) ∷ (5 , 16) ∷ (16 , 15) ∷ (15 , 12) ∷ (12 , 31) ∷ (31 , 25) ∷ (25 , 18) ∷ (18 , 24) ∷ (24 , 19) ∷ (19 , 35) ∷ (35 , 37) ∷ (37 , 22) ∷ (22 , 27) ∷ (27 , 2) ∷ (2 , 3) ∷ (3 , 9) ∷ (9 , 17) ∷ (17 , 21) ∷ (21 , 34) ∷ (34 , 8) ∷ (8 , 14) ∷ (14 , 13) ∷ (13 , 7) ∷ (7 , 28) ∷ (28 , 6) ∷ (6 , 39) ∷ (39 , 30) ∷ []) (3 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt true 122 7 true ((0 , 4) ∷ (4 , 33) ∷ (33 , 10) ∷ (10 , 11) ∷ (11 , 5) ∷ (5 , 16) ∷ (16 , 15) ∷ (15 , 12) ∷ (12 , 31) ∷ (31 , 25) ∷ (25 , 18) ∷ (18 , 24) ∷ (24 , 19) ∷ (19 , 35) ∷ (35 , 37) ∷ (37 , 22) ∷ (22 , 27) ∷ (27 , 2) ∷ (2 , 3) ∷ (3 , 9) ∷ (9 , 17) ∷ (17 , 21) ∷ (21 , 34) ∷ (34 , 8) ∷ (8 , 14) ∷ (14 , 13) ∷ (13 , 7) ∷ (7 , 28) ∷ (28 , 6) ∷ (6 , 39) ∷ (39 , 30) ∷ []) (3 ∷ 3 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 false ([]) (floor 3 0 2 3 ∷ []) true false true 3) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 3 127 false ([]) (floor 3 0 2 3 ∷ []) false false true 3) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 3 false ((2000 , 2003) ∷ []) (3 ∷ []))
+_ : extend (link true 1 255 false (2 ∷ []) ([]) false true true 1) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 1 255 false (2 ∷ []) ([]) true true true 1) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 255 1 false ((0 , 3) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 true ([]) ([]) true false true 3) (2000 , 4004) (valid (route tt false 255 7 true ((4004 , 2002) ∷ (2002 , 3002) ∷ []) (2 ∷ 0 ∷ [])))
-  ⊕ extend (link true 3 127 true ([]) ([]) true false true 3) (2000 , 2004) (valid (route tt false 255 7 true ((2004 , 2002) ∷ (2002 , 3002) ∷ []) (2 ∷ 0 ∷ [])))
-  ≡ valid (route tt true 255 10 true ((2000 , 2004) ∷ (2004 , 2002) ∷ (2002 , 3002) ∷ []) (3 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 1 128 false ([]) (floor 1 0 0 ∷ floor 1 5 2 ∷ floor 2 2 0 ∷ []) false false true 3) (0 , 2) (valid (route tt false 0 0 true ((2 , 1002) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 1 128 false ([]) (floor 1 0 0 ∷ floor 1 5 2 ∷ floor 2 2 0 ∷ []) true false true 3) (0 , 4) (valid (route tt false 0 0 true ((4 , 1004) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt false 128 1 true ((0 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false (2003 ∷ 2004 ∷ []) ([]) false false true 3) (2000 , 4006) (valid (route tt true 255 8 false ((4006 , 4004) ∷ (4004 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2002) ∷ []) (3 ∷ 3 ∷ 1 ∷ 1 ∷ [])))
-  ⊕ extend (link true 4 122 false (2003 ∷ 2004 ∷ []) ([]) false false true 3) (2000 , 2006) (valid (route tt true 255 8 false ((2006 , 4004) ∷ (4004 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2002) ∷ []) (3 ∷ 3 ∷ 1 ∷ 1 ∷ [])))
-  ≡ valid (route tt true 255 12 false ((2000 , 2006) ∷ (2006 , 4004) ∷ (4004 , 2003) ∷ (2003 , 4001) ∷ (4001 , 2002) ∷ []) (3 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 3 0 false (2 ∷ 4 ∷ []) ([]) false false true 3) (0 , 5) (valid (route tt false 122 0 true ((5 , 3) ∷ (3 , 1) ∷ (1 , 1001) ∷ []) (1 ∷ 1 ∷ 0 ∷ [])))
+  ⊕ extend (link true 3 0 false (2 ∷ 4 ∷ []) ([]) false false true 3) (0 , 1) (valid (route tt false 122 0 true ((1 , 3) ∷ (3 , 1) ∷ (1 , 1001) ∷ []) (1 ∷ 1 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 122 3 true ((0 , 1) ∷ (1 , 3) ∷ (3 , 1) ∷ (1 , 1001) ∷ []) (3 ∷ 1 ∷ 1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false ([]) (floor 4 0 1 0 ∷ floor 5 6 1 0 ∷ []) true false true 3) (2000 , 4001) (valid (route tt false 122 6 false ((4001 , 4006) ∷ (4006 , 4003) ∷ (4003 , 4000) ∷ (4000 , 4002) ∷ []) (2 ∷ 2 ∷ 1 ∷ 3 ∷ [])))
-  ⊕ extend (link true 2 127 false ([]) (floor 4 0 1 0 ∷ floor 5 6 1 0 ∷ []) false false true 2) (2000 , 2001) (valid (route tt false 0 0 true ((2001 , 3001) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 127 2 true ((2000 , 2001) ∷ (2001 , 3001) ∷ []) (2 ∷ 0 ∷ []))
+_ : extend (link true 2 122 false (1 ∷ []) (floor 5 1 1 ∷ []) true true true 1) (0 , 1) (valid (route tt false 0 10 true ((1 , 6) ∷ (6 , 2) ∷ (2 , 5) ∷ []) (3 ∷ 3 ∷ 3 ∷ [])))
+  ⊕ extend (link true 2 122 false (1 ∷ []) (floor 5 1 1 ∷ []) true true true 1) (0 , 5) (valid (route tt false 0 10 true ((5 , 6) ∷ (6 , 2) ∷ (2 , 5) ∷ []) (3 ∷ 3 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 128 false (4003 ∷ 4005 ∷ []) (floor 2 4 2 2 ∷ floor 3 1 1 0 ∷ floor 6 6 1 0 ∷ []) false false false 2) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 4005) ∷ []) (2 ∷ [])))
-  ⊕ extend (link true 3 0 true (4003 ∷ 4005 ∷ []) (floor 2 4 2 2 ∷ floor 3 1 1 0 ∷ floor 6 6 1 0 ∷ []) false true false 1) (2000 , 4004) (valid (route tt false 0 4 true ((4004 , 2003) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 128 2 true ((2000 , 2003) ∷ (2003 , 4005) ∷ []) (2 ∷ 2 ∷ []))
+_ : extend (link true 2 127 false (5 ∷ []) (floor 2 3 0 ∷ floor 4 3 1 ∷ []) true false true 3) (0 , 2) (valid (route tt false 255 8 true ((2 , 4) ∷ []) (2 ∷ [])))
+  ⊕ extend (link true 2 127 false (5 ∷ []) (floor 2 3 0 ∷ floor 4 3 1 ∷ []) true false true 3) (0 , 6) (valid (route tt false 255 8 true ((6 , 4) ∷ []) (2 ∷ [])))
+  ≡ valid (route tt false 255 10 true ((0 , 2) ∷ (2 , 4) ∷ []) (3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 true (4004 ∷ []) ([]) true false true 2) (2000 , 2002) (valid (route tt true 255 1 true ((2002 , 4006) ∷ (4006 , 2000) ∷ (2000 , 4001) ∷ (4001 , 5001) ∷ []) (1 ∷ 3 ∷ 2 ∷ 0 ∷ [])))
-  ⊕ extend (link true 4 122 false (4004 ∷ []) ([]) true true true 1) (2000 , 4006) (valid (route tt true 127 11 true ((4006 , 2004) ∷ []) (1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 128 false ([]) (floor 2 0 3 ∷ floor 4 4 2 ∷ []) false false true 2) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 3 128 false ([]) (floor 2 0 3 ∷ floor 4 4 2 ∷ []) false false true 2) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 3 false ((0 , 1) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 255 true ([]) (floor 6 1 2 0 ∷ []) false false true 1) (2000 , 4003) (valid (route tt false 122 11 true ((4003 , 4000) ∷ (4000 , 2005) ∷ (2005 , 2002) ∷ (2002 , 2001) ∷ []) (1 ∷ 2 ∷ 3 ∷ 1 ∷ [])))
-  ⊕ extend (link true 2 255 true ([]) (floor 6 1 2 0 ∷ []) false false true 1) (2000 , 2005) (valid (route tt false 122 11 true ((2005 , 2128) ∷ (2128 , 4000) ∷ (4000 , 2005) ∷ (2005 , 2002) ∷ (2002 , 2001) ∷ []) (1 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 2 127 true (5 ∷ 6 ∷ []) (floor 2 0 2 ∷ floor 4 2 2 ∷ []) false true false 1) (0 , 2) (valid (route tt false 122 11 true ((2 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 0 ∷ [])))
+  ⊕ extend (link true 4 0 false (5 ∷ 6 ∷ []) (floor 2 0 2 ∷ floor 4 2 2 ∷ []) true false true 1) (0 , 5) (valid (route tt false 127 5 true ((5 , 4) ∷ []) (3 ∷ [])))
+  ≡ valid (route tt true 127 9 true ((0 , 5) ∷ (5 , 4) ∷ []) (1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 255 false (4001 ∷ []) (floor 2 1 1 1 ∷ []) true true true 3) (2000 , 2006) (valid (route tt false 0 0 true ((2006 , 3006) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 4 127 false (4001 ∷ []) (floor 2 1 1 1 ∷ []) true true true 1) (2000 , 4005) (valid (route tt true 122 2 true ((4005 , 4006) ∷ (4006 , 4000) ∷ (4000 , 4002) ∷ []) (3 ∷ 1 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 1 127 false (3 ∷ 4 ∷ []) (floor 3 5 1 ∷ floor 6 2 3 ∷ []) false false true 2) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 1 127 false (3 ∷ 4 ∷ []) (floor 3 5 1 ∷ floor 6 2 3 ∷ []) true false true 2) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 127 1 true ((0 , 2) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 127 true (4002 ∷ []) (floor 1 6 2 0 ∷ []) true false true 2) (2000 , 4002) (valid (route tt false 128 1 false ((4002 , 2005) ∷ (2005 , 4000) ∷ (4000 , 4003) ∷ (4003 , 4001) ∷ []) (3 ∷ 2 ∷ 1 ∷ 1 ∷ [])))
-  ⊕ extend (link true 2 127 true (4002 ∷ []) (floor 1 6 2 0 ∷ []) true false true 2) (2000 , 4005) (valid (route tt false 128 1 false ((4005 , 2005) ∷ (2005 , 4000) ∷ (4000 , 4003) ∷ (4003 , 4001) ∷ []) (3 ∷ 2 ∷ 1 ∷ 1 ∷ [])))
+_ : extend (link true 1 127 false ([]) (floor 2 5 3 ∷ floor 4 5 1 ∷ floor 5 1 0 ∷ []) false true false 1) (0 , 3) (valid (route tt false 122 4 true ((3 , 0) ∷ (0 , 1) ∷ (1 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 3 ∷ 2 ∷ 2 ∷ [])))
+  ⊕ extend (link true 1 127 false ([]) (floor 2 5 3 ∷ floor 4 5 1 ∷ floor 5 1 0 ∷ []) false true false 1) (0 , 5) (valid (route tt false 122 4 true ((5 , 0) ∷ (0 , 1) ∷ (1 , 5) ∷ (5 , 4) ∷ []) (2 ∷ 3 ∷ 2 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 1 122 false (4006 ∷ []) (floor 1 6 2 2 ∷ floor 3 6 2 1 ∷ floor 5 4 1 2 ∷ []) false true true 2) (2000 , 4002) (valid (route tt true 122 4 false ((4002 , 4000) ∷ (4000 , 2005) ∷ (2005 , 4004) ∷ []) (1 ∷ 2 ∷ 3 ∷ [])))
-  ⊕ extend (link true 1 0 true (4006 ∷ []) (floor 1 6 2 2 ∷ floor 3 6 2 1 ∷ floor 5 4 1 2 ∷ []) false false false 3) (2000 , 2002) (valid (route tt true 128 2 true ((2002 , 4003) ∷ (4003 , 2006) ∷ (2006 , 4004) ∷ []) (2 ∷ 1 ∷ 1 ∷ [])))
+_ : extend (link true 3 0 true (6 ∷ []) (floor 1 2 3 ∷ floor 1 5 2 ∷ floor 5 3 1 ∷ []) true true true 3) (0 , 2) (valid (route tt true 0 4 true ((2 , 4) ∷ []) (1 ∷ [])))
+  ⊕ extend (link true 3 0 true (6 ∷ []) (floor 1 2 3 ∷ floor 1 5 2 ∷ floor 5 3 1 ∷ []) true true true 3) (0 , 5) (valid (route tt true 0 4 true ((5 , 4) ∷ []) (1 ∷ [])))
   ≡ invalid
+_ = refl
+
+_ : extend (link true 1 255 false (6 ∷ []) (floor 5 3 2 ∷ floor 6 5 2 ∷ []) true false true 2) (0 , 5) (valid (route tt false 128 6 false ((5 , 1) ∷ (1 , 3) ∷ []) (2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 3 128 false (6 ∷ []) (floor 5 3 2 ∷ floor 6 5 2 ∷ []) false true false 2) (0 , 3) (valid (route tt false 255 7 true ((3 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 255 7 true ((0 , 5) ∷ (5 , 1) ∷ (1 , 3) ∷ []) (2 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 255 false (4004 ∷ []) (floor 1 3 2 0 ∷ floor 4 5 1 2 ∷ []) false false true 2) (2000 , 4005) (valid (route tt false 0 0 true ((4005 , 5005) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 3 255 false (4004 ∷ []) (floor 1 3 2 0 ∷ floor 4 5 1 2 ∷ []) false false true 2) (2000 , 4004) (valid (route tt false 0 0 true ((4004 , 5004) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 255 3 true ((2000 , 4005) ∷ (4005 , 5005) ∷ []) (2 ∷ 0 ∷ []))
+_ : extend (link true 2 127 false (6 ∷ []) (floor 3 5 0 ∷ []) true true true 3) (0 , 5) (valid (route tt false 255 6 true ((5 , 3) ∷ (3 , 6) ∷ []) (1 ∷ 3 ∷ [])))
+  ⊕ extend (link true 2 122 true (6 ∷ []) (floor 3 5 0 ∷ []) false false true 1) (0 , 4) (valid (route tt false 255 9 true ((4 , 6) ∷ (6 , 1006) ∷ []) (3 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 255 11 true ((0 , 4) ∷ (4 , 6) ∷ (6 , 1006) ∷ []) (1 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 2 0 false (4003 ∷ []) (floor 2 3 2 1 ∷ floor 6 0 2 0 ∷ []) true true true 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 122 false (4003 ∷ []) (floor 2 3 2 1 ∷ floor 6 0 2 0 ∷ []) true false true 3) (2000 , 2001) (valid (route tt false 128 9 false ((2001 , 2005) ∷ (2005 , 2003) ∷ (2003 , 4004) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
-  ≡ valid (route tt false 0 2 true ((2000 , 2003) ∷ []) (1 ∷ []))
+_ : extend (link true 2 0 false (1 ∷ []) (floor 2 4 1 ∷ []) false true true 3) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 0 false (1 ∷ []) (floor 2 4 1 ∷ []) false true true 3) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 2 false ((0 , 3) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false ([]) (floor 2 6 1 2 ∷ floor 3 1 1 0 ∷ floor 6 1 2 2 ∷ []) false false false 3) (2000 , 4005) (valid (route tt false 0 0 true ((4005 , 5005) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 1 0 false ([]) (floor 2 6 1 2 ∷ floor 3 1 1 0 ∷ floor 6 1 2 2 ∷ []) false false false 3) (2000 , 2002) (valid (route tt false 0 0 true ((2002 , 3002) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 0 1 true ((2000 , 2002) ∷ (2002 , 3002) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 1 128 false (3 ∷ 5 ∷ []) (floor 1 5 1 ∷ floor 2 6 1 ∷ []) true false false 3) (0 , 3) (valid (route tt false 128 9 true ((3 , 30) ∷ (30 , 27) ∷ (27 , 23) ∷ (23 , 8) ∷ (8 , 1) ∷ (1 , 20) ∷ (20 , 39) ∷ (39 , 2) ∷ (2 , 24) ∷ (24 , 22) ∷ (22 , 6) ∷ (6 , 15) ∷ (15 , 33) ∷ (33 , 17) ∷ (17 , 16) ∷ (16 , 11) ∷ (11 , 35) ∷ (35 , 40) ∷ (40 , 25) ∷ (25 , 28) ∷ (28 , 31) ∷ (31 , 34) ∷ (34 , 21) ∷ (21 , 12) ∷ (12 , 32) ∷ (32 , 5) ∷ (5 , 29) ∷ (29 , 9) ∷ (9 , 7) ∷ (7 , 4) ∷ (4 , 13) ∷ (13 , 26) ∷ []) (3 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ [])))
+  ⊕ extend (link true 1 128 false (3 ∷ 5 ∷ []) (floor 1 5 1 ∷ floor 2 6 1 ∷ []) false false false 3) (0 , 5) (valid (route tt false 128 9 true ((5 , 30) ∷ (30 , 27) ∷ (27 , 23) ∷ (23 , 8) ∷ (8 , 1) ∷ (1 , 20) ∷ (20 , 39) ∷ (39 , 2) ∷ (2 , 24) ∷ (24 , 22) ∷ (22 , 6) ∷ (6 , 15) ∷ (15 , 33) ∷ (33 , 17) ∷ (17 , 16) ∷ (16 , 11) ∷ (11 , 35) ∷ (35 , 40) ∷ (40 , 25) ∷ (25 , 28) ∷ (28 , 31) ∷ (31 , 34) ∷ (34 , 21) ∷ (21 , 12) ∷ (12 , 32) ∷ (32 , 5) ∷ (5 , 29) ∷ (29 , 9) ∷ (9 , 7) ∷ (7 , 4) ∷ (4 , 13) ∷ (13 , 26) ∷ []) (3 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 255 true ([]) (floor 1 3 2 2 ∷ floor 4 0 2 1 ∷ floor 4 5 2 1 ∷ []) false false true 2) (2000 , 2002) (valid (route tt true 255 11 true ((2002 , 4001) ∷ (4001 , 5001) ∷ []) (2 ∷ 0 ∷ [])))
-  ⊕ extend (link true 3 255 true ([]) (floor 1 3 2 2 ∷ floor 4 0 2 1 ∷ floor 4 5 2 1 ∷ []) false false true 2) (2000 , 2003) (valid (route tt true 255 11 true ((2003 , 2114) ∷ (2114 , 4001) ∷ (4001 , 5001) ∷ []) (2 ∷ 1 ∷ 0 ∷ [])))
-  ≡ valid (route tt true 255 14 true ((2000 , 2002) ∷ (2002 , 4001) ∷ (4001 , 5001) ∷ []) (2 ∷ 2 ∷ 0 ∷ []))
+_ : extend (link true 1 0 true (2 ∷ []) (floor 3 6 0 ∷ []) false true true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 128 false (2 ∷ []) (floor 3 6 0 ∷ []) true false true 1) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 4 true ((0 , 3) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false (2003 ∷ 4006 ∷ []) ([]) false true true 2) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 0 false (2003 ∷ 4006 ∷ []) ([]) false true true 2) (2000 , 4002) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 0 1 false ((2000 , 2002) ∷ []) (2 ∷ []))
+_ : extend (link true 2 0 false (6 ∷ []) (floor 4 3 0 ∷ floor 4 6 1 ∷ []) true false true 3) (0 , 6) (valid (route tt false 255 2 false ((6 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 0 ∷ [])))
+  ⊕ extend (link true 1 128 true (6 ∷ []) (floor 4 3 0 ∷ floor 4 6 1 ∷ []) true false true 2) (0 , 4) (valid (route tt false 255 4 true ((4 , 2) ∷ []) (3 ∷ [])))
+  ≡ valid (route tt true 255 4 true ((0 , 6) ∷ (6 , 4) ∷ (4 , 1004) ∷ []) (3 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 true (2002 ∷ 4005 ∷ []) (floor 1 2 2 2 ∷ floor 2 5 2 0 ∷ []) false false true 1) (2000 , 4004) (valid (route tt false 0 0 true ((4004 , 5004) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 1 0 true (2002 ∷ 4005 ∷ []) (floor 1 2 2 2 ∷ floor 2 5 2 0 ∷ []) true false true 1) (2000 , 4002) (valid (route tt false 0 0 true ((4002 , 5002) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt true 0 1 true ((2000 , 4002) ∷ (4002 , 5002) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 4 122 true (2 ∷ 3 ∷ []) (floor 6 3 0 ∷ floor 6 4 3 ∷ floor 6 5 2 ∷ []) false false true 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 128 false (2 ∷ 3 ∷ []) (floor 6 3 0 ∷ floor 6 4 3 ∷ floor 6 5 2 ∷ []) false false true 3) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt true 122 4 false ((0 , 6) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 4 128 false (2005 ∷ []) (floor 1 6 1 2 ∷ floor 2 2 2 2 ∷ floor 3 5 1 3 ∷ []) false false false 3) (2000 , 4004) (valid (route tt false 0 0 true ((4004 , 5004) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 4 128 false (2005 ∷ []) (floor 1 6 1 2 ∷ floor 2 2 2 2 ∷ floor 3 5 1 3 ∷ []) false false false 3) (2000 , 4006) (valid (route tt false 0 0 true ((4006 , 5006) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 128 4 true ((2000 , 4004) ∷ (4004 , 5004) ∷ []) (3 ∷ 0 ∷ []))
+_ : extend (link true 2 127 false (2 ∷ []) (floor 2 5 2 ∷ floor 4 4 2 ∷ []) false false true 2) (0 , 4) (valid (route tt false 0 6 true ((4 , 5) ∷ (5 , 0) ∷ (0 , 3) ∷ []) (1 ∷ 3 ∷ 2 ∷ [])))
+  ⊕ extend (link true 2 127 false (2 ∷ []) (floor 2 5 2 ∷ floor 4 4 2 ∷ []) true false true 2) (0 , 1) (valid (route tt false 0 6 true ((1 , 5) ∷ (5 , 0) ∷ (0 , 3) ∷ []) (1 ∷ 3 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 3 0 false (2002 ∷ 2006 ∷ []) (floor 4 3 1 2 ∷ floor 5 2 2 1 ∷ []) false false true 1) (2000 , 2002) (valid (route tt true 0 11 false ((2002 , 4004) ∷ (4004 , 2001) ∷ (2001 , 4005) ∷ []) (2 ∷ 2 ∷ 2 ∷ [])))
-  ⊕ extend (link true 3 0 false (2002 ∷ 2006 ∷ []) (floor 4 3 1 2 ∷ floor 5 2 2 1 ∷ []) true false true 1) (2000 , 2003) (valid (route tt true 0 11 false ((2003 , 4004) ∷ (4004 , 2001) ∷ (2001 , 4005) ∷ []) (2 ∷ 2 ∷ 2 ∷ [])))
-  ≡ valid (route tt true 0 14 false ((2000 , 2002) ∷ (2002 , 4004) ∷ (4004 , 2001) ∷ (2001 , 4005) ∷ []) (1 ∷ 2 ∷ 2 ∷ 2 ∷ []))
+_ : extend (link true 2 128 true (6 ∷ []) (floor 1 2 1 ∷ []) false false true 1) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 0 false (6 ∷ []) (floor 1 2 1 ∷ []) false false true 2) (0 , 3) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 4 false ((0 , 3) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 2 122 false ([]) (floor 1 6 2 3 ∷ floor 5 5 2 0 ∷ []) false true false 2) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 128 true ([]) (floor 1 6 2 3 ∷ floor 5 5 2 0 ∷ []) true true true 3) (2000 , 2001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 128 2 true ((2000 , 2001) ∷ []) (3 ∷ []))
+_ : extend (link true 2 0 false (1 ∷ 3 ∷ []) (floor 2 5 2 ∷ floor 4 4 3 ∷ []) true true true 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 0 false (1 ∷ 3 ∷ []) (floor 2 5 2 ∷ floor 4 4 3 ∷ []) false true true 1) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 0 2 true ((0 , 6) ∷ []) (1 ∷ []))
 _ = refl
 
-_ : extend (link true 3 0 false ([]) (floor 2 4 2 3 ∷ []) false false true 1) (2000 , 2003) (valid (route tt false 0 7 true ((2003 , 2005) ∷ []) (3 ∷ [])))
-  ⊕ extend (link true 3 0 false ([]) (floor 2 4 2 3 ∷ []) false false true 1) (2000 , 2005) (valid (route tt false 0 7 true ((2005 , 2175) ∷ (2175 , 2005) ∷ []) (3 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 0 10 true ((2000 , 2003) ∷ (2003 , 2005) ∷ []) (1 ∷ 3 ∷ []))
+_ : extend (link true 4 0 false (3 ∷ 5 ∷ []) ([]) false false true 1) (0 , 2) (valid (route tt false 255 4 false ((2 , 0) ∷ (0 , 4) ∷ (4 , 1) ∷ (1 , 6) ∷ []) (3 ∷ 1 ∷ 2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 0 false (3 ∷ 5 ∷ []) ([]) false false true 1) (0 , 5) (valid (route tt false 255 4 false ((5 , 155) ∷ (155 , 0) ∷ (0 , 4) ∷ (4 , 1) ∷ (1 , 6) ∷ []) (3 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 127 false (2002 ∷ []) (floor 1 4 1 3 ∷ floor 4 4 1 3 ∷ floor 5 6 2 3 ∷ []) false true false 3) (2000 , 4005) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 127 false (2002 ∷ []) (floor 1 4 1 3 ∷ floor 4 4 1 3 ∷ floor 5 6 2 3 ∷ []) false true false 3) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
+_ : extend (link true 4 127 true (2 ∷ []) ([]) false false false 1) (0 , 1) (valid (route tt false 0 9 false ((1 , 6) ∷ (6 , 3) ∷ (3 , 0) ∷ (0 , 2) ∷ []) (3 ∷ 1 ∷ 1 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 127 true (2 ∷ []) ([]) false false false 1) (0 , 2) (valid (route tt false 0 9 false ((2 , 110) ∷ (110 , 6) ∷ (6 , 3) ∷ (3 , 0) ∷ (0 , 2) ∷ []) (3 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 122 false (2001 ∷ []) (floor 4 1 2 3 ∷ []) true true true 1) (2000 , 4004) (valid (route tt false 127 9 false ((4004 , 4001) ∷ (4001 , 4005) ∷ (4005 , 4003) ∷ (4003 , 2006) ∷ []) (2 ∷ 3 ∷ 2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 3 122 false (2001 ∷ []) (floor 4 1 2 3 ∷ []) false true true 1) (2000 , 4005) (valid (route tt false 127 9 false ((4005 , 4001) ∷ (4001 , 4005) ∷ (4005 , 4003) ∷ (4003 , 2006) ∷ []) (2 ∷ 3 ∷ 2 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 127 12 false ((2000 , 4005) ∷ (4005 , 4001) ∷ (4001 , 4005) ∷ (4005 , 4003) ∷ (4003 , 2006) ∷ []) (1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ []))
+_ : extend (link true 3 0 false (1 ∷ []) ([]) false false true 2) (0 , 4) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 128 false (1 ∷ []) ([]) false true true 3) (0 , 6) (valid (route tt false 255 8 false ((6 , 3) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt false 0 3 false ((0 , 4) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2005 ∷ []) (floor 4 1 2 3 ∷ floor 5 5 2 2 ∷ floor 6 5 2 1 ∷ []) false false true 2) (2000 , 2002) (valid (route tt false 128 8 true ((2002 , 4035) ∷ (4035 , 4011) ∷ (4011 , 2036) ∷ (2036 , 4013) ∷ (4013 , 2034) ∷ (2034 , 2018) ∷ (2018 , 2010) ∷ (2010 , 4015) ∷ (4015 , 4019) ∷ (4019 , 2038) ∷ (2038 , 2031) ∷ (2031 , 4003) ∷ (4003 , 4026) ∷ (4026 , 2016) ∷ (2016 , 2030) ∷ (2030 , 2012) ∷ (2012 , 2021) ∷ (2021 , 2009) ∷ (2009 , 4040) ∷ (4040 , 4014) ∷ (4014 , 2039) ∷ (2039 , 4007) ∷ (4007 , 2001) ∷ (2001 , 4023) ∷ (4023 , 2037) ∷ (2037 , 4024) ∷ (4024 , 4017) ∷ (4017 , 4027) ∷ (4027 , 2006) ∷ (2006 , 4005) ∷ (4005 , 4028) ∷ (4028 , 4032) ∷ []) (1 ∷ 3 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
-  ⊕ extend (link true 1 127 false (2005 ∷ []) (floor 4 1 2 3 ∷ floor 5 5 2 2 ∷ floor 6 5 2 1 ∷ []) false false true 2) (2000 , 4004) (valid (route tt false 128 8 true ((4004 , 4035) ∷ (4035 , 4011) ∷ (4011 , 2036) ∷ (2036 , 4013) ∷ (4013 , 2034) ∷ (2034 , 2018) ∷ (2018 , 2010) ∷ (2010 , 4015) ∷ (4015 , 4019) ∷ (4019 , 2038) ∷ (2038 , 2031) ∷ (2031 , 4003) ∷ (4003 , 4026) ∷ (4026 , 2016) ∷ (2016 , 2030) ∷ (2030 , 2012) ∷ (2012 , 2021) ∷ (2021 , 2009) ∷ (2009 , 4040) ∷ (4040 , 4014) ∷ (4014 , 2039) ∷ (2039 , 4007) ∷ (4007 , 2001) ∷ (2001 , 4023) ∷ (4023 , 2037) ∷ (2037 , 4024) ∷ (4024 , 4017) ∷ (4017 , 4027) ∷ (4027 , 2006) ∷ (2006 , 4005) ∷ (4005 , 4028) ∷ (4028 , 4032) ∷ []) (1 ∷ 3 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
+_ : extend (link true 3 255 false ([]) (floor 5 2 2 ∷ floor 6 2 1 ∷ floor 6 4 2 ∷ []) false true true 1) (0 , 3) (valid (route tt true 255 10 false ((3 , 1) ∷ (1 , 0) ∷ (0 , 6) ∷ []) (3 ∷ 2 ∷ 2 ∷ [])))
+  ⊕ extend (link true 3 255 false ([]) (floor 5 2 2 ∷ floor 6 2 1 ∷ floor 6 4 2 ∷ []) true true true 1) (0 , 1) (valid (route tt true 255 10 false ((1 , 1) ∷ (1 , 0) ∷ (0 , 6) ∷ []) (3 ∷ 2 ∷ 2 ∷ [])))
   ≡ invalid
 _ = refl
 
-_ : extend (link true 3 128 true (4003 ∷ []) (floor 2 4 2 1 ∷ []) true true true 1) (2000 , 4002) (valid (route tt true 128 3 false ((4002 , 4000) ∷ (4000 , 4006) ∷ []) (1 ∷ 1 ∷ [])))
-  ⊕ extend (link true 2 0 false (4003 ∷ []) (floor 2 4 2 1 ∷ []) true true true 1) (2000 , 2005) (valid (route tt true 127 7 false ((2005 , 2004) ∷ []) (2 ∷ [])))
-  ≡ valid (route tt true 127 9 true ((2000 , 2005) ∷ (2005 , 2004) ∷ []) (1 ∷ 2 ∷ []))
+_ : extend (link true 2 128 true ([]) (floor 1 4 3 ∷ floor 3 4 3 ∷ floor 5 5 0 ∷ []) false false true 3) (0 , 5) (valid (route tt false 122 6 false ((5 , 33) ∷ (33 , 7) ∷ (7 , 32) ∷ (32 , 8) ∷ (8 , 13) ∷ (13 , 36) ∷ (36 , 10) ∷ (10 , 6) ∷ (6 , 14) ∷ (14 , 34) ∷ (34 , 3) ∷ (3 , 4) ∷ (4 , 12) ∷ (12 , 38) ∷ (38 , 25) ∷ (25 , 40) ∷ (40 , 29) ∷ (29 , 18) ∷ (18 , 37) ∷ (37 , 35) ∷ (35 , 16) ∷ (16 , 24) ∷ (24 , 28) ∷ (28 , 26) ∷ (26 , 21) ∷ (21 , 23) ∷ (23 , 11) ∷ (11 , 19) ∷ (19 , 9) ∷ (9 , 1) ∷ (1 , 15) ∷ (15 , 17) ∷ []) (1 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 2 128 false ([]) (floor 1 4 3 ∷ floor 3 4 3 ∷ floor 5 5 0 ∷ []) true false true 2) (0 , 2) (valid (route tt false 127 9 true ((2 , 0) ∷ []) (2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 4 128 true (2001 ∷ 2002 ∷ []) (floor 2 0 2 2 ∷ floor 3 6 1 0 ∷ []) true false true 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 128 true (2001 ∷ 2002 ∷ []) (floor 2 0 2 2 ∷ floor 3 6 1 0 ∷ []) true false true 1) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 128 4 true ((2000 , 2003) ∷ []) (1 ∷ []))
+_ : extend (link true 1 255 false ([]) (floor 6 1 1 ∷ []) false false true 3) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 4 0 false ([]) (floor 6 1 1 ∷ []) true false false 1) (0 , 2) (valid (route tt false 255 5 false ((2 , 3) ∷ (3 , 1) ∷ []) (3 ∷ 1 ∷ [])))
+  ≡ valid (route tt false 255 1 true ((0 , 6) ∷ (6 , 1006) ∷ []) (3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 255 false (2002 ∷ 2006 ∷ []) (floor 2 4 2 1 ∷ floor 3 5 1 1 ∷ []) true false false 3) (2000 , 4006) (valid (route tt true 127 5 false ((4006 , 4005) ∷ (4005 , 4003) ∷ (4003 , 5003) ∷ []) (3 ∷ 1 ∷ 0 ∷ [])))
-  ⊕ extend (link true 1 255 false (2002 ∷ 2006 ∷ []) (floor 2 4 2 1 ∷ floor 3 5 1 1 ∷ []) false false false 1) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 255 9 true ((2000 , 4006) ∷ (4006 , 4005) ∷ (4005 , 4003) ∷ (4003 , 5003) ∷ []) (3 ∷ 3 ∷ 1 ∷ 0 ∷ []))
+_ : extend (link true 1 122 false ([]) ([]) true false true 2) (0 , 1) (valid (route tt false 0 8 false ((1 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ (6 , 1006) ∷ []) (2 ∷ 3 ∷ 2 ∷ 0 ∷ [])))
+  ⊕ extend (link true 1 122 false ([]) ([]) true false true 2) (0 , 6) (valid (route tt false 0 8 false ((6 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ (6 , 1006) ∷ []) (2 ∷ 3 ∷ 2 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 122 9 true ((0 , 1) ∷ (1 , 5) ∷ (5 , 4) ∷ (4 , 6) ∷ (6 , 1006) ∷ []) (2 ∷ 2 ∷ 3 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 4 127 false (2004 ∷ 2006 ∷ []) (floor 4 5 1 0 ∷ []) true false true 1) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 127 false (2004 ∷ 2006 ∷ []) (floor 4 5 1 0 ∷ []) false false true 1) (2000 , 2006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 127 4 false ((2000 , 2006) ∷ []) (1 ∷ []))
+_ : extend (link true 4 128 false (2 ∷ 3 ∷ []) (floor 5 5 1 ∷ []) false true true 3) (0 , 6) (valid (route tt true 128 11 false ((6 , 5) ∷ (5 , 3) ∷ (3 , 2) ∷ []) (1 ∷ 2 ∷ 2 ∷ [])))
+  ⊕ extend (link true 4 128 false (2 ∷ 3 ∷ []) (floor 5 5 1 ∷ []) true true true 3) (0 , 3) (valid (route tt true 128 11 false ((3 , 5) ∷ (5 , 3) ∷ (3 , 2) ∷ []) (1 ∷ 2 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 128 15 false ((0 , 6) ∷ (6 , 5) ∷ (5 , 3) ∷ (3 , 2) ∷ []) (3 ∷ 1 ∷ 2 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 false (4006 ∷ []) ([]) false false false 1) (2000 , 4001) (valid (route tt false 127 8 false ((4001 , 4003) ∷ (4003 , 2005) ∷ (2005 , 4006) ∷ []) (2 ∷ 3 ∷ 1 ∷ [])))
-  ⊕ extend (link true 1 0 false (4006 ∷ []) ([]) false false false 1) (2000 , 2006) (valid (route tt false 127 8 false ((2006 , 2108) ∷ (2108 , 4003) ∷ (4003 , 2005) ∷ (2005 , 4006) ∷ []) (2 ∷ 1 ∷ 3 ∷ 1 ∷ [])))
-  ≡ valid (route tt true 127 9 false ((2000 , 4001) ∷ (4001 , 4003) ∷ (4003 , 2005) ∷ (2005 , 4006) ∷ []) (1 ∷ 2 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 3 128 false (2 ∷ 4 ∷ []) (floor 2 4 2 ∷ floor 5 2 3 ∷ []) false true true 1) (0 , 3) (valid (route tt false 255 11 true ((3 , 0) ∷ (0 , 6) ∷ (6 , 2) ∷ (2 , 4) ∷ []) (2 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
+  ⊕ extend (link true 3 128 false (2 ∷ 4 ∷ []) (floor 2 4 2 ∷ floor 5 2 3 ∷ []) false true true 1) (0 , 4) (valid (route tt false 255 11 true ((4 , 0) ∷ (0 , 6) ∷ (6 , 2) ∷ (2 , 4) ∷ []) (2 ∷ 1 ∷ 1 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 0 false (4003 ∷ []) (floor 1 0 1 3 ∷ floor 4 4 2 0 ∷ []) true false true 3) (2000 , 4001) (valid (route tt false 255 7 false ((4001 , 4004) ∷ (4004 , 4003) ∷ (4003 , 4006) ∷ (4006 , 2005) ∷ []) (3 ∷ 3 ∷ 1 ∷ 1 ∷ [])))
-  ⊕ extend (link true 2 0 false (4003 ∷ []) (floor 1 0 1 3 ∷ floor 4 4 2 0 ∷ []) true false true 3) (2000 , 2004) (valid (route tt false 255 7 false ((2004 , 4004) ∷ (4004 , 4003) ∷ (4003 , 4006) ∷ (4006 , 2005) ∷ []) (3 ∷ 3 ∷ 1 ∷ 1 ∷ [])))
-  ≡ valid (route tt true 255 9 true ((2000 , 4001) ∷ (4001 , 4004) ∷ (4004 , 4003) ∷ (4003 , 4006) ∷ (4006 , 2005) ∷ []) (3 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 2 0 false (6 ∷ []) ([]) true true false 1) (0 , 3) (valid (route tt false 128 5 false ((3 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 0 ∷ [])))
+  ⊕ extend (link true 2 0 false (6 ∷ []) ([]) true true false 1) (0 , 6) (valid (route tt false 128 5 false ((6 , 128) ∷ (128 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 1 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 128 7 true ((0 , 3) ∷ (3 , 1) ∷ (1 , 1001) ∷ []) (1 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 0 true (4001 ∷ []) (floor 3 5 1 2 ∷ floor 4 1 2 0 ∷ []) false true true 1) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 0 true (4001 ∷ []) (floor 3 5 1 2 ∷ floor 4 1 2 0 ∷ []) false true true 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 0 1 false ((2000 , 2003) ∷ []) (1 ∷ []))
+_ : extend (link true 4 127 false ([]) (floor 3 5 1 ∷ []) false false false 1) (0 , 4) (valid (route tt true 255 10 true ((4 , 5) ∷ (5 , 2) ∷ []) (1 ∷ 3 ∷ [])))
+  ⊕ extend (link true 3 127 false ([]) (floor 3 5 1 ∷ []) true false true 3) (0 , 1) (valid (route tt true 128 2 false ((1 , 5) ∷ (5 , 0) ∷ (0 , 2) ∷ (2 , 3) ∷ []) (2 ∷ 2 ∷ 3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 255 14 true ((0 , 4) ∷ (4 , 5) ∷ (5 , 2) ∷ []) (1 ∷ 1 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 4 0 false ([]) (floor 6 4 2 3 ∷ []) false false true 2) (2000 , 4005) (valid (route tt true 0 5 false ((4005 , 2006) ∷ []) (3 ∷ [])))
-  ⊕ extend (link true 4 0 false ([]) (floor 6 4 2 3 ∷ []) true false true 2) (2000 , 4003) (valid (route tt true 0 5 false ((4003 , 2006) ∷ []) (3 ∷ [])))
-  ≡ valid (route tt true 0 9 false ((2000 , 4005) ∷ (4005 , 2006) ∷ []) (2 ∷ 3 ∷ []))
+_ : extend (link true 3 127 false ([]) (floor 3 0 2 ∷ floor 5 3 0 ∷ []) false false true 3) (0 , 6) (valid (route tt false 0 11 false ((6 , 2) ∷ (2 , 1002) ∷ []) (3 ∷ 0 ∷ [])))
+  ⊕ extend (link true 1 122 false ([]) (floor 3 0 2 ∷ floor 5 3 0 ∷ []) true false true 3) (0 , 4) (valid (route tt false 255 3 true ((4 , 0) ∷ (0 , 1) ∷ []) (3 ∷ 3 ∷ [])))
+  ≡ valid (route tt false 127 14 false ((0 , 6) ∷ (6 , 2) ∷ (2 , 1002) ∷ []) (3 ∷ 3 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 false (2002 ∷ 4002 ∷ []) (floor 1 2 1 3 ∷ floor 2 4 2 0 ∷ floor 3 4 2 1 ∷ []) false true false 1) (2000 , 2003) (valid (route tt false 0 0 true ((2003 , 3003) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 1 255 false (2002 ∷ 4002 ∷ []) (floor 1 2 1 3 ∷ floor 2 4 2 0 ∷ floor 3 4 2 1 ∷ []) true true false 1) (2000 , 4003) (valid (route tt false 0 0 true ((4003 , 5003) ∷ []) (0 ∷ [])))
-  ≡ invalid
+_ : extend (link true 2 0 true ([]) (floor 1 5 1 ∷ floor 2 3 3 ∷ []) false false true 1) (0 , 4) (valid (route tt false 0 0 true ((4 , 1004) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 2 0 true ([]) (floor 1 5 1 ∷ floor 2 3 3 ∷ []) false false true 1) (0 , 6) (valid (route tt false 0 0 true ((6 , 1006) ∷ []) (0 ∷ [])))
+  ≡ valid (route tt true 0 2 true ((0 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 true ([]) ([]) false false true 3) (2000 , 2004) (valid (route tt true 0 3 false ((2004 , 4015) ∷ (4015 , 2038) ∷ (2038 , 2024) ∷ (2024 , 2005) ∷ (2005 , 2023) ∷ (2023 , 4027) ∷ (4027 , 2031) ∷ (2031 , 2014) ∷ (2014 , 4006) ∷ (4006 , 4022) ∷ (4022 , 4018) ∷ (4018 , 2011) ∷ (2011 , 2021) ∷ (2021 , 2033) ∷ (2033 , 2002) ∷ (2002 , 2037) ∷ (2037 , 2017) ∷ (2017 , 4003) ∷ (4003 , 2008) ∷ (2008 , 4009) ∷ (4009 , 4039) ∷ (4039 , 2035) ∷ (2035 , 2040) ∷ (2040 , 4030) ∷ (4030 , 2010) ∷ (2010 , 4032) ∷ (4032 , 2013) ∷ (2013 , 2036) ∷ (2036 , 2016) ∷ (2016 , 2029) ∷ (2029 , 2034) ∷ []) (1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 1 127 true ([]) ([]) true false true 3) (2000 , 4006) (valid (route tt true 0 3 false ((4006 , 4015) ∷ (4015 , 2038) ∷ (2038 , 2024) ∷ (2024 , 2005) ∷ (2005 , 2023) ∷ (2023 , 4027) ∷ (4027 , 2031) ∷ (2031 , 2014) ∷ (2014 , 4006) ∷ (4006 , 4022) ∷ (4022 , 4018) ∷ (4018 , 2011) ∷ (2011 , 2021) ∷ (2021 , 2033) ∷ (2033 , 2002) ∷ (2002 , 2037) ∷ (2037 , 2017) ∷ (2017 , 4003) ∷ (4003 , 2008) ∷ (2008 , 4009) ∷ (4009 , 4039) ∷ (4039 , 2035) ∷ (2035 , 2040) ∷ (2040 , 4030) ∷ (4030 , 2010) ∷ (2010 , 4032) ∷ (4032 , 2013) ∷ (2013 , 2036) ∷ (2036 , 2016) ∷ (2016 , 2029) ∷ (2029 , 2034) ∷ []) (1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 122 false ([]) (floor 1 6 2 ∷ []) false false true 3) (0 , 3) (valid (route tt false 122 4 false ((3 , 5) ∷ (5 , 6) ∷ []) (2 ∷ 3 ∷ [])))
+  ⊕ extend (link true 3 122 false ([]) (floor 1 6 2 ∷ []) false false true 3) (0 , 5) (valid (route tt false 122 4 false ((5 , 180) ∷ (180 , 5) ∷ (5 , 6) ∷ []) (2 ∷ 1 ∷ 3 ∷ [])))
+  ≡ valid (route tt false 122 7 false ((0 , 3) ∷ (3 , 5) ∷ (5 , 6) ∷ []) (3 ∷ 2 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 122 false ([]) (floor 1 6 1 2 ∷ floor 3 2 1 2 ∷ floor 5 6 2 0 ∷ []) false false true 2) (2000 , 2003) (valid (route tt false 127 4 true ((2003 , 4006) ∷ (4006 , 2004) ∷ []) (3 ∷ 3 ∷ [])))
-  ⊕ extend (link true 1 127 true ([]) (floor 1 6 1 2 ∷ floor 3 2 1 2 ∷ floor 5 6 2 0 ∷ []) false false false 2) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 5 true ((2000 , 2003) ∷ (2003 , 4006) ∷ (4006 , 2004) ∷ []) (2 ∷ 3 ∷ 3 ∷ []))
+_ : extend (link true 3 127 true ([]) ([]) true false true 2) (0 , 1) (valid (route tt false 0 0 true ((1 , 1001) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 4 127 false ([]) ([]) false false true 3) (0 , 2) (valid (route tt false 122 10 true ((2 , 5) ∷ (5 , 1) ∷ []) (3 ∷ 2 ∷ [])))
+  ≡ valid (route tt false 127 14 true ((0 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ []) (3 ∷ 3 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 true (4003 ∷ []) (floor 3 4 2 2 ∷ floor 3 6 1 0 ∷ floor 4 5 2 3 ∷ []) true false true 2) (2000 , 2006) (valid (route tt false 0 1 true ((2006 , 2003) ∷ (2003 , 4005) ∷ (4005 , 5005) ∷ []) (3 ∷ 1 ∷ 0 ∷ [])))
-  ⊕ extend (link true 1 255 true (4003 ∷ []) (floor 3 4 2 2 ∷ floor 3 6 1 0 ∷ floor 4 5 2 3 ∷ []) true false true 2) (2000 , 2005) (valid (route tt false 0 1 true ((2005 , 2003) ∷ (2003 , 4005) ∷ (4005 , 5005) ∷ []) (3 ∷ 1 ∷ 0 ∷ [])))
-  ≡ valid (route tt true 255 2 true ((2000 , 2005) ∷ (2005 , 2003) ∷ (2003 , 4005) ∷ (4005 , 5005) ∷ []) (2 ∷ 3 ∷ 1 ∷ 0 ∷ []))
+_ : extend (link true 1 0 false (4 ∷ 6 ∷ []) (floor 6 3 2 ∷ []) true false true 2) (0 , 1) (valid (route tt false 128 5 false ((1 , 6) ∷ (6 , 2) ∷ (2 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 1 ∷ 2 ∷ 0 ∷ [])))
+  ⊕ extend (link true 1 0 false (4 ∷ 6 ∷ []) (floor 6 3 2 ∷ []) true false true 2) (0 , 4) (valid (route tt false 128 5 false ((4 , 6) ∷ (6 , 2) ∷ (2 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 1 ∷ 2 ∷ 0 ∷ [])))
+  ≡ valid (route tt true 128 6 true ((0 , 1) ∷ (1 , 6) ∷ (6 , 2) ∷ (2 , 4) ∷ (4 , 1004) ∷ []) (2 ∷ 1 ∷ 1 ∷ 2 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 false ([]) (floor 4 3 2 3 ∷ floor 5 5 1 2 ∷ floor 6 1 1 0 ∷ []) false true false 2) (2000 , 2003) (valid (route tt false 0 7 true ((2003 , 2002) ∷ (2002 , 4004) ∷ (4004 , 2001) ∷ []) (3 ∷ 1 ∷ 2 ∷ [])))
-  ⊕ extend (link true 3 127 false ([]) (floor 4 3 2 3 ∷ floor 5 5 1 2 ∷ floor 6 1 1 0 ∷ []) true true false 2) (2000 , 4001) (valid (route tt false 0 7 true ((4001 , 2002) ∷ (2002 , 4004) ∷ (4004 , 2001) ∷ []) (3 ∷ 1 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 255 true (1 ∷ 2 ∷ []) (floor 2 5 2 ∷ floor 4 6 3 ∷ floor 5 3 0 ∷ []) true false true 3) (0 , 4) (valid (route tt false 0 9 false ((4 , 5) ∷ (5 , 3) ∷ []) (2 ∷ 2 ∷ [])))
+  ⊕ extend (link true 4 255 true (1 ∷ 2 ∷ []) (floor 2 5 2 ∷ floor 4 6 3 ∷ floor 5 3 0 ∷ []) false false true 3) (0 , 2) (valid (route tt false 0 9 false ((2 , 5) ∷ (5 , 3) ∷ []) (2 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 255 13 true ((0 , 4) ∷ (4 , 5) ∷ (5 , 3) ∷ []) (3 ∷ 2 ∷ 2 ∷ []))
 _ = refl
 
-_ : extend (link true 4 122 false (4001 ∷ []) (floor 6 5 1 1 ∷ []) false true true 2) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 4 122 false (4001 ∷ []) (floor 6 5 1 1 ∷ []) false true true 2) (2000 , 4004) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 122 4 false ((2000 , 2004) ∷ []) (2 ∷ []))
+_ : extend (link true 3 0 false ([]) ([]) false true true 2) (0 , 3) (valid (route tt false 255 2 true ((3 , 2) ∷ (2 , 0) ∷ (0 , 5) ∷ (5 , 6) ∷ []) (3 ∷ 2 ∷ 3 ∷ 2 ∷ [])))
+  ⊕ extend (link true 3 0 false ([]) ([]) true true true 2) (0 , 5) (valid (route tt false 255 2 true ((5 , 2) ∷ (2 , 0) ∷ (0 , 5) ∷ (5 , 6) ∷ []) (3 ∷ 2 ∷ 3 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 127 false ([]) (floor 1 5 1 2 ∷ floor 3 5 2 0 ∷ floor 4 4 1 2 ∷ []) false false false 2) (2000 , 4001) (valid (route tt false 127 11 true ((4001 , 2018) ∷ (2018 , 4003) ∷ (4003 , 4031) ∷ (4031 , 2012) ∷ (2012 , 4002) ∷ (4002 , 4038) ∷ (4038 , 2034) ∷ (2034 , 2007) ∷ (2007 , 2006) ∷ (2006 , 4015) ∷ (4015 , 2011) ∷ (2011 , 4039) ∷ (4039 , 2022) ∷ (2022 , 4019) ∷ (4019 , 4008) ∷ (4008 , 2017) ∷ (2017 , 4005) ∷ (4005 , 2032) ∷ (2032 , 2035) ∷ (2035 , 2030) ∷ (2030 , 4021) ∷ (4021 , 4014) ∷ (4014 , 2023) ∷ (2023 , 2029) ∷ (2029 , 4027) ∷ (4027 , 2016) ∷ (2016 , 4033) ∷ (4033 , 2020) ∷ (2020 , 4037) ∷ []) (2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
-  ⊕ extend (link true 1 127 false ([]) (floor 1 5 1 2 ∷ floor 3 5 2 0 ∷ floor 4 4 1 2 ∷ []) false false false 2) (2000 , 4002) (valid (route tt false 127 11 true ((4002 , 2018) ∷ (2018 , 4003) ∷ (4003 , 4031) ∷ (4031 , 2012) ∷ (2012 , 4002) ∷ (4002 , 4038) ∷ (4038 , 2034) ∷ (2034 , 2007) ∷ (2007 , 2006) ∷ (2006 , 4015) ∷ (4015 , 2011) ∷ (2011 , 4039) ∷ (4039 , 2022) ∷ (2022 , 4019) ∷ (4019 , 4008) ∷ (4008 , 2017) ∷ (2017 , 4005) ∷ (4005 , 2032) ∷ (2032 , 2035) ∷ (2035 , 2030) ∷ (2030 , 4021) ∷ (4021 , 4014) ∷ (4014 , 2023) ∷ (2023 , 2029) ∷ (2029 , 4027) ∷ (4027 , 2016) ∷ (2016 , 4033) ∷ (4033 , 2020) ∷ (2020 , 4037) ∷ []) (2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 127 12 true ((2000 , 4001) ∷ (4001 , 2018) ∷ (2018 , 4003) ∷ (4003 , 4031) ∷ (4031 , 2012) ∷ (2012 , 4002) ∷ (4002 , 4038) ∷ (4038 , 2034) ∷ (2034 , 2007) ∷ (2007 , 2006) ∷ (2006 , 4015) ∷ (4015 , 2011) ∷ (2011 , 4039) ∷ (4039 , 2022) ∷ (2022 , 4019) ∷ (4019 , 4008) ∷ (4008 , 2017) ∷ (2017 , 4005) ∷ (4005 , 2032) ∷ (2032 , 2035) ∷ (2035 , 2030) ∷ (2030 , 4021) ∷ (4021 , 4014) ∷ (4014 , 2023) ∷ (2023 , 2029) ∷ (2029 , 4027) ∷ (4027 , 2016) ∷ (2016 , 4033) ∷ (4033 , 2020) ∷ (2020 , 4037) ∷ []) (2 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 1 ∷ []))
+_ : extend (link true 3 127 false (2 ∷ 3 ∷ []) (floor 2 0 3 ∷ floor 3 6 3 ∷ []) true true true 3) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 0 false (2 ∷ 3 ∷ []) (floor 2 0 3 ∷ floor 3 6 3 ∷ []) false false true 1) (0 , 4) (valid (route tt false 128 7 true ((4 , 0) ∷ (0 , 5) ∷ (5 , 3) ∷ []) (1 ∷ 1 ∷ 2 ∷ [])))
+  ≡ valid (route tt true 127 3 true ((0 , 2) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2001 ∷ []) (floor 2 5 1 1 ∷ floor 3 3 1 0 ∷ floor 4 0 2 1 ∷ []) true false true 1) (2000 , 2003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 127 false (2001 ∷ []) (floor 2 5 1 1 ∷ floor 3 3 1 0 ∷ floor 4 0 2 1 ∷ []) true false true 1) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 1 true ((2000 , 2003) ∷ []) (1 ∷ []))
+_ : extend (link true 4 255 false (2 ∷ []) (floor 4 4 0 ∷ []) false false true 2) (0 , 6) (valid (route tt false 255 4 false ((6 , 5) ∷ (5 , 4) ∷ (4 , 3) ∷ []) (3 ∷ 3 ∷ 3 ∷ [])))
+  ⊕ extend (link true 4 255 false (2 ∷ []) (floor 4 4 0 ∷ []) true false true 2) (0 , 3) (valid (route tt false 255 4 false ((3 , 5) ∷ (5 , 4) ∷ (4 , 3) ∷ []) (3 ∷ 3 ∷ 3 ∷ [])))
+  ≡ valid (route tt false 255 8 false ((0 , 6) ∷ (6 , 5) ∷ (5 , 4) ∷ (4 , 3) ∷ []) (2 ∷ 3 ∷ 3 ∷ 3 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2002 ∷ 2003 ∷ []) (floor 1 4 2 2 ∷ floor 1 6 2 1 ∷ floor 3 4 2 2 ∷ []) false false true 1) (2000 , 2006) (valid (route tt false 0 0 true ((2006 , 3006) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 4 122 false (2002 ∷ 2003 ∷ []) (floor 1 4 2 2 ∷ floor 1 6 2 1 ∷ floor 3 4 2 2 ∷ []) false false false 3) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt false 127 1 true ((2000 , 2006) ∷ (2006 , 3006) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 4 128 false (1 ∷ []) (floor 1 4 0 ∷ floor 3 3 3 ∷ floor 5 5 2 ∷ []) false false true 1) (0 , 4) (valid (route tt false 0 0 true ((4 , 1004) ∷ []) (0 ∷ [])))
+  ⊕ extend (link true 1 127 false (1 ∷ []) (floor 1 4 0 ∷ floor 3 3 3 ∷ floor 5 5 2 ∷ []) false true true 3) (0 , 6) (valid (route tt false 0 2 true ((6 , 0) ∷ []) (1 ∷ [])))
+  ≡ valid (route tt false 128 4 true ((0 , 4) ∷ (4 , 1004) ∷ []) (1 ∷ 0 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 false (2004 ∷ 4005 ∷ []) ([]) false false true 1) (2000 , 4003) (valid (route tt true 127 11 false ((4003 , 2005) ∷ (2005 , 4002) ∷ (4002 , 2000) ∷ (2000 , 2004) ∷ []) (1 ∷ 1 ∷ 3 ∷ 2 ∷ [])))
-  ⊕ extend (link true 4 127 true (2004 ∷ 4005 ∷ []) ([]) true false true 3) (2000 , 2005) (valid (route tt false 122 3 false ((2005 , 2003) ∷ (2003 , 2006) ∷ (2006 , 4004) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
-  ≡ valid (route tt true 127 7 true ((2000 , 2005) ∷ (2005 , 2003) ∷ (2003 , 2006) ∷ (2006 , 4004) ∷ []) (3 ∷ 3 ∷ 1 ∷ 1 ∷ []))
+_ : extend (link true 1 0 true (3 ∷ 5 ∷ []) (floor 3 6 3 ∷ floor 4 6 1 ∷ floor 5 4 3 ∷ []) false false false 1) (0 , 6) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 3 128 true (3 ∷ 5 ∷ []) (floor 3 6 3 ∷ floor 4 6 1 ∷ floor 5 4 3 ∷ []) false false true 2) (0 , 1) (valid (route tt false 255 0 false ((1 , 6) ∷ (6 , 3) ∷ (3 , 2) ∷ []) (3 ∷ 1 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 255 3 false ((0 , 1) ∷ (1 , 6) ∷ (6 , 3) ∷ (3 , 2) ∷ []) (2 ∷ 3 ∷ 1 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 false (4003 ∷ []) (floor 1 0 2 3 ∷ floor 4 0 1 0 ∷ []) true false true 2) (2000 , 4004) (valid (route tt false 255 7 false ((4004 , 2011) ∷ (2011 , 2008) ∷ (2008 , 4020) ∷ (4020 , 2010) ∷ (2010 , 2013) ∷ (2013 , 2021) ∷ (2021 , 4033) ∷ (4033 , 2028) ∷ (2028 , 2019) ∷ (2019 , 2014) ∷ (2014 , 4002) ∷ (4002 , 4012) ∷ (4012 , 2039) ∷ (2039 , 2001) ∷ (2001 , 2040) ∷ (2040 , 2015) ∷ (2015 , 2025) ∷ (2025 , 2038) ∷ (2038 , 2003) ∷ (2003 , 4034) ∷ (4034 , 4031) ∷ (4031 , 4017) ∷ (4017 , 2036) ∷ (2036 , 2035) ∷ (2035 , 2030) ∷ (2030 , 4022) ∷ (4022 , 2037) ∷ (2037 , 4032) ∷ (4032 , 2023) ∷ []) (3 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ [])))
-  ⊕ extend (link true 1 255 false (4003 ∷ []) (floor 1 0 2 3 ∷ floor 4 0 1 0 ∷ []) false false true 2) (2000 , 2001) (valid (route tt false 255 7 false ((2001 , 2011) ∷ (2011 , 2008) ∷ (2008 , 4020) ∷ (4020 , 2010) ∷ (2010 , 2013) ∷ (2013 , 2021) ∷ (2021 , 4033) ∷ (4033 , 2028) ∷ (2028 , 2019) ∷ (2019 , 2014) ∷ (2014 , 4002) ∷ (4002 , 4012) ∷ (4012 , 2039) ∷ (2039 , 2001) ∷ (2001 , 2040) ∷ (2040 , 2015) ∷ (2015 , 2025) ∷ (2025 , 2038) ∷ (2038 , 2003) ∷ (2003 , 4034) ∷ (4034 , 4031) ∷ (4031 , 4017) ∷ (4017 , 2036) ∷ (2036 , 2035) ∷ (2035 , 2030) ∷ (2030 , 4022) ∷ (4022 , 2037) ∷ (2037 , 4032) ∷ (4032 , 2023) ∷ []) (3 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ [])))
-  ≡ valid (route tt false 255 8 false ((2000 , 2001) ∷ (2001 , 2011) ∷ (2011 , 2008) ∷ (2008 , 4020) ∷ (4020 , 2010) ∷ (2010 , 2013) ∷ (2013 , 2021) ∷ (2021 , 4033) ∷ (4033 , 2028) ∷ (2028 , 2019) ∷ (2019 , 2014) ∷ (2014 , 4002) ∷ (4002 , 4012) ∷ (4012 , 2039) ∷ (2039 , 2001) ∷ (2001 , 2040) ∷ (2040 , 2015) ∷ (2015 , 2025) ∷ (2025 , 2038) ∷ (2038 , 2003) ∷ (2003 , 4034) ∷ (4034 , 4031) ∷ (4031 , 4017) ∷ (4017 , 2036) ∷ (2036 , 2035) ∷ (2035 , 2030) ∷ (2030 , 4022) ∷ (4022 , 2037) ∷ (2037 , 4032) ∷ (4032 , 2023) ∷ []) (2 ∷ 3 ∷ 1 ∷ 2 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 1 ∷ 3 ∷ 1 ∷ 2 ∷ []))
+_ : extend (link true 1 127 false ([]) (floor 6 2 3 ∷ []) true true true 3) (0 , 5) (valid (route tt false 127 9 true ((5 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 4) ∷ []) (3 ∷ 2 ∷ 3 ∷ 2 ∷ [])))
+  ⊕ extend (link true 1 127 false ([]) (floor 6 2 3 ∷ []) true true true 3) (0 , 3) (valid (route tt false 127 9 true ((3 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 4) ∷ []) (3 ∷ 2 ∷ 3 ∷ 2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 127 false (4001 ∷ 2006 ∷ []) (floor 6 6 1 3 ∷ []) false true true 2) (2000 , 4005) (valid (route tt false 122 5 true ((4005 , 2027) ∷ (2027 , 4025) ∷ (4025 , 2016) ∷ (2016 , 4034) ∷ (4034 , 4012) ∷ (4012 , 4031) ∷ (4031 , 2036) ∷ (2036 , 2004) ∷ (2004 , 4029) ∷ (4029 , 4002) ∷ (4002 , 4038) ∷ (4038 , 4030) ∷ (4030 , 2013) ∷ (2013 , 4026) ∷ (4026 , 2019) ∷ (2019 , 2024) ∷ (2024 , 2014) ∷ (2014 , 4032) ∷ (4032 , 2015) ∷ (2015 , 2028) ∷ (2028 , 2003) ∷ (2003 , 4007) ∷ (4007 , 4037) ∷ (4037 , 2008) ∷ (2008 , 4001) ∷ (4001 , 2017) ∷ (2017 , 2006) ∷ (2006 , 4018) ∷ (4018 , 4022) ∷ []) (3 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ [])))
-  ⊕ extend (link true 2 127 false (4001 ∷ 2006 ∷ []) (floor 6 6 1 3 ∷ []) false true true 2) (2000 , 4002) (valid (route tt false 122 5 true ((4002 , 2027) ∷ (2027 , 4025) ∷ (4025 , 2016) ∷ (2016 , 4034) ∷ (4034 , 4012) ∷ (4012 , 4031) ∷ (4031 , 2036) ∷ (2036 , 2004) ∷ (2004 , 4029) ∷ (4029 , 4002) ∷ (4002 , 4038) ∷ (4038 , 4030) ∷ (4030 , 2013) ∷ (2013 , 4026) ∷ (4026 , 2019) ∷ (2019 , 2024) ∷ (2024 , 2014) ∷ (2014 , 4032) ∷ (4032 , 2015) ∷ (2015 , 2028) ∷ (2028 , 2003) ∷ (2003 , 4007) ∷ (4007 , 4037) ∷ (4037 , 2008) ∷ (2008 , 4001) ∷ (4001 , 2017) ∷ (2017 , 2006) ∷ (2006 , 4018) ∷ (4018 , 4022) ∷ []) (3 ∷ 3 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ [])))
-  ≡ invalid
+_ : extend (link true 4 128 false ([]) (floor 4 3 2 ∷ floor 6 6 1 ∷ []) false false true 3) (0 , 1) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 128 false ([]) (floor 4 3 2 ∷ floor 6 6 1 ∷ []) false false true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 4 false ((0 , 1) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 3 127 false ([]) ([]) false true true 2) (2000 , 2005) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 122 false ([]) ([]) true true true 3) (2000 , 4006) (valid (route tt false 0 0 true ((4006 , 5006) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 127 3 false ((2000 , 2005) ∷ []) (2 ∷ []))
+_ : extend (link true 2 0 false ([]) (floor 2 6 2 ∷ floor 5 1 0 ∷ []) true false true 3) (0 , 3) (valid (route tt true 0 10 false ((3 , 0) ∷ []) (2 ∷ [])))
+  ⊕ extend (link true 2 0 false ([]) (floor 2 6 2 ∷ floor 5 1 0 ∷ []) false false true 3) (0 , 5) (valid (route tt true 0 10 false ((5 , 0) ∷ []) (2 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 2 255 false ([]) ([]) true false false 3) (2000 , 2004) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 2 127 false ([]) ([]) false false true 1) (2000 , 2006) (valid (route tt false 122 5 false ((2006 , 4005) ∷ (4005 , 4002) ∷ []) (3 ∷ 1 ∷ [])))
-  ≡ valid (route tt false 127 7 false ((2000 , 2006) ∷ (2006 , 4005) ∷ (4005 , 4002) ∷ []) (1 ∷ 3 ∷ 1 ∷ []))
+_ : extend (link true 2 255 false (1 ∷ []) ([]) false false true 2) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 2 255 false (1 ∷ []) ([]) true false true 2) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 255 2 false ((0 , 2) ∷ []) (2 ∷ []))
 _ = refl
 
-_ : extend (link true 1 255 true (4002 ∷ []) (floor 1 2 2 0 ∷ floor 2 0 1 2 ∷ floor 5 6 2 0 ∷ []) true true true 2) (2000 , 2002) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 255 true (4002 ∷ []) (floor 1 2 2 0 ∷ floor 2 0 1 2 ∷ floor 5 6 2 0 ∷ []) false true true 2) (2000 , 4006) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ valid (route tt true 255 1 false ((2000 , 4006) ∷ []) (2 ∷ []))
+_ : extend (link true 3 127 true (6 ∷ []) (floor 1 3 1 ∷ floor 6 3 0 ∷ []) false false false 2) (0 , 4) (valid (route tt true 122 10 false ((4 , 2) ∷ (2 , 5) ∷ (5 , 3) ∷ (3 , 0) ∷ []) (2 ∷ 1 ∷ 3 ∷ 1 ∷ [])))
+  ⊕ extend (link true 3 127 true (6 ∷ []) (floor 1 3 1 ∷ floor 6 3 0 ∷ []) false false false 2) (0 , 3) (valid (route tt true 122 10 false ((3 , 189) ∷ (189 , 2) ∷ (2 , 5) ∷ (5 , 3) ∷ (3 , 0) ∷ []) (2 ∷ 1 ∷ 1 ∷ 3 ∷ 1 ∷ [])))
+  ≡ invalid
 _ = refl
 
-_ : extend (link true 1 122 false (2003 ∷ 2006 ∷ []) (floor 6 6 1 3 ∷ []) false false true 1) (2000 , 2006) (valid (route tt false 0 0 true ((2006 , 3006) ∷ []) (0 ∷ [])))
-  ⊕ extend (link true 1 122 false (2003 ∷ 2006 ∷ []) (floor 6 6 1 3 ∷ []) false false true 1) (2000 , 4004) (valid (route tt false 0 0 true ((4004 , 5004) ∷ []) (0 ∷ [])))
-  ≡ valid (route tt false 122 1 true ((2000 , 4004) ∷ (4004 , 5004) ∷ []) (1 ∷ 0 ∷ []))
+_ : extend (link true 1 255 false (4 ∷ []) ([]) true true true 3) (0 , 2) (valid (route tt false 122 1 true ((2 , 0) ∷ []) (3 ∷ [])))
+  ⊕ extend (link true 3 255 false (4 ∷ []) ([]) false false true 2) (0 , 4) (valid (route tt false 122 11 false ((4 , 37) ∷ (37 , 28) ∷ (28 , 26) ∷ (26 , 24) ∷ (24 , 29) ∷ (29 , 11) ∷ (11 , 12) ∷ (12 , 36) ∷ (36 , 5) ∷ (5 , 27) ∷ (27 , 19) ∷ (19 , 21) ∷ (21 , 2) ∷ (2 , 9) ∷ (9 , 3) ∷ (3 , 30) ∷ (30 , 22) ∷ (22 , 31) ∷ (31 , 25) ∷ (25 , 1) ∷ (1 , 6) ∷ (6 , 35) ∷ (35 , 10) ∷ (10 , 14) ∷ (14 , 7) ∷ (7 , 15) ∷ (15 , 18) ∷ (18 , 23) ∷ (23 , 16) ∷ []) (2 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 1 ∷ [])))
+  ≡ valid (route tt true 255 14 false ((0 , 4) ∷ (4 , 37) ∷ (37 , 28) ∷ (28 , 26) ∷ (26 , 24) ∷ (24 , 29) ∷ (29 , 11) ∷ (11 , 12) ∷ (12 , 36) ∷ (36 , 5) ∷ (5 , 27) ∷ (27 , 19) ∷ (19 , 21) ∷ (21 , 2) ∷ (2 , 9) ∷ (9 , 3) ∷ (3 , 30) ∷ (30 , 22) ∷ (22 , 31) ∷ (31 , 25) ∷ (25 , 1) ∷ (1 , 6) ∷ (6 , 35) ∷ (35 , 10) ∷ (10 , 14) ∷ (14 , 7) ∷ (7 , 15) ∷ (15 , 18) ∷ (18 , 23) ∷ (23 , 16) ∷ []) (2 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 3 ∷ 2 ∷ 2 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 3 ∷ 1 ∷ []))
 _ = refl
 
-_ : extend (link true 1 127 true ([]) (floor 2 5 1 2 ∷ floor 3 2 2 3 ∷ []) false true false 3) (2000 , 4003) (valid (route tt false 0 0 false ([]) ([])))
-  ⊕ extend (link true 1 127 true ([]) (floor 2 5 1 2 ∷ floor 3 2 2 3 ∷ []) true true false 3) (2000 , 4001) (valid (route tt false 0 0 false ([]) ([])))
-  ≡ invalid
+_ : extend (link true 4 128 false (4 ∷ []) ([]) false false true 3) (0 , 2) (valid (route tt false 0 0 false ([]) ([])))
+  ⊕ extend (link true 4 128 false (4 ∷ []) ([]) true false true 3) (0 , 5) (valid (route tt false 0 0 false ([]) ([])))
+  ≡ valid (route tt false 128 4 false ((0 , 2) ∷ []) (3 ∷ []))
 _ = refl
 
-_ : extend (link true 2 127 false ([]) (floor 2 2 2 2 ∷ floor 5 1 1 1 ∷ []) false true false 2) (2000 , 2006) (valid (route tt true 0 0 false ((2006 , 4004) ∷ (4004 , 2011) ∷ (2011 , 2003) ∷ (2003 , 4002) ∷ (4002 , 4014) ∷ (4014 , 4022) ∷ (4022 , 2037) ∷ (2037 , 2018) ∷ (2018 , 2028) ∷ (2028 , 4007) ∷ (4007 , 4021) ∷ (4021 , 4032) ∷ (4032 , 2016) ∷ (2016 , 4026) ∷ (4026 , 2015) ∷ (2015 , 2031) ∷ (2031 , 2024) ∷ (2024 , 4008) ∷ (4008 , 2012) ∷ (2012 , 4017) ∷ (4017 , 2039) ∷ (2039 , 4009) ∷ (4009 , 4005) ∷ (4005 , 2023) ∷ (2023 , 4029) ∷ (4029 , 2033) ∷ (2033 , 4025) ∷ (4025 , 4040) ∷ (4040 , 4027) ∷ (4027 , 4020) ∷ (4020 , 2019) ∷ []) (1 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ [])))
-  ⊕ extend (link true 2 127 false ([]) (floor 2 2 2 2 ∷ floor 5 1 1 1 ∷ []) false true false 2) (2000 , 4005) (valid (route tt true 0 0 false ((4005 , 4004) ∷ (4004 , 2011) ∷ (2011 , 2003) ∷ (2003 , 4002) ∷ (4002 , 4014) ∷ (4014 , 4022) ∷ (4022 , 2037) ∷ (2037 , 2018) ∷ (2018 , 2028) ∷ (2028 , 4007) ∷ (4007 , 4021) ∷ (4021 , 4032) ∷ (4032 , 2016) ∷ (2016 , 4026) ∷ (4026 , 2015) ∷ (2015 , 2031) ∷ (2031 , 2024) ∷ (2024 , 4008) ∷ (4008 , 2012) ∷ (2012 , 4017) ∷ (4017 , 2039) ∷ (2039 , 4009) ∷ (4009 , 4005) ∷ (4005 , 2023) ∷ (2023 , 4029) ∷ (4029 , 2033) ∷ (2033 , 4025) ∷ (4025 , 4040) ∷ (4040 , 4027) ∷ (4027 , 4020) ∷ (4020 , 2019) ∷ []) (1 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 1 ∷ 1 ∷ 3 ∷ 3 ∷ 2 ∷ 3 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 2 ∷ 2 ∷ 3 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 3 ∷ 1 ∷ 2 ∷ 2 ∷ 1 ∷ 1 ∷ 2 ∷ 3 ∷ 2 ∷ [])))
-  ≡ invalid
+_ : extend (link true 3 122 false ([]) (floor 6 0 2 ∷ []) false false true 2) (0 , 6) (valid (route tt false 0 1 false ((6 , 1) ∷ (1 , 1001) ∷ []) (1 ∷ 0 ∷ [])))
+  ⊕ extend (link true 3 122 false ([]) (floor 6 0 2 ∷ []) false false true 2) (0 , 1) (valid (route tt false 0 1 false ((1 , 1) ∷ (1 , 1001) ∷ []) (1 ∷ 0 ∷ [])))
+  ≡ valid (route tt false 122 4 false ((0 , 1) ∷ (1 , 1) ∷ (1 , 1001) ∷ []) (2 ∷ 1 ∷ 0 ∷ []))
 _ = refl

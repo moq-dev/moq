@@ -633,11 +633,7 @@ fn route_clock() -> kio::clock::Deadlines {
 
 /// The forwarding node of the relay `relay`.
 fn route_id(relay: u64) -> crate::route::NodeId {
-	crate::route::NodeId {
-		relay,
-		start: 1,
-		marked: false,
-	}
+	crate::route::NodeId { relay, marked: false }
 }
 
 /// A link to a neighbour in `role`.

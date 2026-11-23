@@ -539,7 +539,6 @@ mod test {
 			instance: None,
 			node: Some(crate::route::NodeId {
 				relay: 5,
-				start: 9,
 				marked: false,
 			}),
 			broadcast: Path::from_static("room"),

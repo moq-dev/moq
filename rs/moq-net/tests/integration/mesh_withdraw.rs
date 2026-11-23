@@ -283,14 +283,22 @@ struct Cluster {
 }
 
 impl Cluster {
-	async fn new(version: &str, edges: &[Link], mut config: origin::Config, publisher: usize, watcher: usize) -> Self {
+	async fn new(
+		version: &str,
+		edges: &[Link],
+		mut template: origin::Config,
+		publisher: usize,
+		watcher: usize,
+	) -> Self {
 		let version: Version = version.parse().unwrap();
 		let n = edges.iter().map(|&((a, b), _)| a.max(b) + 1).max().unwrap();
-		config.pool = cache::Pool::unbounded();
+		template.pool = cache::Pool::unbounded();
 		let relays: Vec<_> = (1..=n as u64)
 			.map(|id| {
-				let mut config = config.clone();
-				config.node = std::num::NonZeroU64::new(id).unwrap();
+				let node = std::num::NonZeroU64::new(id).unwrap();
+				let mut config = origin::Config::new(node).with_update_hold(template.update_hold());
+				config.max_hops = template.max_hops;
+				config.pool = template.pool.clone();
 				config.proxy = true;
 				let (origin, driver) = origin::Producer::new(config);
 				support::harness::spawn(driver);

@@ -34,12 +34,11 @@ const PARAM_IMPLEMENTATION = 0x6n;
 /** Setup Parameter id for the client's connection credential (client-only, lite-07+). */
 const PARAM_TOKEN = 0x7n;
 
-/** Check a lite-07 Node ID parameter: a non-zero id, the node's start, a Marked of 0, since a
- * session's node is never a marked identity, and nothing after. */
+/** Check a lite-07 Node ID parameter: a non-zero id, a Marked of 0, since a session's node is
+ * never a marked identity, and nothing after. */
 async function checkNode(value: Uint8Array, version: Version): Promise<void> {
 	const r = new Reader(undefined, value, version);
 	const relay = await r.u62();
-	await r.u62();
 	const marked = await r.bool();
 	if (relay === 0n || marked || !(await r.done())) throw new Error("setup Node ID is malformed");
 }
@@ -307,7 +306,7 @@ export class Setup {
 		}
 
 		// Before lite-07, 0 carries no identity (it cannot be excluded), so it decodes as
-		// absent. A lite-07 Node ID is a non-zero id and the node's start, and nothing an
+		// absent. A lite-07 Node ID is a non-zero id and its Marked, and nothing an
 		// endpoint uses: a peer that declares one still sends this node claims alone.
 		let hop: Hop | undefined;
 		if (hasRoutes(version)) {

@@ -10049,7 +10049,7 @@ mod tests {
 	/// its label as a close for its role.
 	#[kio::test]
 	async fn a_route_from_a_peer_without_a_node_counts_its_close() {
-		let node = crate::route::NodeId::new(7, 1);
+		let node = crate::route::NodeId::new(7);
 		let offer = crate::route::relay::Offer {
 			path: vec![crate::route::relay::Hop { node, session: 0 }].into(),
 			draining: false,
@@ -10165,7 +10165,6 @@ mod tests {
 		use crate::route::relay::{Hop, NodeId, Offer};
 		let node = NodeId {
 			relay: 7,
-			start: 1,
 			marked: false,
 		};
 		let hop = Hop { node, session: 0 };

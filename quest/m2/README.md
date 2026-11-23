@@ -11,8 +11,7 @@ complete it before cutting main into release.
 
 Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId
-drops Start ([node-id-drop-start](/quest/m2/node-id-drop-start.md)),
-whether an origin forwards moves into its config, and moq-relay's
+drops Start, whether an origin forwards moves into its config, and moq-relay's
 cluster peers lose `egress`.
 [lite07-finalize](/quest/m2/lite07-finalize.md) also requires three m1 fixes
 from [lite07-routing](/quest/m1/lite07-routing/README.md), whose Plan

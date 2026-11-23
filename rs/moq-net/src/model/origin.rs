@@ -33,8 +33,8 @@ use crate::{
 /// origin, and this is the id it stamps into a route's hop chain as an announcement
 /// passes through, so a receiver can spot its own id and reject a loop.
 ///
-/// A transit fact the origin and the relays fill in: applications pass plain ids
-/// ([`Config::node`]) and read them back ([`RouteInfo::hops`]).
+/// A transit fact the origin and the relays fill in: applications read them back
+/// ([`RouteInfo::hops`]).
 ///
 /// Local hops come from a [`NonZeroU64`] or [`Hop::random`], so loop detection can work.
 /// Remote peers may still send `0`; it is legal on the wire, names nobody, and marks the
@@ -98,13 +98,10 @@ impl Hop {
 #[non_exhaustive]
 pub struct Config {
 	/// The origin's Node ID: its identity on every wire, appended to broadcast hop chains
-	/// for loop detection and declared as the route identity on moq-lite-07, which also
-	/// names it in the hops of each route it forwards there. Random by
-	/// default, so each process is a fresh identity. One kept across restarts needs a
-	/// wall clock that only moves forward: lite-07 names each run of it by when the
-	/// process started, and a routing peer that remembers a session of a later run as
-	/// closed refuses the session of a run that started before it, logging why.
-	pub node: NonZeroU64,
+	/// for loop detection and declared as the Relay ID on moq-lite-07, which also names it
+	/// in the hops of each route it forwards there. Random, so each run is a new node:
+	/// lite-07 floors trust that a Relay ID names one run, numbering its sessions upward.
+	pub(crate) node: NonZeroU64,
 
 	/// Longest hop path a session using this origin accepts or forwards (default 32).
 	///
@@ -211,6 +208,10 @@ impl Default for Config {
 
 impl Config {
 	/// Config for the given origin node with no byte target and the default idle expiry.
+	///
+	/// Behind the `test-support` feature: a test's door, not an API. A Node ID kept across
+	/// runs would merge them on lite-07.
+	#[cfg(any(test, feature = "test-support"))]
 	pub fn new(node: NonZeroU64) -> Self {
 		Self {
 			node,
@@ -236,12 +237,10 @@ impl Config {
 	}
 }
 
-/// A fresh random hop id, for any origin or peer that needs no stable identity across
-/// restarts.
+/// A fresh random hop id, which names one run of an origin or peer.
 ///
 /// Older `@moq/lite` clients decode the exclude hop as a JavaScript number and reject
-/// values above 2^53-1, so generated ids stay in that range while [`Config::node`] accepts
-/// any non-zero 64-bit id.
+/// values above 2^53-1, so generated ids stay in that range.
 pub(crate) fn random_id() -> NonZeroU64 {
 	NonZeroU64::MIN.saturating_add(kio::clock::rng().random_range(0..(1u64 << 53) - 1))
 }
@@ -2499,7 +2498,7 @@ impl Producer {
 		}
 	}
 
-	/// This origin's Node ID; see [`Config::node`].
+	/// This origin's Node ID, random for each run.
 	pub fn node(&self) -> NonZeroU64 {
 		self.node
 	}
@@ -7803,7 +7802,7 @@ impl Consumer {
 		}
 	}
 
-	/// This origin's Node ID; see [`Config::node`].
+	/// This origin's Node ID, random for each run.
 	pub fn node(&self) -> NonZeroU64 {
 		self.node
 	}
@@ -9359,11 +9358,7 @@ mod tests {
 
 	/// The forwarding node of the relay `relay`.
 	fn node_id(relay: u64) -> crate::route::NodeId {
-		crate::route::NodeId {
-			relay,
-			start: 1,
-			marked: false,
-		}
+		crate::route::NodeId { relay, marked: false }
 	}
 
 	fn hops(ids: &[u64]) -> Hops {

@@ -2241,7 +2241,6 @@ counter moq_relay_route_rewrites_total{tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="malformed",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="other",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="overrun",tier="edge"} 0
-counter moq_relay_route_sessions_closed_total{kind="regressed",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="role",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="stalled",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="unasked",tier="edge"} 0
