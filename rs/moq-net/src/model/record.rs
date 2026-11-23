@@ -152,6 +152,18 @@ impl Record {
 		}
 	}
 
+	/// The lowest key at or after `from` the wire was told of as a group, served or dropped,
+	/// rather than skipped as one no group starts at.
+	pub fn first_group(&self, from: u64) -> Option<u64> {
+		if from < self.floor {
+			return Some(from);
+		}
+		let range = from..u64::MAX;
+		let mut runs = self.reported.overlapping(&range);
+		let first = runs.find(|(_, report)| **report != Report::Skip);
+		first.map(|(run, _)| run.start.max(from))
+	}
+
 	/// Record that the wire was told `report` of `range`.
 	pub fn tell(&mut self, range: Range<u64>, report: Report) {
 		if !range.is_empty() {
@@ -165,6 +177,14 @@ impl Record {
 		if !range.is_empty() {
 			self.reported.remove(range);
 		}
+	}
+}
+
+/// The keys the wire was told of, served or given up.
+impl super::subscription::Accounted for Record {
+	fn first_gap(&self, range: &Range<u64>) -> Option<u64> {
+		let range = range.start.max(self.floor)..range.end;
+		self.reported.gaps(&range).next().map(|gap| gap.start)
 	}
 }
 

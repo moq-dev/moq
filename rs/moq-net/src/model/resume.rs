@@ -1371,6 +1371,29 @@ impl Subscriber {
 		}
 	}
 
+	/// Poll for where the serving copy's live feed starts, placed or not; see
+	/// [`track::Subscriber::poll_feed_start`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn poll_feed_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		let mut reader = self.reader();
+		let sub = ready!(reader.poll_serving(waiter));
+		match sub {
+			Some(sub) => sub.poll_feed_start(waiter),
+			None => Poll::Ready(None),
+		}
+	}
+
+	/// Where the serving copy's upstream started a range asked from the oldest group; see
+	/// [`track::Subscriber::oldest_start`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn oldest_start(&mut self, waiter: &kio::Waiter) -> Option<u64> {
+		let mut reader = self.reader();
+		match reader.poll_serving(waiter) {
+			Poll::Ready(Some(sub)) => sub.oldest_start(waiter),
+			_ => None,
+		}
+	}
+
 	/// The lowest group the reader's ranges name; see [`track::Subscriber::floor`].
 	pub(super) fn floor(&self) -> Option<u64> {
 		self.reader().window().start()
@@ -5494,8 +5517,10 @@ mod test {
 				"routed={routed}"
 			);
 			assert_eq!(sub.runs_in_range(0, 10), [0..6], "routed={routed}");
-			assert!(!sub.covered(0, &RangeSet::from_iter([0..5])), "routed={routed}");
-			assert!(sub.covered(0, &RangeSet::from_iter([0..6])), "routed={routed}");
+			sub.record_mut().tell(0..5, crate::model::record::Report::Settled);
+			assert!(!sub.told_all(0), "routed={routed}");
+			sub.record_mut().tell(5..6, crate::model::record::Report::Skip);
+			assert!(sub.told_all(0), "routed={routed}");
 			let unread = track::Unread {
 				start: 0,
 				end: None,

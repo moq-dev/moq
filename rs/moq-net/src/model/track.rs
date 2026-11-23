@@ -27,7 +27,7 @@ pub(crate) use super::subscription::Resolved;
 #[cfg(feature = "async")]
 pub(crate) use super::subscription::budget;
 use super::subscription::{
-	Accounted, Budget, Containing, Cover, Found, Holdings, Join, Joining, Unplaced, Window, minus,
+	Budget, Containing, Cover, Found, Holdings, Join, Joining, Unplaced, Window, minus,
 };
 pub(crate) use super::subscription::{JoinAsk, live_millis};
 pub use super::subscription::{Order, Position, Range, Start, Subscription};
@@ -12117,7 +12117,7 @@ impl Subscriber {
 			Inner::Plain(cursor) => cursor,
 			Inner::Resume(resume, _) => return resume.poll_start(waiter),
 		};
-		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
+		ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
 		let floor = cursor.min_key;
 		let unplaced = |window: &Window| window.is_waiting_above(floor) || window.is_reaching();
@@ -12137,6 +12137,20 @@ impl Subscriber {
 				return Poll::Pending;
 			}
 		}
+		self.poll_feed_start(waiter)
+	}
+
+	/// Poll for where the source's feed starts, as [`Self::poll_start`] does, whether or not
+	/// this subscriber's ranges are placed yet: what a range placed on its own, or reaching
+	/// back to the oldest group, starts no lower than.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_feed_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		let cursor = match &mut self.inner {
+			Inner::Plain(cursor) => cursor,
+			Inner::Resume(resume, _) => return resume.poll_feed_start(waiter),
+		};
+		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
+		cursor.sync();
 		let start = start.map(|start| start.max(cursor.floor()));
 		let filling = cursor.misses.as_ref().and_then(|misses| misses.lowest());
 		Poll::Ready(match (start, filling) {
@@ -12197,6 +12211,22 @@ impl Subscriber {
 				}
 			}
 			Inner::Resume(resume, _) => resume.knows_edge(waiter),
+		}
+	}
+
+	/// Where the copy this subscriber reads says a range reaching back to the oldest group
+	/// starts, when it places ranges as its publisher would (see [`Self::places_as_upstream`]):
+	/// where that publisher started a range asked from the oldest group, whatever else it still
+	/// places. `None` with no such answer, or on any other track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn oldest_start(&mut self, waiter: &kio::Waiter) -> Option<u64> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				let state = cursor.state.read();
+				let answered = state.time_starts.get(&0).and_then(|answer| answer.start);
+				answered.filter(|_| state.anchors == Anchors::Wire)
+			}
+			Inner::Resume(resume, _) => resume.oldest_start(waiter),
 		}
 	}
 
@@ -12343,23 +12373,22 @@ impl Subscriber {
 			.collect()
 	}
 
-	/// Whether `accounted` holds every group from `from` on that this subscriber's ranges
-	/// and [`Self::with_range`] bounds name, once every range has a resolved end: `false`
-	/// while one stays open, counts back from a group not seen yet, or ends at a time not
-	/// settled yet.
+	/// Whether the wire was told of every group from `from` on that this subscriber's ranges
+	/// name, served or given up, once every range has a resolved end: `false` while one stays
+	/// open, counts back from a group not seen yet, or ends at a time not settled yet.
 	///
-	/// A publisher that accounts for each group it serves or drops learns from it that a
+	/// A publisher that tells the wire of each group it serves or drops learns from it that a
 	/// bounded subscription has nothing more to deliver.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn covered(&mut self, from: u64, accounted: &impl Accounted) -> bool {
+	pub(crate) fn told_all(&mut self, from: u64) -> bool {
 		let bounds = self.bounds();
 		let from = from.max(bounds.start);
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.covered_by(from, bounds.end, accounted)
+				cursor.filter.window.covered_by(from, bounds.end, &cursor.record)
 			}
-			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
+			Inner::Resume(resume, logical) => resume.covered(from, bounds.end, &logical.record),
 		}
 	}
 

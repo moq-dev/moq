@@ -1,11 +1,10 @@
 //! The lite publisher's coverage check before SUBSCRIBE_START.
 //!
 //! `publisher_covered_before_start` holds a bounded lite-07 subscription to `RANGES` ranges
-//! whose source gave up `skipped` of them and has yet to resolve a start, then wakes it with
-//! nothing new to serve. Each wake ends in the check of whether every range was given up.
+//! whose source gave up `skipped` of them, one left unanswered, then wakes it with nothing
+//! new to serve. Each wake ends in the check of whether every group was accounted for.
 //! The range count stays fixed, so a cost that grows with the ranges already given up shows
-//! up as a slope over `skipped`. `adjacent` gives up the groups of one range instead, each
-//! with a different error from its neighbor, so the record holds one entry per group.
+//! up as a slope over `skipped`.
 //!
 //! `publisher_update` feeds a lite-07 subscription of `ranges` one-group ranges a stream of
 //! SUBSCRIBE_UPDATEs, each retiring the `edited` oldest ranges and adding as many, then serving
@@ -39,12 +38,6 @@ fn bench_covered_before_start(c: &mut Criterion) {
 		let mut run = None;
 		group.bench_function(BenchmarkId::new("wake", skipped), |b| {
 			let run = run.get_or_insert_with(|| CoverageBench::new(RANGES, skipped));
-			b.iter(|| run.wake());
-		});
-		// The same record within one range, each group its own entry.
-		let mut run = None;
-		group.bench_function(BenchmarkId::new("adjacent", skipped), |b| {
-			let run = run.get_or_insert_with(|| CoverageBench::adjacent(skipped));
 			b.iter(|| run.wake());
 		});
 	}
