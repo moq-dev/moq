@@ -2942,7 +2942,11 @@ export class Producer {
 		// A restated feed reaches below the START, whose publisher re-offers what lies there: a fill
 		// still asks nothing below the START.
 		const restated = wire.served?.restated ? wire.served : undefined;
-		const feed = restated ? (typeof restated.start === "bigint" ? restated.start : restated.requested) : this.#feedStart();
+		const feed = restated
+			? typeof restated.start === "bigint"
+				? restated.start
+				: restated.requested
+			: this.#feedStart();
 		const start = feed === "pending" ? wire.served?.requested : feed;
 		if (start === undefined || start === 0n) return undefined;
 		if (wire.starts.fillsFromStart) return start;

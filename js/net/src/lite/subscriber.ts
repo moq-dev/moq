@@ -2838,9 +2838,7 @@ export class Subscriber {
 					const live = range.start?.live;
 					const joined = range.start?.joined;
 					const unanswered =
-						live !== undefined
-							? !entry.joinTicks.has(id)
-							: joined !== undefined && !entry.starts.has(id);
+						live !== undefined ? !entry.joinTicks.has(id) : joined !== undefined && !entry.starts.has(id);
 					if (!unanswered) continue;
 					const max = (live ?? joined)?.max ?? null;
 					entry.joinBudgets.set(id, Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max)));
