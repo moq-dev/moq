@@ -2183,13 +2183,8 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 
 		sub.release();
 
-		// Group 0, already popped, lies outside every range the update asks for, so no live join's
-		// max keeps it: its stream resets as stale.
-		const reset = await sub.servedSequence().then(
-			() => undefined,
-			(err: unknown) => err,
-		);
-		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
+		// Group 0, already popped, is still within the update's max age, so it is served.
+		expect(await sub.servedSequence()).toBe(0n);
 		expect(await sub.servedSequence()).toBe(2n);
 		expect(lastGroups(ranges)).toEqual({ start: { included: 2n }, end: undefined });
 	} finally {
@@ -2243,13 +2238,8 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 
 		sub.release();
 
-		// Group 0, already popped, lies outside every range the update asks for, so its stream resets
-		// as stale.
-		const reset = await sub.servedGroup().then(
-			() => undefined,
-			(err: unknown) => err,
-		);
-		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
+		// Group 0, already popped, is still within the update's max age, so it is served whole.
+		expect(await sub.servedGroup()).toEqual({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
 		expect(await sub.servedGroup()).toEqual({ key: 1n, frameStart: 2, payloads: ["c"] });
 		expect(lastGroups(ranges)).toEqual({ start: { included: 1n }, end: undefined });
 	} finally {
