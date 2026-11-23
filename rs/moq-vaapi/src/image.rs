@@ -276,6 +276,23 @@ impl AsRef<[u8]> for Image<'_> {
 /// }
 /// ```
 ///
+/// An image unmaps and destroys itself only before its surface is destroyed:
+///
+/// ```compile_fail,E0505
+/// fn destroy_first(mut surface: moq_vaapi::Surface<()>) {
+/// 	let size = surface.size();
+/// 	let _view = moq_vaapi::Image::derive_from(&mut surface, size).unwrap();
+/// 	drop(surface);
+/// }
+/// ```
+///
+/// ```compile_fail,E0505
+/// fn destroy_first(mut surface: moq_vaapi::Surface<()>, format: moq_vaapi::VAImageFormat) {
+/// 	let _write = moq_vaapi::ImageMut::create_uninitialized(&mut surface, format).unwrap();
+/// 	drop(surface);
+/// }
+/// ```
+///
 /// ```compile_fail,E0499
 /// fn alias(surface: &mut moq_vaapi::Surface<()>, format: moq_vaapi::VAImageFormat) {
 /// 	let first = moq_vaapi::ImageMut::create_uninitialized(surface, format).unwrap();
@@ -340,6 +357,17 @@ impl<'a> ImageMut<'a> {
 			)
 		})
 	}
+}
+
+// The mapping that unmaps and destroys the image carries no lifetime, so these empty
+// drops are what make the drop checker hold the surface borrowed until it has run: libva
+// destroys an image only while its surface lives.
+impl Drop for Image<'_> {
+	fn drop(&mut self) {}
+}
+
+impl Drop for ImageMut<'_> {
+	fn drop(&mut self) {}
 }
 
 impl AsMut<[u8]> for ImageMut<'_> {
