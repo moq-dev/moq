@@ -5877,6 +5877,65 @@ mod tests {
 		);
 	}
 
+	/// A group the subscription delivered, recovered once and evicted again before its reader
+	/// took it, is recovered again rather than refused, and the copy landing is held for the
+	/// reader: a key a reader is owed is never lost to the cache.
+	#[kio::test]
+	async fn an_evicted_recovered_group_is_recovered_again() {
+		let (serve, _serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		let write = |key: u64| {
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		};
+		for key in 0..3 {
+			write(key);
+		}
+		copy.evict(0);
+		let mut reader = copy
+			.subscribe(
+				crate::track::Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(None))
+					.with_range(0..1),
+			)
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "group 0 is owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("group 0 is a miss");
+		};
+		let mut fills = fills::RangeFills::default();
+		fills.push(fill);
+		// Delivered on the subscription before, and recovered once since.
+		let Ok(mut accounted) = tail.write() else {
+			unreachable!("the tail is open");
+		};
+		accounted.account(0..1, serve.subscriber.runtime.now());
+		drop(accounted);
+		fills.recovered_once(0..1);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		assert!(fills.recovering(), "recovered again");
+		assert!(reader.poll_next_group(&waiter).is_pending(), "still owed, not given up");
+
+		// The recovered copy lands and is held for the reader, which takes it.
+		write(0);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
+			panic!("group 0 reaches the reader");
+		};
+		assert_eq!(group.start, 0);
+	}
+
 	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the narrowest budget
 	/// the subscription asked: a SUBSCRIBE_UPDATE widening the budget reopens nothing, and an
 	/// OLD drop arriving after it may have been judged before the publisher read it.
@@ -13817,7 +13876,9 @@ impl kio::Task for FillServeRun {
 			// The next fetch waits for a reader to pick up the group the last one brought, so a
 			// fill wider than the cache never evicts its own groups before they are read.
 			ready!(self.fill.poll_paced(waiter));
+			// Answered, the fill lives until its readers take what it holds for them.
 			let Some(key) = self.fill.wanted() else {
+				ready!(self.fill.poll_taken(waiter));
 				return Poll::Ready(());
 			};
 			// Every run answers its group, so the same one coming back is a bug; ending the

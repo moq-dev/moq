@@ -226,6 +226,12 @@ impl RangeFills {
 		}
 	}
 
+	/// Record `groups` recovered once already.
+	#[cfg(test)]
+	pub fn recovered_once(&mut self, groups: Range<u64>) {
+		self.recovered.insert(groups);
+	}
+
 	/// Whether a [`Recovery`] is still out, whose groups the subscription's tail does not wait
 	/// for.
 	pub fn recovering(&self) -> bool {
@@ -270,11 +276,13 @@ impl RangeFills {
 			}
 		}
 		// The groups the subscription already accounted for, which it never sends again, are
-		// recovered on their own, once.
+		// recovered on their own, as often as the cache evicts them before a reader takes them:
+		// a fill holds the first to land until its reader takes it, so each recovery serves at
+		// least that one. A fill whose answer no reader picked up yet asks for nothing more.
 		if let Some(accounted) = accounted {
 			let tail = accounted.read();
 			let mut asked = RangeSet::new();
-			for fill in &self.held {
+			for fill in self.held.iter().filter(|fill| !fill.is_paced()) {
 				if let Some(run) = fill.next_run() {
 					asked.insert(run);
 				}
@@ -282,17 +290,8 @@ impl RangeFills {
 			for run in asked.iter() {
 				for gone in tail.accounted(run.clone()) {
 					for gap in self.recovering.gaps(&gone).collect::<Vec<_>>() {
-						for again in self.recovered.overlapping(&gap).cloned().collect::<Vec<_>>() {
-							let again = again.start.max(gap.start)..again.end.min(gap.end);
-							if self.refusal(again.start).is_none() {
-								// Recovered once for these fills; a later request may recover it again.
-								self.refused.insert(again, Refusal::passing(StreamError::NotFound));
-							}
-						}
-						for fresh in self.recovered.gaps(&gap).collect::<Vec<_>>() {
-							if self.refusal(fresh.start).is_none() {
-								self.recover.insert(fresh);
-							}
+						if self.refusal(gap.start).is_none() {
+							self.recover.insert(gap);
 						}
 					}
 				}
@@ -362,8 +361,9 @@ impl RangeFills {
 			// Arms every input of the owed groups: readers, answers, and the cache.
 			let _ = fill.poll_wanted_changed(waiter);
 			loop {
+				// Answered, it is kept while a reader has yet to take what it holds.
 				let Some(run) = fill.next_run() else {
-					return false;
+					return fill.is_holding();
 				};
 				// `next_run` extends from the group owed first, which the subscription may have
 				// refused already. Refusing the run answers it, so the loop moves on.
@@ -377,8 +377,21 @@ impl RangeFills {
 					continue;
 				}
 				owed.insert(run.clone());
-				for gap in waiting.gaps(&run) {
-					ask.groups.insert(gap);
+				// With an answer no reader picked up yet, it keeps what it asked but asks for nothing
+				// more: what lands meanwhile the cache may evict before the reader gets to it.
+				let asked: Vec<Range<u64>> = match fill.is_paced() {
+					true => this
+						.ask
+						.groups
+						.overlapping(&run)
+						.map(|asked| asked.start.max(run.start)..asked.end.min(run.end))
+						.collect(),
+					false => vec![run],
+				};
+				for run in asked {
+					for gap in waiting.gaps(&run) {
+						ask.groups.insert(gap);
+					}
 				}
 				ask.add(fill);
 				return true;

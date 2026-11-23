@@ -156,8 +156,6 @@ struct Inner {
 	// edge (see [`Footprint`]) and spare encoder. Signed: a footprint that flips while one of its bytes is
 	// mid-update pins it an instant early or late, which may dip this below zero.
 	pinned: AtomicI64,
-	// The part of `used` readers' records and tail ledgers bill.
-	records: AtomicU64,
 	// Wall-clock LRU window in milliseconds; u64::MAX means never expire by idleness.
 	expiry: u64,
 	// Reference point for the coarse tick clock.
@@ -230,7 +228,6 @@ impl Pool {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
 				pinned: AtomicI64::new(0),
-				records: AtomicU64::new(0),
 				expiry,
 				clock: Mutex::new(None),
 				tick: AtomicU64::new(0),
@@ -290,21 +287,12 @@ impl Pool {
 	}
 
 	/// What the capacity leaves beside the pinned bytes, for everything the pool may reclaim.
-	/// None in a pool held past its capacity by what it pins.
+	/// Zero in a pool held past its capacity by what it pins.
 	pub(super) fn room(&self) -> u64 {
 		self.inner
 			.capacity
 			.load(Ordering::Relaxed)
 			.saturating_sub(self.pinned())
-	}
-
-	/// Whether ending a reader is worth what it frees: the pool has [`Self::room`] other
-	/// content may use, or, held past its capacity by what it pins, its readers' records hold
-	/// more than everything else it holds. Short of that, the room a reader frees is room
-	/// nothing may use, while past it the records are what holds the memory.
-	fn ending_frees(&self) -> bool {
-		let records = self.inner.records.load(Ordering::Relaxed);
-		self.room() > 0 || records > self.used().saturating_sub(records)
 	}
 
 	/// Change the capacity. `None` makes the pool unbounded.
@@ -1423,8 +1411,20 @@ impl Drop for Bill {
 const EDGE: u64 = 1 << 63;
 /// The flag bit in a [`Footprint`]'s content: set once its group finished.
 const FINAL: u64 = 1 << 62;
+/// The flag bit in a [`Footprint`]'s counts: set while a fill holds its group for a reader.
+const HELD: u64 = 1 << 61;
 /// The byte count under a [`Footprint`]'s flags.
-const BYTES: u64 = !(EDGE | FINAL);
+const BYTES: u64 = !(EDGE | FINAL | HELD);
+
+/// Whether content counted under `flags` is pinned: a whole live edge, or a held group.
+fn pins_content(flags: u64) -> bool {
+	flags & HELD != 0 || flags & (EDGE | FINAL) == EDGE | FINAL
+}
+
+/// Whether fixed bytes counted under `flags` are pinned: a live edge's, or a held group's.
+fn pins_fixed(flags: u64) -> bool {
+	flags & (EDGE | HELD) != 0
+}
 
 /// The bytes one cached group bills, across its [`Charge`] and the [`Extra`]s it hands out
 /// (shared content, inflated copies, codec state), and whether they are its track's live
@@ -1452,7 +1452,7 @@ impl Footprint {
 		if edge {
 			track.edges.add(n);
 		}
-		if prior & (EDGE | FINAL) == EDGE | FINAL {
+		if pins_content(prior) {
 			track.pool.pin(n);
 		}
 		edge
@@ -1464,14 +1464,14 @@ impl Footprint {
 		if prior & EDGE != 0 {
 			track.edges.sub(taken);
 		}
-		if prior & (EDGE | FINAL) == EDGE | FINAL {
+		if pins_content(prior) {
 			track.pool.unpin(taken);
 		}
 	}
 
 	/// Count `n` more fixed bytes.
 	fn add_fixed(&self, track: &Track, n: u64) {
-		if self.fixed.fetch_add(n, Ordering::Relaxed) & EDGE != 0 {
+		if pins_fixed(self.fixed.fetch_add(n, Ordering::Relaxed)) {
 			track.pool.pin(n);
 		}
 	}
@@ -1479,44 +1479,70 @@ impl Footprint {
 	/// Count `n` fewer fixed bytes, no more than it holds.
 	fn sub_fixed(&self, track: &Track, n: u64) {
 		let (prior, taken) = Self::take(&self.fixed, n);
-		if prior & EDGE != 0 {
+		if pins_fixed(prior) {
 			track.pool.unpin(taken);
 		}
 	}
 
 	/// The group finished, so its content no longer grows.
 	fn finish(&self, track: &Track) {
-		let prior = self.content.fetch_or(FINAL, Ordering::Relaxed);
-		if prior & (EDGE | FINAL) == EDGE {
-			track.pool.pin(prior & BYTES);
-		}
+		self.flag_content(track, FINAL, true);
 	}
 
 	fn promote(&self, track: &Track) {
-		let prior = self.content.fetch_or(EDGE, Ordering::Relaxed);
-		if prior & EDGE == 0 {
-			track.edges.add(prior & BYTES);
-			if prior & FINAL != 0 {
-				track.pool.pin(prior & BYTES);
-			}
-		}
-		let prior = self.fixed.fetch_or(EDGE, Ordering::Relaxed);
-		if prior & EDGE == 0 {
-			track.pool.pin(prior);
-		}
+		self.flag(track, EDGE, true);
 	}
 
 	fn demote(&self, track: &Track) {
-		let prior = self.content.fetch_and(!EDGE, Ordering::Relaxed);
-		if prior & EDGE != 0 {
-			track.edges.sub(prior & BYTES);
-			if prior & FINAL != 0 {
-				track.pool.unpin(prior & BYTES);
-			}
+		self.flag(track, EDGE, false);
+	}
+
+	/// Pin every byte while a fill holds the group for a reader, or stop.
+	fn hold(&self, track: &Track, held: bool) {
+		self.flag(track, HELD, held);
+	}
+
+	/// Set or clear `flag` on both counts, moving their bytes in or out of the session's
+	/// edges and the pool's pins as they change.
+	fn flag(&self, track: &Track, flag: u64, on: bool) {
+		self.flag_content(track, flag, on);
+		let prior = Self::set(&self.fixed, flag, on);
+		let now = Self::flagged(prior, flag, on);
+		match (pins_fixed(prior), pins_fixed(now)) {
+			(false, true) => track.pool.pin(prior & BYTES),
+			(true, false) => track.pool.unpin(prior & BYTES),
+			_ => {}
 		}
-		let prior = self.fixed.fetch_and(!EDGE, Ordering::Relaxed);
-		if prior & EDGE != 0 {
-			track.pool.unpin(prior & BYTES);
+	}
+
+	fn flag_content(&self, track: &Track, flag: u64, on: bool) {
+		let prior = Self::set(&self.content, flag, on);
+		let now = Self::flagged(prior, flag, on);
+		let bytes = prior & BYTES;
+		match (prior & EDGE != 0, now & EDGE != 0) {
+			(false, true) => track.edges.add(bytes),
+			(true, false) => track.edges.sub(bytes),
+			_ => {}
+		}
+		match (pins_content(prior), pins_content(now)) {
+			(false, true) => track.pool.pin(bytes),
+			(true, false) => track.pool.unpin(bytes),
+			_ => {}
+		}
+	}
+
+	/// Set or clear `flag` on `count`, returning its prior value.
+	fn set(count: &AtomicU64, flag: u64, on: bool) -> u64 {
+		match on {
+			true => count.fetch_or(flag, Ordering::Relaxed),
+			false => count.fetch_and(!flag, Ordering::Relaxed),
+		}
+	}
+
+	fn flagged(prior: u64, flag: u64, on: bool) -> u64 {
+		match on {
+			true => prior | flag,
+			false => prior & !flag,
 		}
 	}
 
@@ -1816,6 +1842,14 @@ impl Charge {
 		}
 	}
 
+	/// Pin every byte the group bills while a fill holds it for a reader, which eviction and
+	/// shedding pass over until the reader takes it, or stop.
+	pub(super) fn hold(&self, held: bool) {
+		if let Some(track) = &self.track {
+			self.footprint.hold(track, held);
+		}
+	}
+
 	/// This copy finished, the `whole` group or only a range a transport bound cut: pin its
 	/// content while it is the live edge, which no longer grows.
 	pub(super) fn finish(&mut self, whole: bool) {
@@ -1823,6 +1857,12 @@ impl Charge {
 			self.footprint.finish(track);
 		}
 		self.whole |= whole;
+	}
+
+	/// Whether this copy finished the whole group.
+	#[cfg(test)]
+	pub(super) fn is_whole(&self) -> bool {
+		self.whole
 	}
 
 	/// Record a cache read: a delivered or fetched group, a frame read, or a
@@ -1920,7 +1960,6 @@ impl Reader {
 		if bytes > self.bytes {
 			let grown = bytes - self.bytes;
 			billed.fetch_add(grown, Ordering::Relaxed);
-			self.track.pool.inner.records.fetch_add(grown, Ordering::Relaxed);
 			self.track.pool.add(grown);
 			self.track.written.fetch_add(grown, Ordering::Relaxed);
 			self.bytes = bytes;
@@ -1929,7 +1968,6 @@ impl Reader {
 			// Whatever a record frees pays toward its readers' debt, however it shrank.
 			let shrunk = self.bytes - bytes;
 			billed.fetch_sub(shrunk, Ordering::Relaxed);
-			self.track.pool.inner.records.fetch_sub(shrunk, Ordering::Relaxed);
 			let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
 				(debt > 0).then(|| debt.saturating_sub(shrunk))
 			});
@@ -1952,14 +1990,16 @@ impl Reader {
 	/// Whether this record is one to end when folding leaves a debt: it bills more than a
 	/// cached group's overhead, so ending it frees more than evicting a group would, at least
 	/// its readers' average, so a reader holding little never ends for one holding much, and
-	/// ending it frees what the pool can use (see `Pool::ending_frees`).
+	/// the pool has [`Pool::room`] beside its pins: in a pool held past its capacity by what
+	/// it pins, ending a reader frees room nothing may use, and every key a reader is owed
+	/// resolves (a fill holds what it fetched until taken), so its record folds instead.
 	pub(super) fn ends(&self) -> bool {
 		let readers = &self.track.readers;
 		let count = readers.count.load(Ordering::Relaxed);
 		self.record
 			&& self.bytes > ENTRY_OVERHEAD
 			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
-			&& self.track.pool.ending_frees()
+			&& self.track.pool.room() > 0
 	}
 }
 

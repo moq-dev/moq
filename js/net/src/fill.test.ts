@@ -7,7 +7,7 @@ import { accept as acceptSession, connect as connectSession } from "./connection
 import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { rejectGroups } from "./fill.ts";
-import type { Consumer as GroupConsumer } from "./group.ts";
+import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -927,7 +927,7 @@ test("fill: a group no reader reads any more stays withdrawn, and widening back 
 	const again = await requests.requestedFill();
 	expect([again?.start, again?.end]).toEqual([3n, 5n]);
 
-	// Each narrowing and widening back asks anew, never spending the refill an eviction gets.
+	// Each narrowing and widening back asks anew.
 	reader.update({ ranges: ranges(2n), delay: { max: null }, order: "ascending" });
 	reader.update({ ranges: ranges(4n), delay: { max: null }, order: "ascending" });
 	await yieldNow();
@@ -943,7 +943,7 @@ test("fill: a group no reader reads any more stays withdrawn, and widening back 
 	broadcast.close();
 });
 
-test("fill: a refusal under an old budget is asked afresh on each widening, never spending the eviction refill", async () => {
+test("fill: a refusal under an old budget is asked afresh on each widening", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	const terms = (max: number): Subscription => ({
@@ -1664,6 +1664,61 @@ test("fill: a lookup answered below the eviction watermark starts the range ther
 		for (let i = 0; i < 4; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
 		expect(got).toEqual([2n, 3n, 4n, 5n]);
 		expect(times).toEqual([2n]);
+
+		reader.close();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
+// As in Rust: a key a reader is owed is never lost to the cache, so an answer evicted before the
+// reader takes it is asked again however often, never given up after one refill.
+test("fill: an answer evicted again before its reader takes it is asked again", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const broadcast = new BroadcastProducer();
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const requests = track.requests();
+		let edge = 4n;
+		const write = (group: GroupProducer) => {
+			group.writeFrame({
+				payload: enc.encode(`g${group.start}`),
+				timestamp: Timestamp.fromMillis(Number(group.start)),
+			});
+			group.finish();
+		};
+		// Idle past the cache window, so the next write evicts every group but the new edge.
+		const evict = () => {
+			clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+			write(track.createGroup(++edge));
+		};
+		for (let n = 0n; n <= edge; n++) write(track.createGroup(n));
+		evict();
+		const reader = track.subscribe({ ...history, ranges: [{ start: 0n, end: 4n }] });
+		const ordered = reader.ordered();
+		const next = ordered.nextGroup();
+		const fill = defined(await requests.requestedFill());
+		expect([fill.start, fill.end]).toEqual([0n, 5n]);
+
+		// The reader waits on group 0 while the answer for 3 is evicted, twice over.
+		write(defined(fill.accept(3n)));
+		for (let round = 0; round < 2; round++) {
+			evict();
+			await yieldNow();
+			const again = defined(await requests.requestedFill());
+			expect([again.start, again.end]).toEqual([3n, 4n]);
+			write(defined(again.accept(3n)));
+			again.close();
+		}
+		expect(hooks.tryDrop(reader)).toBeUndefined();
+		for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) write(defined(fill.accept(key)));
+		fill.close();
+		const got = [(await next)?.start];
+		for (let n = 1; n < 5; n++) got.push((await ordered.nextGroup())?.start);
+		expect(got).toEqual([0n, 1n, 2n, 3n, 4n]);
 
 		reader.close();
 		requests.close();

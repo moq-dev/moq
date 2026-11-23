@@ -2384,7 +2384,8 @@ impl Producer {
 		state.outcome = Outcome::Finished(fin, end);
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
-		state.charge.finish(original_fin.is_some());
+		// Finished short of its transport bound, a bounded copy reached the group's own end too.
+		state.charge.finish(state.range_end.is_none_or(|bound| fin < bound));
 		if let Some(content) = &state.content {
 			content.siblings.update(&state.charge);
 		}
@@ -3323,6 +3324,12 @@ impl Handle {
 				content.siblings.update(&state.charge);
 			}
 		}
+	}
+
+	/// Pin the group while a fill holds it for a reader, or stop: see [`cache::Charge::hold`].
+	/// Through a read guard, so holding wakes no consumer.
+	pub(super) fn cache_hold(&self, held: bool) {
+		self.state.read().charge.hold(held);
 	}
 
 	/// Record a cache access (delivery to a subscriber, a FETCH hit, or a fetched
@@ -8090,6 +8097,24 @@ mod test {
 		assert!(matches!(res, Poll::Ready(Ok(None))), "{res:?}");
 		let res = reader.poll_finished(&waiter);
 		assert!(matches!(res, Poll::Ready(Ok(4))), "{res:?}");
+	}
+
+	/// A bounded copy finishing short of its bound reached the group's own end, which makes its
+	/// siblings whole too; one finishing at its bound finished only the range it was cut to.
+	#[test]
+	fn a_copy_finished_short_of_its_bound_is_whole() {
+		for (frames, whole) in [(2, true), (4, false)] {
+			let mut producer = Info { start: 0 }.produce();
+			producer.bound(Bounds { start: 0, end: Some(4) }).unwrap();
+			let handle = producer.handle();
+			for _ in 0..frames {
+				producer
+					.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"x"))
+					.unwrap();
+			}
+			producer.finish().unwrap();
+			assert_eq!(handle.state.read().charge.is_whole(), whole, "{frames} frames");
+		}
 	}
 
 	/// A publisher that read every frame of a finished group still learns when the budget

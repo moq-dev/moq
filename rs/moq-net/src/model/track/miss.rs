@@ -8,9 +8,11 @@
 //! judged again as the feed moves, or once its wait ends: the arrival grace, bounded by
 //! [`ledger::GRACE`] when nothing else bounds it, so every hole is asked in finite time.
 //!
-//! Each key is judged once, except a group evicted after the reader judged it cached
-//! and before it took it: judged again as a miss, once. A refill evicted again before it is
-//! taken is given up, so a slow reader's refills cannot evict each other without bound.
+//! Each key is judged once, except a group evicted after the reader judged it cached or a
+//! fill answered it, and before it took it: a miss again, asked again however often it is
+//! evicted, since a key a reader is owed is never lost to the cache. Each refill reaches a
+//! reader: a fill holds the first group it answered until a reader takes it (see
+//! [`super::held`]).
 //!
 //! A start is no promise, since a group below it may still arrive late. A hole under it is
 //! asked at once, but a refusal is final only once the ledger gives up on it too; until
@@ -95,8 +97,6 @@ pub(super) struct Misses {
 	inbox: Option<Inbox>,
 	/// The track's eviction count this reader last emptied its inbox at.
 	evictions: u64,
-	/// Judged again after an eviction, within the judged span: never refilled twice.
-	refilled: RangeSet<u64>,
 	/// The last key of the highest received stale run above the newest group that this
 	/// reader cannot trust, as of [`Self::unknown_at`]; see [`Self::unknown`].
 	unknown: Option<u64>,
@@ -366,18 +366,14 @@ impl Misses {
 			.map(|run| run.end)
 	}
 
-	/// What was refilled after an eviction and not handed out yet.
-	#[cfg(all(test, feature = "async"))]
-	pub fn refilled(&self) -> &RangeSet<u64> {
-		&self.refilled
-	}
-
-	/// The next answered group still cached in `order`, giving up one evicted before it was
-	/// read: [`Self::judge`] asked a first eviction again, so this one was refilled already.
+	/// The next answered group still cached in `order`. One evicted before it was read is
+	/// added to `lost`, for the reader to ask again, since a key it is owed is never lost to
+	/// the cache; one aborted since is given up.
 	pub fn next_filled(
 		&mut self,
 		state: &TrackState,
 		order: Order,
+		lost: &mut RangeSet<u64>,
 		given_up: &mut GivenUp,
 	) -> Option<crate::group::Handle> {
 		loop {
@@ -390,20 +386,18 @@ impl Misses {
 				return Some(slot.serving().clone());
 			}
 			self.filled.remove(&key);
-			let mut lost = RangeSet::new();
-			lost.insert(key..key + 1);
-			self.release(&lost);
-			self.give_up(key..key + 1, given_up);
+			let mut gone = RangeSet::new();
+			gone.insert(key..key + 1);
+			self.release(&gone);
+			match state.lookup.contains_key(&key) {
+				true => self.give_up(key..key + 1, given_up),
+				false => lost.insert(key..key + 1),
+			}
 		}
 	}
 
-	/// Take `key` as handed out, if a fill answered it. A refill handed out is never
-	/// judged again, so it is forgotten too.
+	/// Take `key` as handed out, if a fill answered it.
 	pub fn take_filled(&mut self, key: u64) {
-		// The last key is never judged, so never refilled.
-		if let Some(end) = key.checked_add(1) {
-			self.refilled.remove(key..end);
-		}
 		if self.filled.remove(&key) {
 			let mut lost = RangeSet::new();
 			lost.insert(key..key + 1);
@@ -532,7 +526,8 @@ impl Misses {
 	}
 
 	/// Take in what the joined fills answered, waking `waiter` once the rest do. Returns the
-	/// runs to ask again: refused as too old for a budget tighter than this reader's.
+	/// runs to ask again: refused as too old for a budget tighter than this reader's, or
+	/// accepted and evicted before this reader took them in.
 	///
 	/// Looks only at the joins whose fills answered since the last call, and the joins new
 	/// since, so a reader waiting on thousands of fills costs the ones that answered.
@@ -572,6 +567,8 @@ impl Misses {
 			}
 			// Only what is unanswered: a join holding only filled groups until they are taken
 			// has nothing to answer.
+			// What a fill that ended left unanswered, rather than what it accepted.
+			let mut unanswered = RangeSet::new();
 			let answers = match join.outcome().poll(parked, |outcome| {
 				let answered = outcome.within(&wanted);
 				match answered.is_empty() {
@@ -589,6 +586,7 @@ impl Misses {
 						left.remove(groups.clone());
 					}
 					answers.extend(left.iter().map(|run| (run.clone(), Ok(()))));
+					unanswered = left;
 					answers
 				}
 				Poll::Pending => {
@@ -606,17 +604,30 @@ impl Misses {
 				self.wanted.remove(groups.clone());
 				taken.insert(groups.clone());
 				match answer {
-					// What the cache holds is filled, and the rest settled by run: a fill that
-					// ended unanswered may span far more groups than were ever cached.
 					Ok(()) => {
 						seen.insert(groups.clone());
-						self.settle(&state, groups.clone(), given_up);
+						// What the cache holds is filled. The rest of what a fill that ended left
+						// unanswered is settled by run, since it may span far more groups than
+						// were ever cached; an accepted group evicted before this reader took it
+						// in is asked again, since a key it is owed is never lost to the cache.
+						let mut evicted = RangeSet::new();
+						if !unanswered.overlaps(&groups) {
+							for key in groups.clone() {
+								if !state.lookup.contains_key(&key) {
+									evicted.insert(key..key + 1);
+								}
+							}
+						}
+						for run in evicted.gaps(&groups) {
+							self.settle(&state, run, given_up);
+						}
 						for (&key, slot) in state.lookup.range(groups) {
 							if slot.serves_end() {
 								self.filled.insert(key);
 								taken.remove(key..key + 1);
 							}
 						}
+						retry.extend(evicted);
 						// Seen cached, though judging may not run again before it is evicted.
 						if let Some(inbox) = &self.inbox {
 							inbox.saw(state.cached);
@@ -824,7 +835,6 @@ impl Misses {
 			self.judged = clip(&self.judged);
 			self.refused = clip(&self.refused);
 			self.given_up = clip(&self.given_up);
-			self.refilled = clip(&self.refilled);
 			if !self.stale.is_empty() {
 				let mut stale = RangeMap::new();
 				for (run, budget) in self.stale.iter() {
@@ -859,12 +869,7 @@ impl Misses {
 			// A moving read floor removes only its retired prefix. New production extends the
 			// judged span; neither path visits older deferred gaps.
 			if low > 0 {
-				for set in [
-					&mut self.judged,
-					&mut self.refused,
-					&mut self.given_up,
-					&mut self.refilled,
-				] {
+				for set in [&mut self.judged, &mut self.refused, &mut self.given_up] {
 					set.remove(0..low);
 				}
 				self.stale.remove(0..low);
@@ -880,12 +885,7 @@ impl Misses {
 			{
 				let half = |run: RangeInclusive<u64>| *run.start()..run.end().saturating_add(1);
 				for run in old.gained(view, low, last).into_iter().map(half) {
-					for set in [
-						&mut self.judged,
-						&mut self.refused,
-						&mut self.given_up,
-						&mut self.refilled,
-					] {
+					for set in [&mut self.judged, &mut self.refused, &mut self.given_up] {
 						set.remove(run.clone());
 					}
 					self.stale.remove(run.clone());
@@ -968,7 +968,6 @@ impl Misses {
 		let evicted = inbox.judge(state.cached, inbox_floor(low, taken), top);
 		self.evictions = state.evictions;
 		let mut refills = RangeSet::new();
-		let mut again = RangeSet::new();
 		for run in evicted.iter() {
 			let run = run.start.max(low)..run.end.min(top.saturating_add(1));
 			if run.is_empty() {
@@ -977,22 +976,14 @@ impl Misses {
 			for part in target(run.start..=run.end - 1).iter() {
 				for gap in taken.gaps(*part.start()..*part.end() + 1) {
 					for judged in self.judged.overlapping(&gap) {
-						let judged = judged.start.max(gap.start)..judged.end.min(gap.end);
-						for fresh in self.refilled.gaps(&judged) {
-							refills.insert(fresh);
-						}
-						for refilled in self.refilled.overlapping(&judged) {
-							again.insert(refilled.start.max(judged.start)..refilled.end.min(judged.end));
-						}
+						refills.insert(judged.start.max(gap.start)..judged.end.min(gap.end));
 					}
 				}
 			}
 		}
-		// Settled here rather than when read, since an ordered reader never looks at what a
-		// fill answered: it reads past a group gone from the cache. Still asked, its fill
-		// settles it; given up already, it was named.
-		// Only what overlaps it, so a reader still asking thousands of fills pays nothing here.
-		let settled: Vec<ops::Range<u64>> = again
+		// Still asked, its fill settles it; given up already, it was named. Only what overlaps
+		// it, so a reader still asking thousands of fills pays nothing here.
+		let settled: Vec<ops::Range<u64>> = refills
 			.iter()
 			.flat_map(|run| {
 				let wanted = self.wanted.overlapping(run);
@@ -1002,26 +993,18 @@ impl Misses {
 			})
 			.collect();
 		for run in settled {
-			again.remove(run);
+			refills.remove(run);
 		}
-		for (run, refill) in refills
-			.iter()
-			.map(|run| (run, true))
-			.chain(again.iter().map(|run| (run, false)))
-		{
-			// A fill's answer evicted before it was taken is no longer held for this reader.
+		for run in refills.iter() {
+			// A fill's answer evicted before it was taken is no longer held for this reader,
+			// which asks for it again however often it is evicted: a fill holds what it fetched
+			// until a reader takes it, so each refill reaches one.
 			let filled: Vec<u64> = self.filled.range(run.clone()).copied().collect();
 			for key in filled {
 				self.filled.remove(&key);
 				self.release(&RangeSet::from_iter(std::iter::once(key..key + 1)));
 			}
-			match refill {
-				true => {
-					self.refilled.insert(run.clone());
-					candidates.insert(run.clone());
-				}
-				false => self.give_up(run.clone(), given_up),
-			}
+			candidates.insert(run.clone());
 		}
 		self.ledger_revision = ledger.revision();
 		self.drops_revision = drops.revision();
@@ -1196,12 +1179,7 @@ impl Misses {
 			return false;
 		}
 		if low > 0 {
-			for set in [
-				&mut self.judged,
-				&mut self.refused,
-				&mut self.given_up,
-				&mut self.refilled,
-			] {
+			for set in [&mut self.judged, &mut self.refused, &mut self.given_up] {
 				set.remove(0..low);
 			}
 			self.stale.remove(0..low);
@@ -1694,17 +1672,17 @@ fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
 	}
 }
 
-/// The misses a reader gave up, billed with its record and forgotten below its floor once it
-/// folds: it hands out nothing there, so never asks a fill for it again.
+/// The misses a reader gave up, billed with its record and forgotten where it folds: it
+/// settled those keys, so never asks a fill for them again.
 impl super::super::record::Beside for Misses {
 	fn runs(&self) -> u64 {
 		(self.given_up.len() + self.stale.len()) as u64
 	}
 
-	fn forget_below(&mut self, floor: u64) {
-		if floor > 0 {
-			self.given_up.remove(0..floor);
-			self.stale.remove(0..floor);
+	fn forget(&mut self, folded: ops::Range<u64>) {
+		if !folded.is_empty() {
+			self.given_up.remove(folded.clone());
+			self.stale.remove(folded);
 		}
 	}
 }
@@ -2379,14 +2357,8 @@ mod tests {
 				.collect()
 		};
 		let snapshot = |misses: &Misses| {
-			let sets = [
-				&misses.wanted,
-				&misses.judged,
-				&misses.refused,
-				&misses.given_up,
-				&misses.refilled,
-			]
-			.map(|set| set.iter().cloned().collect::<Vec<_>>());
+			let sets = [&misses.wanted, &misses.judged, &misses.refused, &misses.given_up]
+				.map(|set| set.iter().cloned().collect::<Vec<_>>());
 			let deferred: Vec<_> = misses.deferred.overlapping(0..u64::MAX).collect();
 			let filled: Vec<_> = misses.filled.iter().copied().collect();
 			(sets, deferred, filled, misses.joins.len())

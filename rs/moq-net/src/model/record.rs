@@ -182,8 +182,8 @@ pub(super) struct Standing {
 pub(super) trait Beside {
 	/// How many runs it holds.
 	fn runs(&self) -> u64;
-	/// Forget every run below `floor`, which the record folded.
-	fn forget_below(&mut self, floor: u64);
+	/// Forget every run within `folded`, which the record folded as settled.
+	fn forget(&mut self, folded: std::ops::Range<u64>);
 }
 
 impl Beside for () {
@@ -191,7 +191,7 @@ impl Beside for () {
 		0
 	}
 
-	fn forget_below(&mut self, _floor: u64) {}
+	fn forget(&mut self, _folded: std::ops::Range<u64>) {}
 }
 
 /// What a record bills, and the debt its track left to its readers.
@@ -236,8 +236,9 @@ impl Record {
 		if bill.debt() == 0 {
 			return Ok(());
 		}
-		self.fold(reader);
-		beside.forget_below(self.floor);
+		for folded in self.fold(reader) {
+			beside.forget(folded);
+		}
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = self.bill.as_mut().expect("opened above");
 		bill.set(bytes);
@@ -258,8 +259,10 @@ impl Record {
 	/// oldest group, never settles the keys below its start, so the final stretch from its
 	/// start folds too, into one handed-out and reported run: from where its ranges start, or
 	/// the lowest key it settled when they name none or less. The keys below stay owed, should
-	/// a group arrive there or its ranges widen.
-	fn fold(&mut self, reader: Standing) {
+	/// a group arrive there or its ranges widen. Returns the runs it folded, below the floor
+	/// and the stretch.
+	fn fold(&mut self, reader: Standing) -> Vec<std::ops::Range<u64>> {
+		let mut folded = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
@@ -282,6 +285,7 @@ impl Record {
 			self.written_off.remove(0..floor);
 			self.pending.remove(0..floor);
 			self.reported.remove(0..floor);
+			folded.push(0..floor);
 		}
 		let from = reader.from.max(self.lowest_settled().unwrap_or(0));
 		if from > self.floor {
@@ -292,9 +296,11 @@ impl Record {
 				self.delivered.insert_run(stretch.clone());
 				self.skipped.forget(stretch.clone());
 				self.written_off.remove(stretch.clone());
-				self.reported.insert(stretch, Report::Settled);
+				self.reported.insert(stretch.clone(), Report::Settled);
+				folded.push(stretch);
 			}
 		}
+		folded
 	}
 
 	/// The lowest key above the floor that anything settled.
@@ -484,10 +490,26 @@ mod test {
 			from: 2_000,
 			handed: None,
 		};
-		record.settle(|| track.clone(), &mut (), started).unwrap();
+		// What the reader gave up inside the stretch is settled with it, so it bills nothing.
+		let mut forgotten = Forgotten(Vec::new());
+		record.settle(|| track.clone(), &mut forgotten, started).unwrap();
 		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the stretch, and the key below it");
 		assert!(record.delivered.contains(3_500) && record.told(3_500));
 		assert!(!record.told(1_500), "below its start stays owed");
+		assert_eq!(forgotten.0, [2_000..4_000], "the stretch, beside the record too");
+	}
+
+	/// What a reader holds beside its record, here only what it was told to forget.
+	struct Forgotten(Vec<std::ops::Range<u64>>);
+
+	impl Beside for Forgotten {
+		fn runs(&self) -> u64 {
+			0
+		}
+
+		fn forget(&mut self, folded: std::ops::Range<u64>) {
+			self.0.push(folded);
+		}
 	}
 
 	/// The group a read hands out stays above the fold: its publisher has yet to tell its wire
@@ -564,10 +586,9 @@ mod test {
 		assert!(!record.told(2), "the run given up is still owed");
 	}
 
-	/// A pool held past its capacity by what it pins ends no reader while its records hold less
-	/// than everything else, since what ending one frees is room nothing may use, though it
-	/// still folds what is final. Room beside the pins, or records holding most of the pool,
-	/// end it.
+	/// A pool held past its capacity by what it pins ends no reader, however much its records
+	/// hold, since what ending one frees is room nothing may use, though it still folds what
+	/// is final. Room beside the pins ends it.
 	#[test]
 	fn a_debt_past_the_pins_ends_no_reader() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(0));
@@ -583,16 +604,14 @@ mod test {
 		assert!(record.told(1), "what is final still folds");
 		assert!(!record.failed());
 
+		// Nor does a record holding most of the pool.
+		edge.sub(1 << 20);
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		assert!(!record.failed());
+
 		// Given room beside the pins, the same debt ends it.
 		pool.resize(pool.pinned() + 1);
-		owe(&track, pool.used());
-		assert!(record.settle(|| track.clone(), &mut (), Standing::default()).is_err());
-
-		// So does a record holding most of the pool, with no room beside the pins.
-		pool.resize(0);
-		let mut record = record_with_promise();
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		edge.sub(1 << 20);
 		owe(&track, pool.used());
 		assert!(record.settle(|| track.clone(), &mut (), Standing::default()).is_err());
 	}

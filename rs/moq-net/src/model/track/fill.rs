@@ -60,9 +60,13 @@ struct Pending {
 	fetch: bool,
 	// How many joins still read each key: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
-	// What its handler accepted that no join has picked up yet, which holds back the next
-	// group: see [`FillGroups::poll_wanted_changed`].
+	// What it answered that no join has picked up yet, which holds back the next group: see
+	// [`FillGroups::poll_wanted_changed`].
 	unseen: RangeSet<u64>,
+	// What it answered that no join took yet: the first in its order is held in the cache for
+	// them (see [`super::held`]). A join taking a group, or no longer reading it, takes it for
+	// all.
+	untaken: RangeSet<u64>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
 	// became of each key.
 	result: kio::Producer<Outcome>,
@@ -86,6 +90,7 @@ impl Pending {
 	/// reads any more.
 	fn unwant(&mut self, groups: ops::Range<u64>) -> Vec<ops::Range<u64>> {
 		self.unseen.remove(groups.clone());
+		self.untaken.remove(groups.clone());
 		let counts: Vec<(ops::Range<u64>, u32)> = self
 			.wants
 			.overlapping(&groups)
@@ -390,7 +395,7 @@ impl Join {
 		self.held.is_empty()
 	}
 
-	/// The reader picked up `groups` the fill accepted, so its handler may serve the next one.
+	/// The reader picked up `groups` the fill answered, so its handler may serve the next one.
 	pub(super) fn saw(&self, groups: &RangeSet<u64>) {
 		let mut fills = self.fills.lock();
 		// Read first: a mutable borrow wakes every poll parked on the fills.
@@ -405,6 +410,24 @@ impl Join {
 		for run in groups.iter() {
 			unseen.remove(run.clone());
 		}
+	}
+
+	/// The caller took `key`, which it still reads through the fill: the fill holds it no
+	/// longer and may serve its next group.
+	pub(super) fn took(&self, key: u64) {
+		let Some(end) = key.checked_add(1) else {
+			return;
+		};
+		let mut fills = self.fills.lock();
+		// Read first: a mutable borrow wakes every poll parked on the fills.
+		if !fills.pending.get(&self.id).is_some_and(|pending| {
+			self.is_ours(pending) && (pending.unseen.contains(&key) || pending.untaken.contains(&key))
+		}) {
+			return;
+		}
+		let pending = fills.pending.get_mut(&self.id).expect("checked above");
+		pending.unseen.remove(key..end);
+		pending.untaken.remove(key..end);
 	}
 
 	/// Stop reading `lost`, so the fill no longer owes this reader any of it.
@@ -609,6 +632,7 @@ impl FillState {
 					fetch: ask.fetch,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
 					unseen: RangeSet::new(),
+					untaken: RangeSet::new(),
 					result,
 				},
 			);
@@ -661,6 +685,7 @@ impl FillState {
 						fetch: false,
 						wants: RangeMap::from_iter([(groups.clone(), 1)]),
 						unseen: RangeSet::new(),
+						untaken: RangeSet::new(),
 						result: Default::default(),
 					},
 				);
@@ -726,6 +751,7 @@ impl FillState {
 				fetch: false,
 				wants: RangeMap::from_iter([(groups, 1)]),
 				unseen: RangeSet::new(),
+				untaken: RangeSet::new(),
 				result,
 			},
 		);
@@ -763,7 +789,7 @@ impl FillState {
 	}
 
 	/// Whether a join of fill `id` still reads `key`.
-	fn wants(&self, id: u64, key: u64) -> bool {
+	pub(super) fn wants(&self, id: u64, key: u64) -> bool {
 		self.pending
 			.get(&id)
 			.is_some_and(|pending| pending.wants.contains_key(&key))
@@ -1070,6 +1096,12 @@ impl FillGroups {
 		self.inner.poll_unwanted(key, waiter)
 	}
 
+	/// The fill's id, which its holds go by.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn id(&self) -> u64 {
+		self.inner.id
+	}
+
 	/// How many answer runs the fill still holds for its readers.
 	#[cfg(all(test, feature = "async"))]
 	pub(super) fn answers(&self) -> usize {
@@ -1086,7 +1118,7 @@ impl FillGroups {
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
 	/// no reader waits on the fill, so stop serving it. It does not wait for the readers to
-	/// pick up what was served before it; [`poll_wanted_changed`](Self::poll_wanted_changed) does.
+	/// take what was served before it; [`poll_wanted_changed`](Self::poll_wanted_changed) does.
 	pub fn wanted(&self) -> Option<u64> {
 		self.wanted_except(None)
 	}
@@ -1108,7 +1140,12 @@ impl FillGroups {
 					Order::Ascending => gaps.next().map(|gap| gap.start),
 					Order::Descending => gaps.last().map(|gap| gap.end - 1),
 				}
-			}?;
+			};
+			let front = self.inner.untaken_front();
+			let Some(key) = key else {
+				self.inner.sync_holds(front, None);
+				return None;
+			};
 			// The live feed may have delivered it since: answered by the cache, not the source.
 			// Never a flight's, which the cached copy shed.
 			let cached = !self.inner.flight
@@ -1119,26 +1156,45 @@ impl FillGroups {
 					.covering_range(key, self.inner.bounds(key))
 					.is_some();
 			if !cached {
+				// Waiting on a run, the fill holds its first group to land, unless it holds one
+				// a reader has yet to take.
+				let awaiting = front
+					.is_none()
+					.then(|| (self.run_from(key, self.inner.owed_around(key)), self.order()));
+				self.inner.sync_holds(front, awaiting);
 				return Some(key);
 			}
-			let Ok(mut outcome) = self.inner.result.write() else {
+			// Held as it is answered, if it is the first a reader has yet to take: the pool may
+			// evict anything else before the reader gets to it. Checked again under the lock
+			// that holds it, since an eviction may have taken it since.
+			if front.is_none() {
+				let Ok(mut state) = TrackState::modify(&self.inner.state) else {
+					return Some(key);
+				};
+				if state.covering_range(key, self.inner.bounds(key)).is_none() {
+					continue;
+				}
+				state.hold_fill(self.inner.id, Some(key), None);
+			}
+			if !self.inner.answer_cached(key) {
 				return Some(key);
-			};
-			outcome.accept(key..key + 1);
-			drop(outcome);
-			uncover(&self.inner.fills, self.inner.id, key..key + 1);
+			}
 		}
 	}
 
 	/// The next group to serve: [`wanted`](Self::wanted) once it differs from what this handle
-	/// last returned and every group this fill accepted reached a reader, which picks it up
-	/// when it next reads. `None`, once the fill is withdrawn or answered, never waits. The
-	/// first call returns at once, unless a group already accepted has yet to reach a reader.
+	/// last returned and every group this fill answered reached a reader, which picks it up
+	/// when it next reads. `None` once the fill is withdrawn, or answered and taken: keep the
+	/// fill until then, since the cache holds what a reader has yet to take only while the
+	/// fill lives. The first call returns at once, unless a group already answered has yet to
+	/// reach a reader.
 	///
 	/// So `while let Some(key) = fill.wanted_changed().await` writes one group at a time
-	/// as the fastest reader reads on, rather than a batch the cache may evict before it is
-	/// read. A reader reading in another order than the fill's picks up groups it cannot take
-	/// yet, so those wait in the cache.
+	/// as the fastest reader reads on. The cache holds the first group in the fill's order that
+	/// a reader has yet to take, which no eviction takes before it does: a fill holds at most
+	/// one group, however far its readers fall behind, and a reader asks again for any other
+	/// it loses. A reader reading in another order than the fill's picks up groups it cannot
+	/// take yet, so the fill moves on.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		// Arm every input of `wanted` before reading it, so a change in between still wakes:
@@ -1150,14 +1206,18 @@ impl FillGroups {
 		let _ = self.inner.fills.poll(waiter, |_| Poll::Pending);
 		let _ = self.inner.asks.poll(waiter, |_| Poll::Pending);
 		let wanted = self.wanted();
-		if self.prev == Some(wanted) || (wanted.is_some() && self.inner.is_unseen()) {
+		let waits = match wanted {
+			Some(_) => self.inner.is_unseen(),
+			None => self.inner.untaken_front().is_some(),
+		};
+		if self.prev == Some(wanted) || waits {
 			return Poll::Pending;
 		}
 		self.prev = Some(wanted);
 		Poll::Ready(wanted)
 	}
 
-	/// Poll until every group this fill accepted reached a reader, or nobody waits on the
+	/// Poll until every group this fill answered reached a reader, or nobody waits on the
 	/// fill, as [`Self::poll_wanted_changed`] paces.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -1172,6 +1232,39 @@ impl FillGroups {
 				_ => Poll::Ready(()),
 			})
 			.map(drop)
+	}
+
+	/// Poll until a reader took every group this fill answered, or nobody waits on the fill:
+	/// the cache holds what a reader has yet to take only while the fill lives.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_taken(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.poll_withdrawn(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		let _ = self.inner.fills.poll(waiter, |_| Poll::<()>::Pending);
+		let _ = self.inner.asks.poll(waiter, |_| Poll::<()>::Pending);
+		match self.inner.untaken_front() {
+			// The hold moves on as readers take what it answered.
+			Some(front) => {
+				self.inner.sync_holds(Some(front), None);
+				Poll::Pending
+			}
+			None => Poll::Ready(()),
+		}
+	}
+
+	/// Whether a group this fill answered has yet to reach a reader, so it asks for nothing
+	/// more for now.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_paced(&self) -> bool {
+		self.inner.is_unseen()
+	}
+
+	/// Whether a reader has yet to take a group this fill answered, which the cache holds
+	/// only while the fill lives.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_holding(&self) -> bool {
+		self.inner.untaken_front().is_some()
 	}
 
 	/// Refuse every group still owed with `err`, which says nothing about whether the source
@@ -1205,10 +1298,15 @@ impl FillGroups {
 	}
 
 	/// The run from `key` over the `owed` groups beside it, in the fill's order, up to
-	/// the nearest one the cache holds.
+	/// the nearest one the cache holds. Just `key` in a pool held past its capacity by what
+	/// it pins: each group landing there evicts the rest of the run before a reader gets to
+	/// it, but for the first, which the fill holds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn run_from(&self, key: u64, owed: ops::Range<u64>) -> ops::Range<u64> {
 		let state = self.inner.state.read();
+		if state.cache.pool().room() == 0 {
+			return key..key + 1;
+		}
 		let held = |(_, slot): &(&u64, &super::Slot)| !slot.is_aborted();
 		match self.order() {
 			Order::Ascending => {
@@ -1315,13 +1413,55 @@ impl Inner {
 		self.result.wanted() && self.fills.read().wants(self.id, key)
 	}
 
-	/// Whether a group this fill accepted has yet to reach a reader.
+	/// Whether a group this fill answered has yet to reach a reader.
 	fn is_unseen(&self) -> bool {
 		self.fills
 			.read()
 			.pending
 			.get(&self.id)
 			.is_some_and(|pending| !pending.unseen.is_empty())
+	}
+
+	/// The first group in the fill's order that it answered and no reader took yet, which the
+	/// fill holds.
+	fn untaken_front(&self) -> Option<u64> {
+		let order = self.asks.read().order();
+		let fills = self.fills.read();
+		let untaken = &fills.pending.get(&self.id)?.untaken;
+		match order {
+			Order::Ascending => untaken.iter().next().map(|run| run.start),
+			Order::Descending => untaken.iter().next_back().map(|run| run.end - 1),
+		}
+	}
+
+	/// Hold `front` and await `awaiting` for the fill's readers from now on, unless the track
+	/// does already: a change takes the track's lock, which wakes everything parked on it. A
+	/// flight's copy is its readers' own, which no eviction takes from them.
+	fn sync_holds(&self, front: Option<u64>, awaiting: Option<(ops::Range<u64>, Order)>) {
+		if self.flight || self.state.read().fill_holds_as(self.id, front, &awaiting) {
+			return;
+		}
+		if let Ok(mut state) = TrackState::modify(&self.state) {
+			state.hold_fill(self.id, front, awaiting);
+		}
+	}
+
+	/// Answer `key` from the cache, for the readers that still read it to take. Returns
+	/// whether the answer went out.
+	fn answer_cached(&self, key: u64) -> bool {
+		let Ok(mut outcome) = self.result.write() else {
+			return false;
+		};
+		outcome.accept(key..key + 1);
+		drop(outcome);
+		if let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
+			&& pending.wants.contains_key(&key)
+		{
+			pending.unseen.insert(key..key + 1);
+			pending.untaken.insert(key..key + 1);
+		}
+		uncover(&self.fills, self.id, key..key + 1);
+		true
 	}
 
 	fn max_delay(&self) -> Option<Duration> {
@@ -1388,35 +1528,44 @@ impl Inner {
 		if self.result.read().resolved.overlaps(&answered) {
 			return Ok(None);
 		}
-		// Written for a reader that has yet to pick it up, which the next group waits on.
+		// Written for a reader that has yet to pick it up, which the next group waits on, and
+		// to take it, which the cache holds it for.
 		// Recorded before the group is cached, since a reader may take it from the cache and
 		// release it before the answer goes out, which must clear it.
-		let unseen = {
+		let untaken = {
 			let mut fills = self.fills.lock();
 			match fills.pending.get_mut(&self.id) {
 				Some(pending) if pending.wants.contains_key(&key) => {
 					pending.unseen.insert(key..end);
+					pending.untaken.insert(key..end);
 					true
 				}
 				_ => false,
 			}
 		};
-		// Cache the group before answering: readers resolve an accept through the cache.
+		let front = self.untaken_front();
+		// Cache the group before answering: readers resolve an accept through the cache. Held
+		// as it is cached, if it is the first a reader has yet to take: the pool may evict
+		// anything else before the reader gets to it.
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
 			let res = match self.flight {
 				true => state.insert_flight(key, frames, info).map(Some),
 				false => state.insert_group_request(key, frames, info),
 			};
+			if !self.flight && matches!(res, Ok(Some(_))) {
+				state.hold_fill(self.id, front, None);
+			}
 			let deferred = state.deferred();
 			drop(state);
 			deferred.wake();
 			res
 		});
-		if unseen
+		if untaken
 			&& !matches!(res, Ok(Some(_)))
 			&& let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
 		{
 			pending.unseen.remove(key..end);
+			pending.untaken.remove(key..end);
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(key..end);
@@ -1576,6 +1725,14 @@ impl Drop for Inner {
 					outcome.refuse(groups.clone(), Error::Dropped, asked, true);
 				}
 			}
+		}
+		// What it held is the cache's again: a reader that has yet to take it asks again if
+		// it is evicted.
+		if !self.flight
+			&& !self.state.read().fill_holds_as(self.id, None, &None)
+			&& let Ok(mut state) = TrackState::modify(&self.state)
+		{
+			state.release_fill(self.id);
 		}
 		self.fills.lock().end(self.id);
 	}
