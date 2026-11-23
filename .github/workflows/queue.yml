@@ -65,6 +65,9 @@ jobs:
       - uses: ./.github/actions/just
 
       # Local storage only: a self-hosted runner gets no remote cache key.
+      # The runner keeps each workspace's target between groups, so Cargo finds
+      # most units fresh without asking mbx. A group's mbx misses are then the
+      # crates its change dirtied, which no cache holds; 0 hits is normal.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
 
