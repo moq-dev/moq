@@ -10687,8 +10687,8 @@ struct SubStream {
 	/// The tick the copy recorded each live join range's answer at, by Range ID (see
 	/// [`track::Producer::answer_join`]): one with none is still unanswered.
 	join_ticks: std::collections::BTreeMap<u64, u64>,
-	/// The narrowest max age each live join range, placed or not, was asked under before its
-	/// answer, by Range ID, beside the one it asks now: its publisher starts it past the groups
+	/// The narrowest max age each live join range was asked under before its answer, or each
+	/// placed one ever, by Range ID, beside the one it asks now: its publisher starts it past the groups
 	/// that max expired, so the answer places only readers within it.
 	join_budgets: std::collections::BTreeMap<u64, Duration>,
 	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
@@ -10953,7 +10953,9 @@ impl SubStream {
 		for (id, range) in self.live.iter() {
 			let unanswered = match range.start {
 				Some(lite::Anchor::Live { max, .. }) if !self.join_ticks.contains_key(&id) => Some(max),
-				Some(lite::Anchor::Joined { max, .. }) if !self.starts.contains_key(&id) => Some(max),
+				// Every max a placed join was ever asked under, answered or not: a retune keeps its
+				// answer, which proves history only if none was finite.
+				Some(lite::Anchor::Joined { max, .. }) => Some(max),
 				_ => None,
 			};
 			if let Some(max) = unanswered {

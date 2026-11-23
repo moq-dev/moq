@@ -3146,11 +3146,12 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 // it alone, so its answer places no history reader at its group; one with no max age skips nothing.
 // Mirrors the Rust `only_an_unbounded_placed_join_answers_for_history`.
 for (const [max, retuned] of [
-	[Duration.ZERO, false],
-	[null, false],
-	[null, true],
+	[Duration.ZERO, undefined],
+	[null, undefined],
+	[null, "before"],
+	[null, "after"],
 ] as const) {
-	const name = `${max === null ? "none" : "0"}${retuned ? ", retuned from 0 before its answer," : ""}`;
+	const name = `${max === null ? "none" : "0"}${retuned ? `, retuned from 0 ${retuned} its answer,` : ""}`;
 	test(`a placed join with max ${name} answers for history only without one`, async () => {
 		const version = Version.DRAFT_07;
 		const { quic, streams, opened } = fakeSession();
@@ -3172,12 +3173,14 @@ for (const [max, retuned] of [
 			await answerTrackInfo(streams[0], version);
 			const request = await opened(1);
 			await request.reading;
-			if (retuned) {
+			const retune = async () => {
 				track.update(asked(max));
 				await drainReactions();
-			}
+			};
+			if (retuned === "before") await retune();
 			await respond(request, version, [{ start: new SubscribeStart([20n]) }]);
 			await drainReactions();
+			if (retuned === "after") await retune();
 			expect(reported.at(-1)).toEqual(max === null && !retuned ? [[10n, 20n]] : []);
 		} finally {
 			hooks.timeStarts = timeStarts;
