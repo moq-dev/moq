@@ -1251,6 +1251,9 @@ export class Consumer {
 			group.#state.unverified = true;
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
+		hooks.skipGroupFrames = (group) => {
+			while (!group.#verdict.peek() && group.#readBufferedFrame(false, "stream")) {}
+		};
 		hooks.groupIndex = (group) => group.#index();
 		hooks.groupFirstFrame = (group) => group.#state.offset;
 		hooks.groupStarted = (group) =>

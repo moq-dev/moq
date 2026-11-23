@@ -1042,7 +1042,7 @@ interface Probe {
 // Where a range from `time` starts once the probed group places it, or the abort that left where it
 // ends unknown; undefined until then. Mirrors the Rust `Probe::poll`.
 function probed(probe: Probe, time: bigint): bigint | Error | undefined {
-	while (probe.reader.tryReadFrame() !== undefined) {}
+	hooks.skipGroupFrames(probe.reader);
 	const from = hooks.groupUnplacedFrom(probe.group);
 	if (from !== undefined && time >= from) return probe.group.closed.peek() ?? undefined;
 	return reached(probe.key, time, hooks.groupWholeEnd(probe.group));

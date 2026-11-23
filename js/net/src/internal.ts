@@ -1131,6 +1131,11 @@ export const hooks: {
 	groupUnplacedFrom: (group: GroupProducer) => bigint | undefined;
 	/** A source copy's frame count, bumped on each write. */
 	groupWrites: (group: GroupProducer) => Getter<number>;
+	/**
+	 * Move a reader past every frame buffered now without building a payload, so a streamed frame
+	 * that aborted or shed its head never throws. Mirrors draining Rust's `poll_next_frame`.
+	 */
+	skipGroupFrames: (group: GroupConsumer) => void;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -1567,6 +1572,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupWrites: () => {
+		throw new Error("group.ts not loaded");
+	},
+	skipGroupFrames: () => {
 		throw new Error("group.ts not loaded");
 	},
 	startGroup: () => {

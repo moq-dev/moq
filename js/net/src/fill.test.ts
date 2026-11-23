@@ -1951,6 +1951,48 @@ test("fill: a looked-up group aborting before the time fails the read", async ()
 	broadcast.close();
 });
 
+// A looked-up group streaming one frame past its retained tail before the time is placed by its later
+// frames, then fails the read with its shed head: the probe moves past frames without building their
+// payloads, so it never throws on the frame whose head is gone. Mirrors the Rust
+// `a_looked_up_group_shedding_its_head_before_the_time_fails_the_read`.
+test("fill: a looked-up group streaming a frame past its tail before the time fails the read", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const requests = track.requests();
+	let answered: ReturnType<typeof track.createGroup> | undefined;
+	void (async () => {
+		const fill = await requests.requestedFill();
+		if (!fill) return;
+		answered = defined(fill.accept(1000n));
+		fill.close();
+		requests.close();
+	})();
+	for (const start of [0, 3000]) {
+		const held = track.createGroup(BigInt(start));
+		held.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(start) });
+		held.finishAt(BigInt(start + 400));
+	}
+	const reader = track.subscribe(fromTime(1300n));
+	const next = reader.ordered().nextGroup();
+	while (answered === undefined) await yieldNow();
+	const group = answered;
+	const chunk = new Uint8Array(1 << 20);
+	const chunks = 34;
+	const frame = group.createFrame({ size: chunk.length * chunks, timestamp: Timestamp.fromMillis(1000) });
+	for (let i = 0; i < chunks; i++) {
+		frame.write(chunk);
+		await yieldNow();
+	}
+	frame.finish();
+	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1350) });
+	group.finishAt(1400n);
+	const read = defined(await next);
+	expect(read.start).toBe(1000n);
+	await expect(read.readFrame()).rejects.toThrow();
+	reader.close();
+	broadcast.close();
+});
+
 // A subscriber closing mid-lookup lets its probe go, so the looked-up group is no longer wanted.
 test("fill: a subscriber closing mid-lookup stops wanting the looked-up group", async () => {
 	const broadcast = new BroadcastProducer();
