@@ -1,4 +1,4 @@
-# [M] A relay resets a live group `Evicted` mid-stream under a pinned pool
+# [M] A relay resets a live group as evicted mid-stream under a pinned pool
 
 ## Goal
 
