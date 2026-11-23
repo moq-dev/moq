@@ -284,15 +284,21 @@ fn payloads(released: &[(Instant, Frame)]) -> Vec<u8> {
 }
 
 /// Assert `released` is the objects of each of `runs` in turn, each run going out on its own
-/// PCR pace: every object its PCR step after the one before it.
+/// PCR pace: every object starting its PCR step after the one before it.
 fn assert_paced(released: &[(Instant, Frame)], runs: &[&[Object]]) {
 	let mut released = released.iter();
 	for (run, objects) in runs.iter().enumerate() {
 		let mut previous: Option<(Instant, u64)> = None;
 		for (i, object) in objects.iter().enumerate() {
+			// An object goes out spread across its PCR interval, a run of packets at a time.
 			let (at, frame) = released.next().expect("every object released");
+			let mut payload = frame.payload.to_vec();
+			while payload.len() < object.payload.len() {
+				let (_, rest) = released.next().expect("every run of the object released");
+				payload.extend_from_slice(&rest.payload);
+			}
 			assert!(
-				frame.payload == object.payload,
+				payload == object.payload,
 				"run {run} object {i} at {:?}, not the object at {} µs",
 				frame.timestamp,
 				object.micros
