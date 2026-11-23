@@ -363,8 +363,10 @@ age the publisher declared; unset, each track keeps its own max age. The latest
 group of every track is kept past `capacity`: whole once it finished, so a new
 viewer always gets it, a catalog included. While it is still arriving, it and any
 group still being read shed their oldest frames instead. When the latest groups
-alone exceed the target, every older group goes but no viewer is ended for it,
-since that would free room nothing could use. Whatever the capacity, a group holds at most its
+alone exceed the target, every older group goes but no viewer is ended for them,
+and a viewer that falls behind skips what it missed, since nothing else fits. A
+group refetched for a viewer that missed it is kept until that viewer reads it,
+one per viewer, while those fit the capacity. Whatever the capacity, a group holds at most its
 newest 32 MB. A reader that reaches a shed frame, such as a late joiner of a long
 group, replays it through a flight: a separate copy fetched from the upstream hop
 from that frame, paced by its fastest reader and held to its own 32 MB. Readers

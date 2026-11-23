@@ -156,6 +156,11 @@ struct Inner {
 	// edge (see [`Footprint`]) and spare encoder. Signed: a footprint that flips while one of its bytes is
 	// mid-update pins it an instant early or late, which may dip this below zero.
 	pinned: AtomicI64,
+	// The part of `used` fills hold for their readers, apart from `pinned`: only spared while
+	// it fits the capacity beside the pins (see [`Pool::holds_fit`]). Signed as `pinned` is.
+	fill_held: AtomicI64,
+	// The part of `used` readers' records and tails bill.
+	recorded: AtomicU64,
 	// Wall-clock LRU window in milliseconds; u64::MAX means never expire by idleness.
 	expiry: u64,
 	// Reference point for the coarse tick clock.
@@ -228,6 +233,8 @@ impl Pool {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
 				pinned: AtomicI64::new(0),
+				fill_held: AtomicI64::new(0),
+				recorded: AtomicU64::new(0),
 				expiry,
 				clock: Mutex::new(None),
 				tick: AtomicU64::new(0),
@@ -266,16 +273,60 @@ impl Pool {
 		self.inner.pinned.load(Ordering::Relaxed).max(0).unsigned_abs()
 	}
 
-	fn pin(&self, n: u64) {
-		self.inner.pinned.fetch_add(n.cast_signed(), Ordering::Relaxed);
+	/// Bytes fills hold for their readers, apart from what live edges pin.
+	pub(super) fn held(&self) -> u64 {
+		self.inner.fill_held.load(Ordering::Relaxed).max(0).unsigned_abs()
 	}
 
-	fn unpin(&self, n: u64) {
-		self.inner.pinned.fetch_sub(n.cast_signed(), Ordering::Relaxed);
+	/// Count `n` bytes into, or out of, the counter for `class`.
+	fn count(&self, class: Class, n: u64, add: bool) {
+		let counter = match class {
+			Class::Pinned => &self.inner.pinned,
+			Class::Held => &self.inner.fill_held,
+			Class::Free => return,
+		};
+		match add {
+			true => counter.fetch_add(n.cast_signed(), Ordering::Relaxed),
+			false => counter.fetch_sub(n.cast_signed(), Ordering::Relaxed),
+		};
+	}
+
+	/// Whether what fills hold fits the capacity beside the pins, so eviction spares it. Past
+	/// that, a held group is evicted like any other: holds never keep the pool past its
+	/// capacity.
+	pub(super) fn holds_fit(&self) -> bool {
+		self.pinned().saturating_add(self.held()) <= self.inner.capacity.load(Ordering::Relaxed)
+	}
+
+	/// Whether a fill could hold one more group: the capacity leaves room beside the pins and
+	/// every hold.
+	pub(super) fn hold_room(&self) -> bool {
+		self.pinned().saturating_add(self.held()) < self.inner.capacity.load(Ordering::Relaxed)
+	}
+
+	/// What eviction spares: the pins, and the holds while they fit.
+	fn spared(&self) -> u64 {
+		match self.holds_fit() {
+			true => self.pinned().saturating_add(self.held()),
+			false => self.pinned(),
+		}
+	}
+
+	/// What eviction could ever free: everything it does not spare.
+	pub(super) fn reclaimable(&self) -> u64 {
+		self.used().saturating_sub(self.spared())
+	}
+
+	/// How far readers' records and tails, beside what eviction spares, are past the target:
+	/// the most their debt stands for. The rest of any excess is cached groups, however
+	/// fresh, which their tracks pay by evicting as they age, never by ending a reader.
+	fn records_over(&self) -> u64 {
+		let recorded = self.inner.recorded.load(Ordering::Relaxed);
+		self.spared().saturating_add(recorded).saturating_sub(self.target())
 	}
 
 	/// What usage converges toward: the capacity, or the pinned bytes when they are more,
-	/// since nothing can reclaim those.
+	/// since nothing can reclaim those. Holds never raise it: they fit within the capacity.
 	fn target(&self) -> u64 {
 		self.inner.capacity.load(Ordering::Relaxed).max(self.pinned())
 	}
@@ -284,15 +335,6 @@ impl Pool {
 	/// readers folding could still free toward it.
 	pub(super) fn excess(&self) -> Option<u64> {
 		self.used().checked_sub(self.target()).filter(|excess| *excess > 0)
-	}
-
-	/// What the capacity leaves beside the pinned bytes, for everything the pool may reclaim.
-	/// Zero in a pool held past its capacity by what it pins.
-	pub(super) fn room(&self) -> u64 {
-		self.inner
-			.capacity
-			.load(Ordering::Relaxed)
-			.saturating_sub(self.pinned())
 	}
 
 	/// Change the capacity. `None` makes the pool unbounded.
@@ -1219,9 +1261,10 @@ impl Track {
 	pub(super) fn owe_readers(&self, debt: &mut u64) {
 		let readers = &self.readers;
 		let mut shifted = 0;
+		let over = self.pool.records_over();
 		let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owed| {
 			let billed = readers.bytes.load(Ordering::Relaxed) + readers.tails.load(Ordering::Relaxed);
-			let room = billed.saturating_sub(owed);
+			let room = billed.min(over).saturating_sub(owed);
 			shifted = room.min(*debt);
 			(shifted > 0).then_some(owed + shifted)
 		});
@@ -1372,7 +1415,7 @@ impl Drop for Track {
 			.is_some()
 		{
 			self.pool.sub(flate::ENCODER_HEAP);
-			self.pool.unpin(flate::ENCODER_HEAP);
+			self.pool.count(Class::Pinned, flate::ENCODER_HEAP, false);
 		}
 		if let Some(key) = self.sweep.get() {
 			self.pool.unregister(*key);
@@ -1417,14 +1460,39 @@ const HELD: u64 = 1 << 61;
 /// The byte count under a [`Footprint`]'s flags.
 const BYTES: u64 = !(EDGE | FINAL | HELD);
 
-/// Whether content counted under `flags` is pinned: a whole live edge, or a held group.
-fn pins_content(flags: u64) -> bool {
-	flags & HELD != 0 || flags & (EDGE | FINAL) == EDGE | FINAL
+/// Which of the [`Pool`]'s counters a byte counts in, if any.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+	/// A live edge's, which no eviction reclaims while its track lives.
+	Pinned,
+	/// A group a fill holds for a reader, spared only while the holds fit.
+	Held,
+	/// Anything eviction may take.
+	Free,
 }
 
-/// Whether fixed bytes counted under `flags` are pinned: a live edge's, or a held group's.
-fn pins_fixed(flags: u64) -> bool {
-	flags & (EDGE | HELD) != 0
+/// Which counter content counted under `flags` falls in: a whole live edge's is pinned, and
+/// any other held group's held.
+fn content_class(flags: u64) -> Class {
+	if flags & (EDGE | FINAL) == EDGE | FINAL {
+		Class::Pinned
+	} else if flags & HELD != 0 {
+		Class::Held
+	} else {
+		Class::Free
+	}
+}
+
+/// Which counter fixed bytes counted under `flags` fall in: a live edge's are pinned, and any
+/// other held group's held.
+fn fixed_class(flags: u64) -> Class {
+	if flags & EDGE != 0 {
+		Class::Pinned
+	} else if flags & HELD != 0 {
+		Class::Held
+	} else {
+		Class::Free
+	}
 }
 
 /// The bytes one cached group bills, across its [`Charge`] and the [`Extra`]s it hands out
@@ -1453,9 +1521,7 @@ impl Footprint {
 		if edge {
 			track.edges.add(n);
 		}
-		if pins_content(prior) {
-			track.pool.pin(n);
-		}
+		track.pool.count(content_class(prior), n, true);
 		edge
 	}
 
@@ -1465,24 +1531,19 @@ impl Footprint {
 		if prior & EDGE != 0 {
 			track.edges.sub(taken);
 		}
-		if pins_content(prior) {
-			track.pool.unpin(taken);
-		}
+		track.pool.count(content_class(prior), taken, false);
 	}
 
 	/// Count `n` more fixed bytes.
 	fn add_fixed(&self, track: &Track, n: u64) {
-		if pins_fixed(self.fixed.fetch_add(n, Ordering::Relaxed)) {
-			track.pool.pin(n);
-		}
+		let prior = self.fixed.fetch_add(n, Ordering::Relaxed);
+		track.pool.count(fixed_class(prior), n, true);
 	}
 
 	/// Count `n` fewer fixed bytes, no more than it holds.
 	fn sub_fixed(&self, track: &Track, n: u64) {
 		let (prior, taken) = Self::take(&self.fixed, n);
-		if pins_fixed(prior) {
-			track.pool.unpin(taken);
-		}
+		track.pool.count(fixed_class(prior), taken, false);
 	}
 
 	/// The group finished, so its content no longer grows.
@@ -1498,21 +1559,25 @@ impl Footprint {
 		self.flag(track, EDGE, false);
 	}
 
-	/// Pin every byte while a fill holds the group for a reader, or stop.
+	/// Count every byte held while a fill holds the group for a reader, or stop.
 	fn hold(&self, track: &Track, held: bool) {
 		self.flag(track, HELD, held);
 	}
 
-	/// Set or clear `flag` on both counts, moving their bytes in or out of the session's
-	/// edges and the pool's pins as they change.
+	/// Set or clear `flag` on both counts, moving their bytes between the session's edges and
+	/// the pool's counters as they change.
 	fn flag(&self, track: &Track, flag: u64, on: bool) {
 		self.flag_content(track, flag, on);
 		let prior = Self::set(&self.fixed, flag, on);
 		let now = Self::flagged(prior, flag, on);
-		match (pins_fixed(prior), pins_fixed(now)) {
-			(false, true) => track.pool.pin(prior & BYTES),
-			(true, false) => track.pool.unpin(prior & BYTES),
-			_ => {}
+		Self::reclass(track, prior & BYTES, fixed_class(prior), fixed_class(now));
+	}
+
+	/// Move `bytes` from the pool's counter for `from` to the one for `to`.
+	fn reclass(track: &Track, bytes: u64, from: Class, to: Class) {
+		if from != to {
+			track.pool.count(from, bytes, false);
+			track.pool.count(to, bytes, true);
 		}
 	}
 
@@ -1525,11 +1590,7 @@ impl Footprint {
 			(true, false) => track.edges.sub(bytes),
 			_ => {}
 		}
-		match (pins_content(prior), pins_content(now)) {
-			(false, true) => track.pool.pin(bytes),
-			(true, false) => track.pool.unpin(bytes),
-			_ => {}
-		}
+		Self::reclass(track, bytes, content_class(prior), content_class(now));
 	}
 
 	/// Set or clear `flag` on `count`, returning its prior value.
@@ -1566,7 +1627,7 @@ impl Footprint {
 /// So they bill the session together: while one copy is itself its track's cached live
 /// edge, they all do, a copy that aborted included, since its frames may still be what the
 /// live copy holds; once none is, none does. Once one finished the whole group, they are all
-/// whole. While a fill holds one, they all pin, for the same reason.
+/// whole. While a fill holds one, they are all held, for the same reason.
 #[derive(Default)]
 pub(super) struct Siblings(Mutex<Vec<Sibling>>);
 
@@ -1620,8 +1681,8 @@ impl Siblings {
 	}
 
 	/// Bill every copy while any is the live edge, pin every copy's content once any finished
-	/// the whole group, and every byte while a fill holds any, since a copy's frames may be what
-	/// that sibling holds. Forgets copies nothing bills any more.
+	/// the whole group, and count every byte held while a fill holds any, since a copy's frames
+	/// may be what that sibling holds. Forgets copies nothing bills any more.
 	fn bill(siblings: &mut Vec<Sibling>) {
 		siblings.retain(|sibling| Arc::strong_count(&sibling.footprint) > 1);
 		let edge = siblings.iter().any(|sibling| sibling.edge);
@@ -1672,7 +1733,7 @@ pub(super) struct Charge {
 	edge: bool,
 	// Whether this copy finished the whole group, which makes its siblings whole too.
 	whole: bool,
-	// Whether a fill holds this copy for a reader, which pins its siblings too. Atomic, since a
+	// Whether a fill holds this copy for a reader, which holds its siblings too. Atomic, since a
 	// hold goes through a shared guard.
 	held: AtomicBool,
 }
@@ -1852,8 +1913,8 @@ impl Charge {
 		}
 	}
 
-	/// Pin every byte the group bills while a fill holds it for a reader, which eviction and
-	/// shedding pass over until the reader takes it, or stop. Frames a sibling copy wrote first
+	/// Count every byte the group bills held while a fill holds it for a reader, which eviction
+	/// and shedding pass over until the reader takes it, while the holds fit, or stop. Frames a sibling copy wrote first
 	/// bill that copy, so update its [`Siblings`] after.
 	pub(super) fn hold(&self, held: bool) {
 		self.held.store(held, Ordering::Relaxed);
@@ -1978,6 +2039,7 @@ impl Reader {
 		if bytes > self.bytes {
 			let grown = bytes - self.bytes;
 			billed.fetch_add(grown, Ordering::Relaxed);
+			self.track.pool.inner.recorded.fetch_add(grown, Ordering::Relaxed);
 			self.track.pool.add(grown);
 			self.track.written.fetch_add(grown, Ordering::Relaxed);
 			self.bytes = bytes;
@@ -1989,35 +2051,37 @@ impl Reader {
 			let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
 				(debt > 0).then(|| debt.saturating_sub(shrunk))
 			});
+			self.track.pool.inner.recorded.fetch_sub(shrunk, Ordering::Relaxed);
 			self.track.pool.sub(shrunk);
 			self.bytes = bytes;
 		}
 	}
 
-	/// The debt the track's readers owe, forgiven once the pool is back within its target:
-	/// nothing needs the room any more, as the track forgives its own debt.
+	/// The debt the track's readers owe, never more than records and tails are over the
+	/// target, and forgiven once they are not: nothing needs the room from them any more.
 	pub(crate) fn debt(&self) -> u64 {
 		let readers = &self.track.readers;
-		if self.track.pool.excess().is_none() {
+		let over = self.track.pool.records_over();
+		if over == 0 {
 			readers.debt.store(0, Ordering::Relaxed);
 			return 0;
 		}
-		readers.debt.load(Ordering::Relaxed)
+		readers.debt.load(Ordering::Relaxed).min(over)
 	}
 
 	/// Whether this record is one to end when folding leaves a debt: it bills more than a
-	/// cached group's overhead, so ending it frees more than evicting a group would, at least
-	/// its readers' average, so a reader holding little never ends for one holding much, and
-	/// the pool has [`Pool::room`] beside its pins: in a pool held past its capacity by what
-	/// it pins, ending a reader frees room nothing may use, and every key a reader is owed
-	/// resolves (a fill holds what it fetched until taken), so its record folds instead.
+	/// cached group's overhead, so ending it frees more than evicting a group would, and at
+	/// least its readers' average, so a reader holding little never ends for one holding much.
+	///
+	/// A debt only ever stands for what records and tails, beside the pins and the holds that
+	/// fit, are past the capacity, or past the pins when they are more: so a reader ends only
+	/// when records and holds, never cached groups or live edges, are what is over.
 	pub(super) fn ends(&self) -> bool {
 		let readers = &self.track.readers;
 		let count = readers.count.load(Ordering::Relaxed);
 		self.record
 			&& self.bytes > ENTRY_OVERHEAD
 			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
-			&& self.track.pool.room() > 0
 	}
 }
 
@@ -2087,7 +2151,7 @@ impl Extra {
 				// Moving existing heap is not a write and must not accrue eviction debt.
 				self.bytes.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
 				self.state.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
-				track.pool.unpin(flate::ENCODER_HEAP);
+				track.pool.count(Class::Pinned, flate::ENCODER_HEAP, false);
 				self.footprint_fixed(track, flate::ENCODER_HEAP, true);
 				encoder.reset();
 				return encoder;
@@ -2106,7 +2170,7 @@ impl Extra {
 				self.state.fetch_sub(flate::ENCODER_HEAP, Ordering::Relaxed);
 				self.footprint_fixed(track, flate::ENCODER_HEAP, false);
 				// Only the track's end frees a spare.
-				track.pool.pin(flate::ENCODER_HEAP);
+				track.pool.count(Class::Pinned, flate::ENCODER_HEAP, true);
 				*spare = Some(encoder);
 				return;
 			}
@@ -2145,6 +2209,16 @@ impl Extra {
 		if let Some(track) = &self.track {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
+			self.bytes.fetch_add(n, Ordering::Relaxed);
+			self.footprint(track, n, true);
+		}
+	}
+
+	/// Count `n` more bytes that what an eviction freed paid for already, so they accrue no
+	/// debt of their own.
+	pub(super) fn add_paid(&self, n: u64) {
+		if let Some(track) = &self.track {
+			track.pool.add(n);
 			self.bytes.fetch_add(n, Ordering::Relaxed);
 			self.footprint(track, n, true);
 		}
@@ -2475,7 +2549,7 @@ mod test {
 		assert_eq!(pool.pinned(), ENTRY_OVERHEAD + 1_600);
 		assert_eq!(pool.pinned(), pool.used());
 		assert_eq!(pool.excess(), None, "held past its capacity by pins alone");
-		assert_eq!(pool.room(), 0);
+		assert!(!pool.hold_room(), "no room for a hold");
 		assert_eq!(pool.accrue(1_000), None);
 
 		charge.sub(400);
@@ -2526,10 +2600,11 @@ mod test {
 		assert_eq!(pool.excess(), None);
 	}
 
-	/// A held copy pins the frames it shares with a sibling that wrote them first, which still
-	/// bills them after leaving the cache, and stops once the hold ends.
+	/// A held copy holds the frames it shares with a sibling that wrote them first, which still
+	/// bills them after leaving the cache, and stops once the hold ends. Holds never raise the
+	/// pool's target: past the capacity, they are what is over.
 	#[test]
-	fn a_held_sibling_pins_the_shared_content() {
+	fn a_held_sibling_holds_the_shared_content() {
 		let pool = bounded(0);
 		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let siblings = Siblings::default();
@@ -2544,15 +2619,17 @@ mod test {
 		held.hold(true);
 		siblings.update(&held);
 		assert_eq!(
-			pool.pinned(),
+			pool.held(),
 			ENTRY_OVERHEAD + 1_000,
 			"the shared frames are what it holds"
 		);
-		assert_eq!(pool.excess(), None);
+		assert_eq!(pool.pinned(), 0, "a hold pins nothing");
+		assert!(!pool.holds_fit(), "nor fits a capacity of nothing");
+		assert_eq!(pool.excess(), Some(pool.used()));
 
 		held.hold(false);
 		siblings.update(&held);
-		assert_eq!(pool.pinned(), 0);
+		assert_eq!(pool.held(), 0);
 		drop((shared, evicted, held));
 		assert_eq!(pool.used(), 0);
 	}

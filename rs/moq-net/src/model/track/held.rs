@@ -9,6 +9,10 @@
 //! A fill fetches its next group only once a reader took every group it answered (see
 //! [`super::fill`]), so it holds at most one group: the first in its order that it answered
 //! and no reader took yet, or, while it waits on a run, the first group to land in that run.
+//! Only a fill some reader fronts, the one holding the next group that reader takes, holds
+//! anything, so a reader holds one group however many fills it waits on. The pool spares what
+//! is held only while it fits the capacity beside the live edges (`cache::Pool::holds_fit`),
+//! so holds never keep the pool past it.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap},

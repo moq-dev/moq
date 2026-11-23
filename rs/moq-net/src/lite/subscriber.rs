@@ -6048,10 +6048,7 @@ mod tests {
 		}
 		copy.evict(0);
 		let mut reader = copy
-			.subscribe(
-				crate::track::Subscription::default()
-					.with_range(0..1),
-			)
+			.subscribe(crate::track::Subscription::default().with_range(0..1))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "group 0 is owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
@@ -6107,10 +6104,7 @@ mod tests {
 		copy.evict(0);
 		copy.evict(1);
 		let mut reader = copy
-			.subscribe(
-				crate::track::Subscription::default()
-					.with_range(0..2),
-			)
+			.subscribe(crate::track::Subscription::default().with_range(0..2))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0 and 1 are owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {

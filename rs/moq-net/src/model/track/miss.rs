@@ -10,9 +10,11 @@
 //!
 //! Each key is judged once, except a group evicted after the reader judged it cached or a
 //! fill answered it, and before it took it: a miss again, asked again however often it is
-//! evicted, since a key a reader is owed is never lost to the cache. Each refill reaches a
-//! reader: a fill holds the first group it answered until a reader takes it (see
-//! [`super::held`]).
+//! evicted while the pool has room to hold it, since a key a reader is owed is never lost to
+//! the cache. Each refill then reaches a reader: the fill holding the reader's next key holds
+//! the first group it answered until the reader takes it (see [`super::held`]). In a pool its
+//! live edges hold past its capacity, nothing is held, so an answer evicted before the reader
+//! took it is given up rather than fetched again forever.
 //!
 //! A start is no promise, since a group below it may still arrive late. A hole under it is
 //! asked at once, but a refusal is final only once the ledger gives up on it too; until
@@ -62,6 +64,9 @@ pub(super) struct Misses {
 	/// The join holding each key: a reader's joins hold disjoint groups, so a change
 	/// touches only the joins holding what it changes, never every fill the reader asked.
 	holders: RangeMap<u64, u64>,
+	/// The join holding the next key this reader takes in its order, which alone has its fill
+	/// hold a group for it: a reader holds one group at most, however many fills it waits on.
+	front: Option<u64>,
 	/// What each join parks on, under its id: a waiter of its own, which records that its
 	/// fill answered before waking the reader, so [`Self::resolve`] looks only at the fills
 	/// that answered, never at every fill still out.
@@ -376,7 +381,8 @@ impl Misses {
 
 	/// The next answered group still cached in `order`. One evicted before it was read is
 	/// added to `lost`, for the reader to ask again, since a key it is owed is never lost to
-	/// the cache; one aborted since is given up.
+	/// the cache while the pool has room to hold it (see [`Self::reask`]); one aborted since
+	/// is given up.
 	pub fn next_filled(
 		&mut self,
 		state: &TrackState,
@@ -399,7 +405,7 @@ impl Misses {
 			self.release(&gone);
 			match state.lookup.contains_key(&key) {
 				true => self.give_up(key..key + 1, given_up),
-				false => lost.insert(key..key + 1),
+				false => lost.extend(self.reask(state, gone, given_up)),
 			}
 		}
 	}
@@ -436,6 +442,7 @@ impl Misses {
 				.unwrap_or_else(PoisonError::into_inner)
 				.insert(id);
 		}
+		self.refront();
 	}
 
 	/// Stop holding `lost` in the joins holding any of it, so their fills no longer owe it
@@ -456,6 +463,7 @@ impl Misses {
 				}
 			}
 		}
+		self.refront();
 	}
 
 	/// Ask every fill this reader waits on with `asking` from now on, queued or taken.
@@ -467,6 +475,28 @@ impl Misses {
 		for join in self.joins.values_mut() {
 			join.update(asking);
 		}
+		self.refront();
+	}
+
+	/// Front the join holding the next key this reader takes in its order, after its joins or
+	/// its order changed.
+	fn refront(&mut self) {
+		let mut holders = self.holders.iter();
+		let next = match self.asking.map_or(Order::Ascending, |asking| asking.order) {
+			Order::Ascending => holders.next(),
+			Order::Descending => holders.next_back(),
+		}
+		.map(|(_, id)| *id);
+		if next == self.front {
+			return;
+		}
+		if let Some(join) = self.front.and_then(|id| self.joins.get_mut(&id)) {
+			join.set_front(false);
+		}
+		if let Some(join) = next.and_then(|id| self.joins.get_mut(&id)) {
+			join.set_front(true);
+		}
+		self.front = next;
 	}
 
 	/// Forget what the reader no longer reads: below `from`, or outside `admitted`, its window
@@ -534,7 +564,8 @@ impl Misses {
 	}
 
 	/// Take in what the joined fills answered, waking `waiter` once the rest do. Returns the
-	/// runs to ask again: accepted and evicted before this reader took them in.
+	/// runs to ask again: accepted and evicted before this reader took them in, while the pool
+	/// has room to hold them (see [`Self::reask`]).
 	///
 	/// Looks only at the joins whose fills answered since the last call, and the joins new
 	/// since, so a reader waiting on thousands of fills costs the ones that answered.
@@ -680,7 +711,24 @@ impl Misses {
 				state.cache.watch_wall(at, waiter);
 			}
 		}
-		retry
+		match retry.is_empty() {
+			true => retry,
+			false => self.reask(&state.read(), retry, given_up),
+		}
+	}
+
+	/// What of `lost`, answered and evicted before this reader took it, to ask again: all of
+	/// it while the pool has room for a fill to hold it, so it reaches the reader this time.
+	/// With none, nothing holds a refill either: writing it puts the pool past its capacity,
+	/// and the debt that write runs up evicts it, forever, so it is given up.
+	fn reask(&mut self, state: &TrackState, lost: RangeSet<u64>, given_up: &mut GivenUp) -> RangeSet<u64> {
+		if state.cache.pool().hold_room() {
+			return lost;
+		}
+		for run in lost.iter() {
+			self.give_up(run.clone(), given_up);
+		}
+		RangeSet::new()
 	}
 
 	/// Tell each fill this reader joined that a read picked up what it answered, so its
@@ -1726,7 +1774,9 @@ pub(super) struct Unfed {
 ///
 /// Kept a miss grace, the window the arrivals hold a gap for: a group's successor arrived
 /// before it, so by then every reader's budget has given up on the group anyway. Evictions
-/// come in time order, so expiring is a pop from the front.
+/// come in time order, so expiring is a pop from the front. Each entry bills the pool
+/// [`LOST_OVERHEAD`], and paying eviction debt forgets the oldest first: a group forgotten
+/// early is given up as never sent, as one past the grace is.
 #[derive(Default)]
 pub(super) struct Lost {
 	keys: BTreeMap<u64, crate::time::Instant>,
@@ -1734,6 +1784,10 @@ pub(super) struct Lost {
 	// which bounds this by the evictions in a grace.
 	order: VecDeque<(crate::time::Instant, u64)>,
 }
+
+/// What one [`Lost`] entry bills: its slot in the eviction order, and its key's entry, at
+/// the half-packed node a `BTreeMap` averages.
+pub(super) const LOST_OVERHEAD: u64 = 3 * size_of::<(crate::time::Instant, u64)>() as u64;
 
 impl Lost {
 	/// Record `key`, evicted at `now`.
@@ -1760,13 +1814,23 @@ impl Lost {
 		}
 	}
 
+	/// Forget the oldest eviction, returning whether there was one.
+	pub fn forget_oldest(&mut self) -> bool {
+		let Some((at, key)) = self.order.pop_front() else {
+			return false;
+		};
+		if self.keys.get(&key) == Some(&at) {
+			self.keys.remove(&key);
+		}
+		true
+	}
+
 	/// Whether it holds no eviction, expired or not.
 	pub fn is_empty(&self) -> bool {
 		self.order.is_empty()
 	}
 
-	/// How many evictions it holds.
-	#[cfg(test)]
+	/// How many evictions it holds, each billed [`LOST_OVERHEAD`].
 	pub fn len(&self) -> usize {
 		self.order.len()
 	}

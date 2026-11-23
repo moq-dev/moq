@@ -781,9 +781,11 @@ pub(crate) struct TrackState {
 	// pool would.
 	arrivals_bill: cache::Extra,
 	// The live groups the pool evicted after they arrived, which readers that had yet to take
-	// one ask for again. Kept a grace: each entry is far smaller than the eviction that made
-	// it, so this holds less than the pool freed within one.
+	// one ask for again. Kept a grace, and billed to the pool like the arrivals: paying
+	// eviction debt forgets the oldest first.
 	lost: miss::Lost,
+	// What `lost` bills to the pool, [`miss::LOST_OVERHEAD`] per eviction.
+	lost_bill: cache::Extra,
 
 	// The first key the live feed serves, as the publisher declared it (the wire's
 	// SUBSCRIBE_START). Lower groups are not waited for, though one may still arrive late
@@ -1756,6 +1758,13 @@ impl TrackState {
 			let now = self.cache.pool().now_wall();
 			self.lost.expire(now, self.miss_grace());
 			self.lost.evicted(key, now);
+			// Paid out of what evicting the group frees, by the payment that evicts it.
+			let billed = self.lost.len() as u64 * miss::LOST_OVERHEAD;
+			let before = self.lost_bill.size();
+			match billed.checked_sub(before) {
+				Some(grown) => self.lost_bill.add_paid(grown),
+				None => self.lost_bill.sub(before - billed),
+			}
 		}
 		self.evict_group(key, group::Abort::Evicted);
 	}
@@ -3079,14 +3088,16 @@ impl TrackState {
 		self.protects(key) || self.fill_held(key)
 	}
 
-	/// Whether a fill holds group `key` for a reader that still wants it. A reader taking it
-	/// or leaving updates the fill at once, and the hold here only once its handler looks
-	/// again, so what nobody wants is never spared meanwhile.
+	/// Whether a fill holds group `key` for a reader that still wants it next, and the pool's
+	/// holds fit its capacity beside the pins. A reader taking it, moving on, or leaving
+	/// updates the fill at once, and the hold here only once its handler looks again, so what
+	/// nobody wants next is never spared meanwhile. Past the capacity, a held group is evicted
+	/// like any other, so holds never keep the pool past it.
 	fn fill_held(&self, key: u64) -> bool {
 		let holders = self.fill_holds.holders(key);
-		!holders.is_empty() && {
+		!holders.is_empty() && self.cache.pool().holds_fit() && {
 			let fills = self.fills.read();
-			holders.iter().any(|id| fills.wants(*id, key))
+			holders.iter().any(|id| fills.holds_for(*id, key))
 		}
 	}
 
@@ -3223,8 +3234,35 @@ impl TrackState {
 		// Only once something was lost, so an in-order feed still never reads the subscriptions.
 		if !self.lost.is_empty() {
 			self.lost.expire(now, self.miss_grace());
+			self.bill_lost();
 		}
 		self.bill_arrivals();
+	}
+
+	/// Bill the lost groups to the pool, after any change to them.
+	fn bill_lost(&mut self) {
+		let billed = self.lost.len() as u64 * miss::LOST_OVERHEAD;
+		let before = self.lost_bill.size();
+		if billed > before {
+			self.lost_bill.add(billed - before);
+		} else if billed < before {
+			self.lost_bill.sub(before - billed);
+		}
+	}
+
+	/// Forget the oldest lost groups until the debt is paid or `cap` bytes are freed,
+	/// returning the bytes freed: a reader that had yet to take one gives it up, as once the
+	/// grace passes.
+	fn shed_lost(&mut self, cap: u64) -> u64 {
+		let mut paid = 0u64;
+		while self.debt > 0 && paid < cap && self.lost.forget_oldest() {
+			let billed = self.lost_bill.size();
+			self.bill_lost();
+			let freed = billed.saturating_sub(self.lost_bill.size());
+			self.debt -= freed.min(self.debt);
+			paid = paid.saturating_add(freed);
+		}
+		paid
 	}
 
 	/// Bill the arrivals' gaps to the pool, after any change to them. The run they split is
@@ -3310,6 +3348,7 @@ impl TrackState {
 		let mut new = state.write().ok().expect("a new track is open");
 		new.drops_bill = cache.extra();
 		new.arrivals_bill = cache.extra();
+		new.lost_bill = cache.extra();
 		new.cache = cache;
 		drop(new);
 		state
@@ -3540,10 +3579,9 @@ impl TrackState {
 				if self.oldest_is_stale(&pool) {
 					accrued = accrued.saturating_mul(2);
 				}
-				// What the pool doesn't pin bounds what eviction could ever free, keeping a
+				// What the pool doesn't spare bounds what eviction could ever free, keeping a
 				// track that can't pay (everything protected) from hoarding a stale schedule.
-				let unpinned = pool.used().saturating_sub(pool.pinned());
-				self.debt = self.debt.saturating_add(accrued).min(unpinned);
+				self.debt = self.debt.saturating_add(accrued).min(pool.reclaimable());
 				// Cap each payment at twice what was written so one write never dumps
 				// a deep backlog at once; the remainder carries to the next write.
 				let cap = written.saturating_mul(2);
@@ -3639,14 +3677,24 @@ impl TrackState {
 				return paid;
 			}
 
-			self.debt -= size;
-			paid = paid.saturating_add(size);
+			// The lost entry an eviction leaves is paid out of what it frees, so a payment
+			// never leaves the pool over its target by the entries it made. The cap bounds
+			// what one write evicts, so it counts the whole group.
+			let billed = self.lost_bill.size();
 			self.evict_for_debt(key);
+			let freed = size.saturating_sub(self.lost_bill.size().saturating_sub(billed));
+			self.debt -= freed.min(self.debt);
+			paid = paid.saturating_add(size);
 		}
 		// Then the arrivals' oldest gaps, which costs a reader only the wait for a late group, as
 		// the grace passing would.
 		if self.debt > 0 && paid < cap {
 			paid = paid.saturating_add(self.shed_arrivals(cap - paid));
+		}
+		// Then the oldest lost groups, which costs a reader only the refill of a group it may
+		// no longer want.
+		if self.debt > 0 && paid < cap {
+			paid = paid.saturating_add(self.shed_lost(cap - paid));
 		}
 		// Then the drop set, oldest keys first: losing a run costs a reader a judgment or
 		// a fill, never content being read.
@@ -8115,7 +8163,10 @@ fn queue(fills: &kio::Shared<FillState>, key: u64, request: &FetchOptions) -> Op
 	// The handler gate is atomic with a handler dropping (no fill stranded on a queue
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
 	let (joins, _) = fills.lock().join(fills, &ask);
-	joins.into_iter().next().map(Box::new)
+	// A fetch reads this one group, so its fill holds it for the fetch.
+	let mut join = joins.into_iter().next()?;
+	join.set_front(true);
+	Some(Box::new(join))
 }
 
 /// One transport request, whose end may cut the stored copy short.
@@ -30329,9 +30380,8 @@ mod test {
 			panic!("group 1 is a miss now");
 		};
 		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(1)));
-		let pinned = pool.pinned();
 		write_filled(fill.accept(1, None), 1);
-		assert!(pool.pinned() > pinned, "the pool counts it pinned");
+		assert!(pool.held() > 0, "the pool counts it held");
 		{
 			let state = producer.state.read();
 			assert_eq!(state.fill_holds.held_by(fill.id()), 1);
@@ -30351,7 +30401,151 @@ mod test {
 			0,
 			"the hold ended with the fill"
 		);
-		assert_eq!(pool.pinned(), pinned, "and so did its pin");
+		assert_eq!(pool.held(), 0, "and so did its count");
+	}
+
+	/// Write `key` as one group of `size` bytes.
+	#[cfg(feature = "async")]
+	fn write_sized(group: Result<Option<group::Producer>>, key: u64, size: usize) {
+		let mut group = group.unwrap().expect("a fresh group");
+		group
+			.write_frame(Timestamp::from_millis(key).unwrap(), vec![0u8; size])
+			.unwrap();
+		group.finish().unwrap();
+	}
+
+	/// Serve every fill `requests` has queued or taken, writing each group it asks for as
+	/// `size` bytes, until none asks for more. Returns how many groups it wrote.
+	#[cfg(feature = "async")]
+	fn serve_fills(requests: &Requests, fills: &mut Vec<FillGroups>, size: usize) -> u64 {
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) {
+			fills.push(fill);
+		}
+		let mut wrote = 0;
+		fills.retain_mut(|fill| {
+			loop {
+				match fill.poll_wanted_changed(&waiter) {
+					Poll::Ready(Some(key)) => {
+						write_sized(fill.accept(key, None), key, size);
+						wrote += 1;
+					}
+					Poll::Ready(None) => break false,
+					Poll::Pending => break true,
+				}
+			}
+		});
+		wrote
+	}
+
+	/// A reader that lost twenty groups asks twenty fills, which all answer at once, yet holds
+	/// one group at a time: only the fill holding its next group holds what it answers. Each
+	/// fill holding its own answer held 2 MB of a 500 KB pool for one reader. It still reads
+	/// every group once, in order.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_holds_one_group_however_many_fills_it_waits_on() {
+		const SIZE: usize = 100_000;
+		let (producer, pool) = pooled_producer(u64::MAX - 1);
+		let requests = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for key in 0..41 {
+			write_sized(producer.create_group(group::Info { start: key }).map(Some), key, SIZE);
+		}
+		let waiter = kio::Waiter::noop();
+		let mut read = Vec::new();
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("group 0 is cached");
+		};
+		read.push(group.start);
+		for key in (1..41).step_by(2) {
+			producer.evict(key);
+		}
+		pool.resize(500_000);
+		let mut fills = Vec::new();
+		let mut most = 0;
+		let mut idle = 0;
+		while idle < 2 {
+			let wrote = serve_fills(&requests, &mut fills, SIZE);
+			most = most.max(pool.held());
+			match subscriber.poll_next_group(&waiter) {
+				Poll::Ready(Ok(Some(group))) => {
+					read.push(group.start);
+					idle = 0;
+				}
+				_ if wrote == 0 => idle += 1,
+				_ => idle = 0,
+			}
+		}
+		assert!(most <= SIZE as u64 + 2_000, "one reader held {most} bytes");
+		assert_eq!(read, (0..41).collect::<Vec<_>>(), "every group once, in order");
+		assert!(drained_drops(&mut subscriber).is_empty(), "nothing given up");
+	}
+
+	/// Readers whose holds outgrow the room the live edge leaves keep none of them past the
+	/// capacity: a held group is evicted like any other once the holds don't fit, so the
+	/// pool returns within its capacity as the feed writes on.
+	#[test]
+	#[cfg(feature = "async")]
+	fn holds_past_the_capacity_are_evicted() {
+		const SIZE: usize = 100_000;
+		const CAPACITY: u64 = 500_000;
+		let (producer, pool) = pooled_producer(u64::MAX - 1);
+		let requests = producer.requests();
+		for key in 0..21 {
+			write_sized(producer.create_group(group::Info { start: key }).map(Some), key, SIZE);
+		}
+		for key in 0..20 {
+			producer.evict(key);
+		}
+		pool.resize(CAPACITY);
+		let waiter = kio::Waiter::noop();
+		// Twenty readers, each owed one group, so each holds its own.
+		let mut readers: Vec<_> = (0..20)
+			.map(|key| producer.subscribe(Subscription::default().with_range(key..key + 1)))
+			.collect();
+		for reader in &mut readers {
+			assert!(reader.poll_next_group(&waiter).is_pending(), "a miss");
+		}
+		let mut fills = Vec::new();
+		serve_fills(&requests, &mut fills, SIZE);
+		assert!(!pool.holds_fit(), "twenty holds outgrow the room");
+		for key in 21..31 {
+			write_sized(producer.create_group(group::Info { start: key }).map(Some), key, SIZE);
+		}
+		assert!(
+			pool.used() <= CAPACITY + 2 * SIZE as u64,
+			"{} bytes cached against a {CAPACITY} byte capacity",
+			pool.used()
+		);
+	}
+
+	/// The live groups the pool evicts are kept for readers to ask again, billed to the pool
+	/// like the arrivals: a pool with no room beside its live edges sheds them oldest first,
+	/// so a feed whose every group it evicts keeps only what one write's debt leaves.
+	#[test]
+	fn lost_groups_are_billed_to_the_pool() {
+		let (producer, pool) = pooled_producer(1 << 20);
+		for key in 0..50 {
+			write_group(&producer, key);
+		}
+		let before = pool.used();
+		{
+			let mut state = producer.modify().unwrap();
+			for key in 0..49 {
+				state.evict_for_debt(key);
+			}
+			assert_eq!(state.lost.len(), 49);
+			assert_eq!(state.lost_bill.size(), 49 * miss::LOST_OVERHEAD);
+		}
+		assert!(pool.used() < before, "the groups went");
+
+		// No room beside the live edge: the next write's debt sheds what was lost.
+		pool.resize(0);
+		write_group(&producer, 50);
+		let state = producer.state.read();
+		assert!(state.lost.len() < 49, "{} lost groups kept", state.lost.len());
+		assert_eq!(state.lost_bill.size(), state.lost.len() as u64 * miss::LOST_OVERHEAD);
 	}
 
 	/// A refill evicted again before its reader took it is asked again, however often: a key
@@ -30450,7 +30644,7 @@ mod test {
 					"group {key} held for no reader that wants it"
 				);
 			}
-			pinned |= pool.room() == 0;
+			pinned |= pool.capacity().is_some_and(|capacity| pool.pinned() >= capacity);
 		};
 		let (mut read, mut drops) = (Vec::new(), Vec::new());
 		// A wire publisher forwards what the reader gives up as it reads.
@@ -30521,17 +30715,26 @@ mod test {
 	}
 
 	/// A reader with no delay budget, in a pool held past its capacity by what it pins, whose
-	/// next group the pool evicts before it reads it: each refill reaches it however often the
-	/// feed writes before it reads, so it receives every group and gives up none.
+	/// next group the pool evicts before it reads it: no hold fits, so writing a refill runs
+	/// up the debt that evicts it. Each lost group is asked once and then given up, rather
+	/// than refilled for as long as the feed writes, and every group is read or given up.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_pinned_pool_loses_no_group_its_reader_is_owed() {
+	fn a_pinned_pool_asks_each_lost_group_once() {
 		let slow = read_slowly(1, 2, None);
 		assert!(slow.pinned, "the pool was held past its capacity by what it pins");
 		assert!(slow.refilled > 0, "the pool evicted groups before the reader read them");
-		assert_eq!(slow.read, (0..GROUPS).collect::<Vec<_>>(), "every group once, in order");
-		assert!(slow.drops.is_empty(), "nothing given up: {:?}", slow.drops);
-		assert!(slow.held <= 1, "a fill held {} groups at once", slow.held);
+		assert!(slow.refilled <= GROUPS, "{} refills for {GROUPS} groups", slow.refilled);
+		let mut seen = slow.read.clone();
+		for (start, end) in &slow.drops {
+			seen.extend(*start..*end);
+		}
+		seen.sort_unstable();
+		assert_eq!(
+			seen,
+			(0..GROUPS).collect::<Vec<_>>(),
+			"every group read or given up, once"
+		);
 	}
 
 	/// A batch far past the cache, asked by one slow reader: served through `wanted_changed`,

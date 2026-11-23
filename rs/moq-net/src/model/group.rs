@@ -3403,7 +3403,7 @@ impl Handle {
 	pub(super) fn cache_hold(&self, held: bool) {
 		let state = self.state.read();
 		state.charge.hold(held);
-		// Frames a sibling copy wrote first bill that copy, so it pins with this one.
+		// Frames a sibling copy wrote first bill that copy, so it is held with this one.
 		if let Some(content) = &state.content {
 			content.siblings.update(&state.charge);
 		}

@@ -567,7 +567,10 @@ mod test {
 				self.0.as_ref().filter(|run| run.contains(&key)).map(|run| run.end)
 			}
 			fn forget(&mut self, folded: Range<u64>) {
-				self.0 = self.0.take().filter(|run| run.start >= folded.end || run.end <= folded.start);
+				self.0 = self
+					.0
+					.take()
+					.filter(|run| run.start >= folded.end || run.end <= folded.start);
 			}
 		}
 		let (pool, track) = account();
@@ -576,9 +579,13 @@ mod test {
 		record.delivered.insert(0);
 		record.delivered.insert(2);
 		record.reported.insert(4..5, Report::Dropped);
-		record.settle(|| track.clone(), &mut beside, Standing::default()).unwrap();
+		record
+			.settle(|| track.clone(), &mut beside, Standing::default())
+			.unwrap();
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut beside, Standing::default()).unwrap();
+		record
+			.settle(|| track.clone(), &mut beside, Standing::default())
+			.unwrap();
 		assert!(record.told(1) && record.told(2), "folded over the gap it gave up");
 		assert_eq!(beside.0, None, "and forgot it below the floor");
 		assert!(!record.told(3), "a key nothing settled stops the fold");
@@ -632,34 +639,43 @@ mod test {
 		assert!(!record.told(2), "the run given up is still owed");
 	}
 
-	/// A pool held past its capacity by what it pins ends no reader, however much its records
-	/// hold, since what ending one frees is room nothing may use, though it still folds what
-	/// is final. Room beside the pins ends it.
+	/// A pool held past its capacity by its live edges alone owes its readers nothing, so it
+	/// ends none. Once a record is what is over, its reader ends, however far past the
+	/// capacity the live edges sit: a record never grows without bound beside them.
 	#[test]
-	fn a_debt_past_the_pins_ends_no_reader() {
+	fn a_record_past_a_pinned_pool_ends_its_reader() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(0));
 		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut edge = track.charge();
 		edge.add(1 << 20);
 		edge.promote();
 		edge.finish(true);
+		assert_eq!(pool.excess(), None, "past its capacity by the live edge alone");
+
 		let mut record = record_with_promise();
 		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		assert!(record.told(1), "what is final still folds");
-		assert!(!record.failed());
-
-		// Nor does a record holding most of the pool.
-		edge.sub(1 << 20);
-		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		assert!(!record.failed());
-
-		// Given room beside the pins, the same debt ends it.
-		pool.resize(pool.pinned() + 1);
-		owe(&track, pool.used());
+		let excess = pool.excess().expect("the record is what is over");
+		assert_eq!(excess, pool.used() - pool.pinned(), "the live edge owes nothing");
+		owe(&track, excess);
 		assert!(record.settle(|| track.clone(), &mut (), Standing::default()).is_err());
+		assert_eq!(pool.excess(), None, "ending it brought the pool back to its pins");
+	}
+
+	/// A pool over its capacity by cached groups its tracks could not evict yet owes its
+	/// readers only what their records are over: one whose records fit ends none.
+	#[test]
+	fn cached_groups_past_the_capacity_end_no_reader() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(1 << 20));
+		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+		let mut cached = track.charge();
+		cached.add(4 << 20);
+		let mut record = record_with_promise();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		let excess = pool.excess().expect("the cached group is over");
+		owe(&track, excess);
+		record
+			.settle(|| track.clone(), &mut (), Standing::default())
+			.expect("the record fits the capacity");
 	}
 
 	/// A record holding a promise it cannot fold, and enough reports above it that ending it
@@ -724,8 +740,8 @@ mod test {
 		assert!(!records[0].ends());
 	}
 
-	/// Whatever a bill frees pays its readers' debt, however it shrank, and the debt is forgiven
-	/// once the pool is back within its capacity: nothing needs the room any more.
+	/// A debt never exceeds what the records are over the capacity, whatever paid it, and is
+	/// forgiven once they are back within it: nothing needs the room any more.
 	#[test]
 	fn a_debt_is_paid_by_any_shrink_and_forgiven_without_pressure() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(2 * RUN_OVERHEAD));
@@ -733,8 +749,9 @@ mod test {
 		let mut bill = track.reader();
 		bill.set(4 * RUN_OVERHEAD);
 		owe(&track, 3 * RUN_OVERHEAD);
+		assert_eq!(bill.debt(), 2 * RUN_OVERHEAD, "only what the record is over");
 		bill.set(3 * RUN_OVERHEAD);
-		assert_eq!(bill.debt(), 2 * RUN_OVERHEAD, "the shrink paid what it freed");
+		assert_eq!(bill.debt(), RUN_OVERHEAD, "the shrink paid what it freed");
 		bill.set(2 * RUN_OVERHEAD);
 		assert_eq!(bill.debt(), 0, "within its capacity, the pool forgives the rest");
 		bill.set(5 * RUN_OVERHEAD);

@@ -66,6 +66,9 @@ struct Pending {
 	// them (see [`super::held`]). A join taking a group, or no longer reading it, takes it for
 	// all.
 	untaken: RangeSet<u64>,
+	// How many joins are their reader's front, the fill holding the next group that reader
+	// takes: only a fill some reader fronts holds a group, so each reader holds one at most.
+	fronts: u32,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
 	// became of each key.
 	result: kio::Producer<Outcome>,
@@ -317,6 +320,8 @@ pub(super) struct Join {
 	// What this reader asks the fill with, counted in its asks.
 	asking: Asking,
 	asks: kio::Shared<Asks>,
+	// Whether this is its reader's front, counted in the fill's fronts.
+	front: bool,
 }
 
 impl Join {
@@ -347,6 +352,9 @@ impl Drop for Join {
 		if !fills.pending.get(&self.id).is_some_and(|pending| self.is_ours(pending)) {
 			return;
 		}
+		if self.front {
+			fills.pending.get_mut(&self.id).expect("checked above").fronts -= 1;
+		}
 		for run in std::mem::take(&mut self.held).iter() {
 			fills.unwant(self.id, run.clone());
 		}
@@ -369,6 +377,24 @@ impl Join {
 	/// Whether the reader holds none of the fill any more.
 	pub(super) fn is_empty(&self) -> bool {
 		self.held.is_empty()
+	}
+
+	/// Make this its reader's front, the fill holding the next group the reader takes, or
+	/// stop: a reader fronts one fill at a time, so it holds one group at most.
+	pub(super) fn set_front(&mut self, front: bool) {
+		if self.front == front {
+			return;
+		}
+		self.front = front;
+		let mut fills = self.fills.lock();
+		if let Some(pending) = fills.pending.get_mut(&self.id)
+			&& self.is_ours(pending)
+		{
+			match front {
+				true => pending.fronts += 1,
+				false => pending.fronts -= 1,
+			}
+		}
 	}
 
 	/// The reader picked up `groups` the fill answered, so its handler may serve the next one.
@@ -557,6 +583,7 @@ impl FillState {
 				attempt: pending.result.weak(),
 				asking: ask.asking,
 				asks: pending.asks.clone(),
+				front: false,
 			});
 		}
 		// Queued in the reader's order, so a descending reader's newest fragment goes first.
@@ -592,6 +619,7 @@ impl FillState {
 				attempt: result.weak(),
 				asking: ask.asking,
 				asks: asks.clone(),
+				front: false,
 			});
 			// A taken fill's first group split off above keeps that fill, routed here instead.
 			self.covers.insert(groups.clone(), id);
@@ -609,6 +637,7 @@ impl FillState {
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
 					unseen: RangeSet::new(),
 					untaken: RangeSet::new(),
+					fronts: 0,
 					result,
 				},
 			);
@@ -662,6 +691,7 @@ impl FillState {
 						wants: RangeMap::from_iter([(groups.clone(), 1)]),
 						unseen: RangeSet::new(),
 						untaken: RangeSet::new(),
+						fronts: 0,
 						result: Default::default(),
 					},
 				);
@@ -679,6 +709,7 @@ impl FillState {
 			attempt: pending.result.weak(),
 			asking,
 			asks: pending.asks.clone(),
+			front: false,
 		})
 	}
 
@@ -713,6 +744,7 @@ impl FillState {
 			attempt: result.weak(),
 			asking,
 			asks: asks.clone(),
+			front: true,
 		};
 		self.pending.insert(
 			id,
@@ -728,6 +760,7 @@ impl FillState {
 				wants: RangeMap::from_iter([(groups, 1)]),
 				unseen: RangeSet::new(),
 				untaken: RangeSet::new(),
+				fronts: 1,
 				result,
 			},
 		);
@@ -769,6 +802,19 @@ impl FillState {
 		self.pending
 			.get(&id)
 			.is_some_and(|pending| pending.wants.contains_key(&key))
+	}
+
+	/// Whether fill `id` holds `key` for a reader: a join still reads it, and some reader
+	/// fronts the fill.
+	pub(super) fn holds_for(&self, id: u64, key: u64) -> bool {
+		self.pending
+			.get(&id)
+			.is_some_and(|pending| pending.fronts > 0 && pending.wants.contains_key(&key))
+	}
+
+	/// Whether some reader fronts fill `id`.
+	fn fronted(&self, id: u64) -> bool {
+		self.pending.get(&id).is_some_and(|pending| pending.fronts > 0)
 	}
 
 	/// Whether a join of fill `id` still reads any of `groups`.
@@ -1049,8 +1095,7 @@ impl FillGroups {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn skip_groups(&self, groups: ops::Range<u64>) {
 		let owed = self.inner.owed(groups);
-		self.inner
-			.drop_groups(&owed, Error::Skipped, super::Hole::Skip);
+		self.inner.drop_groups(&owed, Error::Skipped, super::Hole::Skip);
 	}
 
 	/// Poll until no reader waits on this fill: it is withdrawn, so stop serving it.
@@ -1141,10 +1186,11 @@ impl FillGroups {
 				self.inner.sync_holds(front, awaiting);
 				return Some(key);
 			}
-			// Held as it is answered, if it is the first a reader has yet to take: the pool may
-			// evict anything else before the reader gets to it. Checked again under the lock
-			// that holds it, since an eviction may have taken it since.
-			if front.is_none() {
+			// Held as it is answered, if it is the first a reader has yet to take and a reader
+			// fronts the fill: the pool may evict anything else before the reader gets to it.
+			// Checked again under the lock that holds it, since an eviction may have taken it
+			// since.
+			if front.is_none() && self.inner.fills.read().fronted(self.inner.id) {
 				let Ok(mut state) = TrackState::modify(&self.inner.state) else {
 					return Some(key);
 				};
@@ -1405,11 +1451,19 @@ impl Inner {
 		}
 	}
 
-	/// Hold `front` and await `awaiting` for the fill's readers from now on, unless the track
-	/// does already: a change takes the track's lock, which wakes everything parked on it. A
-	/// flight's copy is its readers' own, which no eviction takes from them.
+	/// Hold `front` and await `awaiting` for the fill's readers from now on, or nothing while
+	/// no reader fronts the fill, unless the track does already: a change takes the track's
+	/// lock, which wakes everything parked on it. A flight's copy is its readers' own, which no
+	/// eviction takes from them.
 	fn sync_holds(&self, front: Option<u64>, awaiting: Option<(ops::Range<u64>, Order)>) {
-		if self.flight || self.state.read().fill_holds_as(self.id, front, &awaiting) {
+		if self.flight {
+			return;
+		}
+		let (front, awaiting) = match self.fills.read().fronted(self.id) {
+			true => (front, awaiting),
+			false => (None, None),
+		};
+		if self.state.read().fill_holds_as(self.id, front, &awaiting) {
 			return;
 		}
 		if let Ok(mut state) = TrackState::modify(&self.state) {
@@ -1694,7 +1748,11 @@ impl Drop for Inner {
 			}
 			if let Ok(mut outcome) = self.result.write() {
 				for groups in left.iter() {
-					outcome.refuse(groups.clone(), Error::Dropped, Some(super::Hole::drop(StreamError::NotFound)));
+					outcome.refuse(
+						groups.clone(),
+						Error::Dropped,
+						Some(super::Hole::drop(StreamError::NotFound)),
+					);
 				}
 			}
 		}
