@@ -10131,10 +10131,12 @@ impl Cursor {
 		}
 		let window = &self.filter.window;
 		self.poll(waiter, |state| {
-			if state
-				.walk(groups.start, self.end_key, window)
-				.take_while(|slot| slot.group.start < groups.end)
-				.any(|slot| slot.cached > seen)
+			// Nothing cached since the walk began leaves nothing to find: no rescan per candidate.
+			if state.cached > seen
+				&& state
+					.walk(groups.start, self.end_key, window)
+					.take_while(|slot| slot.group.start < groups.end)
+					.any(|slot| slot.cached > seen)
 			{
 				return Poll::Ready(Ok(true));
 			}
