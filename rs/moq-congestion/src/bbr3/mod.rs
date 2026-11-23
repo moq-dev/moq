@@ -1510,16 +1510,19 @@ impl Bbr3 {
     /// The delayed-ACK term accounts for the QUIC ACK frequency extension:
     /// `min(Ack-Eliciting Threshold, Requested Max Ack Delay * BBR.max_bw)`.
     fn update_offload_budget(&mut self) {
-        let base = self.send_quantum;
+        self.offload_budget = self.offload_budget_at(self.send_quantum, self.max_bw);
+    }
 
+    /// The offload budget of a sender sending `quantum` at a time with `max_bw` as BBR.max_bw.
+    fn offload_budget_at(&self, quantum: u64, max_bw: f64) -> u64 {
         // Ack-Eliciting Threshold is a packet count in the ACK_FREQUENCY frame; convert to
         // bytes using the current SMSS. A threshold of 0 requires an immediate ACK per packet,
         // so the delayed-ACK term contributes nothing in that case.
         let threshold_bytes = self.ack_eliciting_threshold.saturating_mul(self.smss);
-        let delay_bytes = (self.max_ack_delay.as_secs_f64() * self.max_bw).round() as u64;
+        let delay_bytes = (self.max_ack_delay.as_secs_f64() * max_bw).round() as u64;
         let delayed_ack_term = Ord::min(threshold_bytes, delay_bytes);
 
-        self.offload_budget = base.saturating_add(delayed_ack_term);
+        quantum.saturating_add(delayed_ack_term)
     }
 
     /// equivalent to BBRBoundCwndForProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.6.4.5>
@@ -1606,13 +1609,16 @@ impl Bbr3 {
 
     /// equivalent to BBRSetSendQuantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.6.3>
     fn set_send_quantum(&mut self) {
-        // C.pacing_rate is in bytes/sec, so multiplying by 1ms is dividing by 1000.
-        let mut quantum = (self.pacing_rate / 1000.0) as u64;
-        quantum = Ord::min(quantum, HIGH_PACE_MAX_QUANTUM);
+        self.send_quantum = self.send_quantum_at(self.pacing_rate);
+    }
+
+    /// The send quantum of a sender pacing at `pacing_rate` bytes per second.
+    fn send_quantum_at(&self, pacing_rate: f64) -> u64 {
+        // Bytes per second times 1ms is dividing by 1000.
+        let quantum = Ord::min((pacing_rate / 1000.0) as u64, HIGH_PACE_MAX_QUANTUM);
         // One datagram is enough at low rates. A two-datagram floor forces packet pairs
         // even when earning that pair takes longer than the RTT.
-        quantum = Ord::max(quantum, self.smss);
-        self.send_quantum = quantum;
+        Ord::max(quantum, self.smss)
     }
 
     /// equivalent to BBRHandleLostPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.5.10.2>
@@ -1848,8 +1854,13 @@ impl Bbr3 {
         let inflight = (self.probe_bw_up_pacing_gain * bdp) as u64;
         // BBRQuantizationBudget, without the side effects `get_inflight` has on BBR.bdp, nor the
         // 2 SMSS ProbeBW_UP adds: the gain already reaches past BBR.bw, and on a small BDP two
-        // more packets only queue ahead of the next frame, over a round trip at 10ms
-        let inflight = Ord::max(inflight, self.offload_budget);
+        // more packets only queue ahead of the next frame, over a round trip at 10ms.
+        // The offload budget is taken at the rate the probe fills over: at BBR.max_bw's pacing
+        // rate, a fast path that slowed would keep a floor of up to 64 KiB queued.
+        let scale = if self.bw > 0.0 { bw / self.bw } else { 1.0 };
+        let quantum = self.send_quantum_at(self.pacing_rate * scale);
+        let floor = self.offload_budget_at(quantum, self.max_bw * scale);
+        let inflight = Ord::max(inflight, floor);
         Some(Ord::max(inflight, self.min_pipe_cwnd))
     }
 
@@ -7819,14 +7830,19 @@ mod test {
             now += 10 * MS;
         }
 
-        // The bandwidth probe fills over the aged estimate, not over the stale maximum.
+        // The bandwidth probe fills over the aged estimate, not over the stale maximum, and so
+        // does its offload floor: at the maximum's pacing rate, a 12 KB quantum would fill past both.
         sim.bbr.state = BbrState::ProbeBw(ProbeBwSubstate::Up);
         sim.bbr.bw_probe_fill = true;
-        let bdp = 1_200_000.0 * sim.bbr.min_rtt.as_secs_f64();
-        let fill = (sim.bbr.probe_bw_up_pacing_gain * bdp) as u64;
-        let fill = fill.max(sim.bbr.offload_budget).max(sim.bbr.min_pipe_cwnd);
-        assert!(fill < (sim.bbr.probe_bw_up_pacing_gain * bdp * 10.0) as u64);
-        assert_eq!(sim.bbr.probe_inflight(), Some(fill));
+        let floor = sim.bbr.offload_budget_at(sim.bbr.smss, 1_200_000.0);
+        for rtt_ms in [10, 1] {
+            sim.bbr.min_rtt = Duration::from_millis(rtt_ms);
+            let bdp = 1_200_000.0 * sim.bbr.min_rtt.as_secs_f64();
+            let fill = (sim.bbr.probe_bw_up_pacing_gain * bdp) as u64;
+            let fill = fill.max(floor).max(sim.bbr.min_pipe_cwnd);
+            assert!(sim.bbr.offload_budget > fill, "the stale floor would bind");
+            assert_eq!(sim.bbr.probe_inflight(), Some(fill), "at {rtt_ms}ms");
+        }
     }
 
     /// ProbeRTT entered mid-probe ends the probe's feedback: the window ages once, on entry, and
