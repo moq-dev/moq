@@ -3865,11 +3865,12 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	};
 
 	// Control: the PSI rides every output frame here (each is a keyframe, and they are
-	// further apart than PSI_INTERVAL either way), and the grid repeats it every 100ms while
-	// the next is queued to go out. The SI PIDs must not follow it.
+	// further apart than PSI_INTERVAL either way), and the grid repeats it in each 100ms
+	// period with no copy of its own while the next is queued to go out. The SI PIDs must not
+	// follow it.
 	assert_eq!(
 		count(0x0000),
-		25,
+		24,
 		"PAT on every frame, and repeated while the next is queued"
 	);
 	// SDT every second from 0 to 12s, half its 2s limit.
@@ -3960,7 +3961,7 @@ async fn inline_si_form_is_re_emitted() {
 	};
 	assert_eq!(
 		count(0x0000),
-		25,
+		24,
 		"PAT on every frame, and repeated while the next is queued"
 	);
 	// SDT every second from 0 to 12s, byte-for-byte the inline section.
@@ -4272,11 +4273,11 @@ async fn reordered_video_keeps_the_table_cadence() {
 	let (out, discontinuities) = export_reordered_with_sdt().await;
 
 	// 125 frames span 0..4.96s: ten 500ms slots and five 1s SDT slots, one emission each, and
-	// the grid's copy of the PAT in the 100ms periods between the slots' copies.
+	// the grid's copy of the PAT in each 100ms period without a slot's copy.
 	assert_eq!(discontinuities, 0, "a reorder is not a rewind");
 	assert_eq!(
 		count_pid(&out, 0x0000),
-		48,
+		47,
 		"PAT once per slot and period, not per reorder"
 	);
 	assert_eq!(count_pid(&out, 0x0011), 5, "SDT once per 1s slot, not per reorder");

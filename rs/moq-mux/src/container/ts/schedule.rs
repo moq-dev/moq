@@ -254,9 +254,9 @@ struct Unit {
 	runs: Vec<Run>,
 	/// For a unit of program tables, what they put in force and the PIDs they hold back.
 	tables: Option<Program>,
-	/// A copy of the tables in force that the grid repeats ([`Schedule::repeat`]): no access
-	/// unit, and nothing to put in force.
-	repeat: bool,
+	/// For a copy of the tables in force that the grid repeats ([`Schedule::repeat`]), the
+	/// [`Schedule::set_psi`] it lays: no access unit, and nothing to put in force.
+	repeat: Option<u64>,
 	/// The payload of the frames it carries, counted once it has gone out.
 	charges: Vec<Charge>,
 }
@@ -273,6 +273,8 @@ struct Program {
 	leads: u16,
 	/// The [`Schedule::set_psi`] they lay, counted from the first.
 	laid: u64,
+	/// They lay the tables flagging a break ([`Psi::flagged`]).
+	flags: bool,
 }
 
 impl Unit {
@@ -283,7 +285,16 @@ impl Unit {
 	/// A repeat not yet begun, which goes out in whichever slot is laid next and so keeps no
 	/// slot going on its own.
 	fn idle(&self) -> bool {
-		self.repeat && self.sent == 0
+		self.repeat.is_some() && self.sent == 0
+	}
+
+	/// For a copy of the tables as some [`Schedule::set_psi`] stated them, unflagged, which one.
+	fn version(&self) -> Option<u64> {
+		self.repeat.or(self
+			.tables
+			.as_ref()
+			.filter(|program| !program.flags)
+			.map(|program| program.laid))
 	}
 
 	/// When its last bytes leave the decoder buffer.
@@ -319,7 +330,7 @@ impl Unit {
 
 	/// A copy of the program tables, led by the media or repeated by the grid.
 	fn is_tables(&self) -> bool {
-		self.tables.is_some() || self.repeat
+		self.tables.is_some() || self.repeat.is_some()
 	}
 
 	fn pid_at(&self, packet: usize) -> u16 {
@@ -689,9 +700,14 @@ pub(super) struct Schedule {
 	/// The tables as they stand have yet to go out in a unit that puts them in force, so the
 	/// grid repeats none: a copy would announce them, and the clock PID they name, early.
 	revising: bool,
-	/// The [`TABLE_REPEAT`] period of the grid's last copy of the tables.
+	/// The [`TABLE_REPEAT`] period of the last copy of the tables, the grid's or one the media
+	/// leads.
 	repeated: Option<u128>,
-	/// Whether the grid repeats the tables at all, off only for a test comparing against none.
+	/// The [`Self::set_psi`] the last unflagged copy of the tables to go whole into Bsys lays,
+	/// and when its last byte leaves Bsys: until then another copy of them adds nothing.
+	held: Option<(u64, i128)>,
+	/// Whether the grid repeats the tables, and copies of them share its obligation, off only for
+	/// a test comparing against neither.
 	#[cfg(test)]
 	grid: bool,
 	/// Tables to go out ahead of the next unit pushed.
@@ -734,6 +750,7 @@ impl Schedule {
 			stated: 0,
 			revising: false,
 			repeated: None,
+			held: None,
 			#[cfg(test)]
 			grid: true,
 			lead: None,
@@ -898,7 +915,7 @@ impl Schedule {
 			self.stated += 1;
 			self.revising = true;
 			// A repeat not yet begun would follow the new tables out with the old.
-			self.units.retain(|unit| !unit.repeat || unit.sent > 0);
+			self.units.retain(|unit| unit.repeat.is_none() || unit.sent > 0);
 		}
 		self.retable();
 	}
@@ -917,6 +934,7 @@ impl Schedule {
 			};
 			program.clock = psi.clock;
 			program.laid = self.stated;
+			program.flags = flagged.is_some();
 			let packets = flagged.take().unwrap_or(&psi.packets);
 			if unit.packets != *packets {
 				unit.packets.clone_from(packets);
@@ -1006,6 +1024,7 @@ impl Schedule {
 				holds,
 				leads: pid,
 				laid: self.stated,
+				flags: false,
 			};
 			// They go out ahead of the first byte of a placed unit, which a decode time well past
 			// its placement would otherwise let them hold the lane until, past later tables' due.
@@ -1103,7 +1122,7 @@ impl Schedule {
 			frames: Vec::new(),
 			runs,
 			tables,
-			repeat: false,
+			repeat: None,
 			charges: Vec::new(),
 		});
 		self.units.back_mut().expect("the unit just pushed")
@@ -1133,6 +1152,10 @@ impl Schedule {
 		};
 		let (clock, rate, laid) = (program.clock, program.rate, program.laid);
 		self.revising &= laid != self.stated;
+		// A copy the media leads is the grid's for its period too.
+		if laid == self.stated {
+			self.repeated = self.repeated.max(Some(index / REPEAT_SLOTS));
+		}
 		self.clock = Some(clock);
 		self.set_rate(rate);
 		if std::mem::take(&mut self.opening) {
@@ -1185,6 +1208,7 @@ impl Schedule {
 		self.lead = None;
 		// The tables go out again before the grid repeats them.
 		self.repeated = None;
+		self.held = None;
 		self.revising = true;
 		// An opening still pending stays: its tables never went out, so the reader has no clock
 		// for the next timeline to continue.
@@ -1397,11 +1421,22 @@ impl Schedule {
 	fn repeat(&mut self, index: u128) {
 		let period = index / REPEAT_SLOTS;
 		// Tables too large for Bsys to take each period repeat as fast as it takes them.
-		let pending = self.units.iter().any(|unit| unit.repeat);
+		let pending = self.units.iter().any(|unit| unit.repeat.is_some());
+		// A copy that changes the rate goes out whatever Bsys holds, so none waits on a repeat.
+		let rerating = self
+			.units
+			.iter()
+			.any(|unit| unit.tables.as_ref().is_some_and(|program| program.rate != self.rate));
 		// Only media still to go out is repeated around: a clock running on without it, through
 		// a stall or as a tail ahead of a switch, carries only the clock.
 		let flowing = self.units.iter().any(|unit| !unit.is_tables());
-		if self.opening || self.revising || pending || !flowing || self.repeated.is_some_and(|last| period <= last) {
+		if self.opening
+			|| self.revising
+			|| pending
+			|| rerating
+			|| !flowing
+			|| self.repeated.is_some_and(|last| period <= last)
+		{
 			return;
 		}
 		let Some(psi) = &self.psi else {
@@ -1411,9 +1446,6 @@ impl Schedule {
 		if !self.grid {
 			return;
 		}
-		// Under a mux rate a copy the media leads has a deadline, so a repeat in Bsys must leave
-		// room for the two a keyframe just after a cadence copy brings: larger tables go out on
-		// the media's cadence alone.
 		if self.rate.is_some() && 3 * psi.packets.len() as u128 > BSYS {
 			return;
 		}
@@ -1423,9 +1455,10 @@ impl Schedule {
 		// On the PAT's lane of its own, so it waits on no copy the media leads; it follows no
 		// unit, so the next one pushed keeps its own start.
 		let last = self.last;
+		let stated = self.stated;
 		let unit = self.enqueue(0, Timing { by, decode: by }, packets, None);
 		unit.late = true;
-		unit.repeat = true;
+		unit.repeat = Some(stated);
 		self.last = last;
 	}
 
@@ -1508,12 +1541,18 @@ impl Schedule {
 		}
 		removals.sort_by_key(|event| event.0);
 		let mut removals = removals.into_iter().peekable();
+		// Earliest deadline first, but a repeat not yet begun takes only a position nothing else
+		// can use, so it costs no other unit a packet's time.
+		let rank = |unit: &Unit| match unit.idle() {
+			true => u128::MAX,
+			false => unit.timing.by,
+		};
 		let mut ready: BinaryHeap<Reverse<(u128, usize)>> = lanes
 			.iter()
 			.enumerate()
 			.filter_map(|(lane, units)| {
 				let unit = &self.units[*units.front()?];
-				(self.release(unit) <= index).then_some(Reverse((unit.timing.by, lane)))
+				(self.release(unit) <= index).then_some(Reverse((rank(unit), lane)))
 			})
 			.collect();
 		let mut waiting: BinaryHeap<Reverse<(i128, usize)>> = BinaryHeap::new();
@@ -1531,7 +1570,7 @@ impl Schedule {
 			}
 			while waiting.peek().is_some_and(|Reverse((at, _))| *at <= now) {
 				let Reverse((_, lane)) = waiting.pop().unwrap();
-				ready.push(Reverse((self.units[*lanes[lane].front().unwrap()].timing.by, lane)));
+				ready.push(Reverse((rank(&self.units[*lanes[lane].front().unwrap()]), lane)));
 			}
 			let mut emitted = false;
 			// The slot's PCR opens it. Its PID's next packet carries it there when it can go
@@ -1544,6 +1583,27 @@ impl Schedule {
 				// them.
 				if holding.get(&unit.pid).is_some_and(|&seq| seq < unit.seq) || self.release(unit) > index {
 					passed.push(Reverse((by, lane)));
+					continue;
+				}
+				// A copy of tables the receiver still holds in Bsys adds nothing: it is done where
+				// it stands, so copies of one version go out at least a Bsys drain apart.
+				if unit.sent == 0 && self.covered(i, now) && !held_back(&self.units, i) {
+					let unit = &mut self.units[i];
+					unit.packets.clear();
+					unit.runs.clear();
+					out.begun += usize::from(unit.tables.is_some());
+					lanes[lane].pop_front();
+					if self.enforce(i, index) {
+						out.tables += 1;
+						holding = self.holding(|i| self.units[i].remaining());
+					}
+					if let Some(&i) = lanes[lane].front()
+						&& self.release(&self.units[i]) <= index
+					{
+						ready.push(Reverse((rank(&self.units[i]), lane)));
+					}
+					// What it held back may go at this position.
+					ready.extend(passed.drain(..));
 					continue;
 				}
 				let rest = &unit.packets[unit.sent * TsPacket::SIZE..];
@@ -1727,6 +1787,11 @@ impl Schedule {
 					*occupancy.entry(unit.pid).or_default() += bytes;
 				}
 				if unit.remaining() == 0 {
+					if let Some(version) = unit.version().filter(|_| !unit.runs.is_empty())
+						&& let Some((empty, _)) = self.system
+					{
+						self.held = Some((version, empty));
+					}
 					lanes[lane].pop_front();
 					if self.enforce(i, index) {
 						out.tables += 1;
@@ -1736,7 +1801,7 @@ impl Schedule {
 				if let Some(&i) = lanes[lane].front() {
 					let unit = &self.units[i];
 					if self.release(unit) <= index {
-						ready.push(Reverse((unit.timing.by, lane)));
+						ready.push(Reverse((rank(unit), lane)));
 					}
 				}
 				emitted = true;
@@ -1783,6 +1848,25 @@ impl Schedule {
 		out.charges = self.retire();
 		self.busy_slots = if out.nulls > 0 { 0 } else { self.busy_slots + 1 };
 		Ok(out)
+	}
+
+	/// Whether unit `i` copies the tables a copy still in Bsys at `now` holds, changing no clock
+	/// or rate, so it may add nothing.
+	fn covered(&self, i: usize, now: i128) -> bool {
+		let unit = &self.units[i];
+		let changes = unit
+			.tables
+			.as_ref()
+			.is_some_and(|program| Some(program.clock) != self.clock || program.rate != self.rate);
+		#[cfg(test)]
+		if !self.grid {
+			return false;
+		}
+		!self.opening
+			&& !changes
+			&& unit
+				.version()
+				.is_some_and(|version| self.held.is_some_and(|(held, out)| held == version && now < out))
 	}
 
 	/// The error for a unit on `pid` that misses its decode deadline at `rate`, naming what
@@ -2077,9 +2161,10 @@ mod tests {
 			last.is_some_and(|last| last <= slot(ms(100))),
 			"the unit due at 100 ms goes out by slot {last:?}"
 		);
-		// The two leading the units, and the grid's copies while the picture is queued.
+		// The copies leading the units and the grid's while the picture is queued, each period
+		// one and none while another is in Bsys.
 		let tables: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&100)).sum();
-		assert_eq!(tables, 5);
+		assert_eq!(tables, 3);
 	}
 
 	/// After a long silence, media keeps its send-ahead instead of riding the old clock.
@@ -2336,11 +2421,11 @@ mod tests {
 		assert_eq!(marks, [[2; 13], [3; 13]].concat());
 	}
 
-	/// Under a mux rate, the grid's repeats never cost a copy the media leads its deadline: every
-	/// export that keeps its deadlines without them keeps them with them, however short the
-	/// send-ahead, large the tables, or frequent the copies.
+	/// Under a mux rate, the grid's repeats never cost a deadline: every export that keeps its
+	/// deadlines without them keeps them with them, however short the send-ahead, large or
+	/// revised the tables, frequent the copies the media leads, or changed the rate.
 	#[test]
-	fn repeats_leave_bsys_to_the_media_led_copies() {
+	fn repeats_cost_no_deadline() {
 		const AUDIO: Buffer = Buffer {
 			rate: 2_000_000,
 			leak: None,
@@ -2348,35 +2433,82 @@ mod tests {
 			transport: 512,
 			reach: Duration::from_millis(40),
 		};
-		// The media leads a copy every 500 ms, at keyframes every 200 ms, or at a keyframe 40 ms
-		// after each 500 ms copy.
-		let cadences: [fn(u128) -> bool; 3] = [
+		// Audio of a packet every 20 or 10 ms, or all-keyframe video at 25 fps of 8, 20 or 60
+		// packets a frame, the last near the rate.
+		let media = [
+			(AUDIO, 20, 1),
+			(AUDIO, 10, 1),
+			(VIDEO, 40, 8),
+			(VIDEO, 40, 20),
+			(VIDEO, 40, 60),
+		];
+		// The media leads a copy every 500 ms, at keyframes every 200 ms, at a keyframe 40 ms
+		// after each 500 ms copy, every 40 ms, or with every frame.
+		let cadences: [fn(u128) -> bool; 5] = [
 			|ms| ms % 500 == 0,
 			|ms| ms % 200 == 0,
 			|ms| ms % 500 == 0 || ms % 500 == 40,
+			|ms| ms % 40 == 0,
+			|_| true,
 		];
+		// Every 520 ms from 1 s, each landing elsewhere in its repeat period, the tables stay as
+		// they are, swap with a PMT of 12, 8 or 1 packets, or the rate doubles and halves.
+		#[derive(Clone, Copy, Debug)]
+		enum Change {
+			None,
+			Resize(usize),
+			Rate,
+		}
+		let changes = [
+			Change::None,
+			Change::Resize(12),
+			Change::Resize(8),
+			Change::Resize(1),
+			Change::Rate,
+		];
+		struct Case {
+			delay: Duration,
+			count: usize,
+			media: (Buffer, u128, usize),
+			cadence: usize,
+			change: Change,
+		}
 		// The error a run ends with, if any, and the PAT packets it laid.
-		let run = |delay: Duration, count: usize, leads: fn(u128) -> bool, grid: bool| {
-			let mut schedule = Schedule::new(delay);
+		let run = |case: &Case, grid: bool| {
+			let (buffer, step, size) = case.media;
+			let mut schedule = Schedule::new(case.delay);
 			schedule.grid = grid;
 			schedule.set_rate(Some(RATE));
 			schedule.set_tables(100);
 			schedule.set_clock(1);
-			schedule.set_buffer(1, AUDIO);
-			schedule.set_psi(Psi {
-				packets: marked_tables(1, count),
+			schedule.set_buffer(1, buffer);
+			let psi = |mark: u8, count: usize| Psi {
+				packets: marked_tables(mark, count),
 				flagged: None,
 				clock: 1,
-			});
-			let mut pats = 0;
-			for ms in (0..5_000).step_by(20) {
-				if leads(ms) {
+			};
+			schedule.set_psi(psi(1, case.count));
+			let (mut mark, mut rate, mut pats) = (1, RATE, 0);
+			for ms in (0..5_000).step_by(step as usize) {
+				let changed = ms >= 1_000 && (ms - 1_000) % 520 < step;
+				if changed {
+					mark += 1;
+					match case.change {
+						Change::None => {}
+						Change::Resize(to) => {
+							let count = if mark % 2 == 0 { to } else { case.count };
+							schedule.set_psi(psi(mark, count));
+						}
+						Change::Rate => rate = if rate == RATE { 2 * RATE } else { RATE },
+					}
+				}
+				if cadences[case.cadence](ms) || changed {
 					schedule.lead(Tables {
-						rate: Some(RATE),
+						rate: Some(rate),
 						added: Vec::new(),
 					});
 				}
-				schedule.push(1, timing(ms), unit(1, 1), true).unwrap();
+				schedule.push(1, timing(ms), unit(1, size), true).unwrap();
 				loop {
 					match schedule.next(Some(slot(self::ms(ms)))) {
 						Ok(Some(slot)) => {
@@ -2390,26 +2522,58 @@ mod tests {
 			}
 			(None, pats)
 		};
-		let mut failed = Vec::new();
+		let mut cases = Vec::new();
 		for delay in [Duration::ZERO, Duration::from_millis(40), Duration::from_secs(1)] {
-			for count in [1, 3, 6] {
-				for (cadence, &leads) in cadences.iter().enumerate() {
-					let (without, _) = run(delay, count, leads, false);
-					let (with, pats) = run(delay, count, leads, true);
-					if let (None, Some(err)) = (without, with) {
-						failed.push(format!("{delay:?}, a {count}-packet PMT, cadence {cadence}: {err}"));
-					}
-					// Ten copies are the media's; the smallest tables also repeat on the grid.
-					if count == 1 && cadence == 0 {
-						assert!(pats > 40, "{delay:?}: {pats} PATs");
+			for count in [1, 2, 3, 6] {
+				for media in media {
+					for cadence in 0..cadences.len() {
+						cases.extend(changes.map(|change| Case {
+							delay,
+							count,
+							media,
+							cadence,
+							change,
+						}));
 					}
 				}
+			}
+		}
+		let mut failed = Vec::new();
+		for case in &cases {
+			let (without, _) = run(case, false);
+			let (with, pats) = run(case, true);
+			let codex =
+				case.media.2 == 8 && case.count == 1 && case.cadence == 3 && matches!(case.change, Change::None);
+			let name = || {
+				let (_, step, _) = case.media;
+				format!(
+					"{:?}, a {}-packet PMT, a frame every {step} ms, cadence {}, {:?}",
+					case.delay, case.count, case.cadence, case.change
+				)
+			};
+			// The video leading a copy with each frame at 25 fps completes without them.
+			assert!(!codex || without.is_none(), "{}: {without:?}", name());
+			// Ten copies are the media's; the tables also repeat on the grid.
+			if with.is_none() && case.count == 1 && case.cadence == 0 && matches!(case.change, Change::None) {
+				assert!(pats > 40, "{}: {pats} PATs", name());
+			}
+			if let (None, Some(err)) = (without, with) {
+				failed.push(format!("{}: {err}", name()));
 			}
 		}
 		assert!(failed.is_empty(), "{failed:#?}");
 	}
 
-	/// With the clock running, the grid repeats the tables in force every [`TABLE_REPEAT`]
+	/// Under a mux rate, the grid's repeats never cost a deadline: every export that keeps its
+	/// deadlines without them keeps them with them, however short the send-ahead, large or
+	/// revised the tables, frequent the copies the media leads, or changed the rate.
+	/// The slots a copy of a one-packet PAT and PMT stays in Bsys under a mux `rate`, which a copy
+	/// due meanwhile adds nothing to.
+	fn padded_drain(rate: Option<u64>) -> u128 {
+		rate.map_or(0, |_| 2)
+	}
+
+	/// With the clock running, the grid repeats the tables in force each [`TABLE_REPEAT`]
 	/// between the copies the media leads, and only while media is still to go out, whether
 	/// drained to the source's horizon or to the end, as at a switch.
 	#[test]
@@ -2448,7 +2612,7 @@ mod tests {
 			assert!(pats.len() > 2, "{rate:?} {known:?}: the grid repeats the tables");
 			for pair in pats.windows(2) {
 				assert!(
-					pair[1] - pair[0] <= REPEAT_SLOTS,
+					pair[1] - pair[0] <= REPEAT_SLOTS + padded_drain(rate),
 					"{rate:?} {known:?}: tables {pair:?} slots apart"
 				);
 			}
@@ -2495,7 +2659,10 @@ mod tests {
 		}
 		assert!(pats.len() > 2, "the grid repeats the tables");
 		for pair in pats.windows(2) {
-			assert!(pair[1] - pair[0] <= REPEAT_SLOTS, "tables {pair:?} slots apart");
+			assert!(
+				pair[1] - pair[0] <= REPEAT_SLOTS + padded_drain(Some(RATE)),
+				"tables {pair:?} slots apart"
+			);
 		}
 	}
 
