@@ -1,4 +1,4 @@
-import { Duration, yieldNow } from "@moq/clock";
+import { Duration, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -51,6 +51,7 @@ import { type Counted, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { GRACE } from "../ledger.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { toNumber } from "../util/bigint.ts";
 import { Deadline } from "../util/deadline.ts";
@@ -2101,20 +2102,26 @@ export class Subscriber {
 			this.#recover(broadcast, consumed, entry, groups, priority),
 		);
 		entry.fills = fills;
-		const driving = this.#driveFills(entry, fills);
+		// Accepted before its fills run, so this only reads what TRACK_INFO said.
+		const framing = producer
+			.info()
+			.catch(() => undefined)
+			.then((info) => ({ compress: entry.compress, timescale: entry.timescale, maxAge: info?.maxAge }));
+		const fetch = (fill: track.FillGroups) => {
+			const job = framing.then((framing) => this.#serveFill(broadcast, consumed, producer, framing, fill));
+			jobs.add(job);
+			void job.then(() => jobs.delete(job));
+		};
+		const driving = this.#driveFills(entry, fills, fetch);
 		try {
-			// Accepted before its fills run, so this only reads what TRACK_INFO said.
-			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
-			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
+			await framing;
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 				// One group is what FETCH carries; more go through a subscription.
 				if (fill.end - fill.start > 1n) {
 					fills.push(fill);
 					continue;
 				}
-				const job = this.#serveFill(broadcast, consumed, producer, framing, fill);
-				jobs.add(job);
-				void job.then(() => jobs.delete(job));
+				fetch(fill);
 			}
 		} finally {
 			requests.close();
@@ -2124,8 +2131,9 @@ export class Subscriber {
 	}
 
 	// Settle `fills` as their inputs change, until the copy closes, asking what they owe through
-	// `entry`'s subscription. Mirrors the Rust serve loop's `RangeFills::poll`.
-	async #driveFills(entry: SubscribeEntry, fills: RangeFills): Promise<void> {
+	// `entry`'s subscription, and `fetch` what a stalled recovery handed back (a TEMPORARY MIGRATION,
+	// see `RecoveryHandle.walk`). Mirrors the Rust serve loop's `RangeFills::poll`.
+	async #driveFills(entry: SubscribeEntry, fills: RangeFills, fetch: (fill: track.FillGroups) => void): Promise<void> {
 		const demand = entry.track.demand();
 		while (!fills.closed) {
 			// A stream still arriving on a recovery is kept only for someone reading it. A recovery
@@ -2133,6 +2141,7 @@ export class Subscriber {
 			const recovering = fills.recovering;
 			if (fills.poll(entry.tail, !isAbandoned(demand)) || fills.recovering !== recovering)
 				entry.fillsChanged.update((revision) => revision + 1);
+			for (const fill of fills.takeWalks()) fetch(fill);
 			await fills.changed(entry.tail);
 		}
 		entry.fillsChanged.update((revision) => revision + 1);
@@ -2223,6 +2232,14 @@ export class Subscriber {
 		let refused: Refused[] = [];
 		// Those the fills have yet to take: each refusal is handed over once.
 		let fresh: Refused[] = [];
+		// TEMPORARY MIGRATION, delete at the next version cut with the Rust `Recovery::walk`, once no
+		// relay of the previous release is left. That relay starts the recovery at its floor, sends the
+		// next group it holds, and never accounts for the keys between: it read a SUBSCRIBE asking no max
+		// delay as a 285,000-year grace, so it never asks its own upstream. Its FETCH answers them, so
+		// once the grace passes they are left to FETCH, a key at a time.
+		let walk: Run[] = [];
+		let stall: Promise<void> | undefined;
+		let stalled = false;
 		const changed = new Signal(0);
 		// What the publisher gives up of the groups, accounted for in the tail. The latest verdict on a
 		// group replaces any earlier one, so a peer repeating its drops grows nothing.
@@ -2279,6 +2296,12 @@ export class Subscriber {
 					if (capped || !started || first === undefined || first < groups.start) return;
 					if (first + 1n < groups.end) groups.end = first + 1n;
 					cap();
+					// TEMPORARY MIGRATION, see `walk`: a current relay names the first group it starts at.
+					if (!entry.tail.covers(groups.start, groups.end)) {
+						stall = sleep(GRACE).then(() => {
+							stalled = true;
+						});
+					}
 				};
 				const responses = this.#recoveryResponses(
 					opened,
@@ -2311,6 +2334,16 @@ export class Subscriber {
 				try {
 					while (!ended && !left.signal.aborted) {
 						capAtFirst();
+						// TEMPORARY MIGRATION, see `walk`: what is still owed once the grace passed, with no
+						// stream being read, is left to FETCH.
+						if (stalled && !entry.tail.reading && !covered()) {
+							let owed: Run[] = [{ ...groups }];
+							for (const run of [...entry.tail.accounted(groups.start, groups.end), ...refused])
+								owed = removeRun(owed, run.start, run.end);
+							walk = owed;
+							left.abort();
+							break;
+						}
 						if (covered()) {
 							await race([entry.tail.settle(covered, stopped), over, leaving]);
 							if (ended || left.signal.aborted) break;
@@ -2322,7 +2355,7 @@ export class Subscriber {
 							opened.writer.close();
 							break;
 						}
-						await race([Signal.race(entry.tail.changed), over, leaving]);
+						await race([Signal.race(entry.tail.changed), over, leaving, ...(stall ? [stall] : [])]);
 					}
 				} finally {
 					stopped.set(null);
@@ -2360,7 +2393,7 @@ export class Subscriber {
 			}
 			// What nothing accounted for is refused, as nothing more arrives on it.
 			let unanswered: Run[] = [{ ...groups }];
-			for (const run of [...entry.tail.accounted(groups.start, groups.end), ...refused])
+			for (const run of [...entry.tail.accounted(groups.start, groups.end), ...refused, ...walk])
 				unanswered = removeRun(unanswered, run.start, run.end);
 			for (const gap of unanswered) fresh.push({ ...gap, refusal: passing(failed) });
 			// Only what was not handed over while it was out.
@@ -2374,6 +2407,7 @@ export class Subscriber {
 		return {
 			groups: () => groups,
 			done,
+			walk: () => walk,
 			takeRefused,
 			changed,
 			readingChanged: entry.tail.changed,

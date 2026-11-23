@@ -56,6 +56,7 @@ function recoveries() {
 		cancelled: boolean;
 		reading: boolean;
 		readingChanged: Signal<number>;
+		walk: Run[];
 	}[] = [];
 	const recover = (groups: Run, priority: number): RecoveryHandle => {
 		let finish!: (refused: Refused[]) => void;
@@ -76,11 +77,13 @@ function recoveries() {
 			cancelled: false,
 			reading: false,
 			readingChanged: new Signal(0),
+			walk: [] as Run[],
 		};
 		opened.push(entry);
 		return {
 			groups: () => entry.groups,
 			done,
+			walk: () => entry.walk,
 			takeRefused: () => soFar.splice(0),
 			changed,
 			readingChanged: entry.readingChanged,
@@ -107,6 +110,29 @@ test("range fills: a fill of more than one group joins the subscription's ranges
 
 	fills.close();
 	expect(fills.ask.groups).toEqual([]);
+	peer.close();
+});
+
+// TEMPORARY MIGRATION, delete with `RecoveryHandle.walk`: behind a relay of the previous release a
+// lite-06 recovery stalls on keys that relay never accounts for, and the fill owing them goes to
+// FETCH instead. Mirrors the Rust `a_stalled_recovery_walks_its_keys`.
+test("range fills: a stalled recovery hands its fill to FETCH", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, Version.DRAFT_06, recover);
+	fills.push(peer.fill);
+	fills.poll(new Tail(), true);
+	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 0n, end: 4n }]);
+	expect(fills.takeWalks()).toEqual([]);
+
+	const stalled = defined(opened[0]);
+	stalled.walk = [{ start: 0n, end: 4n }];
+	stalled.finish([]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	fills.poll(new Tail(), true);
+	expect(fills.takeWalks()).toEqual([peer.fill]);
+	expect(fills.recovering).toBe(false);
+	expect(fills.isEmpty()).toBe(true);
 	peer.close();
 });
 

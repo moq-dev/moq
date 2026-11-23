@@ -43,14 +43,15 @@ function frame(payload: string, version: Version, delta = 0): Uint8Array {
 }
 
 /**
- * A group stream the test writes by hand, handed to the subscriber as if it arrived. Its first
- * frame starts at `sequence` milliseconds, so group starts strictly increase with their keys.
+ * A group stream the test writes by hand for subscription `subscribe`, handed to the subscriber as
+ * if it arrived. Its first frame starts at `sequence` milliseconds, so group starts strictly
+ * increase with their keys.
  */
-function groupStream(subscriber: Subscriber, key: bigint) {
+function groupStream(subscriber: Subscriber, key: bigint, subscribe = 0n) {
 	let controller!: ReadableStreamDefaultController<Uint8Array>;
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
 	const handled = subscriber.runGroup(
-		new GroupMessage({ subscribe: 0n, key: key }),
+		new GroupMessage({ subscribe, key: key }),
 		new Reader(readable, undefined, subscriber.version),
 	);
 	let first = true;
@@ -533,5 +534,39 @@ test("draft-07's SUBSCRIBE_START says the largest before any group arrives", asy
 	const { reader, respond } = await subscribed(Version.DRAFT_07);
 	await respond({ start: new SubscribeStart([4n], { position: { group: 4n, frame: 2 }, ended: false }) });
 	expect(await reader.largest()).toEqual({ group: 4n, frame: 2 });
+	reader.close();
+});
+
+// TEMPORARY MIGRATION, delete with `RecoveryHandle.walk`: a relay of the previous release starts a
+// recovery at its floor, sends the next group it holds, and never accounts for the keys between.
+// Once the grace passes, the copy FETCHes them a key at a time instead. Mirrors the Rust
+// `a_stalled_recovery_walks_its_keys`, on lite-05, where a floor below the start is recovered.
+test("a recovery stalled behind a relay of the previous release is fetched", async () => {
+	using clock = manual();
+	const version = Version.DRAFT_05;
+	const { subscriber, reader, respond, accept } = await subscribed(version, Duration.millis(60_000), {
+		start: 1n,
+	});
+	await respond({ start: new SubscribeStart([4n]) });
+	const group = groupStream(subscriber, 4n);
+	group.finish();
+	await group.handled;
+	expect((await reader.recvGroup())?.start).toBe(4n);
+	// The reader still owes 1..4, which the copy recovers on a SUBSCRIBE of its own.
+	void reader.recvGroup().catch(() => undefined);
+	const recovery = defined(await accept());
+	expect(await recovery.reader.u53()).toBe(StreamId.Subscribe);
+	await Subscribe.decode(recovery.reader, version);
+	await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([1n]) }, version);
+	const held = groupStream(subscriber, 3n, 1n);
+	held.write("3.0");
+	held.finish();
+	await held.handled;
+
+	const fetched = accept();
+	expect(await settlesWithin(fetched, clock, Duration.millis(500))).toBe(false);
+	expect(await settlesWithin(fetched, clock, Duration.millis(1000))).toBe(true);
+	const fetch = defined(await fetched);
+	expect(await fetch.reader.u53()).toBe(StreamId.Fetch);
 	reader.close();
 });

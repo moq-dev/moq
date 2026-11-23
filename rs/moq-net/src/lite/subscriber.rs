@@ -5877,6 +5877,98 @@ mod tests {
 		);
 	}
 
+	/// TEMPORARY MIGRATION, delete with `fills::Recovery::walk`: a relay of the previous release
+	/// starts a lite-06 recovery at its floor, sends the next group it holds, and never accounts
+	/// for the keys between. Once the grace passes, the fill owing them goes to FETCH instead.
+	#[kio::test]
+	async fn a_stalled_recovery_walks_its_keys() {
+		let version = Version::Lite06;
+		let mut responses = Vec::new();
+		lite::SubscribeResponse::Start(lite::SubscribeStart {
+			largest: None,
+			starts: vec![Some(2)],
+		})
+		.encode(
+			&mut crate::coding::Encoder::new(&mut responses, version.into()),
+			version,
+		)
+		.unwrap();
+		let session = crate::lite::test_transport::ScriptedSession::new(responses);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_node: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			node: None,
+			name: "video".to_string(),
+		};
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		for key in 0..6 {
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		for key in 2..4 {
+			copy.evict(key);
+		}
+		let mut reader = copy
+			.subscribe(
+				crate::track::Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(None))
+					.with_range(2..4),
+			)
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 2..4 are owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("groups 2..4 are a miss");
+		};
+		let mut fills = fills::RangeFills::new(version);
+		fills.push(fill);
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert!(fills.recovering(), "2..4 recovered on its own subscription");
+
+		// The relay sends group 4, the next it holds, and nothing for 2 or 3.
+		{
+			let subscribes = serve.subscriber.subscribes.lock();
+			let (_, entry) = subscribes.iter().next().expect("the recovery subscribed");
+			Reading::open(&entry.tail, Some(4), serve.subscriber.runtime.now());
+		}
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert!(fills.take_walks().is_empty(), "the grace has not passed");
+		assert!(fills.recovering());
+
+		kio::clock::sleep(crate::tail::GRACE * 2).await;
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		let walks = fills.take_walks();
+		assert_eq!(walks.len(), 1, "the fill owing 2..4 goes to FETCH");
+		assert_eq!(walks[0].wanted(), Some(2));
+		assert!(!fills.recovering(), "the stalled recovery ended");
+	}
+
 	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the narrowest budget
 	/// the subscription asked: a SUBSCRIBE_UPDATE widening the budget reopens nothing, and an
 	/// OLD drop arriving after it may have been judged before the publisher read it.
@@ -12955,6 +13047,20 @@ impl FeedFetches {
 }
 
 impl ServeLoop {
+	/// TEMPORARY MIGRATION, delete at the next version cut with `fills::Recovery::walk`: FETCH
+	/// what a recovery stalled on behind a relay of the previous release, a key at a time.
+	fn walk_fills(
+		serve: &TrackServe,
+		range_fills: &mut RangeFills,
+		fetches: &mut kio::Tasks<FillServeRun>,
+		serving: &track::Producer,
+	) {
+		for fill in range_fills.take_walks() {
+			let info = FetchInfo::Known(serving.info().clone());
+			fetches.push(FillServeRun::new(serve.clone(), fill, info));
+		}
+	}
+
 	fn new(serve: &TrackServe, request: track::Request, info: track::Info) -> Self {
 		// Register the fetch handler before accepting: `accept` releases the request's own
 		// fetch gate, and a cache-miss fetch queued in the gap would be drained as NotFound.
@@ -13416,6 +13522,7 @@ impl ServeLoop {
 						Ok(changed) => est.fills_changed |= changed,
 						Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
 					}
+					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
 					// TRACK requesters own a Resolving handle through metadata acceptance
 					// until they attach a reader or cancel. That ownership is demand too,
 					// so no observed-arrival history is needed to bridge the handoff.
@@ -13506,6 +13613,7 @@ impl ServeLoop {
 					{
 						return Poll::Ready(ServeEnd::GiveBack(err));
 					}
+					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
 					// Ending drops a recovery still out, as a lite-07 track waits for them too.
 					if settle
 						.poll(waiter, |tail| {
@@ -13647,10 +13755,11 @@ impl ServeLoop {
 					};
 					// A stream still arriving on a recovery is kept only for someone reading it.
 					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
-					match self
+					let polled = self
 						.range_fills
-						.poll(serve, &self.serving, accounted.as_ref(), read, waiter)
-					{
+						.poll(serve, &self.serving, accounted.as_ref(), read, waiter);
+					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
+					match polled {
 						Ok(true) => {
 							if let Err(err) = self.begin(serve, self.serving.subscription()) {
 								return Poll::Ready(ServeEnd::GiveBack(err));

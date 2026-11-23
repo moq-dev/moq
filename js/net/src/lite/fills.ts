@@ -57,6 +57,11 @@ export interface RecoveryHandle {
 	/** Resolves once it is over, with the groups it refused. */
 	done: Promise<Refused[]>;
 	/**
+	 * TEMPORARY MIGRATION, delete at the next version cut with the Rust `Recovery::walk`: once it
+	 * is over, the keys it stalled on, which FETCH asks a key at a time instead.
+	 */
+	walk(): Run[];
+	/**
 	 * The groups it refused since the last call, each handed over once, which answer the fills
 	 * owing them before it is over. Its {@link done} resolves with only those never taken.
 	 */
@@ -74,6 +79,8 @@ export interface RecoveryHandle {
 class Recovery {
 	readonly handle: RecoveryHandle;
 	refused?: Refused[];
+	// TEMPORARY MIGRATION, see `RecoveryHandle.walk`.
+	walk: Run[] = [];
 	// The groups it refused and handed over, which it no longer covers, so a later request for
 	// them asks again rather than waiting on its other streams.
 	readonly released: Run[] = [];
@@ -82,6 +89,7 @@ class Recovery {
 	constructor(handle: RecoveryHandle, ended: () => void) {
 		this.handle = handle;
 		void handle.done.then((refused) => {
+			this.walk = handle.walk();
 			this.refused = refused;
 			ended();
 		});
@@ -149,6 +157,8 @@ export class RangeFills {
 	// Groups recovered once already, which a second stale drop refuses.
 	#recovered: Run[] = [];
 	#recoveries = new Set<Recovery>();
+	// TEMPORARY MIGRATION, see `RecoveryHandle.walk`: fills handed back to FETCH.
+	#walking: track.FillGroups[] = [];
 	#closed = false;
 
 	/** The fills of `copy`, whose upstream speaks `version`, each recovery opened by `recover`. */
@@ -161,6 +171,11 @@ export class RangeFills {
 	/** Whether no fill is held, asked for, or recovering. */
 	isEmpty(): boolean {
 		return this.#held.length === 0 && this.ask.groups.length === 0 && this.#recoveries.size === 0;
+	}
+
+	/** TEMPORARY MIGRATION, see `RecoveryHandle.walk`: take the fills a stalled recovery handed back. */
+	takeWalks(): track.FillGroups[] {
+		return this.#walking.splice(0);
 	}
 
 	/** Whether a recovery is still out. */
@@ -246,10 +261,22 @@ export class RangeFills {
 			this.#recoveries.add(new Recovery(this.#recover(run, priority), () => this.#bump()));
 		}
 		// What a finished recovery did not deliver stands refused.
+		const walk: Run[] = [];
 		for (const done of this.#recoveries) {
 			if (!done.refused) continue;
 			this.#recoveries.delete(done);
 			for (const refused of done.refused) this.#setRefused(refused.start, refused.end, refused.refusal);
+			for (const run of done.walk) insertRun(walk, run.start, run.end);
+		}
+		// TEMPORARY MIGRATION, see `RecoveryHandle.walk`: a fill owing keys a stalled recovery left
+		// goes to FETCH whole, as before per-run recoveries.
+		if (walk.length > 0) {
+			const kept: track.FillGroups[] = [];
+			for (const fill of this.#held) {
+				if (clip(walk, fill.start, fill.end).length > 0) this.#walking.push(fill);
+				else kept.push(fill);
+			}
+			this.#held = kept;
 		}
 		// What a recovery still out refused since the last poll answers the fills owing it now,
 		// rather than waiting on its other streams. Taken once, so once those fills end, a later

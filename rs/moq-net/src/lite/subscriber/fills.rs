@@ -132,6 +132,8 @@ pub(super) struct RangeFills {
 	recovered: RangeSet<u64>,
 	/// The subscriptions recovering them.
 	recoveries: Vec<Recovery>,
+	/// TEMPORARY MIGRATION, see [`Recovery::walk`]: fills handed back to FETCH, one key at a time.
+	walking: Vec<track::FillGroups>,
 }
 
 impl RangeFills {
@@ -151,6 +153,12 @@ impl RangeFills {
 			.partition(|fill| fill.is_fetch());
 		self.held = held;
 		fetches
+	}
+
+	/// TEMPORARY MIGRATION, see [`Recovery::walk`]: take the fills a stalled recovery handed back,
+	/// which FETCH walks a key at a time.
+	pub fn take_walks(&mut self) -> Vec<track::FillGroups> {
+		std::mem::take(&mut self.walking)
 	}
 
 	/// Whether no fill is held, asked for, or recovering.
@@ -341,10 +349,14 @@ impl RangeFills {
 		}
 		// What a finished recovery did not deliver stands refused.
 		let mut done = Vec::new();
+		let mut walk = RangeSet::new();
 		let mut violation = None;
 		self.recoveries.retain_mut(|recovery| match recovery.poll(waiter) {
 			Poll::Ready(Ok(refused)) => {
 				done.push(refused);
+				for keys in recovery.walk.iter() {
+					walk.insert(keys.clone());
+				}
 				false
 			}
 			Poll::Ready(Err(err)) => {
@@ -360,6 +372,15 @@ impl RangeFills {
 			for (groups, refusal) in refused.iter() {
 				self.refused.insert(groups.clone(), refusal.clone());
 			}
+		}
+		// TEMPORARY MIGRATION, see [`Recovery::walk`]: a fill owing keys a stalled recovery left
+		// goes to FETCH whole, as before per-run recoveries.
+		if !walk.is_empty() {
+			let (walking, held) = std::mem::take(&mut self.held)
+				.into_iter()
+				.partition(|fill| walk.overlaps(&(fill.start().group..fill.end())));
+			self.held = held;
+			self.walking.extend::<Vec<_>>(walking);
 		}
 		// What a recovery still out refused since the last poll answers the fills owing it now,
 		// rather than waiting on its other streams.
@@ -562,6 +583,16 @@ struct Recovery {
 	/// Whether its range is final. Before lite-07 the subscription proves only the keys below
 	/// its start, so it asks open, then caps once at the first group that arrives.
 	capped: bool,
+	/// TEMPORARY MIGRATION, delete at the next version cut with [`Self::walk`]: armed once the
+	/// cap left keys below the first group unaccounted for, which a current relay never does.
+	stall: Option<crate::time::Deadline>,
+	/// TEMPORARY MIGRATION, delete at the next version cut, once no relay of the previous
+	/// release is left: the keys a stalled recovery leaves to FETCH. A relay of that release
+	/// starts the recovery at its floor, then sends the next group it holds and never accounts
+	/// for the keys between: it read a SUBSCRIBE asking no max delay as a 285,000-year grace,
+	/// so it never asks its own upstream. Its FETCH answers them, so once [`crate::tail::GRACE`] passes
+	/// they are walked a key at a time.
+	walk: RangeSet<u64>,
 	state: RecoveryState,
 	/// The groups this subscription said it will not deliver, and why.
 	refused: RangeMap<u64, Refusal>,
@@ -615,6 +646,8 @@ impl Recovery {
 			id: establish.id,
 			groups,
 			capped: !one_start,
+			stall: None,
+			walk: RangeSet::new(),
 			state: RecoveryState::Establish(Box::new(establish)),
 			refused: Default::default(),
 			fresh: Default::default(),
@@ -643,6 +676,9 @@ impl Recovery {
 		}
 		for (refused, _) in self.refused.iter() {
 			owed.remove(refused.clone());
+		}
+		for walked in self.walk.iter() {
+			owed.remove(walked.clone());
 		}
 		for gap in owed.iter() {
 			self.refused.insert(gap.clone(), Refusal::passing(err.clone()));
@@ -694,6 +730,28 @@ impl Recovery {
 						self.end(StreamError::NotFound);
 						continue;
 					}
+					// TEMPORARY MIGRATION, see [`Recovery::walk`]: what is still owed once the
+					// grace passed, with no stream being read, is left to FETCH.
+					if let Some(stall) = &mut self.stall
+						&& stall.poll(waiter).is_ready()
+					{
+						let tail = active.tail.read();
+						if !tail.is_reading() && !tail.covers(self.groups.clone()) {
+							let mut walk = RangeSet::new();
+							walk.insert(self.groups.clone());
+							for arrived in tail.accounted(self.groups.clone()) {
+								walk.remove(arrived);
+							}
+							drop(tail);
+							for (refused, _) in self.refused.iter() {
+								walk.remove(refused.clone());
+							}
+							tracing::debug!(track = %self.serve.name, ?walk, "recovery stalled, fetching");
+							self.walk = walk;
+							self.end(StreamError::Cancel);
+							continue;
+						}
+					}
 					// FIN once every group is accounted for and read, as a subscriber does once
 					// its tail settles, and the publisher FINs in reply; after any update, whose
 					// flush wakes this again.
@@ -726,6 +784,13 @@ impl Recovery {
 								self.groups = groups.start..groups.end.min(first.saturating_add(1));
 								self.capped = true;
 								cap(&self.groups, active)?;
+								// TEMPORARY MIGRATION, see [`Recovery::walk`].
+								if !active.tail.read().covers(self.groups.clone()) {
+									self.stall = Some(crate::time::Deadline::after(
+										&self.serve.subscriber.runtime,
+										crate::tail::GRACE,
+									));
+								}
 								continue;
 							}
 							Some(None) => {
