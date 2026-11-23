@@ -1307,6 +1307,9 @@ impl Holdings for TrackState {
 			let target = match newest {
 				_ if min >= subscription::PAST_EVERY_GROUP => 0,
 				Some(newest) => newest.saturating_sub(back),
+				// No frame measures the edge yet, and the read ends before one must: it starts at
+				// the oldest group held.
+				None if ended => 0,
 				None => return Join::Unknown,
 			};
 			if target == 0 {
@@ -17748,6 +17751,26 @@ mod test {
 		group.write_frame(Timestamp::from_micros(at).unwrap(), &b"x"[..]).unwrap();
 		producer.finish_at(Position::group(at + 1)).unwrap();
 		assert_eq!(drain_groups(&mut reader), vec![at]);
+		group.finish().unwrap();
+	}
+
+	/// A copy whose wire reports no starts, once every group below its end arrived, places a
+	/// join no frame measures yet at the oldest group held: the read ends with the feed, before
+	/// the last group's first frame need arrive.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_complete_received_copy_places_a_join_no_frame_measures() {
+		let join = Subscription::default().with_ranges([Range::from(Start::Live {
+			min: Duration::from_secs(40),
+			max: Some(Duration::from_secs(40)),
+		})]);
+		let mut producer = track_producer("test", Info::default().with_timescale(Timescale::MICRO).with_max_age(None));
+		producer.received();
+		let mut reader = producer.subscribe(join);
+		let mut group = producer.create_group(group::Info { start: 2 }).unwrap();
+		producer.finish_at(Position::group(3)).unwrap();
+		assert_eq!(drain_groups(&mut reader), vec![2]);
+		group.write_frame(Timestamp::from_micros(2).unwrap(), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
 
