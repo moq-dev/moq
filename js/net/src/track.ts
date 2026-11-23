@@ -3150,14 +3150,10 @@ export class Producer {
 			this.#unlink(entry);
 			this.#uncache(entry);
 		}
-		for (const sink of this.#sinks) {
-			// A finished group stays readable, and a route failure continues it from another copy
-			// once a front takes it, so only an unfinished one ends with the track.
-			for (const group of sink.groups.peek()) {
-				if (hooks.groupFate(group)() !== undefined) hooks.releaseGroupReader(group, abort);
-			}
-			closeTrackState(sink, abort);
-		}
+		// A group still buffered for a subscriber is left to it: the abort above already ended an
+		// unfinished one, a finished one stays readable, and a front that takes either continues it
+		// from another copy. Releasing it here would end that continuation at its next short close.
+		for (const sink of this.#sinks) closeTrackState(sink, abort);
 		this.#sinks.clear();
 		// The former live edge becomes evictable too, its idle window restarted, so the close
 		// never reclaims a group its subscribers have yet to drain.
