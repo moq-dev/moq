@@ -10932,7 +10932,7 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 /// It starts at the lowest start. A subscription with only ranges without a start asks with
 /// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor,
 /// under the widest max age among them, the one `Subscriber Max Age` the wire carries: a
-/// live join reaching back past every group (see [`track::Start::within`]), or none while a
+/// live join with no lag limit (see [`track::Start::within`]), or none while a
 /// range from the oldest group asks for history. One mixing the two asks from group 0,
 /// history, since no single start covers both: the latest group may sit below the start.
 ///
