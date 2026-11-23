@@ -475,6 +475,33 @@ test("through a lite-06 upstream, a group reported dropped as it lands is fetche
 	await chained.close();
 });
 
+// A wider newcomer through a relay already serving a narrow reader gets what it would through a
+// cold one, though the lite-06 upstream answered the narrow join's START first. Mirrors the Rust
+// `a_warm_relay_serves_a_wider_newcomer_what_a_cold_one_would`.
+test("through a lite-06 upstream, a warm relay serves a wider newcomer what a cold one would", async () => {
+	using clock = manual();
+	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07);
+	// One group per second, so a max picks how far behind the 9s edge a join reaches.
+	for (let key = 0n; key < 10n; key++) chained.write(key, Number(key) * 1000);
+	const narrow = chained.remote
+		.track("video")
+		.subscribe(withMax({ delay: { max: Duration.millis(2500) }, ranges: [{}] }));
+	await chained.reached();
+	expect(groupsOf(await drain(clock, narrow))).toEqual([6n, 7n, 8n, 9n]);
+
+	const wide = chained.remote
+		.track("video")
+		.subscribe(withMax({ delay: { max: Duration.millis(6500) }, ranges: [{}] }));
+	expect(groupsOf(await drain(clock, wide))).toEqual([2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n]);
+	// The re-offered groups are stale for the narrow reader.
+	expect(groupsOf(await drain(clock, narrow))).toEqual([]);
+
+	chained.track.finish();
+	narrow.close();
+	wide.close();
+	await chained.close();
+});
+
 // Groups 1 and 2 are judged stale for the relay's subscription, under a 1.5s budget, a run the
 // relay's copy shares with all its readers, then the relay forgot that run: it aged out past the
 // pool's idle window. The readers in `readers` subscribe next:
