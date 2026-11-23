@@ -34,16 +34,10 @@ Received status code 429`, dropping all six `* -> kotlin` cells.
   `dev.moq:moq` `<release>` differs from Central's, so a mirror that lags a
   release still fails loudly instead of testing the previous version.
 
+Decided 2026-11-23 (maintainer, /quest-run): resolve every Kotlin and Maven
+dependency through Google's Maven Central mirror, and change the
+`test/smoke/AGENTS.md` rule that clients install from their official registry
+so it allows that mirror for Maven. Rejected: keeping the rule, and deleting
+the quest.
+
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: whether the Kotlin client may resolve from Google's Maven Central
-  mirror, since `test/smoke/AGENTS.md` says each cell installs the published
-  artifact from the registry users hit. Options: the mirror, with the
-  freshness check above (recommended: Central's block is per shared IP, and
-  only an endpoint off Central avoids it); a self-hosted runner for the
-  Kotlin build (rejected: moq-dev/moq is public, and its smoke runs on hosted
-  runners); or accepting the red column on a blocked runner (rejected: it
-  hides a broken release behind noise). An agent cannot settle this: it
-  changes a rule in `test/smoke/AGENTS.md`.
