@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/endel/quic-zig-moq-relay:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    https://relay:4443
-time="2026-11-23T08:46:26Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-23T08:46:26Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-23T08:46:26Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-23T08:46:26Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-23T08:46:26Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-23T19:50:34Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-23T19:50:34Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-23T19:50:34Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-23T19:50:34Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-23T19:50:34Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-test-client-1 Recreate 
  Container runner-upstream-test-client-1 Recreated 
 Attaching to relay-1, test-client-1
@@ -17,7 +17,7 @@ Attaching to relay-1, test-client-1
  Container runner-upstream-relay-1 Waiting 
 relay-1  | 
 relay-1  | === MoQ Relay (drafts 17, 18, 22; WebTransport + QUIC) ===
-relay-1  | Certificate SHA-256: 8dfe6f8f73472ea0dbb4a3d9738d57db52b0f73a3f42b8cfe3da61090abc97ce
+relay-1  | Certificate SHA-256: 69ee506ba7ca2bab270362893edf5633dccab4cac09275da261b299182b36115
 relay-1  | 
 relay-1  | Listening on https://0.0.0.0:4443
 relay-1  | Video demo: https://127.0.0.1:4443/moq_video.html
@@ -37,7 +37,7 @@ relay-1        | [relay] client 0 SETUP received
 relay-1        | [relay] client 0 gone
 test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 58
+test-client-1  |   duration_ms: 132
 test-client-1  |   ...
 relay-1        | [relay] client 0 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
@@ -47,7 +47,7 @@ relay-1        | [relay] PUBLISH_NAMESPACE client=0 ns="moq-test/interop/"
 relay-1        | [relay] client 0 gone
 test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 558
+test-client-1  |   duration_ms: 560
 test-client-1  |   ...
 relay-1        | [relay] client 0 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
@@ -58,27 +58,27 @@ relay-1        | [relay] namespace "moq-test/interop/" withdrawn by client 0
 relay-1        | [relay] client 0 gone
 test-client-1  | ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 730
+test-client-1  |   duration_ms: 733
 test-client-1  |   ...
 relay-1        | [relay] client 0 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
 relay-1        | [relay] client 0 SETUP received
 test-client-1  | subscribe_namespace written: requestId=0
-relay-1        | [relay] SUBSCRIBE_NAMESPACE client=0 prefix="moq-test/interop/subscribe-namespace-lifecycle/6d84117e53612ea5bbfa21edf6bb6b71/"
 relay-1        | [relay] client 1 connected (WT session 0, moqt-22)
+relay-1        | [relay] SUBSCRIBE_NAMESPACE client=0 prefix="moq-test/interop/subscribe-namespace-lifecycle/d8d4c671d81508789085e03e3efec529/"
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
 relay-1        | [relay] client 1 SETUP received
-relay-1        | [relay] PUBLISH_NAMESPACE client=1 ns="moq-test/interop/subscribe-namespace-lifecycle/6d84117e53612ea5bbfa21edf6bb6b71/"
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/6d84117e53612ea5bbfa21edf6bb6b71 active=true
-relay-1        | [relay] namespace "moq-test/interop/subscribe-namespace-lifecycle/6d84117e53612ea5bbfa21edf6bb6b71/" withdrawn by client 1
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/6d84117e53612ea5bbfa21edf6bb6b71 active=false
+relay-1        | [relay] PUBLISH_NAMESPACE client=1 ns="moq-test/interop/subscribe-namespace-lifecycle/d8d4c671d81508789085e03e3efec529/"
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/d8d4c671d81508789085e03e3efec529 active=true
+relay-1        | [relay] namespace "moq-test/interop/subscribe-namespace-lifecycle/d8d4c671d81508789085e03e3efec529/" withdrawn by client 1
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/d8d4c671d81508789085e03e3efec529 active=false
 relay-1        | [relay] client 1 gone
 relay-1        | [relay] client 0 gone
 test-client-1  | ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 64
+test-client-1  |   duration_ms: 67
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   ...
 relay-1        | [relay] client 0 connected (WT session 0, moqt-22)
@@ -110,7 +110,7 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 5 - subscribe-error
 test-client-1  |   ---
-test-client-1  |   duration_ms: 309
+test-client-1  |   duration_ms: 315
 test-client-1  |   ...
 relay-1        | [relay] client 0 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
@@ -121,14 +121,14 @@ relay-1        | [relay] client 1 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
 relay-1        | [relay] client 1 SETUP received
-test-client-1  | subscribe_namespace written: requestId=0
 relay-1        | [relay] SUBSCRIBE_NAMESPACE client=1 prefix=""
 relay-1        | [relay] → 1 NAMESPACE to client 1
+test-client-1  | subscribe_namespace written: requestId=0
 test-client-1  | announced: broadcast=moq-test/interop active=true
 test-client-1  | subscribe start: id=2 broadcast=moq-test/interop track=test-track
-test-client-1  | subscribe written: id=2 broadcast=moq-test/interop track=test-track
 relay-1        | [relay] SUBSCRIBE client=1 ns="moq-test/interop/" track="test-track"
 relay-1        | [relay] SUBSCRIBE → publisher client 0 ns="moq-test/interop/" track="test-track"
+test-client-1  | subscribe written: id=2 broadcast=moq-test/interop track=test-track
 relay-1        | [relay] SUBSCRIBE_OK ← publisher client 0 alias=1
 test-client-1  | publish ok: broadcast=moq-test/interop track=test-track
 test-client-1  | subscribe ok: id=2 broadcast=moq-test/interop track=test-track
@@ -155,14 +155,14 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 342
+test-client-1  |   duration_ms: 369
 test-client-1  |   ...
 relay-1        | [relay] client 0 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
 relay-1        | [relay] client 0 SETUP received
-relay-1        | [relay] SUBSCRIBE_NAMESPACE client=0 prefix=""
 test-client-1  | subscribe_namespace written: requestId=0
+relay-1        | [relay] SUBSCRIBE_NAMESPACE client=0 prefix=""
 relay-1        | [relay] client 1 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
@@ -199,39 +199,39 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 7 - subscribe-before-announce
 test-client-1  |   ---
-test-client-1  |   duration_ms: 561
+test-client-1  |   duration_ms: 566
 test-client-1  |   ...
 relay-1        | [relay] client 0 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
 relay-1        | [relay] client 0 SETUP received
-relay-1        | [relay] PUBLISH_NAMESPACE client=0 ns="moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/"
+relay-1        | [relay] PUBLISH_NAMESPACE client=0 ns="moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/"
 relay-1        | [relay] client 1 connected (WT session 0, moqt-22)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
 relay-1        | [relay] client 1 SETUP received
-relay-1        | [relay] SUBSCRIBE_NAMESPACE client=1 prefix="moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/"
-relay-1        | [relay] → 1 NAMESPACE to client 1
 test-client-1  | subscribe_namespace written: requestId=0
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a active=true
-test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-relay-1        | [relay] SUBSCRIBE client=1 ns="moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0/" track="track"
-relay-1        | [relay] SUBSCRIBE → publisher client 0 ns="moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0/" track="track"
-test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+relay-1        | [relay] SUBSCRIBE_NAMESPACE client=1 prefix="moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/"
+relay-1        | [relay] → 1 NAMESPACE to client 1
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce active=true
+test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+relay-1        | [relay] SUBSCRIBE client=1 ns="moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0/" track="track"
+relay-1        | [relay] SUBSCRIBE → publisher client 0 ns="moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0/" track="track"
+test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 relay-1        | [relay] SUBSCRIBE_OK ← publisher client 0 alias=1
-test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 relay-1        | [relay] stream from client 0 → 1 subs (group=0)
 relay-1        | [relay] stream from client 0 → 1 subs (group=1)
 relay-1        | [relay] stream from client 0 → 1 subs (group=2)
 relay-1        | [relay] cached group 2 for track 0 (222 bytes)
 relay-1        | [relay] stream from client 0 → 1 subs (group=3)
-test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 relay-1        | [relay] cached group 3 for track 0 (3 bytes)
 relay-1        | [relay] PUBLISH_DONE → client 1 status=2 streams=4
-test-client-1  | subscribe close: id=2 broadcast=moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe close: id=2 broadcast=moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 relay-1        | [relay] client 0 gone
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/1d2254285d24123b8180bb0682241f4a active=false
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/39d2195eb0dc8e7b983087d5265892ce active=false
 relay-1        | [relay] client 1 gone
 test-client-1  | subscribe_namespace error: session error: connection error: closed
 test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
@@ -250,7 +250,7 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 43
+test-client-1  |   duration_ms: 83
 test-client-1  |   test_spec_revision: 2
 test-client-1  |   ...
 [Ktest-client-1 exited with code 0
