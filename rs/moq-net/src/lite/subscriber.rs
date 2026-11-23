@@ -12518,9 +12518,10 @@ impl TrackServeRun {
 							let _ = serve_loop.serving.finish_shared();
 							// No FETCH before lite-05: nothing but the subscription fills a group.
 							if serve_loop.supports_fetch {
-								// A reader's miss in flight is settled by the tail instead.
+								// A reader's miss in flight is settled by the tail instead, except one a
+								// stalled recovery handed to FETCH.
 								let mut fetches = serve_loop.fetches;
-								fetches.retain(|run| run.fill.is_fetch());
+								fetches.retain(|run| run.fill.is_fetch() || run.walk);
 								let mut range_fills = serve_loop.range_fills;
 								for fill in range_fills.take_fetches() {
 									let info = FetchInfo::Known(serve_loop.serving.info().clone());
@@ -13057,7 +13058,9 @@ impl ServeLoop {
 	) {
 		for fill in range_fills.take_walks() {
 			let info = FetchInfo::Known(serving.info().clone());
-			fetches.push(FillServeRun::new(serve.clone(), fill, info));
+			let mut run = FillServeRun::new(serve.clone(), fill, info);
+			run.walk = true;
+			fetches.push(run);
 		}
 	}
 
@@ -13943,6 +13946,9 @@ struct FillServeRun {
 	run: Option<(u64, FetchServeRun)>,
 	/// The group the last run answered.
 	last: Option<u64>,
+	/// TEMPORARY MIGRATION, see `fills::Recovery::walk`: a reader's fill a stalled recovery
+	/// handed back, which the subscription's tail no longer settles.
+	walk: bool,
 }
 
 impl Drop for FillServeRun {
@@ -13963,6 +13969,7 @@ impl FillServeRun {
 			info,
 			run: None,
 			last: None,
+			walk: false,
 		}
 	}
 }

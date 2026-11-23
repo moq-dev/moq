@@ -560,12 +560,13 @@ test("a recovery stalled behind a relay of the previous release is fetched", asy
 	await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([1n]) }, version);
 	const held = groupStream(subscriber, 3n, 1n);
 	held.write("3.0");
+
+	// The grace passes while group 3 is still being read, which is waited on rather than spun on.
+	const fetched = accept();
+	expect(await settlesWithin(fetched, clock, Duration.millis(2000))).toBe(false);
 	held.finish();
 	await held.handled;
-
-	const fetched = accept();
-	expect(await settlesWithin(fetched, clock, Duration.millis(500))).toBe(false);
-	expect(await settlesWithin(fetched, clock, Duration.millis(1000))).toBe(true);
+	expect(await settlesWithin(fetched, clock)).toBe(true);
 	const fetch = defined(await fetched);
 	expect(await fetch.reader.u53()).toBe(StreamId.Fetch);
 	reader.close();

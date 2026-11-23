@@ -131,6 +131,9 @@ test("range fills: a stalled recovery hands its fill to FETCH", async () => {
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	fills.poll(new Tail(), true);
 	expect(fills.takeWalks()).toEqual([peer.fill]);
+	// The copy stays open for the FETCH as for a recovery.
+	expect(fills.recovering).toBe(true);
+	fills.walked();
 	expect(fills.recovering).toBe(false);
 	expect(fills.isEmpty()).toBe(true);
 	peer.close();

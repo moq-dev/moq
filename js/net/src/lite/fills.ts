@@ -157,8 +157,10 @@ export class RangeFills {
 	// Groups recovered once already, which a second stale drop refuses.
 	#recovered: Run[] = [];
 	#recoveries = new Set<Recovery>();
-	// TEMPORARY MIGRATION, see `RecoveryHandle.walk`: fills handed back to FETCH.
+	// TEMPORARY MIGRATION, see `RecoveryHandle.walk`: fills handed back to FETCH, and how many of
+	// those taken are still being fetched.
 	#walking: track.FillGroups[] = [];
+	#walksOut = 0;
 	#closed = false;
 
 	/** The fills of `copy`, whose upstream speaks `version`, each recovery opened by `recover`. */
@@ -173,14 +175,24 @@ export class RangeFills {
 		return this.#held.length === 0 && this.ask.groups.length === 0 && this.#recoveries.size === 0;
 	}
 
-	/** TEMPORARY MIGRATION, see `RecoveryHandle.walk`: take the fills a stalled recovery handed back. */
+	/**
+	 * TEMPORARY MIGRATION, see `RecoveryHandle.walk`: take the fills a stalled recovery handed back,
+	 * each counted as recovering until {@link walked} reports it fetched.
+	 */
 	takeWalks(): track.FillGroups[] {
+		this.#walksOut += this.#walking.length;
 		return this.#walking.splice(0);
 	}
 
-	/** Whether a recovery is still out. */
+	/** TEMPORARY MIGRATION, see {@link takeWalks}: a fill taken from it was fetched. */
+	walked(): void {
+		this.#walksOut--;
+		this.#bump();
+	}
+
+	/** Whether a recovery, or a fill one handed to FETCH, is still out. */
 	get recovering(): boolean {
-		return this.#recoveries.size > 0;
+		return this.#recoveries.size > 0 || this.#walksOut > 0;
 	}
 
 	push(fill: track.FillGroups): void {

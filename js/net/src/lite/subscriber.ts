@@ -2107,10 +2107,11 @@ export class Subscriber {
 			.info()
 			.catch(() => undefined)
 			.then((info) => ({ compress: entry.compress, timescale: entry.timescale, maxAge: info?.maxAge }));
-		const fetch = (fill: track.FillGroups) => {
+		const fetch = (fill: track.FillGroups): Promise<void> => {
 			const job = framing.then((framing) => this.#serveFill(broadcast, consumed, producer, framing, fill));
 			jobs.add(job);
 			void job.then(() => jobs.delete(job));
+			return job;
 		};
 		const driving = this.#driveFills(entry, fills, fetch);
 		try {
@@ -2121,7 +2122,7 @@ export class Subscriber {
 					fills.push(fill);
 					continue;
 				}
-				fetch(fill);
+				void fetch(fill);
 			}
 		} finally {
 			requests.close();
@@ -2136,7 +2137,7 @@ export class Subscriber {
 	async #driveFills(
 		entry: SubscribeEntry,
 		fills: RangeFills,
-		fetch: (fill: track.FillGroups) => void,
+		fetch: (fill: track.FillGroups) => Promise<void>,
 	): Promise<void> {
 		const demand = entry.track.demand();
 		while (!fills.closed) {
@@ -2145,7 +2146,11 @@ export class Subscriber {
 			const recovering = fills.recovering;
 			if (fills.poll(entry.tail, !isAbandoned(demand)) || fills.recovering !== recovering)
 				entry.fillsChanged.update((revision) => revision + 1);
-			for (const fill of fills.takeWalks()) fetch(fill);
+			for (const fill of fills.takeWalks())
+				void fetch(fill).then(
+					() => fills.walked(),
+					() => fills.walked(),
+				);
 			await fills.changed(entry.tail);
 		}
 		entry.fillsChanged.update((revision) => revision + 1);
@@ -2304,6 +2309,8 @@ export class Subscriber {
 					if (!entry.tail.covers(groups.start, groups.end)) {
 						stall = sleep(GRACE).then(() => {
 							stalled = true;
+							// Once fired it wakes nothing more: a stream still being read is waited on as a change.
+							stall = undefined;
 						});
 					}
 				};
