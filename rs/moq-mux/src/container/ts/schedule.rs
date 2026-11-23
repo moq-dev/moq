@@ -2564,9 +2564,6 @@ mod tests {
 		assert!(failed.is_empty(), "{failed:#?}");
 	}
 
-	/// Under a mux rate, the grid's repeats never cost a deadline: every export that keeps its
-	/// deadlines without them keeps them with them, however short the send-ahead, large or
-	/// revised the tables, frequent the copies the media leads, or changed the rate.
 	/// The slots a copy of a one-packet PAT and PMT stays in Bsys under a mux `rate`, which a copy
 	/// due meanwhile adds nothing to.
 	fn padded_drain(rate: Option<u64>) -> u128 {
