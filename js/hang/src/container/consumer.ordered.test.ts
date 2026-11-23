@@ -227,7 +227,7 @@ test("an open GOP past keys the reader gave up on waits for its leading picture"
 	const track = new Track.Producer("video");
 	const requests = track.requests();
 	const ordered = track.subscribe(subscription({ min: Duration.ZERO, max: Duration.millis(100) })).ordered();
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.secs(2) } }), {
+	const consumer = new Consumer(track.subscribe(within(Duration.secs(2))), {
 		format: new Format("video"),
 		delay: { min: Duration.ZERO, max: Duration.secs(2) },
 		ordered,

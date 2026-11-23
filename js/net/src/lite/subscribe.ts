@@ -589,7 +589,7 @@ export function rangeSize(range: WireRange): number {
 }
 
 /** A range's anchors as a key, so equal ranges compare equal. */
-export function rangeKey(range: WireRange): string {
+function rangeKey(range: WireRange): string {
 	const anchor = (anchor: WireAnchor | undefined) => {
 		if (anchor?.absolute !== undefined) return `a${anchor.absolute}.${anchor.frame ?? 0}`;
 		if (anchor?.time !== undefined) return `t${anchor.time}`;

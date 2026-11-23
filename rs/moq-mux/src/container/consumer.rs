@@ -3241,9 +3241,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn mp2_durations_bridge_undeclared_runs_between_audio_groups() {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
-		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
-		);
+		let subscription =
+			track.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]));
 		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Mp2, 48_000, 2);
 		let mut reader = Consumer::new(subscription, Container::try_from(&config).unwrap());
 		// Two 24 ms frames per group. The group starting at 96 ms never arrives.
@@ -3274,9 +3273,8 @@ mod tests {
 	/// them with nothing declared between them: the frames of each, in decode order, with no duration.
 	async fn legacy_video(groups: &[&[u64]]) -> Vec<String> {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
-		);
+		let subscription =
+			track.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]));
 		let wire = Container::Legacy(crate::container::Kind::Video);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		for pictures in groups {
@@ -3367,9 +3365,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_open_gops_keyframe_reads_once_a_leading_picture_lands() {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
-		);
+		let subscription =
+			track.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]));
 		let wire = Container::Legacy(crate::container::Kind::Video);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		let frame = |micros: u64, keyframe| Frame {
@@ -3410,9 +3407,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_held_keyframe_is_read_once_the_max_buffer_fills() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
-		);
+		let subscription =
+			track.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]));
 		let wire = Container::Legacy(crate::container::Kind::Video);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		let frame = |micros: u64, keyframe| Frame {
@@ -3453,9 +3449,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_empty_unproven_group_is_skipped_once_the_max_buffer_fills() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
-		);
+		let subscription =
+			track.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]));
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		write_group(&mut track, 0, &[ts(0), ts(40_000)]);
 		for _ in 0..2 {

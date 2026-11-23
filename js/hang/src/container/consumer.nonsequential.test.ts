@@ -314,9 +314,9 @@ test("Consumer buffers groups at sparse starts as one range", async () => {
 // the reader reads, as Rust's `legacy_video` test helper does.
 async function legacyVideo(groups: number[][]): Promise<string[]> {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(10_000) } }), {
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 		format: new LegacyFormat("video"),
-		delay: { max: Duration.millis(10_000) },
+		delay: { min: null, max: Duration.millis(10_000) },
 	});
 	for (const pictures of groups) {
 		const group = track.createGroup(BigInt(pictures[0]));
@@ -414,9 +414,9 @@ test("MP2 groups at sparse sequences run back to back", async () => {
 		sampleRate: 48_000,
 		numberOfChannels: 2,
 	});
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(10_000) } }), {
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 		format: new LegacyFormat(config),
-		delay: { max: Duration.millis(10_000) },
+		delay: { min: null, max: Duration.millis(10_000) },
 	});
 	// Two 24 ms frames per group. The group starting at 96 ms never arrives.
 	for (const start of [0, 48_000, 144_000]) {
