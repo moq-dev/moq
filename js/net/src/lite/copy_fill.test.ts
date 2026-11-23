@@ -369,7 +369,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s recovers a run past the t
 		}),
 	);
 	try {
-		const history: Subscription = { ranges: [{ start: 0n }], delay: { max: null }, order: "ascending" };
+		const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
 		const first = peer.remote.track("video").subscribe(history);
 		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
 		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
@@ -860,7 +860,7 @@ test.each([
 				before = requests();
 				const reader = remote
 					.track("video")
-					.subscribe({ delay: { max: Duration.secs(30) } })
+					.subscribe(withMax({ delay: { max: Duration.secs(30) } }))
 					.ordered();
 				read = (async () => {
 					const keys: bigint[] = [];

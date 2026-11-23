@@ -6064,9 +6064,7 @@ mod tests {
 			copy.evict(key);
 		}
 		let mut reader = copy
-			.subscribe(
-				crate::track::Subscription::default().with_range(missing.read),
-			)
+			.subscribe(crate::track::Subscription::default().with_range(missing.read))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "the read is owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {

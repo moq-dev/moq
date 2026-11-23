@@ -235,9 +235,7 @@ async fn a_recovery_outlives_the_finished_subscription() {
 		let track = remote.track("video").unwrap();
 		async move {
 			track
-				.subscribe(
-					Subscription::default().with_ranges([ranges]),
-				)
+				.subscribe(Subscription::default().with_ranges([ranges]))
 				.await
 				.unwrap()
 		}
@@ -396,9 +394,7 @@ impl Chain {
 		self.remote
 			.track("video")
 			.unwrap()
-			.subscribe(
-				Subscription::default().with_ranges([ranges]),
-			)
+			.subscribe(Subscription::default().with_ranges([ranges]))
 			.await
 			.unwrap()
 	}
