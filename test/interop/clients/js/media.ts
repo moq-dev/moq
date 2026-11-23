@@ -332,6 +332,8 @@ async function waitForLive(
 	let first: number | undefined;
 	let lag: number | undefined;
 	let frame: number | undefined;
+	// Samples carry the page's clock, so their trace lines count from the first one read.
+	let origin: number | undefined;
 	let moved = false;
 	// Live needs audio playing too, so a failure says whether audio or the picture held it back.
 	let audio = "unread";
@@ -342,13 +344,15 @@ async function waitForLive(
 			() => [],
 		);
 		if (fixture && state?.frameId !== undefined) {
+			origin ??= state.at;
+			const start = origin;
 			if (resumed) {
 				const skew = resumeSkew(state, frame);
 				if (skew !== undefined)
 					check(
 						Math.abs(skew) <= MAX_SKEW_STEPS * Pattern.STEP_MS,
 						"resume audio/video sync",
-						() => `${assertion}: offset ${skew}ms; ${traceLine(state, since)}`,
+						() => `${assertion}: offset ${skew}ms; ${traceLine(state, start)}`,
 					);
 			}
 			lag = fixture.frameId - state.frameId;
