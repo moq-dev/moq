@@ -519,6 +519,7 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 							assert!(told.insert(key), "group {key} reported twice");
 						}
 					}
+					_ => panic!("unexpected item"),
 				}
 			}
 			assert!(got.is_disjoint(&told), "{versions:?}: {got:?} also reported {told:?}");

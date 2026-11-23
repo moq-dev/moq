@@ -635,6 +635,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 							let moq_net::origin::RouteEvent {
 								kind: moq_net::origin::RouteKind::Restart,
 								announce: update,
+								..
 							} = event
 							else {
 								panic!("expected a restart: got {event:?}");

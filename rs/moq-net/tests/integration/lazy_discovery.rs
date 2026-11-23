@@ -158,15 +158,18 @@ async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
 				announce,
+				..
 			} => seen.push(announce.prefix.to_string()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
+				..
 			} => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	seen.sort();
@@ -500,10 +503,12 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
 				announce,
+				..
 			} => held.push(announce.prefix.to_string()),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End | origin::RouteKind::Offline,
 				announce,
+				..
 			} => {
 				ended = true;
 				held.retain(|prefix| *prefix != announce.prefix.as_str())
@@ -512,6 +517,7 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 				kind: origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	held.sort();

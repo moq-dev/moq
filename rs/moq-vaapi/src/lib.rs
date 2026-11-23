@@ -69,7 +69,7 @@ pub use bindings::{
 pub use codec::Codec;
 pub use color::{Color, Matrix};
 pub use display::{Display, DrmDeviceIterator, OpenDrmDisplayError};
-pub use image::Image;
+pub use image::{Image, ImageMut};
 pub use surface::{
 	DrmPrimeSurfaceDescriptor, DrmPrimeSurfaceDescriptorLayer, DrmPrimeSurfaceDescriptorObject, Surface,
 };
@@ -115,6 +115,12 @@ use std::num::NonZeroI32;
 pub struct VaError(NonZeroI32);
 
 impl VaError {
+	/// Returns an error carrying `status`, for a call libva reported as successful
+	/// whose result we cannot use.
+	fn status(status: u32) -> Self {
+		Self(NonZeroI32::new(status as i32).expect("a failure status"))
+	}
+
 	/// Returns the `VAStatus` of this error.
 	pub fn va_status(&self) -> VAStatus {
 		self.0.get() as VAStatus

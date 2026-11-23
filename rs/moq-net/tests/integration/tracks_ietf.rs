@@ -50,6 +50,7 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 		Ok(Some(TracksEvent::Removed { name, .. })) => format!("-{name}"),
 		Ok(Some(TracksEvent::Finished { name, .. })) => format!("~{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
+		Ok(Some(event)) => panic!("unexpected event {event:?}"),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
 	}

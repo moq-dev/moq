@@ -73,14 +73,17 @@ async fn drain(routes: &mut origin::Routes) -> Vec<(bool, String)> {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start,
 				announce,
+				..
 			} => events.push((true, announce.prefix.to_string())),
 			origin::RouteEvent {
 				kind: origin::RouteKind::End,
 				announce,
+				..
 			} => events.push((false, announce.prefix.to_string())),
 			origin::RouteEvent {
 				kind: origin::RouteKind::Offline,
 				announce,
+				..
 			} => events.push((false, format!("offline {}", announce.prefix))),
 			_ => {}
 		}

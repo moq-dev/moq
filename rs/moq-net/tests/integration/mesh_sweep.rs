@@ -678,6 +678,7 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 			End | Offline => {
 				reader.shown.remove(&seen.path);
 			}
+			kind => return Err(format!("unknown route kind {kind:?}")),
 		}
 		return Ok(());
 	}
@@ -718,6 +719,7 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 		Offline => {
 			reader.shown.remove(&seen.path);
 		}
+		kind => return Err(format!("unknown route kind {kind:?}")),
 	}
 	Ok(())
 }

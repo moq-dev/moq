@@ -26,17 +26,10 @@ native crates, and public APIs:
 - **Wire and drafts.** Delete the temporary `raw_parts` / `base.split("/")`
   `Path Keep` migration before lite-07 finalizes
   ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)).
-- **Vendored native crate soundness.** Fix the unsound public APIs in
-  [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md) before `0.22.0`
-  publishes them (moq-v4l's and moq-nvenc's are fixed).
-- **Public API freezes.** Fence `moq-net` event/item types with
-  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)).
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),
-[m1/precut-audit](/quest/m1/precut-audit/README.md) (high- and medium-impact
-fixes, TLA+ sync drift, and CI hardening), [m3](/quest/m3/README.md) (softer
-edge cases and low-severity cleanups), and
+[m3](/quest/m3/README.md) (softer edge cases and low-severity cleanups), and
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
 
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
@@ -319,7 +312,7 @@ stream-credit epic (rejected: keep the gate). It was an ordering rule, not a
 code dependency, and with takeover moved to m3 the epic changes no wire.
 
 Decided 2026-11-13 (maintainer, /quest-plan from an audit of `main`'s audio):
-✅ the [audio playout](/quest/m2/audio-playout/README.md) epic moves here from
+✅ the audio playout epic moves here from
 m1, with its calibration in m3 (rejected: calibration here too; only the lag
 rule here). Its lag rule reshapes `main`-only API the cut would publish (the
 `stretch` setting, moq-audio's `Sink::due` and `bus::Positioned`), and the
