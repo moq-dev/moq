@@ -540,3 +540,37 @@ async fn chain() {
 async fn route_switch() {
 	table(Mode::Switch).await;
 }
+
+/// Each range is answered on its own, through every hop: a cold relay behind a warm one
+/// serves a time range its upstream placed from cache, over the wire, while a live join in
+/// the same subscription still waits on the warm relay's upstream, slowed past [`QUIET`]
+/// here. The join's groups follow once it is placed.
+#[kio::test]
+async fn chain_serves_a_placed_range_before_its_join() {
+	let case = cases()
+		.into_iter()
+		.find(|case| case.name == "a time range and a live join in one subscription")
+		.expect("the case is in the table");
+	let source = Source::new();
+	source.write(&case);
+	let warm_relay = produce_origin(2, None);
+	let cold_relay = produce_origin(3, None);
+	let front = produce_origin(4, None);
+	let upstream = link(&source.origin, &warm_relay, None).await;
+	let _readers = warm(&broadcast(&warm_relay).await, &case).await;
+	let _links = [
+		link(&warm_relay, &cold_relay, None).await,
+		link(&cold_relay, &front, None).await,
+	];
+	let remote = broadcast(&front).await;
+
+	upstream.client_transport.set_latency(UPSTREAM);
+	let mut reader = subscribe(&remote, &case.read).await.unwrap();
+	let mut got = Got::default();
+	got.read(&mut reader, 0).await;
+	assert_eq!(got.starts(), [1000, 2000], "the time range waited on the join");
+
+	upstream.client_transport.set_latency(Duration::ZERO);
+	got.read(&mut reader, case.deliver.len()).await;
+	assert_eq!(got.delivered(case.frames).await.unwrap(), case.deliver);
+}
