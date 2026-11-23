@@ -4,7 +4,7 @@
  * Random sequences of route flips, route failures, give-ups, short closes, ranges, cache expiry,
  * and reader joins and leaves drive an origin's fronts on the manual clock. Every reader's groups,
  * frames, drops, and end are checked against what one plain cursor on the logical track would see:
- * every group its range and budget allow, each once, in its order. A second instance, priced
+ * every group its range and staleness budget allow, each once, in its order. A second instance, priced
  * below the first, wins the path while older readers stay on theirs until it has no route left,
  * then end with an error.
  *
@@ -25,6 +25,7 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -37,8 +38,6 @@ const SLOTS = 3;
 const INSTANCES: readonly Instance.Valid[] = [Instance.parse("first"), Instance.parse("second")];
 const READERS = 4;
 const PATH = Path.from("room/alice");
-/** A budget nothing in a case outlives. */
-const HOUR = Duration.millis(3_600_000);
 /** A budget spanning about three groups. */
 const SHORT = Duration.millis(30);
 
@@ -64,7 +63,17 @@ function giveUp(): Error {
 	return new StreamError(StreamCode.DeliveryTimeout);
 }
 
+/**
+ * The staleness budget of a reader with no range. Only a live join has one: a reader with a range
+ * asks for history and reads all of it. `"hour"` takes every group from the oldest, as history;
+ * `"short"` is a live join reaching back past every group, taking only those within {@link SHORT}.
+ */
 type Budget = "hour" | "short";
+
+/** Whether `spec`'s reader with `range` reads a live join whose groups expire within a case. */
+function expires(spec: Spec, range: Range): boolean {
+	return spec.budget === "short" && range === undefined;
+}
 type Range = readonly [number, number] | undefined;
 
 interface Spec {
@@ -308,6 +317,11 @@ interface Reader {
 	floor?: number;
 	/** Its instance lost its last route while it read. */
 	doomed: boolean;
+	/**
+	 * It once read a live join whose groups expire within a case, so any group it was handed may have
+	 * ended short, and only the last is owed.
+	 */
+	expires: boolean;
 	/** `null` once the track ended cleanly, the error once it failed. */
 	end?: Error | null;
 	/**
@@ -390,10 +404,9 @@ function groups(range: Range): track.Groups {
 }
 
 function subscription(budget: Budget, range: Range): track.Subscription {
-	return {
-		delay: { max: budget === "hour" ? HOUR : SHORT },
-		ranges: range ? [{ start: BigInt(range[0]), end: BigInt(range[1]) - 1n }] : undefined,
-	};
+	if (range) return { ranges: [{ start: BigInt(range[0]), end: BigInt(range[1]) - 1n }] };
+	if (budget === "hour") return { ranges: [{}] };
+	return withMax({ delay: { max: SHORT } });
 }
 
 function max(values: Iterable<number>): number | undefined {
@@ -511,6 +524,7 @@ class Model {
 				if (!reader) return;
 				reader.ranges = op.range;
 				reader.holding = undefined;
+				reader.expires ||= expires(reader.spec, op.range);
 				reader.cursor = intersect(op.range, reader.local);
 				reader.sub.update(subscription(reader.spec.budget, op.range));
 				// A read that ended at its range's end reads on once the range widens.
@@ -699,6 +713,7 @@ class Model {
 			dropped: new Set(),
 			floor: this.instances[instance].newest(),
 			doomed: false,
+			expires: expires(spec, spec.range),
 			end: undefined,
 			parked: false,
 			carried: new Set(),
@@ -846,7 +861,7 @@ class Model {
 					this.failure ??= fail(index, `group ${key} ended cleanly after ${reading.frames} frames`);
 				} else if (
 					!whole &&
-					reader.spec.budget === "hour" &&
+					!reader.expires &&
 					!reader.doomed &&
 					(instance.expired === undefined || key > instance.expired) &&
 					!instance.live().some((copy) => closed(copy, key, reading.frames)) &&
@@ -982,11 +997,11 @@ class Model {
 		if (reader.spec.ordered && before !== undefined) owed = owed.filter((group) => group > before);
 		if (ended) owed = owed.filter((group) => reader.carried.has(group));
 		else owed = owed.filter((group) => !passedBelow(reader, group) || reader.carried.has(group));
-		if (reader.spec.budget === "short") owed = owed.filter((group) => group === GROUPS - 1);
+		if (reader.expires) owed = owed.filter((group) => group === GROUPS - 1);
 		const missing = owed.filter((group) => !reader.reading.has(group));
 		let problems = "";
 		if (missing.length > 0) problems += `missing groups ${missing}; `;
-		if (reader.spec.budget === "hour") {
+		if (!reader.expires) {
 			for (const [key, reading] of reader.reading) {
 				if (reading.end === null || !carried(key) || instance.givenUp.has(key)) continue;
 				// Like a group under the floor, one older than an expiry may be gone from its own copy

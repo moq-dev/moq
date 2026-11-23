@@ -126,7 +126,17 @@ async function measure(tracks: number, seconds: number, onDemand: boolean) {
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("missing broadcast");
 		for (const encoder of encoders)
-			subscribers.push(net.track(encoder.name).subscribe({ delay: { max: Duration.millis(seconds * 1000) } }));
+			subscribers.push(
+				net.track(encoder.name).subscribe({
+					ranges: [
+						{
+							start: {
+								live: { min: Duration.millis(seconds * 1000), max: Duration.millis(seconds * 1000) },
+							},
+						},
+					],
+				}),
+			);
 		await yieldNow();
 		await flush();
 		const catchup = performance.now() - joining;

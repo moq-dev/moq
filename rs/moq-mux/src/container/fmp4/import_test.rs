@@ -12,7 +12,7 @@ const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(
 
 /// A replay window with that budget, for a test asserting every group is delivered.
 fn replay() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
+	crate::container::test_util::within(RECORDING_MAX_DELAY)
 }
 
 /// Drain every group currently buffered on the consumer without waiting for new ones.
@@ -1969,8 +1969,12 @@ async fn test_msf_catalog_roundtrip() {
 
 /// The start of every group a finished track published, in microseconds.
 async fn starts(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64> {
-	let replay = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
+	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: std::time::Duration::from_secs(3600),
+			max: Some(std::time::Duration::from_secs(3600)),
+		},
+	)]);
 	let mut track = consumer
 		.track(track)
 		.unwrap()

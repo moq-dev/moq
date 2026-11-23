@@ -32,8 +32,8 @@ Consumers return `Timed<T>`: read `.value` for the decoded value and `.at` for
 its frame timestamp, with the track's exact scale preserved (an unscaled group key on an
 untimed track). Snapshot
 `next()` yields states in order, skipping every group a newer one supersedes:
-`snapshot::Consumer::new` takes the track and subscribes to it itself at a zero
-`delay.max`, so nothing else can raise its budget. A reader that applies each state
+`snapshot::Consumer::new` takes the track and subscribes to it itself as a live
+join with a zero `max`, so nothing else can raise its budget. A reader that applies each state
 at its timestamp sets its playout delay as `consumer::Config::delay` to keep the
 superseded states it may still need. Use `latest()` to skip to the
 newest buffered state. Skipped states

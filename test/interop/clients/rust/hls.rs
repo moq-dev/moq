@@ -145,8 +145,7 @@ async fn main() -> anyhow::Result<()> {
 		}
 		for (kind, name, container) in renditions {
 			use moq_mux::container::Container as _;
-			let replay = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+			let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
 			let mut groups = broadcast.track(&name)?.subscribe(replay).await?.ordered();
 			let mut out = Vec::new();
 			// A group given up on starts no segment.

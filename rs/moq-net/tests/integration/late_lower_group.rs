@@ -7,8 +7,8 @@
 //! is dropped. Lite-06 and later encode a floor of group 0 as 0, which is the only
 //! spelling of both an omitted floor and group 0; the draft says that 0 is group 0.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -126,9 +126,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 		.expect("broadcast resolves")
 		.unwrap();
 
-	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(BUDGET))
-		.with_ranges([floored(start)]);
+	let subscription = Subscription::default().with_ranges([floored(start)]).with_max(BUDGET);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("late")
@@ -173,9 +171,7 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 				.with_max_age(FOREVER),
 		)
 		.unwrap();
-	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(BUDGET))
-		.with_ranges([floored(start)]);
+	let subscription = Subscription::default().with_ranges([floored(start)]).with_max(BUDGET);
 	let mut sub = track.subscribe(subscription);
 	let reader = kio::clock::sim::spawn(async move { read_all(&mut sub).await });
 	kio::clock::sleep(Duration::from_millis(10)).await;
@@ -255,21 +251,19 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		async move {
 			let range = match (range.start, min) {
 				(moq_net::track::Start::Oldest, Some(min)) => Range {
-					start: moq_net::track::Start::Live(min),
+					start: moq_net::track::Start::Live { min, max: Some(BUDGET) },
 					..range
 				},
 				_ => range,
 			};
-			let subscription = Subscription::default()
-				.with_delay(Delay::default().with_max(BUDGET))
-				.with_ranges([range]);
+			let subscription = Subscription::default().with_ranges([range]).with_max(BUDGET);
 			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await
 				.expect("subscribe timeout")
 				.expect("subscribe")
 		}
 	};
-	let mut live = subscribe(Range::default(), Some(Duration::ZERO)).await;
+	let mut live = subscribe(Range::ALL, Some(Duration::ZERO)).await;
 	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")

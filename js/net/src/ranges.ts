@@ -6,15 +6,17 @@
  * and asks one range-minimum question, whatever else the audience holds. A start between groups
  * stands for the group containing it, which a range starting at or before it covers too, so spans
  * merge as they do over starts. Ranges with no time start can't be placed on that line and are
- * counted by value instead.
+ * counted by value instead, live joins by lag and end under the largest max among them, since where
+ * a join lands doesn't depend on it.
  *
  * @module
  */
 
-import { Cover } from "./cover.ts";
+import type { Duration } from "@moq/clock";
+import { Counts, Cover } from "./cover.ts";
 import type { Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
-import { compare, isEmpty, rangeKey, rangeTime } from "./window.ts";
+import { compare, isEmpty, joinOf, maxOf, rangeBudget, rangeKey, rangeTime } from "./window.ts";
 
 /** How {@link Ranges} counts one range. */
 type Shape =
@@ -23,7 +25,9 @@ type Shape =
 	| { kind: "open" }
 	/** A time range, as the exclusive span of starts it covers, {@link UNBOUNDED} when open. */
 	| { kind: "time"; start: bigint; end: bigint }
-	/** The rest: a live join, or a range from the oldest group with an end. */
+	/** A live join, by lag and end, and its budget. */
+	| { kind: "join"; join: string; min: Duration; budget: number }
+	/** The rest: a range from the oldest group with an end. */
 	| { kind: "other" };
 
 function shapeOf(range: Range): Shape {
@@ -31,6 +35,9 @@ function shapeOf(range: Range): Shape {
 	const start = rangeTime(range);
 	const end = range.end;
 	if (start !== undefined) return { kind: "time", start, end: end === undefined ? UNBOUNDED : end + 1n };
+	const join = joinOf(range);
+	if (join !== undefined && typeof range.start === "object")
+		return { kind: "join", join, min: range.start.live.min, budget: rangeBudget(range) };
 	return range.start === undefined && end === undefined ? { kind: "open" } : { kind: "other" };
 }
 
@@ -43,8 +50,11 @@ export class Ranges {
 	#open = 0;
 	// Time ranges, as spans of starts.
 	#time = new Cover();
-	// The rest, live joins and ranges from the oldest group with an end, kept as they are.
+	// Ranges from the oldest group with an end, kept as they are.
 	#others = new Map<string, { range: Range; count: number }>();
+	// Live joins by lag and end, each with the budgets its holders ask under, and the range asking
+	// the widest.
+	#joins = new Map<string, { budgets: Counts<number>; min: Duration; end: bigint | undefined }>();
 	// The last union read, until a change moves it.
 	#union?: Range[];
 
@@ -62,6 +72,17 @@ export class Ranges {
 				const uncovered = this.#time.least(shape.start, shape.end) <= 0;
 				this.#time.add(shape.start, shape.end, 1);
 				changed = uncovered && this.#open === 0;
+				break;
+			}
+			case "join": {
+				let held = this.#joins.get(shape.join);
+				if (!held) {
+					held = { budgets: new Counts<number>(), min: shape.min, end: range.end };
+					this.#joins.set(shape.join, held);
+				}
+				const widest = held.budgets.last();
+				held.budgets.add(shape.budget);
+				changed = (widest === undefined || shape.budget > widest) && this.#open === 0;
 				break;
 			}
 			case "other": {
@@ -90,6 +111,16 @@ export class Ranges {
 				this.#time.add(shape.start, shape.end, -1);
 				changed = this.#open === 0 && this.#time.least(shape.start, shape.end) <= 0;
 				break;
+			case "join": {
+				const held = this.#joins.get(shape.join);
+				if (!held) break;
+				const widest = held.budgets.last();
+				held.budgets.remove(shape.budget);
+				const now = held.budgets.last();
+				if (now === undefined) this.#joins.delete(shape.join);
+				changed = now !== widest && this.#open === 0;
+				break;
+			}
 			case "other": {
 				const key = rangeKey(range);
 				const held = this.#others.get(key);
@@ -121,6 +152,13 @@ export class Ranges {
 			.runs()
 			.map((run) => (run.end === UNBOUNDED ? { start: run.start } : { start: run.start, end: run.end - 1n }));
 		for (const { range } of this.#others.values()) union.push(range);
+		for (const { budgets, min, end } of this.#joins.values()) {
+			const widest = budgets.last();
+			if (widest === undefined) continue;
+			const range: Range = { start: { live: { min, max: maxOf(widest) } } };
+			if (end !== undefined) range.end = end;
+			union.push(range);
+		}
 		return union.sort(compare);
 	}
 }

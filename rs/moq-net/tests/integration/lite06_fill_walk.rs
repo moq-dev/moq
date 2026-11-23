@@ -7,11 +7,12 @@
 //! hop of a relay chain too. A run still asked when the publisher ends the track is answered
 //! by upstream before the copy finishes.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Subscription};
+use moq_net::track::Subscription;
 use moq_net::{Error, Timestamp, Version, group, origin, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -117,7 +118,7 @@ async fn reset_groups(live: bool, join: u64, hops: u64) {
 	let mut read = None;
 	for index in 0..GROUPS {
 		if index == join {
-			let subscription = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30)));
+			let subscription = Subscription::default().with_max(Duration::from_secs(30));
 			let mut reader = remote
 				.track("video")
 				.unwrap()
@@ -234,11 +235,7 @@ async fn a_recovery_outlives_the_finished_subscription() {
 		let track = remote.track("video").unwrap();
 		async move {
 			track
-				.subscribe(
-					Subscription::default()
-						.with_delay(Delay::default().with_max(None))
-						.with_ranges([ranges]),
-				)
+				.subscribe(Subscription::default().with_ranges([ranges]))
 				.await
 				.unwrap()
 		}
@@ -246,7 +243,7 @@ async fn a_recovery_outlives_the_finished_subscription() {
 
 	// The live subscription delivers every group, which the copy then expires while a reader
 	// keeps it live.
-	let mut first = history(track::Range::default()).await;
+	let mut first = history(track::Range::ALL).await;
 	let mut got = Vec::new();
 	while got.len() < 6 {
 		let group = kio::clock::timeout(TIMEOUT, first.recv_group())
@@ -397,11 +394,7 @@ impl Chain {
 		self.remote
 			.track("video")
 			.unwrap()
-			.subscribe(
-				Subscription::default()
-					.with_delay(Delay::default().with_max(None))
-					.with_ranges([ranges]),
-			)
+			.subscribe(Subscription::default().with_ranges([ranges]))
 			.await
 			.unwrap()
 	}
@@ -436,7 +429,7 @@ async fn a_relay_chain_settles_an_evicted_run_live() {
 
 	// The live subscription delivers every group, which B then expires while a reader keeps it
 	// live.
-	let mut live = chain.read(track::Range::default()).await;
+	let mut live = chain.read(track::Range::ALL).await;
 	for _ in 0..6 {
 		kio::clock::timeout(TIMEOUT, live.recv_group())
 			.await
@@ -501,7 +494,7 @@ async fn a_slow_relay_still_answering_is_not_walked() {
 	let _written: Vec<_> = (0..6)
 		.map(|index| chain.write(index * GROUP, Timestamp::from_micros(index * GROUP).unwrap()))
 		.collect();
-	let mut live = chain.read(track::Range::default()).await;
+	let mut live = chain.read(track::Range::ALL).await;
 	for _ in 0..6 {
 		kio::clock::timeout(TIMEOUT, live.recv_group())
 			.await

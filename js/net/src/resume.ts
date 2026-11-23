@@ -50,6 +50,7 @@ import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import * as broadcast from "./broadcast.ts";
 import { Delivered } from "./delivered.ts";
+import { samePlaced } from "./demand.ts";
 import { NotFound, Retry, retry, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
@@ -62,7 +63,6 @@ import {
 	insertDrop,
 	insertRun,
 	type Land,
-	maxDelayOf,
 	type RecoverCause,
 	type Recv,
 	type Replacement,
@@ -79,15 +79,19 @@ import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import {
 	AT_KEYS,
-	clamped,
+	asked,
+	type Budget,
 	EMPTY,
 	isEmpty,
+	type Joining,
 	liveMillis,
 	type Resolved,
 	rangeTime,
+	SINCE_ZERO,
 	sameRanges,
 	UNHELD,
 	Window,
+	widest,
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
@@ -349,6 +353,13 @@ class Route {
 	}
 }
 
+/** The reader's ranges, and the live joins placed among them, resolved where its copies placed them. */
+interface Resolution {
+	from: readonly track.Range[];
+	placed?: ReadonlyMap<number, bigint>;
+	window: Window;
+}
+
 /** A route's copy, as one reader reads it. */
 interface Copy {
 	generation: number;
@@ -466,7 +477,7 @@ class Reader implements ResumeSource {
 	 */
 	#copies: Copy[] = [];
 	/** The reader's ranges, and the {@link #window} they resolved to. */
-	#resolution?: { from: readonly track.Range[]; window: Window };
+	#resolution?: Resolution;
 	/** The reader's cursor the copies were last bounded at: a lower start asks for a backfill. */
 	#bounded: { start: bigint; end?: bigint };
 	/** The newest group handed out: where a new copy is asked to start. */
@@ -545,6 +556,7 @@ class Reader implements ResumeSource {
 		this.#shell = shell;
 		this.within = {
 			contains: (key) => this.#inWindow(key),
+			budget: () => this.#readerBudget(),
 			end: () => shell.cursor.peek().end,
 			changed: [shell.cursor, shell.subscription],
 		};
@@ -830,7 +842,13 @@ class Reader implements ResumeSource {
 			copy.from = ranges;
 			copy.resolved = this.#window().resolved();
 		}
-		return { ...preferences, ranges: clamped(ranges, copy.floor, copyEnd(copy), copy.resolved ?? []) };
+		// A live join placed already, here or where the reader's own request came from, is asked
+		// placed, so the copy starts it there and still expires it under its max.
+		const wire = asked(ranges, copy.floor, copyEnd(copy), copy.resolved ?? [], preferences.placed);
+		const { placed: _, ...rest } = preferences;
+		return wire.placed.size > 0
+			? { ...rest, ranges: wire.ranges, placed: wire.placed }
+			: { ...rest, ranges: wire.ranges };
 	}
 
 	/**
@@ -843,9 +861,14 @@ class Reader implements ResumeSource {
 	 */
 	#window(): Window {
 		const ranges = this.#ranges();
+		const placed = this.#shell.subscription.peek()?.placed;
 		let resolution = this.#resolution;
-		if (!resolution || (resolution.from !== ranges && !sameRanges(resolution.from, ranges))) {
-			resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD) };
+		if (
+			!resolution ||
+			(resolution.from !== ranges && !sameRanges(resolution.from, ranges)) ||
+			!samePlaced(resolution.placed, placed)
+		) {
+			resolution = this.#fresh(ranges);
 			this.#resolution = resolution;
 		}
 		if (resolution.window.settled) return resolution.window;
@@ -873,6 +896,20 @@ class Reader implements ResumeSource {
 			this.#resolve(resolved);
 		}
 		return resolution.window;
+	}
+
+	/**
+	 * A resolution of the reader's `ranges` with nothing placed but a live join already placed where
+	 * its preferences say, as each copy is asked to place it. Mirrors the Rust `mirrored_window`.
+	 */
+	#fresh(ranges: readonly track.Range[]): Resolution {
+		const placed = this.#shell.subscription.peek()?.placed;
+		const joining = (key: bigint): Joining => {
+			const at = placed?.get(Number(key));
+			return at === undefined ? SINCE_ZERO : { at };
+		};
+		const keyed = ranges.map((range, index) => [BigInt(index), range] as const);
+		return { from: ranges, placed, window: Window.keyed(keyed, undefined, UNHELD, joining) };
 	}
 
 	/**
@@ -965,7 +1002,11 @@ class Reader implements ResumeSource {
 		// A closed copy still resolves replaced ranges against the groups it holds, for the window.
 		const wire = this.#wire(copy);
 		if (copy.sub.closed.peek() === undefined) {
-			copy.sub.update(wire);
+			// Restated, as the reader's ranges were, unless they only retuned a live join's max: a join
+			// whose max alone changed is then placed afresh rather than retuned where the copy placed
+			// the old one. Mirrors the Rust `Copy::ask_whole`.
+			if (this.#shell.retuned()) copy.sub.update(wire);
+			else hooks.restateSubscriber(copy.sub, wire);
 			this.#stamp(copy);
 		}
 	}
@@ -983,7 +1024,7 @@ class Reader implements ResumeSource {
 	/**
 	 * Apply the reader's preferences and cursor to every copy once they changed. Their signals
 	 * notify a microtask after a change, so every read applies them first too: a copy then picks
-	 * and judges its groups by what the reader holds now, such as a just-lowered `delay.max` or
+	 * and judges its groups by what the reader holds now, such as a just-lowered live {@link track.Live.max} or
 	 * replaced ranges, not its last ones. Mirrors the Rust `Reader::sync`.
 	 */
 	#follow(): void {
@@ -999,7 +1040,7 @@ class Reader implements ResumeSource {
 			if (this.#resolution && !sameRanges(this.#resolution.from, ranges)) {
 				// The serving copy's resume point may cut off groups the new ranges cover.
 				this.#resumed = true;
-				this.#resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD) };
+				this.#resolution = this.#fresh(ranges);
 				for (let index = this.#copies.length - 1; index >= 0; index--) {
 					if (this.#resolution.window.settled) break;
 					const copy = this.#copies[index];
@@ -1966,10 +2007,24 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	/** The reader's budget in milliseconds: how far behind a group may fall before it is skipped. */
+	/**
+	 * The reader's widest budget in milliseconds, how far behind any group may fall before it is
+	 * skipped, as its own ranges set it: a copy is let go as a whole, so it waits out the widest.
+	 * Mirrors the Rust `Mirrored::widest`.
+	 */
 	#budget(): number {
-		const subscription = this.#shell.subscription.peek();
-		return subscription ? maxDelayOf(subscription) : 0;
+		return widest(this.#ranges());
+	}
+
+	/**
+	 * How long each group stays worth delivering, as the reader's own ranges set it, placed where its
+	 * copies resolved them: the window places a live join as a time start, whose groups still go
+	 * stale past its max. Mirrors the Rust `Reader::budget`.
+	 */
+	#readerBudget(): Budget {
+		const window = this.#window();
+		const ranges = new Map(this.#ranges().map((range, index) => [BigInt(index), range] as const));
+		return window.budgetOf(ranges);
 	}
 
 	/**
@@ -2059,8 +2114,12 @@ class Reader implements ResumeSource {
 	}
 
 	forgetPastBudget(delivered: Delivered): void {
+		this.forgetPast(delivered, this.#readerBudget());
+	}
+
+	forgetPast(delivered: Delivered, budget: Budget): void {
 		const newest = this.#copies.at(-1);
-		if (newest) hooks.forgetPastBudget(newest.sub, delivered);
+		if (newest) hooks.forgetPastBudget(newest.sub, delivered, budget);
 	}
 
 	latest(): bigint | undefined {
@@ -2184,6 +2243,14 @@ class Reader implements ResumeSource {
 		if (!serving) return undefined;
 		if (!this.#placesNothing(serving)) return hooks.servingStarts(serving.sub, from);
 		return this.#window().starts(from);
+	}
+
+	// Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the
+	// serving copy. Mirrors the Rust `Subscriber::join_start` on a reader following route copies.
+	joinStart(placed: bigint, budget: number): bigint {
+		this.sync();
+		const serving = this.#serving();
+		return serving ? hooks.joinStart(serving.sub, placed, budget) : placed;
 	}
 
 	// The reader's ranges as its window resolved them, whichever copy serves.
@@ -2682,7 +2749,7 @@ class Recover implements GroupRecover {
 				// group either.
 				if (outcome && settled && !routeFailed(outcome.error) && !copyFailed(serving)) {
 					const subscription = serving.sub.subscription.peek();
-					const maxDelay = Duration.millis(subscription ? maxDelayOf(subscription) : 0);
+					const maxDelay = Duration.millis(widest(subscription?.ranges ?? []));
 					const land = { start: this.key, end: this.key + 1n, floor: true, grace: grace(maxDelay) };
 					if (generation === current.generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
 					landing = new Promise<void>((resolve) => {
@@ -2717,7 +2784,7 @@ class Recover implements GroupRecover {
 }
 
 /**
- * A fetched group's own budget, in milliseconds, judged against a reader's copy of its track on
+ * A fetched group judged by the publisher's max age alone against a reader's copy of its track on
  * the route it came from, as the Rust relay judges a fetch landed in that copy's cache. It opens
  * no subscription, so a fetch-only relay never pulls the track: with no copy, nothing newer is
  * known here, and the group is never stale.
@@ -2726,17 +2793,15 @@ class FetchExpiry implements Expiry {
 	readonly changed: readonly Getter<unknown>[];
 	#find: () => Copy | undefined;
 	#key: bigint;
-	#budget: number;
 	// The copy judging the group. One that closed still judges by what it held, until another opens.
 	#judging?: { sub: track.Subscriber; expiry: Expiry; unwatch: Dispose[] };
 	// Bumped whenever the judging copy's verdict may change.
 	#relay = new Signal(0);
 	#closed = false;
 
-	constructor(find: () => Copy | undefined, copied: Getter<unknown>, key: bigint, budget: number) {
+	constructor(find: () => Copy | undefined, copied: Getter<unknown>, key: bigint) {
 		this.#find = find;
 		this.#key = key;
-		this.#budget = budget;
 		this.changed = [copied, this.#relay];
 	}
 
@@ -2762,7 +2827,7 @@ class FetchExpiry implements Expiry {
 		const found = this.#find();
 		if (!found || found.sub === this.#judging?.sub) return;
 		this.#unwatch();
-		const expiry = hooks.staleAt(found.sub, this.#key, this.#budget);
+		const expiry = hooks.staleAt(found.sub, this.#key, true);
 		const bump = () => this.#relay.update((n) => n + 1);
 		const unwatch = this.#closed ? [] : expiry.changed.map((changed) => changed.subscribe(bump));
 		this.#judging = { sub: found.sub, expiry, unwatch };
@@ -3177,14 +3242,9 @@ export class Front {
 	async fetchGroup(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
 		const fetched = await this.#fetch(name, key, options);
 		let current = fetched.source;
-		// A group fetched over a wire carries no budget of its own, unlike one a local track
-		// answers: the fetch's own budget judges it against a copy of the route it came from.
-		const judge = new FetchExpiry(
-			() => this.#copyOn(name, current),
-			this.#copied,
-			key,
-			options?.maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY,
-		);
+		// A group fetched over a wire carries no expiry of its own, unlike one a local track
+		// answers: the publisher's max age judges it against a copy of the route it came from.
+		const judge = new FetchExpiry(() => this.#copyOn(name, current), this.#copied, key);
 		const expiry = (group: GroupConsumer) => hooks.groupExpiry(group) ?? judge;
 		if (!hooks.groupExpiry(fetched.group)) hooks.expireGroup(fetched.group, judge);
 		// Too old and evicted judge a subscription's delivery, not whether the group exists, so

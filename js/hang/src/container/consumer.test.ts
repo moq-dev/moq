@@ -6,6 +6,7 @@ import { Format as LocFormat } from "@moq/loc";
 import { type Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { decodeInitSegment, type InitSegment } from "../cmaf/decode.ts";
 import { Format as CmafFormat } from "../cmaf/format.ts";
+import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import type { Format as ContainerFormat } from "./format.ts";
 import { Format as LegacyFormat, Producer as LegacyProducer } from "./legacy.ts";
@@ -105,13 +106,17 @@ async function poll<T>(read: Promise<T>): Promise<T | "pending"> {
 // These tests write every group up front and only then read, so they ask for history
 // rather than the live edge.
 function replay(track: Track.Producer): Track.Subscriber {
-	return track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	return track.subscribe({ ranges: [{}] });
 }
 // A subscription from group `from` on whose missing groups an unserved fill owes, as a session's
 // feed would, so its ordered read waits `max` for each hole before giving it up.
 function owed(track: Track.Producer, max: number, from: bigint): Track.Subscriber {
 	track.requests();
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(max) } });
+	// A join at the live edge places on the first group written, with no track info to measure a lag
+	// by; unaccepted, the track has no media time, so a hole expires by when the groups past it landed.
+	const subscriber = track.subscribe({
+		ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(max) } } }],
+	});
 	subscriber.withRange({ start: { included: from } });
 	return subscriber;
 }
@@ -200,7 +205,7 @@ test("Legacy Producer accepts open-GOP leading pictures above the previous group
 
 test("Legacy Producer continues a group at a keyframe overlapping it, and drops a leading picture before it with those after it", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = track.subscribe({ ranges: [{}] });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [timestamp, keyframe] of [
 		[100_000, true],
@@ -243,7 +248,7 @@ test("Legacy Producer drops a keyframe overlapping a closed group", () => {
 
 test("Legacy Producer writes a duration marker at the next keyframe", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = track.subscribe({ ranges: [{}] });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([0xde, 0xad]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([0xbe, 0xef]), Duration.micros(10_000), false);
@@ -268,7 +273,7 @@ test("Legacy Producer writes a duration marker at the next keyframe", async () =
 
 test("Legacy Producer omits a reordered group's presentation endpoint marker", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = track.subscribe({ ranges: [{}] });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 120_000, 40_000, 80_000].entries()) {
 		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), index === 0);
@@ -294,7 +299,7 @@ test("Legacy Producer omits a reordered group's presentation endpoint marker", a
 
 test("Legacy Producer estimates the tail from the current cadence", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = track.subscribe({ ranges: [{}] });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 16_000, 32_000, 65_000, 98_000].entries()) {
 		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), index === 0);
@@ -314,7 +319,7 @@ test("Legacy Producer estimates the tail from the current cadence", async () => 
 
 test("Legacy Producer rejects a backwards discontinuity without closing the group", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = track.subscribe({ ranges: [{}] });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
 	expect(() => producer.discontinuity(Duration.micros(10_000))).toThrow();
@@ -333,7 +338,7 @@ test("Legacy Producer rejects a backwards discontinuity without closing the grou
 
 test("Legacy Producer keeps the cadence after rejecting a backwards discontinuity", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = track.subscribe({ ranges: [{}] });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
 	producer.encode(new Uint8Array([2]), Duration.micros(30_000), false);
@@ -511,7 +516,7 @@ test("Legacy Producer discontinuity keeps pre-pause media from reading as live",
 	producer.encode(new Uint8Array([1]), Duration.micros(5_000_000), true);
 	producer.finish();
 
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(1_000) } });
+	const subscriber = track.subscribe(within(Duration.millis(1_000)));
 	expect((await readGroups(subscriber, 5_000_000n)).map(([start]) => start)).toEqual([33_000n, 5_000_000n]);
 });
 

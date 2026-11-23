@@ -173,6 +173,8 @@ impl Record {
 pub(super) trait Beside {
 	/// How many runs it holds.
 	fn runs(&self) -> u64;
+	/// One past the run holding `key` that this reader gave up for good, if it did.
+	fn given_up_end(&self, key: u64) -> Option<u64>;
 	/// Forget every run below `floor`, which the record folded.
 	fn forget_below(&mut self, floor: u64);
 }
@@ -180,6 +182,10 @@ pub(super) trait Beside {
 impl Beside for () {
 	fn runs(&self) -> u64 {
 		0
+	}
+
+	fn given_up_end(&self, _key: u64) -> Option<u64> {
+		None
 	}
 
 	fn forget_below(&mut self, _floor: u64) {}
@@ -227,7 +233,7 @@ impl Record {
 		if bill.debt() == 0 {
 			return Ok(());
 		}
-		self.fold(handed);
+		self.fold(handed, beside);
 		beside.forget_below(self.floor);
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = self.bill.as_mut().expect("opened above");
@@ -240,11 +246,11 @@ impl Record {
 	}
 
 	/// Raise the floor over the final prefix: each run from it up to the lowest one that is
-	/// not final. Final are the groups handed out, every report, and this reader's own stale
-	/// skips, which a wider budget would offer again only while the pool still held their
-	/// groups. Not final are the runs given up and not reported yet, and the keys nothing
-	/// settled.
-	fn fold(&mut self, handed: Option<u64>) {
+	/// not final. Final are the groups handed out, every report, and this reader's own
+	/// verdicts: its stale skips and what `beside` gave up, which a wider budget would offer
+	/// again only while they were held. Not final are the runs given up and not reported yet,
+	/// and the keys nothing settled.
+	fn fold(&mut self, handed: Option<u64>, beside: &dyn Beside) {
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
@@ -269,6 +275,7 @@ impl Record {
 						self.delivered.run_end(floor),
 						self.written_off.get(&floor).map(|run| run.end),
 						self.skipped.run_end(floor),
+						beside.given_up_end(floor),
 					];
 					let Some(end) = local.into_iter().flatten().max() else {
 						break;
@@ -396,6 +403,37 @@ mod test {
 		record.settle(|| track.clone(), &mut (), Some(3)).unwrap();
 		assert!(record.told(2), "the drops below it fold");
 		assert!(!record.told(3), "the handed group stays to be told");
+	}
+
+	/// A run the reader gave up beside its record, such as a drop it took from the track's drop
+	/// set, is its own final verdict: a debt folds the floor over it rather than stopping at
+	/// the gap, and forgets it below the floor.
+	#[test]
+	fn a_debt_folds_over_what_the_reader_gave_up_beside_it() {
+		struct GivenUp(Option<Range<u64>>);
+		impl Beside for GivenUp {
+			fn runs(&self) -> u64 {
+				u64::from(self.0.is_some())
+			}
+			fn given_up_end(&self, key: u64) -> Option<u64> {
+				self.0.as_ref().filter(|run| run.contains(&key)).map(|run| run.end)
+			}
+			fn forget_below(&mut self, floor: u64) {
+				self.0 = self.0.take().filter(|run| run.end > floor);
+			}
+		}
+		let (pool, track) = account();
+		let mut record = Record::default();
+		let mut beside = GivenUp(Some(1..2));
+		record.delivered.insert(0);
+		record.delivered.insert(2);
+		record.reported.insert(4..5, Report::Dropped);
+		record.settle(|| track.clone(), &mut beside, None).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut beside, None).unwrap();
+		assert!(record.told(1) && record.told(2), "folded over the gap it gave up");
+		assert_eq!(beside.0, None, "and forgot it below the floor");
+		assert!(!record.told(3), "a key nothing settled stops the fold");
 	}
 
 	/// A debt that needs a run this reader was promised ends it with `TooFarBehind`: one given

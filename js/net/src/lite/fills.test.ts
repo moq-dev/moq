@@ -9,6 +9,7 @@ import { StreamCode, StreamError } from "../error.ts";
 import { hooks, type Run } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import { manual } from "../mock.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Tail } from "../tail.ts";
 import { Timestamp } from "../time.ts";
 import type { FillGroups, Producer } from "../track.ts";
@@ -26,7 +27,7 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const requests = track.requests();
-	const reader = track.subscribe({ ranges: [{ start: 0n }], delay: { max: null }, order: "ascending" });
+	const reader = track.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: null }, order: "ascending" }));
 	// Reading is what asks.
 	void reader
 		.ordered()
@@ -285,11 +286,13 @@ test("range fills: a recovery's refusals stand until the fill reaches them", asy
 	// Recorded as lost: a later reader is told so rather than waiting on them.
 	// From time 0, which names group 0 whatever is held: a time start of 1 would look up whether a
 	// group between 0 and 4 contains it, as the Rust tests' `missed` notes.
-	const later = peer.track.subscribe({
-		ranges: [{ start: 0n }],
-		delay: { max: null },
-		order: "ascending",
-	});
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
 	const drops: bigint[][] = [];
 	for (let next = hooks.tryRecvGroup(later, true); next.kind !== "idle"; next = hooks.tryRecvGroup(later, true)) {
 		if (next.kind === "drop") drops.push([next.start, next.end]);
@@ -371,11 +374,13 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 	// Nothing recorded: the track still holds no verdict on groups 0 and 1, so a later reader asks
 	// for them again.
 	const requests = peer.track.requests();
-	const later = peer.track.subscribe({
-		ranges: [{ start: 0n }],
-		delay: { max: null },
-		order: "ascending",
-	});
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
 	void later
 		.ordered()
 		.nextGroup()
@@ -430,11 +435,13 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 	const requests = peer.track.requests();
 	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
 	// looking up where time 1 falls.
-	const later = peer.track.subscribe({
-		ranges: [{ start: 0n }],
-		delay: { max: null },
-		order: "ascending",
-	});
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
 	// Reading past group 0 is what asks.
 	const reading = later.ordered();
 	void reading
@@ -506,11 +513,13 @@ test("range fills: a recovery's refusal is taken once", async () => {
 	const requests = peer.track.requests();
 	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
 	// looking up where time 1 falls.
-	const later = peer.track.subscribe({
-		ranges: [{ start: 0n }],
-		delay: { max: null },
-		order: "ascending",
-	});
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
 	// Reading past group 0 is what asks.
 	const reading = later.ordered();
 	void reading
@@ -558,11 +567,13 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 	const requests = peer.track.requests();
 	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
 	// looking up where time 1 falls.
-	const later = peer.track.subscribe({
-		ranges: [{ start: 0n }],
-		delay: { max: null },
-		order: "ascending",
-	});
+	const later = peer.track.subscribe(
+		withMax({
+			ranges: [{ start: 0n }],
+			delay: { max: null },
+			order: "ascending",
+		}),
+	);
 	// Reading past group 0 is what asks.
 	const reading = later.ordered();
 	void reading

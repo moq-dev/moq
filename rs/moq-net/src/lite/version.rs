@@ -185,24 +185,6 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one,
-	/// so 0 says no limit. Added in lite-07; earlier wires carry bare milliseconds.
-	pub(crate) fn has_unlimited_max_delay(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
-	/// earlier fetch is bounded by the publisher's max age alone.
-	pub(crate) fn has_fetch_max_delay(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
 	/// Whether this version's SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO
 	/// carry the retired `Ordered` byte.
 	///
@@ -231,10 +213,10 @@ impl Version {
 	}
 
 	/// Whether a copy's fills stop at the start its publisher resolved from the budget.
-	/// Lite-06 resolves the start, but drops media time and sends FETCH without a max
-	/// delay, so nothing judges a group below that start against a reader's budget.
+	/// Lite-06 resolves the start but drops media time, so nothing judges a group below that
+	/// start against a reader's budget.
 	pub(crate) fn fills_from_start(self) -> bool {
-		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
+		self.resolves_start() && !self.has_media_time()
 	}
 
 	/// Whether subscription completion waits for the subscriber's FIN, which it sends once

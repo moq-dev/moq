@@ -3,8 +3,8 @@
 //! A relay passes on the timestamps it receives over lite-06 and moq-transport, with their
 //! values, even for a group that arrives after a later one.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -79,8 +79,8 @@ async fn relay(upstream: &str, downstream: &str) -> (Option<moq_net::Timescale>,
 		.unwrap();
 
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(BUDGET))
-		.with_ranges([support::keys(0..)]);
+		.with_ranges([support::keys(0..)])
+		.with_max(BUDGET);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")

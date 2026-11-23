@@ -172,7 +172,6 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 				}
 				await w.string("video");
 				await w.u8(0);
-				if (version === Lite.DRAFT_07) await w.u53(0);
 				await w.u62(0n);
 				await w.u62(index === 0 ? UNSAFE : 0n);
 				await w.u62(index === 1 ? UNSAFE : 0n);
