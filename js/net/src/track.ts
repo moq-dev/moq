@@ -5736,7 +5736,8 @@ export class Subscriber {
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
 		// A bounded window ends once nothing in it is left to deliver, as in Rust.
-		if (this.#exhausted()) return this.#done();
+		// Exhausted, nothing kept out is still asked, and what was given up stays given up.
+		if (this.#exhausted()) return { kind: "done" };
 		if (!this.#complete() || this.#starting(groups)) return { kind: "idle" };
 		// An open track can still raise the cap. Keep the groups beyond it.
 		return this.#parked(groups) ? { kind: "boundary" } : this.#done();
@@ -6501,7 +6502,7 @@ export class Subscriber {
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
 		if (this.#exhausted()) {
 			this.#passEnd();
-			return this.#done();
+			return { kind: "done" };
 		}
 		if (
 			!this.#parked(groups) &&

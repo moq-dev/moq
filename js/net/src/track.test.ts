@@ -6632,6 +6632,50 @@ test("a kept-out fill is withdrawn when the feed ends", async () => {
 	}
 });
 
+// A read that ended once a fill refused its kept-out keys stays ended: polled again, it asks nothing.
+test("a kept-out key a fill refused stays given up once the read ends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	try {
+		for (const key of [0n, 6n]) {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		const sub = producer.subscribe({ ranges: [{ start: 0n, end: 6n }] });
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });
+		const ended = sub.recvGroup();
+		producer.skipGroups(3n, 6n);
+		await clock.advance(Duration.millis(60_000));
+		producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[3n, 6n]]);
+		fills[0].refuseGroups(3n, 6n, new Error("not found"));
+		expect(await ended).toBeUndefined();
+
+		expect(await sub.recvGroup()).toBeUndefined();
+		await clock.advance(Duration.ZERO);
+		expect(fills).toHaveLength(1);
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
 // A forgotten kept-out run spanning a history range and a live join is judged per budget: the live
 // part gone stale is given up, while the history part, which never goes stale, stays asked.
 test("a forgotten kept-out run is judged by each range's budget", async () => {
