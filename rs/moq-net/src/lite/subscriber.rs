@@ -5936,6 +5936,64 @@ mod tests {
 		assert_eq!(group.start, 0);
 	}
 
+	/// A group evicted after the subscription delivered it is recovered again even when the
+	/// run owing it starts with keys a recovery answered skipped: a refusal answers only its
+	/// own keys.
+	#[kio::test]
+	async fn an_evicted_group_past_a_skipped_run_is_recovered() {
+		let (serve, _serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		let write = |key: u64| {
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		};
+		for key in 0..3 {
+			write(key);
+		}
+		copy.evict(0);
+		copy.evict(1);
+		let mut reader = copy
+			.subscribe(
+				crate::track::Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(None))
+					.with_range(0..2),
+			)
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0 and 1 are owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("a miss");
+		};
+		let mut fills = fills::RangeFills::default();
+		fills.push(fill);
+		let Ok(mut accounted) = tail.write() else {
+			unreachable!("the tail is open");
+		};
+		accounted.account(0..2, serve.subscriber.runtime.now());
+		drop(accounted);
+		// The run the fill owes starts at the key a recovery answered skipped.
+		fills.refused_skipped(0..1);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		assert!(fills.recovering(), "group 1 is recovered");
+
+		write(1);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
+			panic!("group 1 reaches the reader");
+		};
+		assert_eq!(group.start, 1);
+	}
+
 	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the narrowest budget
 	/// the subscription asked: a SUBSCRIBE_UPDATE widening the budget reopens nothing, and an
 	/// OLD drop arriving after it may have been judged before the publisher read it.

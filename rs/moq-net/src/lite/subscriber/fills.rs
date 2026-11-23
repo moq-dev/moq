@@ -232,10 +232,31 @@ impl RangeFills {
 		self.recovered.insert(groups);
 	}
 
+	/// Record `groups` answered skipped by a recovery.
+	#[cfg(test)]
+	pub fn refused_skipped(&mut self, groups: Range<u64>) {
+		self.refused.insert(groups, Refusal::skipped());
+	}
+
 	/// Whether a [`Recovery`] is still out, whose groups the subscription's tail does not wait
 	/// for.
 	pub fn recovering(&self) -> bool {
 		!self.recoveries.is_empty()
+	}
+
+	/// The keys of `groups` neither the subscription said it will not deliver nor the
+	/// subscriber's own range starts past: a refusal answers only its own keys, so a group
+	/// past a skipped run is still owed.
+	fn unrefused(&self, groups: Range<u64>) -> Vec<Range<u64>> {
+		let mut owed = RangeSet::new();
+		owed.insert(groups.clone());
+		for (refused, _) in self.refused.overlapping(&groups) {
+			owed.remove(refused.clone());
+		}
+		for (skipped, _) in self.skipped.overlapping(&groups) {
+			owed.remove(skipped.clone());
+		}
+		owed.iter().cloned().collect()
 	}
 
 	/// Why the subscription will not deliver the run of groups from `first`, if it said so.
@@ -290,8 +311,8 @@ impl RangeFills {
 			for run in asked.iter() {
 				for gone in tail.accounted(run.clone()) {
 					for gap in self.recovering.gaps(&gone).collect::<Vec<_>>() {
-						if self.refusal(gap.start).is_none() {
-							self.recover.insert(gap);
+						for owed in self.unrefused(gap) {
+							self.recover.insert(owed);
 						}
 					}
 				}

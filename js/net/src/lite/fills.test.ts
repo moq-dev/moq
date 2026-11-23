@@ -307,6 +307,24 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 	peer.close();
 });
 
+// A group the subscription already accounted for is recovered even when the run owing it starts
+// with keys the subscription will not deliver: a refusal answers only its own keys.
+test("range fills: an accounted group past a refused run is recovered", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	tail.account(0n, 4n);
+	fills.push(peer.fill);
+	// The subscription's range starts past group 0.
+	fills.skip({ start: 0n, end: 4n }, 0n, 1n);
+	fills.poll(tail, true);
+	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 1n, end: 4n }]);
+
+	fills.close();
+	peer.close();
+});
+
 // A recovery opened on the first poll that holds its fill asks with that fill's priority, not the
 // empty ask's lowest.
 test("range fills: a recovery the first poll opens asks with the fill's priority", async () => {

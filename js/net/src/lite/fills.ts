@@ -4,7 +4,7 @@
 import { type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "../error.ts";
 import { fillChanged, wantedRuns } from "../fill.ts";
-import { hooks, insertRun, type Run, removeRun, runGaps } from "../internal.ts";
+import { hooks, insertRun, type Run, removeRun, runGaps, subtractRuns } from "../internal.ts";
 import type { Tail } from "../tail.ts";
 import type * as track from "../track.ts";
 import { max, min } from "../util/key.ts";
@@ -212,11 +212,12 @@ export class RangeFills {
 					const done = clip(this.#recovered, gap.start, gap.end);
 					for (const again of done) {
 						// Recovered once for these fills; a later request may recover it again.
-						if (!this.#refusal(again.start))
-							this.#setRefused(again.start, again.end, passing(new NotFound(`group ${again.start}`)));
+						for (const owed of this.#unrefused(again.start, again.end))
+							this.#setRefused(owed.start, owed.end, passing(new NotFound(`group ${owed.start}`)));
 					}
 					for (const fresh of runGaps(done, gap.start, gap.end)) {
-						if (!this.#refusal(fresh.start)) insertRun(this.#toRecover, fresh.start, fresh.end);
+						for (const owed of this.#unrefused(fresh.start, fresh.end))
+							insertRun(this.#toRecover, owed.start, owed.end);
 					}
 				}
 			}
@@ -374,6 +375,13 @@ export class RangeFills {
 	/** Whether {@link close} was called. */
 	get closed(): boolean {
 		return this.#closed;
+	}
+
+	// The keys of `[start, end)` neither the subscription nor a recovery said it will not deliver,
+	// nor the subscriber's own range starts past: a refusal answers only its own keys, so a group
+	// past a skipped run is still owed.
+	#unrefused(start: bigint, end: bigint): Run[] {
+		return subtractRuns(subtractRuns([{ start, end }], this.#refused), this.#skipped);
 	}
 
 	// Why the subscription or a recovery will not deliver the run of groups from `first`, if it
