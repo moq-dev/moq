@@ -2863,13 +2863,9 @@ export class Subscriber {
 				entry.floor = span.start;
 				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.
 				this.#declare(entry);
-			} else if (
-				span.start !== wireSpan(placedAsTimes(last.ranges, last.placed)).start ||
-				(span.start === undefined && maxAge(ranges) !== maxAge(last.ranges))
-			) {
+			} else if (span.start !== wireSpan(placedAsTimes(last.ranges, last.placed)).start) {
 				// An update gets no fresh SUBSCRIBE_START, so the floor follows the requested start in
-				// both directions: one that moves back keeps the floor asked, not the stale START. A
-				// restate with no start is placed afresh within its max age, so a new max moves it too.
+				// both directions: one that moves back keeps the floor asked, not the stale START.
 				hooks.startTrack(entry.track, { start: null, requested: span.start });
 			}
 			// Round-trip the other Subscribe parameters so the publisher doesn't
