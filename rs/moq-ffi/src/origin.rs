@@ -864,7 +864,7 @@ mod supervision_tests {
 		let container = MoqMediaContainerProducer::new(
 			&broadcast,
 			MoqContainerInit {
-				format: MoqContainerFormat::Ts,
+				format: MoqContainerFormat::ts(),
 				data: Vec::new(),
 				timebase: Some(timebase.clone()),
 			},
@@ -873,7 +873,7 @@ mod supervision_tests {
 		let independent = MoqMediaContainerProducer::new(
 			&broadcast,
 			MoqContainerInit {
-				format: MoqContainerFormat::Ts,
+				format: MoqContainerFormat::ts(),
 				data: Vec::new(),
 				timebase: None,
 			},

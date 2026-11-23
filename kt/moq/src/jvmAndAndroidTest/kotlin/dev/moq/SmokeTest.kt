@@ -118,7 +118,7 @@ class SmokeTest {
                     assertFailsWith<MoqException.Codec> {
                         ContainerProducer(
                             other,
-                            ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase),
+                            ContainerInit(ContainerFormat.fmp4(), byteArrayOf(), timebase),
                         )
                     }
                     owner.end()
@@ -546,7 +546,7 @@ class SmokeTest {
                 dev.moq.media.TrackProducer.audio(
                     broadcast,
                     Named(null),
-                    AudioInit(format = AudioFormat.OPUS, data = opusHead()),
+                    AudioInit(format = AudioFormat.opus(), data = opusHead()),
                 )
             val consumer = broadcast.consume()
             val (name, audio) = catalog(consumer).audio.entries.single()
@@ -1448,7 +1448,7 @@ class SmokeTest {
                             VideoProducerOptions(
                                 input =
                                     VideoEncoderInput(
-                                        format = VideoPixelFormat.RGBA,
+                                        format = VideoPixelFormat.rgba(),
                                         width = 320u,
                                         height = 240u,
                                         framerate = VideoFrameRate(30000u, 1001u),
@@ -1494,13 +1494,13 @@ class SmokeTest {
                         decoder.cancel()
                         assertNull(frame.surface())
 
-                        val planar = frame.pixels(VideoPixelFormat.I420)
+                        val planar = frame.pixels(VideoPixelFormat.i420())
                         assertEquals(
                             frame.width().toInt() * frame.height().toInt() * 3 / 2,
                             planar.size,
                         )
 
-                        val packed = frame.pixels(VideoPixelFormat.RGBA)
+                        val packed = frame.pixels(VideoPixelFormat.rgba())
                         assertEquals(
                             frame.width().toInt() * frame.height().toInt() * 4,
                             packed.size,

@@ -547,11 +547,13 @@ A minted Instance is new for every announcement, so a publisher reconnecting or 
 
 ### Closed Sessions and Drains {#closed-sessions}
 A node that loses a session to a routing neighbour names the hop it lost: its own Node ID and that session's Session Number, with the Node ID of the node at the far end.
+It names a session only if no session it numbered lower to the same relay is still open, since the floor below would refuse routes through that one; a session that closes while one is open is never named, and the routes through it are replaced or withdrawn like any other.
 It sends one [DEAD](#dead) for it to each neighbour it sent a route whose Path holds the hop, and each neighbour passes it on in the same way, once per neighbour.
 A DEAD ends every route its sender sent through the hop, which keeps its Route ID until the sender sends a ROUTE for it again or a ROUTE_END.
 
 For each pair of relays a node remembers the highest session it knows closed, ordering sessions by their node's Start and then their Session Number, and never uses a route whose Path names a session of that pair at or below it.
 A route through a closed session that arrives late is therefore unusable, and a relay that restarts takes a higher Start, so its new sessions are not.
+A floor only makes such a route unusable sooner, so a node MAY forget one whose pair no route it holds names.
 A node whose Start repeats or goes back has its new sessions refused.
 
 A node that sends a GOAWAY is draining.
@@ -2315,7 +2317,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - ANNOUNCE_END carries `Lost`: whether the claim's publisher withdrew it or the sender only lost its way to it.
 - Replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), a Relay, its Start, and a Marked byte that only a routing node's marked Node ID sets, which only a routing node sends. Two routing nodes exchange routes; every other session carries claims alone, one per path and Instance. Removed ANNOUNCE_OK's Hop ID.
 - Added ROUTE (0x7) and ROUTE_END (0x8): a routing node's route to another, a path vector of at most 32 hops, each a Node ID and the Session Number that node learned the route on, with a marked bit, a draining bit, a priority, and an additive cost. A node never uses a route whose Path names its relay, and ranks routes by drain, then priority, then cost.
-- Added DEAD (0x9): a node that loses a session names that hop once to each neighbour it sent a route through it, which ends those routes. A node never uses a route through a session at or below the highest it knows closed between the same two relays.
+- Added DEAD (0x9): a node that loses a session names that hop once to each neighbour it sent a route through it, which ends those routes, unless a lower session it numbered to the same relay is still open, in which case it is never named. A node never uses a route through a session at or below the highest it knows closed between the same two relays, and may forget that floor once no route it holds names the pair.
 - Added DRAIN (0xA): names a node that sent a GOAWAY once per neighbour, and every route through it ranks draining.
 - Added ANNOUNCE_FLOOR (0x3), closing each batch of a route's claims with the Revision of the node the route leads to, so a stale copy never revives a claim whose withdrawal a newer one delivered.
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.

@@ -920,7 +920,9 @@ Every frame of a group MUST present after every frame of any group with a lower 
 Frames within a group MAY present out of order (B-frames, open-GOP leading pictures), so a consumer bounds a group that isn't whole by the lowest timestamp it knows in a higher group.
 A publisher splicing in new content keeps this by continuing the current group at a keyframe that doesn't present after the group's newest frame, and by dropping a later frame that presents at or before the previous group's newest frame, such as a leading picture that references the old content, along with the leading pictures of the same keyframe that decode after it, which may reference it.
 A publisher whose source restarts below the previous group's start begins a new broadcast instead.
-A hole between delivered groups is a playhead event unless the publisher declared the starts between them skipped or the boundary is contiguous within 1 ms.
+A hole between delivered groups is a playhead event unless the publisher declared the starts between them skipped or the later group continues the earlier within 1 ms: one of its frames presents by where the earlier ended.
+When neither a frame duration nor an endpoint says where the earlier group ends, it ends one picture past its highest timestamp, taken as the largest step between its latest presentation times.
+An open GOP's leading pictures decode after the keyframe, so a consumer holds the later group's keyframe until a frame shows it continues, looking at most as many frames past the keyframe as the track has reordered.
 A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.
 
 ## legacy
@@ -1088,6 +1090,7 @@ This document has no IANA actions.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks, and a fragment's runs lie back to back in its `mdat`, each `data_offset` counting from its `moof`.
 - A `loc` frame's codec payload uses the `legacy` framing.
+- A later group continues the earlier when any of its frames, such as an open GOP's leading pictures, presents by the earlier's end, which without a duration or endpoint is one picture past its highest timestamp.
 
 ## moq-hang-03
 {:numbered="false"}

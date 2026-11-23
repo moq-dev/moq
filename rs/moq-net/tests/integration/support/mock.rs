@@ -819,6 +819,24 @@ impl MockSession {
 		held.len()
 	}
 
+	/// How many uni streams this side opened are held back.
+	pub fn held_unis(&self) -> usize {
+		let link = &self.side.out;
+		link.settle();
+		link.held_uni.lock().unwrap().as_ref().map_or(0, Vec::len)
+	}
+
+	/// Deliver only the oldest held uni stream, and keep holding the rest.
+	pub fn release_oldest_uni(&self) {
+		let link = &self.side.out;
+		link.settle();
+		let mut held = link.held_uni.lock().unwrap();
+		let held = held.as_mut().expect("not holding");
+		if !held.is_empty() {
+			let _ = link.ready_uni.try_push(held.remove(0));
+		}
+	}
+
 	/// Deliver the held uni streams newest first, and stop holding.
 	pub fn release_unis_reversed(&self) {
 		self.side.out.release_unis(|held| held.reverse());

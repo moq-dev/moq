@@ -22,7 +22,7 @@ func TestRefusesNegativeJoin(t *testing.T) {
 
 	// Everything but the join is valid, so only the duration check can refuse it.
 	negative := -time.Millisecond
-	input := EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: FrameRate{Numerator: 30, Denominator: 1}}
+	input := EncoderInput{Format: moq.RgbaVideoPixelFormat(), Width: 320, Height: 240, Framerate: FrameRate{Numerator: 30, Denominator: 1}}
 	output := EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.SoftwareEncoder(), Join: &negative}
 	if _, err := NewProducer(catalog, ProducerOptions{Input: input, Output: output}); err == nil {
 		t.Fatal("a producer opened with a negative join, want an error")

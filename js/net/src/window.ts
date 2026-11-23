@@ -305,8 +305,8 @@ export interface Holdings {
 	looksUp?(): boolean;
 	/**
 	 * Where a live join holding a nonzero `min` behind the live edge, ending at `end`, starts for a
-	 * reader within `budget` (see {@link containing}). On a hop that {@link answersJoins}, only an
-	 * answer recorded after tick `since` counts. Undefined while it can't tell yet: nothing held
+	 * reader within `budget` (see {@link containing}). Only an upstream's answer recorded after tick
+	 * `since` counts. Undefined while it can't tell yet: nothing held
 	 * measures the live edge, or a relay copy waits on upstream to answer for it. Absent where the
 	 * hop leaves its ranges to the copies it follows. Mirrors the Rust `Holdings::join`.
 	 */
@@ -317,6 +317,19 @@ export interface Holdings {
 	 * each starts. Absent for none. Mirrors the Rust `Holdings::answers_joins`.
 	 */
 	answersJoins?(): boolean;
+	/**
+	 * The upstream's answer to the live join `min` through `end`, for a reader within `budget` whose
+	 * range was added at tick `since`: the group it starts at, or none for nothing to deliver. It
+	 * stands once the end is declared too, when {@link answersJoins} no longer holds: a copy holds
+	 * only the groups from where its feed started, so they can't measure a join behind them. Absent
+	 * for none. Mirrors the Rust `Holdings::answered_join`.
+	 */
+	answeredJoin?(
+		min: Duration,
+		end: bigint | undefined,
+		budget: number,
+		since: number,
+	): { start?: bigint } | undefined;
 	/**
 	 * Whether the producer declared every start in `[start, end)` skipped, so no group starts there
 	 * even in the history a handler serves. Absent for none.
@@ -441,8 +454,8 @@ export class Window {
 	 */
 	#reaching = new Set<bigint>();
 	/**
-	 * The join tick each live join's range was added at, by key: a hop that
-	 * {@link Holdings.answersJoins} places it only from an answer recorded since.
+	 * The join tick each live join's range was added at, by key: only an upstream's answer recorded
+	 * since places it.
 	 */
 	#since = new Map<bigint, number>();
 	// How many spans name each start, and how many name none: see {@link start}.
@@ -912,21 +925,30 @@ export class Window {
 					this.#reaching.add(key);
 					return;
 				}
-			} else if (latest === undefined) {
-				// Nothing to measure the live edge by yet: wait for the first group, reading everything
-				// meanwhile.
-				this.#pending.add(key);
-				return;
-			} else if (live.asNanos() === 0) {
-				// The latest group holds the live edge. One made before any group then starts at the first,
-				// which was the latest when it was placed.
-				join = { group: latest };
 			} else {
-				join = holdings.join?.(live, range.end, this.budget, 0);
-				// Nothing to measure the live edge by yet: read none of the groups held until it resolves.
-				if (join === undefined || join === "empty") {
-					this.#reaching.add(key);
+				const since = this.#since.get(key) ?? 0;
+				// Its upstream's answer places it, whatever the groups held measure: nothing to deliver
+				// starts it past its end, while an unbounded one measures.
+				const answer = holdings.answeredJoin?.(live, range.end, this.budget, since);
+				const answered = answer?.start ?? (answer && range.end !== undefined ? range.end + 1n : undefined);
+				if (answered !== undefined) {
+					join = { group: answered };
+				} else if (latest === undefined) {
+					// Nothing to measure the live edge by yet: wait for the first group, reading everything
+					// meanwhile.
+					this.#pending.add(key);
 					return;
+				} else if (live.asNanos() === 0) {
+					// The latest group holds the live edge. One made before any group then starts at the
+					// first, which was the latest when it was placed.
+					join = { group: latest };
+				} else {
+					join = holdings.join?.(live, range.end, this.budget, since);
+					// Nothing to measure the live edge by yet: read none of the groups held until it resolves.
+					if (join === undefined || join === "empty") {
+						this.#reaching.add(key);
+						return;
+					}
 				}
 			}
 			// A group a join measured starts there; a time is placed among the groups held.

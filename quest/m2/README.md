@@ -33,10 +33,7 @@ native crates, and public APIs:
   [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md) before `0.22.0`
   publishes them (moq-nvenc's are fixed).
 - **Public API freezes.** Fence `moq-net` event/item types with
-  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)),
-  and open
-  `moq-ffi`'s 5 closed extensible enums while deriving `Debug`/`Eq`/`Hash` on
-  its codec types ([ffi-open-enums](/quest/m2/ffi-open-enums.md)).
+  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)).
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),

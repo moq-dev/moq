@@ -85,8 +85,8 @@ pub(in crate::model) trait Holdings {
 	fn complete(&self) -> bool;
 
 	/// Where a live join holding a nonzero `min` behind the live edge, ending at `end`, starts
-	/// for a reader within `budget`; see [`Join`]. On a hop that [`Self::answers_joins`], only
-	/// an answer recorded after join tick `since`, when the join's range was added, counts.
+	/// for a reader within `budget`; see [`Join`]. Only an upstream's answer recorded after join
+	/// tick `since`, when the join's range was added, counts.
 	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
 		let _ = (min, end, budget, since);
 		Join::Unknown
@@ -96,6 +96,16 @@ pub(in crate::model) trait Holdings {
 	/// does, never from the groups it holds: a copy holding only part of the track.
 	fn answers_joins(&self) -> bool {
 		false
+	}
+
+	/// The upstream's answer to the live join `min` through `end`, for a reader within `budget`
+	/// whose range was added at join tick `since`: the group it starts at, or `None` for nothing
+	/// to deliver. It stands once the end is declared too, when [`Self::answers_joins`] no
+	/// longer holds: a copy holds only the groups from where its feed started, so they can't
+	/// measure a join behind them.
+	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+		let _ = (min, end, budget, since);
+		None
 	}
 
 	/// Whether the producer declared every key in `keys` skipped, so no group starts there
@@ -818,27 +828,39 @@ impl Window {
 					}
 				}
 			}
-			Start::Live(min) => match latest {
-				// Nothing to measure the live edge by yet: wait for the first group, reading
-				// everything meanwhile.
-				None => {
-					self.pending.insert(key);
-					return;
-				}
-				// The latest group holds the live edge. One made before any group then starts at
-				// the first, which was the latest when it was placed.
-				Some(latest) if min.is_zero() => (Some(latest), false),
-				Some(_) => match holdings.join(min, range.end, self.budget, 0) {
-					Join::Time(time) => (Some(time), true),
-					Join::Group(group) => (Some(group), false),
-					// Nothing to measure the live edge by yet: read none of the groups held until it
-					// resolves.
-					Join::Empty | Join::Unknown => {
-						self.reaching.insert(key);
+			Start::Live(min) => {
+				let since = self.since.get(&key).copied().unwrap_or(0);
+				let until = join_end(range.end);
+				// Its upstream's answer places it, whatever the groups held measure: nothing to
+				// deliver starts it past its end, while an unbounded one measures.
+				let answered = match holdings.answered_join(min, until, self.budget, since) {
+					Some(Some(group)) => Some(group),
+					Some(None) => range.end.and_then(|last| last.checked_add(1)),
+					None => None,
+				};
+				match (answered, latest) {
+					(Some(group), _) => (Some(group), false),
+					// Nothing to measure the live edge by yet: wait for the first group, reading
+					// everything meanwhile.
+					(None, None) => {
+						self.pending.insert(key);
 						return;
 					}
-				},
-			},
+					// The latest group holds the live edge. One made before any group then starts at
+					// the first, which was the latest when it was placed.
+					(None, Some(latest)) if min.is_zero() => (Some(latest), false),
+					(None, Some(_)) => match holdings.join(min, until, self.budget, since) {
+						Join::Time(time) => (Some(time), true),
+						Join::Group(group) => (Some(group), false),
+						// Nothing to measure the live edge by yet: read none of the groups held until
+						// it resolves.
+						Join::Empty | Join::Unknown => {
+							self.reaching.insert(key);
+							return;
+						}
+					},
+				}
+			}
 		};
 		// A group a join measured starts there; a time is placed among the groups held.
 		let placed = match (anchor, asks) {
@@ -1180,6 +1202,10 @@ mod tests {
 
 		fn answers_joins(&self) -> bool {
 			self.0.answers_joins()
+		}
+
+		fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+			self.0.answered_join(min, end, budget, since)
 		}
 
 		fn complete(&self) -> bool {

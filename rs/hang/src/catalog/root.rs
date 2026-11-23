@@ -81,7 +81,8 @@ pub struct Catalog<E = ()> {
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	///
-	/// The root `version` is reserved: serializing fails if the extension names a member `version`.
+	/// The root `version` and every section name are reserved: serializing fails if the extension
+	/// names one.
 	pub ext: E,
 
 	/// The entries decoding skipped because a newer moq-hang draft defines them.
@@ -166,18 +167,23 @@ struct Wire<E> {
 	skipped: crate::catalog::Skipped,
 }
 
-/// Refuse an extension member named `version`: the root `version` is reserved for this
-/// specification, and a reader would refuse a catalog whose extension claimed a newer draft.
+/// The root members this specification defines: `version` and each [`Wire`] section.
+const RESERVED: [&str; 10] = [
+	"version", "video", "audio", "sync", "text", "json", "binary", "stats", "echo", "include",
+];
+
+/// Refuse an extension member the specification reserves. One beside a section would write a
+/// duplicate key that a reader resolves to either copy, and an extension `version` would claim a
+/// newer draft that a reader refuses.
 fn serialize_ext<E: Serialize, S: serde::Serializer>(ext: &E, serializer: S) -> std::result::Result<S::Ok, S::Error> {
 	use serde::ser::Error;
 
 	// Inspected as a `Value` but written from `ext` itself, which keeps its member order.
-	if serde_json::to_value(ext)
-		.map_err(S::Error::custom)?
-		.get("version")
-		.is_some()
-	{
-		return Err(S::Error::custom("catalog extension must not name a member `version`"));
+	let value = serde_json::to_value(ext).map_err(S::Error::custom)?;
+	if let Some(key) = RESERVED.into_iter().find(|key| value.get(key).is_some()) {
+		return Err(S::Error::custom(format!(
+			"catalog extension must not name the reserved member `{key}`"
+		)));
 	}
 	ext.serialize(serializer)
 }
@@ -1487,10 +1493,10 @@ mod test {
 		assert!(!catalog.ext.contains_key("version"));
 	}
 
-	/// An extension's own `version` would sit beside the computed one as a duplicate key, letting it
-	/// override what the catalog actually needs.
+	/// An extension member the specification reserves would sit beside the base member as a
+	/// duplicate key: an extension `version` could override what the catalog actually needs.
 	#[test]
-	fn an_extension_version_is_refused() {
+	fn an_extension_reserved_member_is_refused() {
 		#[derive(Serialize, Default)]
 		struct Ext {
 			version: u64,
@@ -1501,11 +1507,15 @@ mod test {
 			..Default::default()
 		};
 		let err = catalog.to_json().unwrap_err();
-		assert!(err.to_string().contains("must not name a member `version`"), "{err}");
+		assert!(err.to_string().contains("reserved member `version`"), "{err}");
 
-		let mut passthrough = Catalog::<serde_json::Map<String, serde_json::Value>>::default();
-		passthrough.ext.insert("version".into(), 3.into());
-		assert!(passthrough.to_json().is_err());
+		// Every section name too, which would otherwise sit beside the section as a duplicate key.
+		for key in RESERVED {
+			let mut passthrough = Catalog::<serde_json::Map<String, serde_json::Value>>::default();
+			passthrough.ext.insert(key.into(), serde_json::json!({}));
+			let err = passthrough.to_json().unwrap_err();
+			assert!(err.to_string().contains(&format!("`{key}`")), "{key}: {err}");
+		}
 
 		// Any other member still flattens beside the base sections.
 		let ok = Catalog {

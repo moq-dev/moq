@@ -31,6 +31,11 @@ export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => D
 		const duration = Duration.micros((1024 * 1_000_000) / rate);
 		return (payload) => (payload.byteLength > 0 ? duration : undefined);
 	}
+	// Layer II codes 1152 samples per frame.
+	if (config.codec === "mp2") {
+		const duration = Duration.micros((1152 * 1_000_000) / rate);
+		return (payload) => (payload.byteLength > 0 ? duration : undefined);
+	}
 	// Interleaved 32-bit samples, so the payload's length says.
 	if (config.codec === "pcm" && config.numberOfChannels > 0) {
 		const frameBytes = 4 * config.numberOfChannels;
