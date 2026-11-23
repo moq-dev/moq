@@ -21,9 +21,10 @@
 //! out.
 //!
 //! The MFT learns the picture size from the bitstream, so unlike the encoder we
-//! don't know the dimensions up front: only after feeding the first access unit
-//! does the MFT offer an output type carrying the real frame size, so we set the
-//! NV12 output type (and read the size off it) right after that first input.
+//! don't know the dimensions up front. The NV12 output type is still set at open,
+//! because the HEVC decoder takes no input until every stream has a type; its
+//! size is the decoder's placeholder until the first access unit's parameter
+//! sets raise a stream change carrying the real one.
 //!
 //! The backend is `!Send`: the COM handles must stay on the thread that created
 //! them, either the `Sink` worker thread or the thread owning a direct `Decoder`.
@@ -66,6 +67,9 @@ const NOMINAL_FPS: i64 = 30;
 /// H.264 and H.265 decoded-picture buffers are smaller than this for the
 /// supported profiles, so anything older can no longer be a valid reorder.
 const MAX_PENDING: usize = 32;
+/// Frame size put on the input type before the stream has said its own. Inside
+/// the range the HEVC decoder guarantees DXVA for (up to 1920x1088).
+const PLACEHOLDER_SIZE: (u32, u32) = (1920, 1080);
 
 pub(crate) struct MediaFoundation {
 	transform: IMFTransform,
@@ -75,10 +79,11 @@ pub(crate) struct MediaFoundation {
 	/// The DXVA device backing the decoder; also the device the output textures
 	/// live on, so the I420 download runs on the device that owns them.
 	device: ID3D11Device,
-	/// Picture size, learned from the first output-type negotiation (0 until then).
+	/// Picture size off the current NV12 output type: the decoder's placeholder
+	/// from `open` until the stream change that carries the stream's own.
 	width: u32,
 	height: u32,
-	/// True once the NV12 output type is set (after the initial stream change).
+	/// True once the NV12 output type is set (at open).
 	output_configured: bool,
 	/// Whether the MFT allocates its own output samples (true in DXVA mode: each
 	/// output is a GPU texture from the decoder's pool). Cached from
@@ -135,7 +140,7 @@ impl MediaFoundation {
 			let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
 		}
 
-		let backend = Self {
+		let mut backend = Self {
 			transform,
 			input_subtype,
 			device,
@@ -153,7 +158,15 @@ impl MediaFoundation {
 			_com: com,
 		};
 
+		// Every stream gets a type before streaming starts: Media Foundation wants
+		// all media types set before MFT_MESSAGE_NOTIFY_BEGIN_STREAMING and before
+		// the first ProcessInput. The H.264 decoder lets either slide; the HEVC
+		// decoder refuses both with MF_E_TRANSFORM_TYPE_NOT_SET. Before any input
+		// the sizes on both types are placeholders: the decoder reports the
+		// stream's own with MF_E_TRANSFORM_STREAM_CHANGE once it has parsed the
+		// parameter sets, and `process_output` renegotiates then.
 		backend.set_input_type()?;
+		backend.configure_output()?;
 		unsafe {
 			backend
 				.transform
@@ -179,6 +192,14 @@ impl MediaFoundation {
 			media
 				.SetGUID(&MF_MT_SUBTYPE, &self.input_subtype)
 				.map_err(|e| mf_err("input subtype", e))?;
+			// The HEVC decoder looks the frame size up on the input type when the
+			// output type is set and fails with MF_E_ATTRIBUTENOTFOUND without one.
+			// The stream's own size isn't known yet; any size does, because the
+			// decoder replaces it with the parsed one through a stream change.
+			let (width, height) = PLACEHOLDER_SIZE;
+			media
+				.SetUINT64(&MF_MT_FRAME_SIZE, (u64::from(width) << 32) | u64::from(height))
+				.map_err(|e| mf_err("input frame size", e))?;
 			self.transform
 				.SetInputType(0, &media, 0)
 				.map_err(|e| mf_err("SetInputType", e))?;
@@ -186,9 +207,10 @@ impl MediaFoundation {
 		Ok(())
 	}
 
-	/// Pick the NV12 output type the MFT offers (now that it has parsed the
-	/// stream) and read the negotiated picture size off it. Called once after the
-	/// first access unit, and again if the MFT later reports a resolution change.
+	/// Pick the NV12 output type the MFT offers and read the negotiated picture
+	/// size off it. Called once at open, where the size is the decoder's
+	/// placeholder, and again on every stream change the MFT reports: the first
+	/// one carries the stream's size, later ones a resolution change.
 	fn configure_output(&mut self) -> Result<(), Error> {
 		let mut index = 0;
 		loop {
