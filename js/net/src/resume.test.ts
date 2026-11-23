@@ -4137,7 +4137,7 @@ for (const ordered of [false, true]) {
 		const ta = copy(a);
 		const tb = copy(b);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe();
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 		const keyOrder = ordered ? sub.ordered() : undefined;
 		const take = () => {
 			if (!keyOrder) return drain(sub);
@@ -4733,7 +4733,7 @@ test.each(["lands", "dropped", "expired"])(
 		const tb = copy(b);
 		hooks.receiveTrack(ta.producer);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe(joining(SECOND));
+		const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: SECOND } }));
 		try {
 			ta.write(0n);
 			expect(drain(sub)).toEqual([0n]);
