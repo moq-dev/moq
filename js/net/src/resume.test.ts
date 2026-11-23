@@ -1007,6 +1007,42 @@ test("a routed reader serves its live join as the serving copy resolves it", asy
 	}
 });
 
+// A switch asks the next copy for a live join the serving copy placed as that join, placed at the
+// boundary past what the reader holds, so its groups still go stale past its max there and nothing
+// below the boundary is asked again. Mirrors the Rust `a_switch_asks_a_placed_live_join_with_its_max`.
+test("a switch asks a placed live join with its max", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const first = copy(a);
+	const next = copy(b);
+	hooks.receiveTrack(first.producer);
+	hooks.receiveTrack(next.producer);
+	front.serve(a.consume());
+	const hour = Duration.secs(3600);
+	const live = front.consumer.track("seq").subscribe(joining(hour));
+	try {
+		first.write(64n);
+		await settle();
+		expect(drain(live)).toEqual([64n]);
+		first.write(66n);
+		await settle();
+		expect(drain(live)).toEqual([66n]);
+
+		front.serve(b.consume());
+		await settle();
+		// The copy's aggregate, where a placed join's lag places nothing.
+		const asked = hooks.requested(next.producer).peek();
+		expect(asked?.ranges).toEqual([{ start: { live: { min: Duration.ZERO, max: hour } } }]);
+		expect(asked?.placed).toEqual(new Map([[0, 67n]]));
+	} finally {
+		live.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 // A front's reader subscribes to a copy only once a route serves it, which may be after the copy's
 // upstream answered the reader's live join. The copy takes the tick the reader added its range at,
 // not its own later one, so it places the join from that answer rather than asking again. Mirrors
