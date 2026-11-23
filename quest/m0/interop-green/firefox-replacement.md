@@ -17,12 +17,12 @@ causes stacked:
   pages through the section, and the lifecycle player underflowed with the
   replacement viewer every night. The lifecycle player now detaches and the
   lifecycle fixture stops encoding video for the section. Measured on that
-  runner class, 20 focused runs each
+  runner class with focused runs
   (`just test media --media-engines firefox --media-cases replacement`): 4 of 20
-  passed without it, 19 of 20 with it.
+  passed without it, 29 of 30 with it.
 - What remains: the `moq-lite-06` fallback. With the runner no longer starved,
   every other step takes 130 to 420 ms on ARM, but the lite-06 fallback takes
-  716 to 1026 ms (x86: 308 ms), and its one failure of 20 ended with the
+  716 to 1026 ms (x86: 308 ms), and its one failure of 30 ended with the
   incumbent's picture playing and its audio unanchored (`audioStalled: true`,
   `audioTimestamp: 0`) after two `skipping missing groups: track=audio` on the
   viewer. The lite-06 replacement, which also builds a fresh subscription,
