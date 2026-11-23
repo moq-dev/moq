@@ -36,6 +36,13 @@ struct Mapping {
 	mapped: bool,
 }
 
+// Safe since `data` is plain client memory owned by the mapping, and the libva calls
+// that release it go through `Display`, which is thread-safe. `Image` reads it only
+// through `&self` and `ImageMut` writes it only through `&mut self`, so the borrow
+// rules still exclude a data race.
+unsafe impl Send for Mapping {}
+unsafe impl Sync for Mapping {}
+
 impl Mapping {
 	/// Maps `created`'s buffer, destroying the image if that fails.
 	fn new(created: Created, display_resolution: (u32, u32)) -> Result<Self, VaError> {
@@ -340,5 +347,17 @@ impl AsMut<[u8]> for ImageMut<'_> {
 		// Safe since the buffer stays mapped for `data_size` bytes while `self` lives, and
 		// `&mut self` makes this the only reference to it.
 		unsafe { std::slice::from_raw_parts_mut(self.mapping.data, self.mapping.len()) }
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn images_can_cross_threads() {
+		fn assert_send_sync<T: Send + Sync>() {}
+		assert_send_sync::<Image<'static>>();
+		assert_send_sync::<ImageMut<'static>>();
 	}
 }
