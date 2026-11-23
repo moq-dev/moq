@@ -56,6 +56,7 @@ class QueryTests(unittest.TestCase):
             "mv",
             "realpath",
             "ps",
+            "tail",
         ):
             (self.bin / command).symlink_to(shutil.which(command))
         self.env = dispatch_env(
@@ -733,6 +734,13 @@ esac
                     stderr=subprocess.PIPE,
                 )
                 started.read_text()
+                # The stub announces itself before it execs sleep, which the
+                # process tree below must show, so wait for that exec.
+                stub = ["ps", "-o", "args=", "-p", pid.read_text().strip()]
+                deadline = time.monotonic() + 60
+                while subprocess.run(stub, text=True, capture_output=True).stdout.strip() != "sleep 600":
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
                 # A job timeout can kill the run without a signal it traps, so
                 # a buffered lane names its running phase before the phase ends.
                 live = b""

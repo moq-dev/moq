@@ -822,14 +822,15 @@ processes() {
 # output would otherwise die with it in its buffer. So before stopping the
 # lanes, print each running lane's processes and buffered output, naming what
 # it waits on. This comes first because a runner kills the job seconds after
-# its TERM. An INT is a local Ctrl-C, which needs neither.
+# its TERM, so each log prints only its tail, whose last lines name the wait.
+# An INT is a local Ctrl-C, which needs neither.
 stopped() {
     local pid name
     for pid in "${!running[@]}"; do
         name=${running[$pid]}
         if github; then echo "::error::$action: lane $name was still running"; else echo "$action: lane $name was still running" >&2; fi
         processes "$pid"
-        cat "$logs/$name.log"
+        tail -c 65536 "$logs/$name.log"
         ! github || echo "::endgroup::"
     done
 }
