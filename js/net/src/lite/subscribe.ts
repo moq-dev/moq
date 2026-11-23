@@ -1452,7 +1452,6 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 	}
 }
 
-/** Like {@link decodeSubscribeResponse} but resolves `undefined` on a clean FIN. */
 /**
  * Whether the next response `r` holds whole, without reading the stream, is a lite-07
  * SUBSCRIBE_START, so a subscriber applying a burst of them can take the next before applying.
@@ -1467,6 +1466,7 @@ export function startBuffered(r: Reader, version: Version): boolean {
 	return start === true;
 }
 
+/** Like {@link decodeSubscribeResponse} but resolves `undefined` on a clean FIN. */
 export async function decodeSubscribeResponseMaybe(
 	r: Reader,
 	version: Version,

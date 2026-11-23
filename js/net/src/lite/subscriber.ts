@@ -2825,9 +2825,9 @@ export class Subscriber {
 		const ranges = wireRanges(hooks.requested(entry.track).peek()?.ranges ?? [{}]);
 		const end = min(entry.end, wireSpan(ranges).end ?? entry.end);
 		const floor = rangesStart(ranges);
-		// Lite-07 answers with SUBSCRIBE_OK once the track ends, unless nothing was asked below the
-		// end. Each range the publisher holds is then owed from the start SUBSCRIBE_OK or
-		// SUBSCRIBE_START named, which accounts for a skipped prefix and resolves a live join or a
+		// Lite-07 answers each range with its own SUBSCRIBE_START, even once the track ended, unless
+		// nothing was asked below the end. Each range the publisher holds is then owed from the start
+		// its SUBSCRIBE_START named, which accounts for a skipped prefix and resolves a live join or a
 		// time start; one whose SUBSCRIBE_START is still on its way owes what nothing says yet.
 		if (hasRanges(this.version)) {
 			if (entry.start === undefined) return !(end > (floor ?? 0n));

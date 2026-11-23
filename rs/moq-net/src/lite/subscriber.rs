@@ -3325,6 +3325,17 @@ mod tests {
 		assert_eq!(active.never_serves(largest), None, "a later range serves it");
 		active.starts.insert(1, None);
 		assert_eq!(active.never_serves(largest), largest, "that range served nothing");
+		active.starts.remove(&1);
+		assert_eq!(active.never_serves(largest), None, "an unanswered range may serve it");
+		active.live = live(&[
+			lite::Range::span(Some(0), 0, Some(3), None),
+			lite::Range::span(Some(4), 0, Some(8), None),
+		]);
+		assert_eq!(
+			active.never_serves(largest),
+			largest,
+			"4..9 never reaches group 10, answered or not"
+		);
 
 		let open = lite::Range { end: None, ..later };
 		active.live = live(&[lite::Range::span(Some(0), 0, Some(3), None), open]);
@@ -6044,8 +6055,9 @@ mod tests {
 	#[kio::test]
 	async fn a_stalled_recovery_walks_its_keys() {
 		let responses = lite06_responses([lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest: None,
-			starts: vec![Some(2)],
+			id: 0,
+			start: Some(2),
+			largest: lite::Edge::Unknown,
 		})]);
 		let Recovering {
 			serve,
@@ -6083,10 +6095,11 @@ mod tests {
 	async fn a_drained_recovery_gives_up_a_missing_key() {
 		let responses = lite06_responses([
 			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				largest: None,
-				starts: vec![Some(2)],
+				id: 0,
+				start: Some(2),
+				largest: lite::Edge::Unknown,
 			}),
-			lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 6, error: None }),
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 6, error: None }),
 		]);
 		let Recovering {
 			serve,
@@ -10897,8 +10910,8 @@ impl SubStream {
 		}
 	}
 
-	/// Where each bounded range delivers, as its reported start resolved it, up to its end.
-	/// `None` when a range is open, or nothing says yet where one starts.
+	/// Where each bounded range may deliver, up to its end: from its reported start, or from as
+	/// low as it asked while nothing has answered it yet. `None` when a range has no group end.
 	fn spans(&self) -> Option<Vec<std::ops::Range<u64>>> {
 		self.live
 			.iter()
@@ -10907,8 +10920,14 @@ impl SubStream {
 				let Some(lite::Anchor::Absolute(end)) = range.end else {
 					return None;
 				};
-				// Each range's own start accounts for its skipped prefix.
-				let start = self.range_start(id, range)?.unwrap_or(end.group);
+				let start = match self.range_start(id, range) {
+					// Each range's own start accounts for its skipped prefix.
+					Some(start) => start.unwrap_or(end.group),
+					None => match range.start {
+						Some(lite::Anchor::Absolute(start)) => start.group,
+						_ => 0,
+					},
+				};
 				Some(start..end.group)
 			})
 			.collect()

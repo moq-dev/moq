@@ -1909,6 +1909,31 @@ test("lite draft-07: a time start a copy's oldest range covers waits for an answ
 	}
 });
 
+// A copy whose feed start resolved before its upstream said where the live edge is resolves delivery
+// with no range answered: a range following the edge waits for it. A skip given up meanwhile waits
+// for that START too, since a subscriber reads none before the first. Mirrors the Rust
+// `lite07_withholds_drops_until_a_range_is_answered`.
+test("lite draft-07: drops wait for the first SUBSCRIBE_START", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n });
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { start: 0n });
+		sub.track.skipGroups(0n, 2n);
+		sub.serve(2n);
+		expect(await sub.servedSequence()).toBe(2n);
+		hooks.answerEdge(sub.track);
+		const first = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in first)) throw new Error(`expected SUBSCRIBE_START, got ${Object.keys(first)}`);
+		expect(first.start.id).toBe(0n);
+		const second = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("skip" in second)) throw new Error(`expected SUBSCRIBE_SKIP, got ${Object.keys(second)}`);
+		expect([second.skip.start, second.skip.end]).toEqual([0n, 2n]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // On a relay's copy whose upstream placed one range and still places an older one, the placed range
 // is answered and served at once. The older one is answered once placed, where it starts, below the
 // range answered first. Mirrors the Rust `lite07_a_placed_range_goes_out_before_an_older_unplaced_one`.

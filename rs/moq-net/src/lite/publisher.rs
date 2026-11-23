@@ -5347,6 +5347,10 @@ struct TrackRun {
 	// SUBSCRIBE_START is the first message, and a SUBSCRIBE_END ahead of it says no group
 	// was served, so the end waits for the start, or goes out alone once none can arrive.
 	held_end: Option<lite::SubscribeEnd>,
+	// Lite-07: the drops and skips given up once delivery resolved, while no range's
+	// SUBSCRIBE_START has gone out yet, as a range following an edge this hop does not know
+	// yet leaves it. A subscriber reads none before the subscription's first START.
+	withheld: Option<RangeMap<u64, Hole>>,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
 	bounded: bool,
@@ -5494,6 +5498,7 @@ impl TrackRun {
 			start,
 			end_sent: false,
 			held_end: None,
+			withheld: None,
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -5845,11 +5850,7 @@ impl TrackRun {
 					continue;
 				}
 			};
-			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-				id,
-				start,
-				largest,
-			}))?;
+			self.buffer_start(lite::SubscribeStart { id, start, largest }, writer)?;
 			reported = true;
 		}
 		self.unstarted = waiting;
@@ -5956,7 +5957,7 @@ impl TrackRun {
 						record.tell(gap.clone(), report);
 					}
 				}
-				writer.buffer(&self.hole(span, &hole))?;
+				self.buffer_hole(span, hole, writer)?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -6204,7 +6205,7 @@ impl TrackRun {
 		};
 		let report = self.report(hole);
 		self.track.record_mut().tell(range.clone(), report);
-		writer.buffer(&self.hole(range, hole))?;
+		self.buffer_hole(range, hole.clone(), writer)?;
 		Ok(true)
 	}
 
@@ -6235,8 +6236,7 @@ impl TrackRun {
 		let report = self.report(hole);
 		for gap in gaps.iter() {
 			self.track.record_mut().tell(gap.clone(), report);
-			let msg = self.hole(gap.clone(), hole);
-			writer.buffer(&msg)?;
+			self.buffer_hole(gap.clone(), hole.clone(), writer)?;
 		}
 		Ok(!gaps.is_empty())
 	}
@@ -6249,6 +6249,33 @@ impl TrackRun {
 			Hole::Skip if version.has_skip() => lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
 			hole => lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &hole.error(), version)),
 		}
+	}
+
+	/// Send `groups` given up as `hole`, or withhold it until the first SUBSCRIBE_START.
+	fn buffer_hole(
+		&mut self,
+		groups: Range<u64>,
+		hole: Hole,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
+	) -> Result<(), Error> {
+		match &mut self.withheld {
+			Some(withheld) => withheld.insert(groups, hole),
+			None => writer.buffer(&self.hole(groups, &hole))?,
+		}
+		Ok(())
+	}
+
+	/// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one.
+	fn buffer_start(
+		&mut self,
+		start: lite::SubscribeStart,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
+	) -> Result<(), Error> {
+		writer.buffer(&lite::SubscribeResponse::Start(start))?;
+		for (groups, hole) in self.withheld.take().into_iter().flatten() {
+			writer.buffer(&self.hole(groups, &hole))?;
+		}
+		Ok(())
 	}
 
 	/// Name every key from the start to the end that this subscription never got. The
@@ -6425,9 +6452,10 @@ impl TrackRun {
 
 	/// Lite-07, on a track known to have no group yet: answer each range starting at the oldest
 	/// group at once, since every group the track produces is owed, so the subscriber learns
-	/// the track is empty rather than wait on a group. A time start or a live join waits for a
-	/// group to place it: a join on an empty track starts at the first group produced, which a
-	/// lower one produced later does not precede. Returns whether any was answered.
+	/// the track is empty rather than wait on a group. A time start above the floor, or a live
+	/// join, waits for a group to place it: a join on an empty track starts at the first group
+	/// produced, which a lower one produced later does not precede. One at or below the floor
+	/// starts where delivery does (see [`Self::starts`]). Returns whether any was answered.
 	fn resolve_empty(
 		&mut self,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
@@ -6447,11 +6475,14 @@ impl TrackRun {
 			.collect();
 		for id in ids {
 			self.unstarted.remove(&id);
-			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-				id,
-				start: Some(0),
-				largest: lite::Edge::Empty,
-			}))?;
+			self.buffer_start(
+				lite::SubscribeStart {
+					id,
+					start: Some(0),
+					largest: lite::Edge::Empty,
+				},
+				writer,
+			)?;
 		}
 		Ok(true)
 	}
@@ -6474,6 +6505,9 @@ impl TrackRun {
 		// (see `lite::SubscribeStart`).
 		match self.ctx.version.has_ranges() {
 			true => {
+				// Until a range's START goes out, which one following an edge this hop does not
+				// know yet may trail delivery resolving.
+				self.withheld = Some(RangeMap::new());
 				let largest = self.largest(&kio::Waiter::noop());
 				for (id, at) in self.starts(start) {
 					let asked = self.unstarted[&id];
@@ -6481,11 +6515,7 @@ impl TrackRun {
 						continue;
 					}
 					self.unstarted.remove(&id);
-					writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-						id,
-						start: at,
-						largest,
-					}))?;
+					self.buffer_start(lite::SubscribeStart { id, start: at, largest }, writer)?;
 				}
 				// A range an update added before this start is answered with it, before the
 				// drops below, which a subscriber reads only once a range has started.
@@ -9662,6 +9692,45 @@ mod serve_group_test {
 					start: Some(0),
 					largest: lite::Edge::Empty,
 				})]
+			),
+			"{answered:?}"
+		);
+	}
+
+	/// A copy whose feed start resolved before its upstream said where the live edge is resolves
+	/// delivery with no range answered: a range following the edge waits for it. A skip given
+	/// up meanwhile waits for that START too, since a subscriber reads none before the first.
+	#[kio::test]
+	async fn lite07_withholds_drops_until_a_range_is_answered() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.await_edge();
+		track.set_live(None, None, Some(0)).unwrap();
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
+		track.skip_groups(0..2);
+		write_group(&mut track, 2, 2);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.start.resolved(), Some(2), "delivery resolved");
+		assert!(responses(&mut writer, &log).await.is_empty());
+
+		track.answer_edge();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let answered = responses(&mut writer, &log).await;
+		assert!(
+			matches!(
+				answered.as_slice(),
+				[
+					lite::SubscribeResponse::Start(lite::SubscribeStart {
+						id: 0,
+						start: Some(_),
+						largest: lite::Edge::Largest(_),
+					}),
+					lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
+				] if *groups == (0..2)
 			),
 			"{answered:?}"
 		);

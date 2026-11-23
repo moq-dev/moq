@@ -674,7 +674,6 @@ function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	return range;
 }
 
-// The later of two locations, either of which may be unknown.
 /** A lite-07 range still waiting for its SUBSCRIBE_START, as it was asked. Mirrors the Rust `Unstarted`. */
 interface Asked {
 	/** It starts with a live join. */
@@ -690,6 +689,7 @@ function asked(range: WireRange): Asked {
 	return { joins, live: joins || range.end === undefined, oldest: range.start === undefined };
 }
 
+// The later of two locations, either of which may be unknown.
 function newer(a: track.Position | undefined, b: track.Position | undefined): track.Position | undefined {
 	if (!a || !b) return a ?? b;
 	return b.group > a.group || (b.group === a.group && b.frame > a.frame) ? b : a;
@@ -1639,8 +1639,26 @@ export class Publisher {
 				if (range) unstarted.set(id, asked(range));
 			}
 		}
-		const sendStart = (start: SubscribeStart) =>
-			controls.response(encodeSubscribeResponse(stream, { start }, this.version));
+		// Lite-07: the drops and skips given up once delivery resolved, while no range's SUBSCRIBE_START
+		// has gone out yet, as a range following an edge this hop does not know yet leaves it. A
+		// subscriber reads none before the subscription's first START. Mirrors the Rust `TrackRun::withheld`.
+		let withheld: SubscribeResponse[] | undefined;
+		// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one.
+		const sendStart = async (start: SubscribeStart): Promise<boolean> => {
+			if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))) return false;
+			const held = withheld ?? [];
+			withheld = undefined;
+			for (const msg of held) {
+				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
+			}
+			return true;
+		};
+		// Send a drop or skip, or withhold it until the first SUBSCRIBE_START.
+		const sendHole = (msg: SubscribeResponse): Promise<boolean> => {
+			if (!withheld) return controls.response(encodeSubscribeResponse(stream, msg, this.version));
+			withheld.push(msg);
+			return Promise.resolve(true);
+		};
 		// Lite-07: whether the track is a relay's copy that places each range only where its upstream
 		// would, from that upstream's answer for it or groups proving it, so a range it placed waits
 		// on no other. A copy that places ranges from whatever groups it holds, or a local track,
@@ -1656,6 +1674,9 @@ export class Publisher {
 			startKey = from;
 			if (!hasRanges(this.version))
 				return sendStart(new SubscribeStart({ id: 0n, start: from, largest: "unknown" }));
+			// Until a range's START goes out, which one following an edge this hop does not know yet
+			// may trail delivery resolving.
+			withheld = [];
 			const largest = edge(position);
 			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, ids);
@@ -1740,8 +1761,9 @@ export class Publisher {
 
 		// Lite-07, on a track this hop knows has no group yet: answer each range starting at the
 		// oldest group at once, since every group the track produces is owed, so the subscriber
-		// learns the track is empty rather than wait on a group. A time start or a live join waits
-		// for a group to place it. Mirrors the Rust `TrackRun::resolve_empty`.
+		// learns the track is empty rather than wait on a group. A time start above the floor, or a
+		// live join, waits for a group to place it; one at or below the floor starts where delivery
+		// does. Mirrors the Rust `TrackRun::resolve_empty`.
 		const resolveEmpty = async (): Promise<boolean | undefined> => {
 			if (!hasRanges(this.version) || ![...unstarted.values()].some((ask) => ask.oldest)) return undefined;
 			if (newest() !== undefined || !hooks.knowsEdge(track) || hooks.subscriberEnd(track) !== undefined)
@@ -1792,8 +1814,7 @@ export class Publisher {
 				const from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
 				if (from >= gap.end) continue;
 				record.tell(from, gap.end, report);
-				const msg = holeMessage(from, gap.end, hole);
-				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
+				if (!(await sendHole(holeMessage(from, gap.end, hole)))) return false;
 			}
 			return true;
 		};
@@ -1805,7 +1826,7 @@ export class Publisher {
 			if (!record || start >= end) return true;
 			if (!hole.skip) end = reach(end);
 			record.tell(start, end, reportOf(hole));
-			return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
+			return sendHole(holeMessage(start, end, hole));
 		};
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
@@ -1914,8 +1935,7 @@ export class Publisher {
 						// The rest of the span is told with it; the served start keeps its record.
 						for (const gap of record?.untold(start, end) ?? [])
 							record?.tell(gap.start, gap.end, reportOf({ error }));
-						const msg = SubscribeDrop.given(start, end, error, this.version);
-						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
+						if (!(await sendHole({ drop: SubscribeDrop.given(start, end, error, this.version) })))
 							return false;
 					}
 				}

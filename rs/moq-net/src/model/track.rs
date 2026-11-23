@@ -4065,6 +4065,10 @@ impl TrackState {
 				})
 			});
 		self.feed = Feed::Idle { newest, held };
+		// The next feed's answer says afresh where the live feed is.
+		if let EdgeSource::Answer { answered } = &mut self.edge {
+			*answered = false;
+		}
 	}
 
 	/// The route answered with its largest position (`None` for nothing yet): the cache
@@ -14914,6 +14918,25 @@ mod test {
 		);
 		let _next = framed(&producer, 3, 1);
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(3))));
+	}
+
+	/// A lite-07 copy knows the live edge only from its current feed's answer: one whose feed
+	/// went idle and came back answered Unknown, as a bounded feed is, knows nothing of it.
+	#[test]
+	fn an_idle_copy_forgets_its_answered_edge() {
+		let mut producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		producer.await_edge();
+		producer.set_live(Some(Position::group(2)), Some(false), None).unwrap();
+		producer.answer_edge();
+		let mut reader = producer.subscribe(replay());
+		assert!(reader.knows_edge(&noop));
+
+		producer.set_idle();
+		producer.set_live_ahead(None, None, None).unwrap();
+		assert!(!reader.knows_edge(&noop), "the new feed has not said");
+		producer.answer_edge();
+		assert!(reader.knows_edge(&noop));
 	}
 
 	/// An idle copy that declared an end it has not reached yet still waits for the live
