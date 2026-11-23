@@ -12,9 +12,9 @@ groups as missing there.
 
 - [Reattach old groups](/quest/m0/interop-green/reattach-old-groups.md) -
   [moq-dev/moq#9492](https://github.com/moq-dev/moq/pull/9492) deletes it and
-  adds the `waitForLive` failure diagnostics this needs: both pages' long
-  animation frames with their longest scripts, the host's busiest processes,
-  and how long ago the player's latest sample arrived.
+  adds the `waitForLive` failure diagnostics this needs: how long ago the
+  player's latest sample arrived, the host's busiest processes, and, on
+  Chromium, both pages' long animation frames with their longest scripts.
 
 ## Plan
 
@@ -61,13 +61,18 @@ What the artifacts show:
   exposes.
 
 Next: reproduce on `ubuntu-24.04-arm` with a temporary `pull_request` workflow
-running `just test media --media-engines firefox --media-cases
+running `just test media --media-engines chromium,firefox --media-cases
 pause,rejoin,detach` several times per job, as #9494's did, once #9492's
-diagnostics have landed. Its long animation frames name the script that holds
-the page. Candidates are work proportional to the span of audio keys (µs
+diagnostics have landed. On Firefox they show only that the page stopped (the
+latest sample's age and the host's busiest processes): long animation frames
+are Chromium-only, so `test/interop/clients/js/src/stalls.ts` logs nothing
+there. To name the script, use a Chromium player that stops the same way, or
+capture a Gecko profile of the Firefox player across the resumes (for example
+`MOZ_PROFILER_STARTUP=1` with `MOZ_PROFILER_SHUTDOWN=<path>`, kept on
+failure; confirm Playwright's Firefox build honors them). Candidates are work proportional to the span of audio keys (µs
 timestamps) rather than to the groups held, such as the gap handling in
 `js/hang/src/container/consumer.ts` or the lite-06 fill in
-`js/net/src/lite/fills.ts`. Confirm it on x86 under CPU throttling, then fix
+`js/net/src/lite/fills.ts`. Confirm it on x86 on fewer CPUs (`taskset`), then fix
 it at the root and measure the stop on ARM before and after. If no stop
 recurs, the relay becomes the suspect again: rerun with the relay at
 `moq_net=trace`. Loosening the bounds or retrying is not a fix.
