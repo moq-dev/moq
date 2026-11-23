@@ -546,6 +546,7 @@ async fn route_at(
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: update,
+			..
 		} = announced.next().await.expect("update")
 		else {
 			continue;

@@ -133,6 +133,7 @@ impl Watch {
 					origin::RouteKind::Restart => Kind::Restart,
 					origin::RouteKind::End => Kind::End,
 					origin::RouteKind::Offline => Kind::Offline,
+					kind => panic!("unexpected route kind {kind:?}"),
 				};
 				let route = &event.announce.route;
 				let live = matches!(kind, Kind::Start | Kind::Update | Kind::Restart);
@@ -948,6 +949,7 @@ impl Listing {
 				origin::RouteKind::Restart => Kind::Restart,
 				origin::RouteKind::End => Kind::End,
 				origin::RouteKind::Offline => Kind::Offline,
+				kind => panic!("unexpected route kind {kind:?}"),
 			};
 			seen.push((event.announce.prefix.to_string(), kind));
 		}

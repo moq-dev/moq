@@ -35,6 +35,7 @@ async fn started(announced: &mut origin::Routes) -> Instance {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => announce.route.instance().clone(),
 		other => panic!("expected a start, got {other:?}"),
 	}
@@ -177,6 +178,7 @@ async fn next_hop_lost(version: &str) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce,
+				..
 			} => {
 				assert_ne!(
 					announce.route.instance(),

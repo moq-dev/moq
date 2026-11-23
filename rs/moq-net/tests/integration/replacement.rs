@@ -101,6 +101,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => {
 			assert_eq!(announce.prefix.as_str(), "cam");
 			let carried = announce.route.instance();
@@ -143,6 +144,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		Some(origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		}) => assert_eq!(announce.prefix.as_str(), "cam"),
 		other => panic!("{version}: expected the restart, got {other:?}"),
 	}

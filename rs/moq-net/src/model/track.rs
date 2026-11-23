@@ -12946,10 +12946,12 @@ enum Rest {
 }
 
 /// What [`Ordered::poll_next_item`] returns next.
+#[non_exhaustive]
 pub enum Item {
 	/// A group, with a higher key than any group returned before.
 	Group(group::Consumer),
 	/// Groups this reader gave up on, which it will not return.
+	#[non_exhaustive]
 	Gap {
 		/// The keys given up, as group starts.
 		range: ops::Range<u64>,

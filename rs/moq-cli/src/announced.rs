@@ -93,6 +93,7 @@ async fn follow(
 		let (announce, active) = match event {
 			Event::Present(announce) => (announce, true),
 			Event::Absent(announce) => (announce, false),
+			_ => continue,
 		};
 
 		let path = announce.prefix.as_str();

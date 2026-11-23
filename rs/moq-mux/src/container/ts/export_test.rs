@@ -2682,11 +2682,15 @@ async fn aac_program_config_follows_each_table() {
 	let units = aac_program_configs(&ts);
 	assert_eq!(units.len(), 30);
 	for (i, (after_pat, pce)) in units.iter().enumerate() {
-		assert_eq!(
-			after_pat, pce,
-			"unit {i}: the element rides with the tables, and only there"
-		);
+		assert!(!pce || *after_pat, "unit {i}: the element rides only with the tables");
 	}
+	// The tables the media leads, on its cadence and at the marker; the copies the grid
+	// repeats between them lead no media.
+	assert_eq!(
+		units.iter().filter(|(_, pce)| *pce).count(),
+		6,
+		"the element follows each table the media leads"
+	);
 	assert!(units[20].1, "the restarted clock re-sends the element");
 
 	// Join at the second PAT.
@@ -2865,14 +2869,20 @@ async fn aac_program_config_follows_a_revision() {
 	frames.extend(drain_frames(&mut export).await);
 	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 
-	// Whether each PES start, per PID, is the first on its PID since a PAT, and leads with the element.
+	// Whether each PES start, per PID, is the first on its PID since a version of the tables went
+	// out, and leads with the element. The copies the grid repeats in between lead no media.
 	let mut tuned: std::collections::HashSet<u16> = Default::default();
+	let mut version = None;
 	let mut starts: Vec<(u16, bool, bool)> = Vec::new();
 	let mut reader = TsPacketReader::new(Cursor::new(&ts[..]));
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
 		let pid = packet.header.pid.as_u16();
 		match packet.payload {
-			Some(TsPayload::Pat(_)) => tuned.clear(),
+			Some(TsPayload::Pmt(pmt))
+				if version.replace(pmt.version_number.as_u8()) != Some(pmt.version_number.as_u8()) =>
+			{
+				tuned.clear()
+			}
 			Some(TsPayload::PesStart(pes)) => {
 				let header = super::adts::Header::parse(&pes.data).unwrap();
 				// ID_PCE in the first three bits of the raw data block.
@@ -2892,7 +2902,7 @@ async fn aac_program_config_follows_a_revision() {
 	for (i, (pid, first, pce)) in starts.iter().enumerate() {
 		assert!(
 			!first || *pce,
-			"PES {i} on PID {pid}: the first since a PAT lacks the element"
+			"PES {i} on PID {pid}: the first since the tables changed lacks the element"
 		);
 	}
 }
@@ -3924,12 +3934,18 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	};
 
 	// Control: the PSI rides every output frame here (each is a keyframe, and they are
-	// further apart than PSI_INTERVAL either way). The SI PIDs must not follow it.
-	assert_eq!(count(0x0000), 13, "PAT on every frame");
-	// SDT at 0,2,4,6,8,10,12s.
-	assert_eq!(count(0x0011), 7, "SDT re-emitted on its 2s interval");
-	// NIT at 0 and 10s.
-	assert_eq!(count(0x0010), 2, "NIT re-emitted on its 10s interval");
+	// further apart than PSI_INTERVAL either way), and the grid repeats it in each 100ms
+	// period with no copy of its own while the next is queued to go out. The SI PIDs must not
+	// follow it.
+	assert_eq!(
+		count(0x0000),
+		24,
+		"PAT on every frame, and repeated while the next is queued"
+	);
+	// SDT every second from 0 to 12s, half its 2s limit.
+	assert_eq!(count(0x0011), 13, "SDT re-emitted at half its 2s interval");
+	// NIT at 0, 5 and 10s.
+	assert_eq!(count(0x0010), 3, "NIT re-emitted at half its 10s interval");
 }
 
 /// The catalog form every published moq-cli through 0.11 writes carries the SI
@@ -4012,9 +4028,13 @@ async fn inline_si_form_is_re_emitted() {
 			.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
 			.count()
 	};
-	assert_eq!(count(0x0000), 13, "PAT on every frame");
-	// SDT at 0,2,4,6,8,10,12s, byte-for-byte the inline section.
-	assert_eq!(count(0x0011), 7, "inline SDT re-emitted on its 2s interval");
+	assert_eq!(
+		count(0x0000),
+		24,
+		"PAT on every frame, and repeated while the next is queued"
+	);
+	// SDT every second from 0 to 12s, byte-for-byte the inline section.
+	assert_eq!(count(0x0011), 13, "inline SDT re-emitted at half its 2s interval");
 	let packet = ts
 		.as_chunks::<188>()
 		.0
@@ -4254,8 +4274,9 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	write(&mut producer, 50, 600_000_000);
 	let before = drain_frames(&mut export).await;
 	assert_eq!(export.discontinuity(), 0, "no rewind yet");
-	assert_eq!(count_pid(&before, 0x0000), 10, "PAT on its 500ms cadence");
-	assert_eq!(count_pid(&before, 0x0011), 3, "SDT at 0, 2 and 4s");
+	// Ten on the media's 500ms cadence, and the grid's copy in the 100ms periods between.
+	assert_eq!(count_pid(&before, 0x0000), 59, "PAT on its cadence and the grid's");
+	assert_eq!(count_pid(&before, 0x0011), 5, "SDT every second, half its 2s limit");
 
 	// A forward marker must flush the last old frame instead of discarding it.
 	producer.discontinuity().unwrap();
@@ -4318,6 +4339,64 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 /// intended PSI rate, and none of those steps is a rewind.
 #[tokio::test(start_paused = true)]
 async fn reordered_video_keeps_the_table_cadence() {
+	let (out, discontinuities) = export_reordered_with_sdt().await;
+
+	// 125 frames span 0..4.96s: ten 500ms slots and five 1s SDT slots, one emission each, and
+	// the grid's copy of the PAT in each 100ms period without a slot's copy.
+	assert_eq!(discontinuities, 0, "a reorder is not a rewind");
+	assert_eq!(
+		count_pid(&out, 0x0000),
+		47,
+		"PAT once per slot and period, not per reorder"
+	);
+	assert_eq!(count_pid(&out, 0x0011), 5, "SDT once per 1s slot, not per reorder");
+	// The SPS declares no reorder depth, so the first B-frame grows the reorder delay. It is
+	// read a delay ahead of the first PCR, so the clock starts on the grown delay and never
+	// steps back.
+	assert_eq!(count_discontinuity(&out), 0, "a reorder does not restart the clock");
+}
+
+/// The tables stay inside TR 101 290's repetition limits on the wire, not only on the media
+/// timeline: PAT and PMT within 500ms, the SDT within 2s. A repeat is decided on a frame's
+/// presentation time but goes out at the frame's place in decode order.
+#[tokio::test(start_paused = true)]
+async fn table_repeats_keep_inside_their_limits_on_the_wire() {
+	let (out, _) = export_reordered_with_sdt().await;
+	for (pid, limit) in [(0x0000, 500), (0x1000, 500), (0x0011, 2_000)] {
+		let gap = longest_wire_gap(&out, pid);
+		assert!(
+			gap < Duration::from_millis(limit),
+			"PID {pid:#06x} repeats {gap:?} apart on the wire, over its {limit}ms limit"
+		);
+	}
+}
+
+/// The longest gap on the wire between two sections starting on `pid`, or from the last to the
+/// last PCR, each packet timed by the PCRs either side of it, as an analyser reads arrival on a
+/// PCR-paced stream.
+fn longest_wire_gap(frames: &[Frame], pid: u16) -> Duration {
+	let ts: Vec<u8> = frames.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
+	let pcrs = pcr_positions(&ts);
+	let at = |index: usize| {
+		let after = pcrs.partition_point(|&(at, _)| at <= index).clamp(1, pcrs.len() - 1);
+		let ((i0, p0), (i1, p1)) = (pcrs[after - 1], pcrs[after]);
+		let ticks = p0 as f64 + (p1 - p0) as f64 * (index as f64 - i0 as f64) / (i1 - i0) as f64;
+		Duration::from_secs_f64(ticks / 27_000_000.0)
+	};
+	let mut starts: Vec<Duration> = ts
+		.chunks(188)
+		.enumerate()
+		.filter(|(_, p)| p[1] & 0x40 != 0 && ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
+		.map(|(index, _)| at(index))
+		.collect();
+	assert!(starts.len() > 1, "PID {pid:#06x} repeats");
+	starts.push(at(pcrs.last().unwrap().0));
+	starts.windows(2).map(|pair| pair[1] - pair[0]).max().unwrap()
+}
+
+/// One keyframe, then frames at 40ms displayed and emitted in decode order as IPBB quads, with
+/// an SDT beside them: the output and its discontinuity count.
+async fn export_reordered_with_sdt() -> (Vec<Frame>, u64) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -4377,15 +4456,7 @@ async fn reordered_video_keeps_the_table_cadence() {
 
 	let mut export = export_of(&consumer).await;
 	let out = drain_frames(&mut export).await;
-
-	// 125 frames span 0..4.96s: ten 500ms slots and three 2s slots, one emission each.
-	assert_eq!(export.discontinuity(), 0, "a reorder is not a rewind");
-	assert_eq!(count_pid(&out, 0x0000), 10, "PAT once per 500ms slot, not per reorder");
-	assert_eq!(count_pid(&out, 0x0011), 3, "SDT once per 2s slot, not per reorder");
-	// The SPS declares no reorder depth, so the first B-frame grows the reorder delay. It is
-	// read a delay ahead of the first PCR, so the clock starts on the grown delay and never
-	// steps back.
-	assert_eq!(count_discontinuity(&out), 0, "a reorder does not restart the clock");
+	(out, export.discontinuity())
 }
 
 /// A program with more than one track marks the break once, not once per track. A
@@ -6962,7 +7033,8 @@ async fn si_revision_does_not_wait_for_the_interval() {
 async fn si_repeats_ride_the_media_grid() {
 	let sdt_v1 = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
 	let sdt_v2 = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
-	let mut rig = si_cadence_rig((0x0011, 0x42), Duration::from_secs(2), timed()).await;
+	// A 4s limit, so the repeats go out every 2s.
+	let mut rig = si_cadence_rig((0x0011, 0x42), Duration::from_secs(4), timed()).await;
 
 	// The lead emission lands wherever this exporter joined.
 	write_si(&mut rig.si_track, Bytes::from(sdt_v1));
@@ -7223,8 +7295,8 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 	assert_eq!(rig.media(2_900, 0x0011).await, 0, "the reordered frame waits");
 	let reordered = rig.media(3_100, 0x0011).await;
 
-	// The catalog raises the interval to 1s. The grid slot must be the 3s anchor's,
-	// not the reordered 2.9s emission's.
+	// The catalog raises the interval to 2s, a 1s repeat. The grid slot must be the 3s
+	// anchor's, not the reordered 2.9s emission's.
 	rig.catalog
 		.modify(rig.catalog.next_timestamp())
 		.unwrap()
@@ -7235,7 +7307,7 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 		.unwrap()
 		.get_mut(&0x42)
 		.unwrap()
-		.interval = Some(Duration::from_secs(1));
+		.interval = Some(Duration::from_secs(2));
 	// The decode clock catches up on the reorder over the next frames, so count the
 	// emissions across them rather than per frame.
 	let held = reordered + rig.media(3_400, 0x0011).await + rig.media(3_900, 0x0011).await;

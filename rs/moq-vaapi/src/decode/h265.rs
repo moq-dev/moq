@@ -325,7 +325,8 @@ impl Decoder {
 			self.first_picture_after_eos,
 			self.prev_tid0_pic.as_ref(),
 			max_pic_order_cnt_lsb,
-		);
+		)
+		.context("picture order count overflows")?;
 		self.first_picture_in_bitstream = false;
 		self.first_picture_after_eos = false;
 
@@ -391,10 +392,13 @@ impl Decoder {
 			for i in 0..usize::from(hdr.num_long_term_sps + hdr.num_long_term_pics) {
 				let mut poc_lt = hdr.poc_lsb_lt[i] as i32;
 				let msb = hdr.delta_poc_msb_present_flag[i];
+				// Wraps rather than overflows: a hostile stream's lookup key only
+				// fails to find a picture.
 				if msb {
-					poc_lt += poc
-						.wrapping_sub((hdr.delta_poc_msb_cycle_lt[i] as i32).wrapping_mul(max_pic_order_cnt_lsb))
-						.wrapping_sub(poc & (max_pic_order_cnt_lsb - 1));
+					poc_lt = poc_lt.wrapping_add(
+						poc.wrapping_sub((hdr.delta_poc_msb_cycle_lt[i] as i32).wrapping_mul(max_pic_order_cnt_lsb))
+							.wrapping_sub(poc & (max_pic_order_cnt_lsb - 1)),
+					);
 				}
 				if hdr.used_by_curr_pic_lt[i] {
 					lt_curr.push((poc_lt, msb));
@@ -999,6 +1003,43 @@ mod tests {
 		dpb.bump(false);
 		store(&mut dpb, 6);
 		assert!(dpb.needs_additional_bumping(&sps));
+	}
+
+	/// A trailing picture whose slice_pic_order_cnt_lsb is `lsb`, after a
+	/// prevTid0Pic at `prev_msb` and `prev_lsb`, with MaxPicOrderCntLsb 256.
+	fn trailing_poc(prev_msb: i32, prev_lsb: i32, lsb: u16) -> Option<i32> {
+		let slice = Slice {
+			header: SliceHeader {
+				pic_order_cnt_lsb: lsb,
+				..Default::default()
+			},
+			nalu: Nalu {
+				header: crate::codec::h265::parser::NaluHeader {
+					type_: NaluType::TrailR,
+					nuh_layer_id: 0,
+					nuh_temporal_id_plus1: 1,
+				},
+				data: std::borrow::Cow::Borrowed(&[]),
+				size: 0,
+				offset: 0,
+			},
+		};
+		let mut prev = PictureData::default();
+		prev.pic_order_cnt_msb = prev_msb;
+		prev.slice_pic_order_cnt_lsb = prev_lsb;
+		PictureData::new_from_slice(&slice, false, false, Some(&prev), 256).map(|pic| pic.pic_order_cnt_val)
+	}
+
+	/// 8.3.1: the lsb wrapping either way moves the msb a whole cycle, and an
+	/// msb pushed past the `i32` range fails the picture instead of overflowing.
+	#[test]
+	fn the_picture_order_count_wraps_and_never_overflows() {
+		assert_eq!(trailing_poc(0, 250, 2), Some(256 + 2));
+		assert_eq!(trailing_poc(512, 2, 250), Some(256 + 250));
+		assert_eq!(trailing_poc(i32::MAX - 255, 250, 2), None);
+		assert_eq!(trailing_poc(i32::MIN, 2, 250), None);
+		// The msb fits but adding the lsb does not.
+		assert_eq!(trailing_poc(i32::MAX - 100, 100, 200), None);
 	}
 
 	#[test]

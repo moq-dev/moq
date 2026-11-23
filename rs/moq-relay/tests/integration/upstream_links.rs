@@ -263,6 +263,7 @@ async fn routes_when(
 				let origin::RouteEvent {
 					kind: origin::RouteKind::Start,
 					announce,
+					..
 				} = event
 				else {
 					panic!("an initial set is only starts: got {event:?}");

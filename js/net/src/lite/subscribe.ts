@@ -949,6 +949,7 @@ async function encodeMaxDelay(w: Writer, version: Version, maxDelay: number | nu
 /** Decode the inverse of {@link encodeMaxDelay}: {@link MAX_SAFE_DELAY_MS} or more says no limit. */
 async function decodeMaxDelay(r: Reader, version: Version): Promise<number | null> {
 	if (hasRanges(version)) return null;
+	// Read wide: a peer may send any varint at or past the sentinel, which still means no limit.
 	const millis = await r.u62();
 	return millis < BigInt(MAX_SAFE_DELAY_MS) ? Number(millis) : null;
 }

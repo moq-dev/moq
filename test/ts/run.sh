@@ -33,6 +33,7 @@
 #   ./run.sh --loss 10             # drop 10% of the relay's datagrams to the subscriber (moq-shaper)
 #   ./run.sh --passthrough         # carry the multiplex whole (`import/export ts --passthrough`)
 #   ./run.sh --passthrough --mpts  # the same with two programs whose recovery points rarely line up
+#   ./run.sh --mpts --program 2 --join 5 # import each program as its own broadcast, export one 5 s in
 #   ./run.sh --passthrough --splice [forward] # an unflagged encoder switch, its clock 16,844.5 s back (or on)
 #   ./run.sh --passthrough --restart 10 # SIGKILL the import 10 s in, restart it 0.5 s later
 
@@ -102,9 +103,16 @@ RATE=""         # bits/s moq-shaper carries from the relay to the subscriber, be
 QUEUE=""        # how long a datagram may wait for RATE before the path tail-drops it
 PASSTHROUGH=""  # carry the multiplex whole and grade the capture packet by packet against the source
 MPTS=""         # publish two programs, which only --passthrough carries whole
+PROGRAM=""      # with --mpts: import each program as its own broadcast, and export this one late
 SPLICE=""       # back or forward: splice two encodes on unrelated clocks, as an encoder switch does
 RESTART=""      # seconds into the source to SIGKILL the import, restarted 0.5 s after it exits
 EXPORT=()       # extra `export ts` flags (--delay)
+# How far into the run that export starts (5 s under --program): it joins mid-broadcast, on its
+# program's own groups.
+PROGRAM_JOIN=""
+# How soon the late export must write its first byte, in seconds: connecting, its catalog, and
+# the group it joins on.
+FIRST_BYTE_MAX=3
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
 # exactly the thing under test.
@@ -227,6 +235,14 @@ while [[ $# -gt 0 ]]; do
         --mpts)
             MPTS=1
             shift
+            ;;
+        --program)
+            PROGRAM="$2"
+            shift 2
+            ;;
+        --join)
+            PROGRAM_JOIN="$2"
+            shift 2
             ;;
         --splice)
             SPLICE=back
@@ -378,8 +394,22 @@ if [[ -n "$PASSTHROUGH" && -n "$ANALYZE_ONLY$PAIR$LIVE" ]]; then
     echo "error: --passthrough cannot be combined with --analyze-only, --pair, or --live" >&2
     exit 1
 fi
-if [[ -n "$MPTS" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES") ]]; then
-    echo "error: --mpts generates its own clip and needs --passthrough, the mode that carries a multiplex whole" >&2
+if [[ -n "$MPTS" && (-z "$PASSTHROUGH$PROGRAM" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES") ]]; then
+    echo "error: --mpts generates its own clip and needs --passthrough, which carries the multiplex whole, or --program" >&2
+    exit 1
+fi
+# Its grader allows no loss from the join on, so nothing may shed: an unimpaired path only.
+if [[ -n "$PROGRAM" && (-z "$MPTS" || -n "$PASSTHROUGH$ANALYZE_ONLY$PAIR$LIVE$SHAPED") ]]; then
+    echo "error: --program exports one program of --mpts, and cannot be combined with --passthrough, --analyze-only, --pair, --live, --loss, or --rate" >&2
+    exit 1
+fi
+if [[ -n "$PROGRAM_JOIN" && -z "$PROGRAM" ]]; then
+    echo "error: --join sets when the --program export starts, and needs --program" >&2
+    exit 1
+fi
+[[ -n "$PROGRAM" ]] && PROGRAM_JOIN="${PROGRAM_JOIN:-5}"
+if [[ -n "$PROGRAM" && ! ("$PROGRAM" =~ ^[12]$ && "$PROGRAM_JOIN" =~ ^[0-9]+$ && PROGRAM_JOIN -lt DURATION) ]]; then
+    echo "error: --program is 1 or 2, and --join whole seconds within the ${DURATION}s run" >&2
     exit 1
 fi
 if [[ -n "$SPLICE" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$MPTS$WITH_EIT$RESTART") ]]; then
@@ -400,6 +430,7 @@ if [[ -n "$RESTART" ]]; then
     fi
 fi
 IMPORT=(import ts)
+[[ -n "$PROGRAM" ]] && IMPORT+=(--program all)
 if [[ -n "$PASSTHROUGH" ]]; then
     IMPORT+=(--passthrough)
     EXPORT+=(--passthrough)
@@ -786,14 +817,23 @@ capture_b() {
         "$MOQ" "${SUB_CONNECT[@]}" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+capture_program() {
+    sleep "$PROGRAM_JOIN"
+    python3 "$DIR/first-byte.py" "$SUB_TS" "$HARNESS_RUN/first-byte.txt" -- timeout -k 3 $((DURATION + 20)) \
+        "$MOQ" "${SUB_CONNECT[@]}" --connect-version "$VERSION" --broadcast "${BROADCAST%.hang}/$PROGRAM.hang" \
+        export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log"
+}
+
 if [[ -n "$LIVE" ]]; then
     echo "### grading subscriber output live (export ts | pcr-timing.py)"
     harness_spawn sub - grade_live
-else
+    SUB_PID="$HARNESS_PID"
+elif [[ -z "$PROGRAM" ]]; then
     echo "### capturing subscriber output (export ts)"
     harness_spawn sub - capture
+    SUB_PID="$HARNESS_PID"
 fi
-SUB_PID="$HARNESS_PID"
 if [[ -n "$PAIR" ]]; then
     echo "### capturing a second subscriber, joining ${PAIR_JOIN}s late"
     harness_spawn sub-b - capture_b
@@ -866,6 +906,12 @@ else
     harness_spawn pub "$HARNESS_RUN/pub.log" publish
 fi
 PUB_PID="$HARNESS_PID"
+# The late joiner starts once the publisher has, so its join is that far into the broadcast.
+if [[ -n "$PROGRAM" ]]; then
+    echo "### capturing program $PROGRAM's broadcast (export ts), joining ${PROGRAM_JOIN}s in"
+    harness_spawn sub - capture_program
+    SUB_PID="$HARNESS_PID"
+fi
 
 # shellcheck disable=SC2329  # invoked from multiple failure paths below
 dump_logs() {
@@ -995,6 +1041,29 @@ fi
 
 if [[ -n "$CAPTURE_OUT" ]]; then
     cp "$SUB_TS" "$CAPTURE_OUT"
+fi
+
+# ── program: one program of the multiplex, joined late ──────────────────────
+# Its own export of the program's own broadcast: it must start promptly, carry that program alone,
+# and lose nothing from the group it joined on to the end.
+if [[ -n "$PROGRAM" ]]; then
+    FIRST_BYTE=$(<"$HARNESS_RUN/first-byte.txt")
+    echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes of program $PROGRAM, the first ${FIRST_BYTE}s after the export started"
+    if awk -v t="$FIRST_BYTE" -v max="$FIRST_BYTE_MAX" 'BEGIN { exit !(t > max) }'; then
+        echo "error: the export's first byte took ${FIRST_BYTE}s, past ${FIRST_BYTE_MAX}s" >&2
+        dump_logs
+        exit 1
+    fi
+    echo
+    if ! python3 "$DIR/holes.py" "$SUB_TS" "$SRC_TS" --program "$PROGRAM" --join "$PROGRAM_JOIN"; then
+        echo >&2
+        echo "error: the capture is not program $PROGRAM alone and whole; the exporter reported:" >&2
+        sed 's/\x1b\[[0-9;]*m//g' "$HARNESS_RUN/sub.log" |
+            grep -E 'TS export release clock|media skipped upstream|missed its deadline|group evicted' |
+            tail -n 20 | sed 's/^/  sub: /' >&2 || true
+        exit 1
+    fi
+    exit 0
 fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"

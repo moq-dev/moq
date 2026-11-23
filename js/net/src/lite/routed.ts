@@ -523,11 +523,11 @@ export class Routed {
 				this.#end(msg.id, msg.lost ?? false);
 				break;
 			case "skipped":
-				break;
 			case "active":
 			case "update":
 			case "ended":
-				// Lite-07 names every claim's instance, and ends one by its Announce ID.
+				// Lite-07 names every claim's instance, ends one by its Announce ID, and decoding
+				// refuses an unknown type, which only lite-06 skips.
 				throw new ProtocolViolation(`${msg.status} announcement on lite-07`);
 		}
 	}

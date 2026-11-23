@@ -174,6 +174,7 @@ impl<S: ObjectStore> Producer<S> {
 				Event::Listed(Ok(Some(TracksEvent::Added {
 					name,
 					info: Listed::Track(info),
+					..
 				}))) => {
 					let queue = queues.entry(name.to_string()).or_insert_with(|| {
 						let queue = kio::Queue::new();
@@ -192,16 +193,9 @@ impl<S: ObjectStore> Producer<S> {
 					// Only fails once closed, which happens when the listing ends.
 					let _ = queue.try_push(info);
 				}
-				// A datagram track is never cached, so there is nothing of it to archive.
-				Event::Listed(Ok(Some(
-					TracksEvent::Added {
-						info: Listed::Datagrams(_),
-						..
-					}
-					| TracksEvent::Synced
-					| TracksEvent::Removed { .. }
-					| TracksEvent::Finished { .. },
-				))) => {}
+				// A datagram track is never cached, so there is nothing of it to archive, nor of
+				// a listing change that is not a track of groups.
+				Event::Listed(Ok(Some(_))) => {}
 				Event::Listed(Ok(None)) => {
 					listing = None;
 					for queue in queues.values() {

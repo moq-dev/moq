@@ -752,7 +752,7 @@ test("max delay is carried only before lite-07", async () => {
 	expect(await field(Version.DRAFT_07, 250)).toEqual(await field(Version.DRAFT_07, null));
 
 	for (const version of [Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06, Version.DRAFT_07]) {
-		for (const maxDelay of [null, 0, 250]) {
+		for (const maxDelay of [null, 0, 250, Number.MAX_SAFE_INTEGER - 1]) {
 			const expected = {
 				[Version.DRAFT_01]: null,
 				[Version.DRAFT_03]: maxDelay,
@@ -768,6 +768,30 @@ test("max delay is carried only before lite-07", async () => {
 			expect((await SubscribeUpdate.decode(new Reader(undefined, update, version), version)).maxDelay).toBe(
 				expected,
 			);
+		}
+	}
+});
+
+// Rust reads any bare-milliseconds max delay at or past the sentinel as no limit, so one too wide
+// for a JS number does too rather than failing the decode.
+test("a max delay past the largest safe value before lite-07 is no limit", async () => {
+	for (const version of [Version.DRAFT_03, Version.DRAFT_06]) {
+		// A max delay of 0 is a one-byte varint, found where an update with 1 differs.
+		const encode = (maxDelay: number) =>
+			encodeMessage(version, new SubscribeUpdate({ priority: 0, maxDelay, ranges: [] }));
+		const update = await encode(0);
+		const other = await encode(1);
+		const at = update.findIndex((byte, index) => byte !== other[index]);
+		for (const millis of [2n ** 53n, 2n ** 62n - 1n]) {
+			const wide = new Uint8Array(8);
+			new DataView(wide.buffer).setBigUint64(0, millis | (0b11n << 62n));
+			const bytes = Uint8Array.from([
+				update[0] + 7,
+				...update.subarray(1, at),
+				...wide,
+				...update.subarray(at + 1),
+			]);
+			expect((await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version)).maxDelay).toBeNull();
 		}
 	}
 });

@@ -429,7 +429,7 @@ An endpoint MUST close the session with a PROTOCOL_VIOLATION if it receives:
 - any message but ANNOUNCE_OK and ANNOUNCE_REQUEST before the first ANNOUNCE_OK on the stream, which answers nothing yet;
 - a second SYNCED for a prefix, or one before the ANNOUNCE_OK answering the edit that added it;
 - a ROUTE, ROUTE_END, DEAD, DRAIN, or ANNOUNCE_FLOOR on a session that does not exchange routes; or
-- a message that does not decode within its Message Length, a flag this version does not define, or a Node ID of 0.
+- a message of a type this version does not define, one that does not decode within its Message Length, a flag this version does not define, or a Node ID of 0.
 
 When the session closes, an endpoint MUST assume that every route and claim on the peer's stream is gone.
 

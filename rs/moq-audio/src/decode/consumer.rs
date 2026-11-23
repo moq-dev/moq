@@ -3012,6 +3012,131 @@ mod tests {
 		}
 	}
 
+	/// Paced packets for the first minute of `budget`'s trace: long enough to spend the
+	/// prior and settle the target at its floor.
+	const PACED: usize = 3000;
+
+	/// `@moq/watch`'s `playout.test.ts` "subscription budget" trace, `(arrival, media)` in ms
+	/// per packet: a minute of 20 ms packets over a 50 ms path, then six seconds of them
+	/// flushed six at a time.
+	fn flushes() -> Vec<(u64, u64)> {
+		let base = 20 * PACED as u64;
+		(0..PACED as u64)
+			.map(|i| (50 + 20 * i, 20 * i))
+			.chain((0..300).map(|i| (base + 50 + 20 * (i / 6 * 6 + 5), base + 20 * i)))
+			.collect()
+	}
+
+	/// [`flushes`] through the whole decode path, one PCM packet per group. Every packet
+	/// sharing an arrival lands before any is read, so the oldest of a flush trails the newest by
+	/// 100 ms. After each arrival, `budget` turns the consumer's delay into its max delay.
+	/// Returns the delay after each arrival in milliseconds, and how many packets were decoded
+	/// rather than skipped.
+	async fn budget(budget: impl Fn(Duration) -> Duration) -> (Vec<f64>, usize) {
+		use moq_mux::container::Container as _;
+
+		let events = flushes();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let options = Options {
+			delay: Delay {
+				max: Some(budget(Duration::ZERO)),
+				..Delay::default()
+			},
+			estimate: true,
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", options).await.unwrap();
+
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let start = kio::clock::now();
+		let mut series = Vec::new();
+		let mut delivered = 0;
+		let mut next = 0;
+		while next < events.len() {
+			let at = events[next].0;
+			tokio::time::advance(Duration::from_millis(at).saturating_sub(start.elapsed())).await;
+			let mut newest = 0;
+			for (sequence, &(_, media)) in events.iter().enumerate().skip(next) {
+				if events[sequence].0 != at {
+					break;
+				}
+				let mut group = track
+					.create_group(moq_net::group::Info { start: sequence as u64 })
+					.unwrap();
+				let frame = moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(media * 1000).unwrap(),
+					duration: None,
+					payload: payload.clone(),
+					keyframe: true,
+				};
+				container.write(&mut group, &[frame]).unwrap();
+				group.finish().unwrap();
+				newest = media;
+				next = sequence + 1;
+			}
+			// Read through the newest packet, which the max delay never gives up; what it gives
+			// up below that reads as a gap.
+			loop {
+				let frame = next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
+				delivered += 1;
+				if frame.timestamp == Timestamp::from_micros(newest * 1000).unwrap() {
+					break;
+				}
+			}
+			series.push(crate::jitter::millis(consumer.delay()));
+			consumer.set_max_delay(budget(consumer.delay()));
+		}
+		(series, delivered)
+	}
+
+	/// The targets across the first twenty flushes, 2.4 s of them.
+	fn onset(series: &[f64]) -> f64 {
+		series[PACED..PACED + 20].iter().copied().fold(f64::MIN, f64::max)
+	}
+
+	/// `moq play`'s subscription reaches the estimator's 2 s ceiling past its delay, never below
+	/// the 2 s it opened with (`rs/moq-cli/src/play/media.rs`, here with audio's delay as the
+	/// shared one), so a flush that starts after the target settled at its floor still lands
+	/// whole and moves it, as the browser's does.
+	#[tokio::test(start_paused = true)]
+	async fn the_subscription_reaches_a_flush_that_starts_after_the_target_settled() {
+		let reach = Duration::from_secs(2);
+		let (series, delivered) = budget(|delay| (delay + reach).max(reach)).await;
+		assert_eq!(series[PACED - 1], 40.0);
+		assert_eq!(delivered, PACED + 300);
+
+		// Every packet observed: the estimator fed the same arrivals directly, after each one.
+		let mut target = crate::jitter::Target::new(Duration::ZERO, true, None);
+		target.set_frame(20.0);
+		let mut direct = Vec::new();
+		let events = flushes();
+		for (index, &(at, media)) in events.iter().enumerate() {
+			target.observe(at as f64, media as f64);
+			if events.get(index + 1).is_none_or(|next| next.0 != at) {
+				direct.push(target.millis());
+			}
+		}
+		assert_eq!(series, direct);
+		// Every flush lands whole, so its 100 ms reaches the 95th percentile within a few intervals.
+		assert!(onset(&series) >= 120.0, "{:?}", &series[PACED..PACED + 20]);
+	}
+
+	/// The counter-case: a max delay that only follows the delay gives up the oldest of each
+	/// flush before the consumer observes it, so the estimate only ever sees what the delay it
+	/// already holds allows.
+	#[tokio::test(start_paused = true)]
+	async fn a_budget_following_the_delay_drops_the_flush_it_should_measure() {
+		let (series, delivered) = budget(|delay| delay).await;
+		assert!(delivered < PACED + 300, "{delivered} delivered");
+		assert!(onset(&series) < 120.0, "{:?}", &series[PACED..PACED + 20]);
+	}
+
 	/// Write `events`, `(arrival, group, media)` in ms in arrival order, through the whole
 	/// decode path, one PCM packet per group, reading each one `read` admits as it lands.
 	/// The publisher answers that its feed starts at the first event's group, as a session's

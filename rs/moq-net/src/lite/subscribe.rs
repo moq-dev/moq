@@ -2264,6 +2264,10 @@ mod test {
 		assert_eq!(encoded(Version::Lite06, Some(ms(250))), (Some(250), Some(ms(250))));
 		assert_eq!(encoded(Version::Lite06, Some(ms(0))), (Some(0), Some(ms(0))));
 		assert_eq!(encoded(Version::Lite06, None), (Some(MAX_SAFE_DELAY_MS), None));
+		assert_eq!(
+			encoded(Version::Lite06, Some(ms(MAX_SAFE_DELAY_MS - 1))),
+			(Some(MAX_SAFE_DELAY_MS - 1), Some(ms(MAX_SAFE_DELAY_MS - 1)))
+		);
 
 		let mut msg = subscribe_sample();
 		msg.max_delay = Some(ms(250));
