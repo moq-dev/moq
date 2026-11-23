@@ -69,9 +69,12 @@ jobs:
         uses: ./.github/actions/rust-cache
 
       - name: Check
+        # A cancel or timeout signals only the step's own process, so exec
+        # makes that just (nix develop execs it too), which passes the TERM to
+        # the dispatcher; it then prints what each unfinished lane waits on.
         run: |
           rm -rf target/cargo-timings
-          nix develop --command just ci "$BASE"
+          exec nix develop --command just ci "$BASE"
 
       - name: Upload build timings
         if: ${{ !cancelled() }}

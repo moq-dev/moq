@@ -109,6 +109,7 @@ async fn first_broadcast(url: url::Url) -> String {
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::Start,
 				announce: update,
+				..
 			} => update,
 			other => panic!("expected announce, got {other:?}"),
 		}

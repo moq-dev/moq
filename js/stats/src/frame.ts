@@ -85,10 +85,13 @@ export const PresenceSchema = zeros({
 	subscriptions_peak: counter,
 	wire_tx: counter,
 	wire_rx: counter,
+	wire_lost: counter,
 	credit_stalls: counter,
 	credit_stalled_us: counter,
 	credit_held_readers_us: counter,
 	credit_held_evicted_us: counter,
+	cwnd_blocked_us: counter,
+	pacing_blocked_us: counter,
 	routes_refused: counter,
 	routes: RoutesSchema,
 });

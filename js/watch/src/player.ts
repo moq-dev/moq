@@ -1,5 +1,5 @@
 import { Duration } from "@moq/clock";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
@@ -42,6 +42,11 @@ export type PlayerInput = {
 		visible: Getter<Video.Visible>;
 		/** Which graphics API paints the canvas. */
 		backend: Getter<Video.Backend>;
+		/**
+		 * Delivery priority of the video track against the connection's other subscriptions, in
+		 * `-128..=127` with higher sent first.
+		 */
+		priority: Getter<number>;
 	};
 	/** Audio rendition and speaker output. */
 	audio: {
@@ -51,6 +56,11 @@ export type PlayerInput = {
 		volume: Getter<number>;
 		/** Silence audio and stop its download. */
 		muted: Getter<boolean>;
+		/**
+		 * Delivery priority of the audio track against the connection's other subscriptions, in
+		 * `-128..=127` with higher sent first.
+		 */
+		priority: Getter<number>;
 	};
 	/**
 	 * The claim this player holds on its connection's receive estimate while it downloads. Video
@@ -134,11 +144,13 @@ export class Player {
 				canvas: getter(props.video?.canvas),
 				visible: getter(props.video?.visible ?? "20%"),
 				backend: getter<Video.Backend>(props.video?.backend ?? "auto"),
+				priority: getter(props.video?.priority ?? Catalog.PRIORITY.video),
 			},
 			audio: {
 				target: getter<Audio.Target | undefined>(props.audio?.target),
 				volume: getter(props.audio?.volume ?? 0.5),
 				muted: getter(props.audio?.muted ?? false),
+				priority: getter(props.audio?.priority ?? Catalog.PRIORITY.audio),
 			},
 			viewer: {
 				viewers: getter(props.viewer?.viewers),
@@ -173,8 +185,18 @@ export class Player {
 		this.sync = new Sync({ delay: this.in.delay, lookahead: this.in.lookahead, stretch: this.in.stretch });
 		this.#signals.cleanup(() => this.sync.close());
 
-		this.video = new Video.Decoder({ source: videoSource, sync: this.sync, enabled: this.#videoEnabled });
-		this.audio = new Audio.Decoder({ source: audioSource, sync: this.sync, enabled: this.#audioEnabled });
+		this.video = new Video.Decoder({
+			source: videoSource,
+			sync: this.sync,
+			enabled: this.#videoEnabled,
+			priority: this.in.video.priority,
+		});
+		this.audio = new Audio.Decoder({
+			source: audioSource,
+			sync: this.sync,
+			enabled: this.#audioEnabled,
+			priority: this.in.audio.priority,
+		});
 		this.#signals.cleanup(() => {
 			this.video.close();
 			this.audio.close();

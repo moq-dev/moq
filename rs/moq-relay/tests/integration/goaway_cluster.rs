@@ -186,6 +186,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Start,
 			announce: update,
+			..
 		} => update.route.instance().clone(),
 		other => panic!("expected A's route, got {other:?}"),
 	};
@@ -203,6 +204,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: update,
+				..
 			} = event && *update.route.instance() != instance_a
 			{
 				break;

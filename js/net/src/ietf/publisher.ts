@@ -87,7 +87,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, type TrackStatusRequest } from "./track.ts";
-import type { IetfVersion } from "./version.ts";
+import { type IetfVersion, isDraft23 } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
 const RETRY_BASE = 100;
@@ -703,9 +703,7 @@ export class Publisher {
 		const unsupported =
 			[...params.bytes.keys()].some((key) => key !== 0x21n && key !== 0x23n) ||
 			params.rangeFilters ||
-			[...params.vars.keys()].some(
-				(key) => key !== 0x02n && key !== 0x06n && key !== 0x10n && key !== 0x20n && key !== 0x22n,
-			);
+			[...params.vars.keys()].some((key) => key !== 0x02n && key !== 0x06n && key !== 0x20n && key !== 0x22n);
 		if (unsupported) throw await refused("not_supported", "REQUEST_UPDATE parameters not supported");
 		return { params, requestId };
 	}
@@ -1094,8 +1092,10 @@ export class Publisher {
 			}
 
 			// A revocation bridged from upstream, such as a moq-lite UNAUTHORIZED reset, is one here too.
-			// PUBLISH_DONE's EXPIRED means the subscription's own lifetime ran out, so an expired
-			// token is reported as no longer granted.
+			// Before draft-23 PUBLISH_DONE's EXPIRED means the subscription's own lifetime ran out,
+			// so an expired token is reported as no longer granted. Draft-23 registers
+			// EXPIRED_AUTH_TOKEN for it (section 12.4).
+			const tokenExpired = publishError instanceof SessionError && publishError.code === SessionCode.Expired;
 			if (
 				(publishError instanceof StreamError && publishError.code === StreamCode.Unauthorized) ||
 				(publishError instanceof SessionError &&
@@ -1112,7 +1112,9 @@ export class Publisher {
 			try {
 				const done = new PublishDone({
 					statusCode: unauthorized
-						? PublishDoneStatus.UNAUTHORIZED
+						? tokenExpired && isDraft23(version)
+							? PublishDoneStatus.EXPIRED_AUTH_TOKEN
+							: PublishDoneStatus.UNAUTHORIZED
 						: updateFailed
 							? PublishDoneStatus.UPDATE_FAILED
 							: malformed
@@ -1122,7 +1124,9 @@ export class Publisher {
 									: PublishDoneStatus.TRACK_ENDED,
 					streamCount: BigInt(streams.opened),
 					reasonPhrase: unauthorized
-						? "not granted"
+						? tokenExpired
+							? "token expired"
+							: "not granted"
 						: updateFailed
 							? "update failed"
 							: malformed

@@ -7,7 +7,7 @@ import { nextMedia, subscribeMedia } from "./media";
 
 const flush = () => yieldNow();
 
-test("media joins live, with its delay on the initial subscription and later updates", async () => {
+test("media joins live, with its priority and delay on the initial subscription and later updates", async () => {
 	let initial: Moq.Track.Subscription | undefined;
 	const updates: Moq.Track.Subscription[] = [];
 	const subscriber = {
@@ -24,14 +24,10 @@ test("media joins live, with its delay on the initial subscription and later upd
 		}),
 	} as unknown as Moq.Broadcast.Consumer;
 	const delay = new Signal<Container.Delay>({ min: Duration.millis(100), max: Duration.millis(250) });
+	const priority = new Signal(7);
 	const effect = new Effect();
 
-	subscribeMedia(effect, {
-		broadcast,
-		track: "media",
-		priority: 7,
-		delay,
-	});
+	subscribeMedia(effect, { broadcast, track: "media", priority, delay });
 	// A live join its min delay behind the live edge.
 	const live = [{ start: { live: Duration.millis(100) } }];
 	expect(initial).toEqual({
@@ -54,6 +50,14 @@ test("media joins live, with its delay on the initial subscription and later upd
 	await flush();
 	expect(updates.at(-1)).toEqual({
 		priority: 7,
+		delay: { max: Duration.millis(500) },
+		ranges: live,
+	});
+
+	priority.set(-3);
+	await flush();
+	expect(updates.at(-1)).toEqual({
+		priority: -3,
 		delay: { max: Duration.millis(500) },
 		ranges: live,
 	});

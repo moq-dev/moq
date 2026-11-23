@@ -1121,7 +1121,7 @@ fn lister_lists_physical_names() {
 	lister.finish(Kind::Track, "stats/viewers").unwrap();
 	assert!(matches!(
 		next(&mut tracks),
-		moq_net::broadcast::TracksEvent::Finished { kind: Kind::Track, name: finished } if finished == name
+		moq_net::broadcast::TracksEvent::Finished { kind: Kind::Track, name: finished, .. } if finished == name
 	));
 	assert!(matches!(
 		lister.remove(Kind::Track, "stats/viewers"),
@@ -1132,13 +1132,13 @@ fn lister_lists_physical_names() {
 	lister.add("stats/viewers", moq_net::datagram::Info::default()).unwrap();
 	assert!(matches!(
 		next(&mut tracks),
-		moq_net::broadcast::TracksEvent::Added { name: listed, info: moq_net::broadcast::Listed::Datagrams(_) }
+		moq_net::broadcast::TracksEvent::Added { name: listed, info: moq_net::broadcast::Listed::Datagrams(_), .. }
 			if listed == name
 	));
 	lister.remove(Kind::Datagrams, "stats/viewers").unwrap();
 	assert!(matches!(
 		next(&mut tracks),
-		moq_net::broadcast::TracksEvent::Removed { kind: Kind::Datagrams, name: removed } if removed == name
+		moq_net::broadcast::TracksEvent::Removed { kind: Kind::Datagrams, name: removed, .. } if removed == name
 	));
 	// Listing claims nothing: only serving a name does.
 	assert_eq!(protected.producer.generation().claims(), 0);

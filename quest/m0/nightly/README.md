@@ -25,8 +25,7 @@ This README's own work, after the children:
 - Confirm a scheduled run on `main` passes; never dispatch Nightly. A
   triage counts a cancelled job as failed: a workload that overruns fails at
   its step's timeout, so a job cancelled at its own timeout hung outside it. Failures
-  already owned elsewhere stay there: the audio near-zero p95 row belongs to
-  [audio playout](/quest/m2/audio-playout/README.md), the
+  already owned elsewhere stay there: the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
   a test flakes epic if it recurs, and the paired bench
@@ -156,3 +155,14 @@ a strand counted again at every later event; both fixed in
 rows (a relay still showing a broadcast after its source ended) appeared only
 in those starved runs and did not reproduce locally. A failed replay job now
 uploads its relay and reader logs, so read those if `shown` recurs.
+
+Accepted 2026-11-22, from run
+[45035580806](https://github.com/moq-dev/moq/actions/runs/45035580806): the
+lazy CMAF chunk of `js/watch` and `js/watch-ui` grew from 5,783 to 6,249 bytes
+raw (2,491 to 2,627 gzip, 2,281 to 2,403 Brotli), all in
+`js/hang/src/cmaf/decode.ts`. The cause is
+[moq-dev/moq#9344](https://github.com/moq-dev/moq/pull/9344)'s esds parser, which
+now skips the ES_Descriptor's optional fields and refuses truncated
+descriptors, so AAC with those flags set gets its decoder config. The
+thresholds are unchanged: the failed report became the next daily baseline,
+and 6,249 is 8% over the 5,783 that will be the 30-day anchor, inside its 10%.

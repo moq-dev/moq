@@ -65,6 +65,7 @@ impl Watch {
 					origin::RouteKind::Restart => Kind::Restart,
 					origin::RouteKind::End => Kind::End,
 					origin::RouteKind::Offline => Kind::Offline,
+					kind => panic!("unexpected route kind {kind:?}"),
 				};
 				let seen = Seen {
 					at: kio::clock::now().saturating_duration_since(start),

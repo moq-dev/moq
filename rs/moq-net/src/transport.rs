@@ -25,8 +25,8 @@ pub enum Address {
 }
 
 /// One connection's cumulative wire counters, which its transport updates as it sends and receives:
-/// its bytes, its sender's waits on the peer's connection-level credit, and its receiver's holds
-/// on a spent receive window.
+/// its bytes, its sender's losses and waits on the congestion controller and on the peer's
+/// connection-level credit, and its receiver's holds on a spent receive window.
 ///
 /// Clones share the counters, so stats read them without polling the session or keeping the
 /// connection alive, and the final totals stay readable after it closes. Each counter is
@@ -42,9 +42,13 @@ struct WireCounters {
 	credit_stalled_us: std::sync::atomic::AtomicU64,
 	credit_held_readers_us: std::sync::atomic::AtomicU64,
 	credit_held_evicted_us: std::sync::atomic::AtomicU64,
+	lost_bytes: std::sync::atomic::AtomicU64,
+	cwnd_blocked_us: std::sync::atomic::AtomicU64,
+	pacing_blocked_us: std::sync::atomic::AtomicU64,
 }
 
-fn micros(time: Duration) -> u64 {
+/// A duration in whole microseconds, saturating.
+pub(crate) fn micros(time: Duration) -> u64 {
 	u64::try_from(time.as_micros()).unwrap_or(u64::MAX)
 }
 
@@ -72,6 +76,37 @@ impl Wire {
 	/// Record the cumulative bytes received so far.
 	pub fn set_received_bytes(&self, total: u64) {
 		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// The sent bytes declared lost so far, part of [`Self::sent_bytes`].
+	pub fn lost_bytes(&self) -> u64 {
+		self.0.lost_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Record the cumulative sent bytes declared lost so far.
+	pub fn set_lost_bytes(&self, total: u64) {
+		self.0.lost_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// How long data ready to send waited on a full congestion window.
+	pub fn cwnd_blocked(&self) -> Duration {
+		Duration::from_micros(self.0.cwnd_blocked_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// How long data ready to send waited on the pacer.
+	pub fn pacing_blocked(&self) -> Duration {
+		Duration::from_micros(self.0.pacing_blocked_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// Record the cumulative time data ready to send waited on the congestion controller: on a
+	/// full `cwnd`, or on the `pacing` that spreads sends at its rate.
+	pub fn set_congestion_blocked(&self, cwnd: Duration, pacing: Duration) {
+		self.0
+			.cwnd_blocked_us
+			.store(micros(cwnd), std::sync::atomic::Ordering::Relaxed);
+		self.0
+			.pacing_blocked_us
+			.store(micros(pacing), std::sync::atomic::Ordering::Relaxed);
 	}
 
 	/// How many times the sender blocked with all the peer's connection credit (`MAX_DATA`) spent.
