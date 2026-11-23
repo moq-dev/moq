@@ -1,0 +1,10 @@
+https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443/interop connected via WebTransport
+https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443/interop negotiated ALPN: moqt-22
+connected version=moq-transport-22
+subscribe_namespace written: requestId=0
+announced: broadcast=smoke-rust-4286-1684.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4286-1684.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-rust-4286-1684.hang track=catalog.json
+subscribe error: id=2 broadcast=smoke-rust-4286-1684.hang track=catalog.json error=SUBSCRIBE error: not_supported (code=3) 
+error: SUBSCRIBE error: not_supported (code=3) 
+announced: broadcast=smoke-rust-4286-1684.hang active=false

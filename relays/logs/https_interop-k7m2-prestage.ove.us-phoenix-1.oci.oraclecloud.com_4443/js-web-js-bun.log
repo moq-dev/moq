@@ -1,5 +1,0 @@
-https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443/ connected via WebTransport
-https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443/ negotiated ALPN: moqt-22
-connected version=moq-transport-22
-subscribe_namespace written: requestId=0
-error: timed out waiting for data
