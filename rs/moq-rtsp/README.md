@@ -37,9 +37,18 @@ loop {
 }
 ```
 
+A session keeps the camera's own timestamps, counted from PLAY, and places them
+on the catalog's clock, so `sync.clock` gives each frame its wall time: where
+the camera's RTCP sender report says it was captured, or else when it arrived,
+which trails the capture by the camera's encoding and the network. The catalog
+waits for that placement. `Client::with_report_wait` holds the start for a
+first report, publishing the frames held meanwhile once placed; by default a
+session is placed on its first frame, on a report only when one came first.
+
 Two sessions, such as a camera's SD and HD URLs, can publish renditions of one
 broadcast by sharing its catalog: run both pulls and restart both when either
-returns. Each session's timestamps shift onto the catalog's clock.
+returns. Only the first places the catalog's clock; a later session, like one
+on a clock fixed beforehand, keeps its timestamps and logs a warning.
 
 Credentials ride the URL's userinfo, as every RTSP tool takes them; they are
 taken out of the URL before dialing and never logged.
