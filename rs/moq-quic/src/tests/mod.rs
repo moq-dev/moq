@@ -4173,6 +4173,168 @@ fn lost_handshake_ack_repeats_in_next_packet() {
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.acks, acks + 1);
 }
 
+/// A server whose flight was lost re-sends it when the client repeats its ClientHello, rather than
+/// at its own PTO (RFC 9002 §6.2.3)
+#[test]
+fn server_resends_flight_when_client_probes() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	// The client probes long before the server's 999ms PTO, as a peer with a lower initial RTT does
+	let mut client = client_config();
+	client.transport.initial_rtt = Duration::from_millis(10);
+	let client_ch = pair.begin_connect(client);
+	let start = pair.time;
+
+	// The server's flight is lost
+	pair.drive_client();
+	pair.drive_server();
+	pair.client.inbound.clear();
+	let sent = pair.client_conn_mut(client_ch).stats().frame_tx.crypto;
+	while pair.client_conn_mut(client_ch).stats().frame_tx.crypto == sent {
+		pair.time = pair.client.next_wakeup().unwrap();
+		pair.drive_client();
+	}
+
+	while !has_handshake_data(pair.client_conn_mut(client_ch)) {
+		assert!(pair.step());
+	}
+	// Before the server's own first PTO, three times its initial RTT
+	let pto = 3 * transport::Config::default().initial_rtt;
+	assert!(pair.time - start < pto, "{:?}", pair.time - start);
+}
+
+/// A client that gets the server's Handshake packets without the ServerHello before them asks
+/// for it again at once, rather than at its PTO (RFC 9002 §6.2.3)
+#[test]
+fn client_requests_lost_server_hello() {
+	let _guard = subscribe();
+	let (cert, key) = big_cert_and_key();
+	let mut pair = Pair::new(Default::default(), server_config_with_cert(cert.clone(), key));
+	pair.latency = Duration::from_millis(10);
+	let client_ch = pair.begin_connect(client_config_with_certs(vec![cert]));
+	pair.drive_client();
+	pair.time = pair.server.next_wakeup().unwrap();
+	pair.server.drive(pair.time, pair.client.addr);
+	let start = pair.time;
+
+	// The datagram carrying the ServerHello is lost, and the Handshake ones paced out behind it
+	// arrive
+	pair.server.outbound.pop_front();
+	pair.drive_server();
+
+	// The client asks by repeating its ClientHello, whose ACK was in the lost datagram: a server
+	// following RFC 9002 §6.2.3's text re-sends on duplicate CRYPTO but only ACKs a PING
+	let tx = pair.client_conn_mut(client_ch).stats().frame_tx;
+	while pair.client_conn_mut(client_ch).stats().frame_tx.crypto == tx.crypto {
+		assert!(pair.step());
+	}
+	let asked = pair.client_conn_mut(client_ch).stats().frame_tx;
+	assert_eq!((asked.crypto, asked.ping), (tx.crypto + 1, tx.ping));
+
+	while !has_handshake_data(pair.client_conn_mut(client_ch)) {
+		assert!(pair.step());
+	}
+	// Three round trips and the pacing between datagrams, against a 999ms PTO: one to hear the
+	// ServerHello is missing, then two for the flight sent again, which the anti-amplification
+	// limit splits around an ACK
+	let rtt = 2 * pair.latency;
+	assert!(pair.time - start < 4 * rtt, "{:?}", pair.time - start);
+	pair.drive();
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
+/// A server's handshake PTO carries its whole lost flight, Initial and Handshake coalesced, so the
+/// probe's first datagram alone completes the client's handshake
+#[test]
+fn handshake_pto_coalesces_lost_flight() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let client_ch = pair.begin_connect(client_config());
+	pair.drive_client();
+	pair.drive_server();
+	// The server's whole flight is lost, up to its PTO's probe, a padded Initial
+	pair.client.inbound.clear();
+	loop {
+		pair.time = pair.server.next_wakeup().unwrap();
+		pair.server.drive(pair.time, pair.client.addr);
+		if pair
+			.server
+			.outbound
+			.front()
+			.is_some_and(|(t, _)| t.size >= MIN_INITIAL_SIZE as usize)
+		{
+			break;
+		}
+		pair.server.outbound.clear();
+	}
+	pair.server.outbound.truncate(1);
+	pair.drive_server();
+	pair.drive_client();
+	assert!(is_connected(pair.client_conn_mut(client_ch)));
+}
+
+/// CRYPTO recovered early goes ahead of a flight the anti-amplification limit still holds back,
+/// since a client buffers only so far past the offset it is missing
+#[test]
+fn recovered_crypto_precedes_unsent_flight() {
+	let _guard = subscribe();
+	let (cert, key) = big_cert_and_key();
+	let mut pair = Pair::new(Default::default(), server_config_with_cert(cert.clone(), key));
+	pair.latency = Duration::from_millis(10);
+	let mut client = client_config_with_certs(vec![cert]);
+	// Less than the flight, more than the anti-amplification limit lets out at once
+	client.transport.crypto_buffer_size = 4096;
+	let client_ch = pair.begin_connect(client);
+	pair.drive_client();
+	pair.time = pair.server.next_wakeup().unwrap();
+	pair.server.drive(pair.time, pair.client.addr);
+
+	// The ServerHello and the flight's first bytes are lost
+	pair.server.outbound.pop_front();
+	pair.drive();
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
+/// A requeued handshake flight goes out in offset order, behind none of its later bytes.
+///
+/// The client, with a 4 KiB crypto buffer, holds the flight up to the datagram lost at offset
+/// 4420. Its retransmission is lost too, and the flight's tail never arrived, so a probe re-sends
+/// both; a tail ahead of the retransmission lands past the client's buffer and closes it.
+#[test]
+fn requeued_crypto_keeps_offset_order() {
+	let _guard = subscribe();
+	let (cert, key) = big_cert_and_key();
+	let mut pair = Pair::new(Default::default(), server_config_with_cert(cert.clone(), key));
+	pair.latency = Duration::from_millis(10);
+	let mut client = client_config_with_certs(vec![cert]);
+	client.transport.crypto_buffer_size = 4096;
+	let client_ch = pair.begin_connect(client);
+
+	// The server's datagrams by index: 4 holds offset 4420, 6 to 8 the flight's tail, and 12 the
+	// retransmission of 4420
+	const LOST: [usize; 5] = [4, 6, 7, 8, 12];
+	let mut sent = 0;
+	while !is_confirmed(pair.client_conn_mut(client_ch)) {
+		pair.drive_client();
+		pair.server.drive(pair.time, pair.client.addr);
+		let outbound = mem::take(&mut pair.server.outbound);
+		let batch = outbound.len();
+		for (index, datagram) in (sent..).zip(outbound) {
+			if !LOST.contains(&index) {
+				pair.server.outbound.push_back(datagram);
+			}
+		}
+		sent += batch;
+		pair.drive_server();
+		// Nothing left to wake: a closed client fails the assertion below
+		match min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()) {
+			Some(t) => pair.time = pair.time.max(t),
+			None => break,
+		}
+	}
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
 /// A short idle timeout does not cut the handshake to two Initial flights.
 ///
 /// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while
