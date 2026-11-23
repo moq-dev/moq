@@ -194,6 +194,12 @@ interface Framing {
 	maxAge?: Duration | null;
 }
 
+/** The ranges a SUBSCRIBE asks for and the live joins placed among them; see `wireHeld`. */
+interface Asked {
+	ranges: readonly track.Range[];
+	placed: ReadonlyMap<number, bigint>;
+}
+
 interface SubscribeEntry {
 	datagrams?: DatagramEntry;
 	/** Release the stream demand held by readers of the legacy datagram track. */
@@ -243,8 +249,10 @@ interface SubscribeEntry {
 	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_FINISH waits a fresh
 	// grace for what one sent meanwhile asks for.
 	sent: number;
-	// The ranges the SUBSCRIBE asked for, as `wireRanges` gives them.
+	// The ranges the SUBSCRIBE asked for, as `wireRanges` gives them, and the group each live join
+	// among them was placed at, by index (see `wireHeld`).
 	asked: track.Range[];
+	askedPlaced: ReadonlyMap<number, bigint>;
 	// A recovery's own subscription, whose groups are cancelled once nobody wants them, as a FETCH's.
 	filling?: boolean;
 	// Lite-07: the copy's fills of more than one group, which ask through this subscription.
@@ -1364,7 +1372,7 @@ export class Subscriber {
 		valid?.addEventListener("abort", retire);
 		if (valid?.aborted) retire();
 		const deadline = new Deadline();
-		const setup = this.#openSubscribe(state, msg, ranges, request, id, deadline);
+		const setup = this.#openSubscribe(state, msg, { ranges, placed }, request, id, deadline);
 
 		// Subscribers and info lookups explicitly own setup, including the handoff from
 		// metadata acceptance to reader attachment. Release it when the last owner leaves.
@@ -1573,7 +1581,7 @@ export class Subscriber {
 	async #openSubscribe(
 		state: SubscribeSetup,
 		msg: Subscribe,
-		ranges: readonly track.Range[],
+		asked: Asked,
 		request: track.Request,
 		id: bigint,
 		deadline: Deadline,
@@ -1584,7 +1592,7 @@ export class Subscriber {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
 			const framing = { compress: false, timescale: 0, scale: undefined };
 			// Nor a max age: no publisher limit, not the authored default.
-			const entry = this.#register(id, msg, ranges, request.accept({ maxAge: null }), framing, state);
+			const entry = this.#register(id, msg, asked, request.accept({ maxAge: null }), framing, state);
 			const stream = await this.#sendSubscribe(state, msg, deadline);
 			// The first response MUST be a SUBSCRIBE_OK (older drafts only).
 			const resp = await decodeSubscribeResponse(stream.reader, this.version);
@@ -1627,7 +1635,7 @@ export class Subscriber {
 				timescale: answered.info.timescale ?? 0,
 				scale: model.timescale ?? undefined,
 			};
-			const entry = this.#register(id, msg, ranges, producer, framing, state);
+			const entry = this.#register(id, msg, asked, producer, framing, state);
 			entry.unanswered = { held: answered.stream, answered: new AbortController() };
 			settle(entry);
 			return { stream, entry };
@@ -1687,12 +1695,12 @@ export class Subscriber {
 		}
 	}
 
-	// Register a subscription's accepted copy, asking for `ranges`, so incoming groups and
+	// Register a subscription's accepted copy, asking for what it `asked`, so incoming groups and
 	// datagrams find it.
 	#register(
 		id: bigint,
 		msg: Subscribe,
-		ranges: readonly track.Range[],
+		asked: Asked,
 		producer: track.Producer,
 		framing: { compress: boolean; timescale: number; scale: Time.Timescale | undefined },
 		state: SubscribeSetup,
@@ -1726,7 +1734,8 @@ export class Subscriber {
 			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
 			requested: msg.startGroup,
 			floor: msg.startGroup,
-			asked: [...ranges],
+			asked: [...asked.ranges],
+			askedPlaced: asked.placed,
 			live,
 			starts: new Map(),
 			joinTicks: new Map(),
@@ -2715,6 +2724,7 @@ export class Subscriber {
 			order: msg.order,
 			ranges: entry.asked,
 		};
+		if (entry.askedPlaced.size > 0) lastSent.placed = entry.askedPlaced;
 
 		// The wanted group is subscription state: an update announces each new one past our
 		// largest, and every later update restates it. Requests asking for the same group
@@ -2941,13 +2951,16 @@ export class Subscriber {
 	}
 
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
-		const ar = wireRanges(a.ranges ?? [{}]);
-		const br = wireRanges(b.ranges ?? [{}]);
+		const aw = wireHeld(a);
+		const bw = wireHeld(b);
+		const ar = aw.ranges;
+		const br = bw.ranges;
 		let rangesEqual: boolean;
-		if (hasRanges(this.version)) rangesEqual = sameRanges(ar, br);
+		if (hasRanges(this.version)) rangesEqual = sameRanges(ar, br) && samePlaced(aw.placed, bw.placed);
 		else {
-			const as = wireSpan(ar);
-			const bs = wireSpan(br);
+			// A placed join goes out as a start at its group.
+			const as = wireSpan(placedAsTimes(ar, aw.placed));
+			const bs = wireSpan(placedAsTimes(br, bw.placed));
 			// A lite-06 `Group Start` of 0 is no floor, so the two spell the same; a pre-06 wire tells
 			// them apart: omitted joins at the publisher's start, and 0 is group 0.
 			const start = resolvesStart(this.version)
