@@ -11,6 +11,7 @@ import {
 	encodeSubscribeResponse,
 	inclusiveGroupEnd,
 	LiveRanges,
+	legacyStart,
 	positionFrames,
 	positionStops,
 	rangeBounds,
@@ -314,11 +315,25 @@ test("a joined start is a placed live join", () => {
 	expect(requestedRanges({ startFrame: 0, ranges: joined(3) })).toEqual([
 		{ start: { live: { min: Duration.ZERO, max: Duration.secs(1) } } },
 	]);
-	expect(requestedPlaced(joined(3))).toEqual(new Map([[0, 5n]]));
+	expect(requestedPlaced({ startFrame: 0, ranges: joined(3) })).toEqual(new Map([[0, 5n]]));
 	expect(rangeBounds(joined(3)[0])).toEqual([5n, undefined]);
 	expect(positionFrames(joined(3))).toEqual(new Map([[5n, 3]]));
 	// Frame 0 is the whole group.
 	expect(positionFrames(joined(0))).toEqual(new Map());
+});
+
+// Before lite-07 one max age bounds a named start too, so it decodes as lite-07's Joined anchor
+// does. Mirrors the Rust `a_legacy_start_with_a_max_age_is_a_placed_join`.
+test("a legacy start with a max age is a placed join", () => {
+	const legacy = legacyStart(Version.DRAFT_06, 2_000);
+	const named = { startGroup: 5n, startFrame: 0 };
+	const joined = { startFrame: 0, ranges: [{ start: { joined: { absolute: 5n, frame: 0, max: 2_000 } } }] };
+	expect(requestedRanges(named, legacy)).toEqual(requestedRanges(joined));
+	expect(requestedPlaced(named, legacy)).toEqual(requestedPlaced(joined));
+	// With no max age, it is history.
+	const history = legacyStart(Version.DRAFT_06, null);
+	expect(requestedRanges(named, history)).toEqual([{ start: 5n }]);
+	expect(requestedPlaced(named, history)).toEqual(new Map());
 });
 
 test("a lite-07 range may start partway through a group, which the span keeps", async () => {

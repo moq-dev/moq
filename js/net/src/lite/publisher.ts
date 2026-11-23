@@ -1179,8 +1179,9 @@ export class Publisher {
 		}
 
 		const consumer = front.track(msg.track);
-		// Lite-07: the live joins already placed, which start where they were placed.
-		const placed = requestedPlaced(msg.ranges ?? []);
+		// The live joins already placed, which start where they were placed.
+		const absent = legacyStart(this.version, msg.maxDelay);
+		const placed = requestedPlaced(msg, absent);
 		const subscription = (ranges: track.Range[]): track.Subscription => {
 			const out: track.Subscription = { priority: msg.priority, order: msg.order, ranges };
 			if (placed.size > 0) out.placed = placed;
@@ -1188,7 +1189,7 @@ export class Publisher {
 		};
 		let ranges: track.Range[];
 		try {
-			ranges = requestedRanges(msg, legacyStart(this.version, msg.maxDelay));
+			ranges = requestedRanges(msg, absent);
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -1373,11 +1374,15 @@ export class Publisher {
 					if (!hasRanges(this.version)) {
 						// An older update restates its one span, replacing every range: an absent start is
 						// placed afresh within the new max age rather than retuned where the old one joined.
-						hooks.restateSubscriber(track, {
+						const absent = legacyStart(this.version, update.maxDelay);
+						const restated: track.Subscription = {
 							priority: update.priority,
 							order: update.order,
-							ranges: requestedRanges(update, legacyStart(this.version, update.maxDelay)),
-						});
+							ranges: requestedRanges(update, absent),
+						};
+						const placed = requestedPlaced(update, absent);
+						if (placed.size > 0) restated.placed = placed;
+						hooks.restateSubscriber(track, restated);
 						return;
 					}
 					// Lite-07 hands the model the edit by Range ID, so it costs the ranges it names

@@ -4904,8 +4904,18 @@ impl Bounds {
 				bounds.ranges.push(Range::EMPTY);
 				continue;
 			}
+			// Before lite-07, one max age bounds the whole subscription, a named start included:
+			// that start is a live join placed there, as lite-07 says with a Joined anchor.
+			let legacy_max = match legacy {
+				Some(Start::Live { max: Some(max), .. }) => Some(max),
+				_ => None,
+			};
 			let start = match range.start {
 				None => legacy.unwrap_or(Start::Oldest),
+				Some(lite::Anchor::Absolute(_)) if legacy_max.is_some() => Start::Live {
+					min: Duration::ZERO,
+					max: legacy_max,
+				},
 				Some(lite::Anchor::Absolute(position)) => Start::Time(position.group),
 				Some(lite::Anchor::Time(time)) => Start::Time(time),
 				Some(lite::Anchor::Live { min, max }) => Start::Live { min, max },
@@ -4929,6 +4939,7 @@ impl Bounds {
 			};
 			let joined = match range.start {
 				Some(lite::Anchor::Joined { at, .. }) => Some(at.group),
+				Some(lite::Anchor::Absolute(at)) if legacy_max.is_some() => Some(at.group),
 				_ => None,
 			};
 			let mut stop = None;
@@ -4987,8 +4998,8 @@ impl Bounds {
 	/// as lite01/02 never carry one. Lite-06 resolves it there. Before lite-06 an absent start
 	/// is the latest group, which [`TrackRun::start`] places as the floor once the source's feed
 	/// says where it starts, so a group arriving ahead of an older one doesn't drop it, as a
-	/// live join placed at the first arrival would. A named start is a history floor on every
-	/// wire, bounded by the publisher's max age.
+	/// live join placed at the first arrival would. A named start with a max age is a live join
+	/// placed there; without one, a history floor bounded by the publisher's max age.
 	fn legacy(version: Version, max_delay: Option<Duration>) -> Option<crate::track::Start> {
 		use crate::track::Start;
 		if version.has_ranges() {
@@ -7590,6 +7601,31 @@ mod serve_group_test {
 		let seven = track.append_group(Timestamp::from_millis(7).unwrap()).unwrap();
 		assert!(position_group(four.consume(), &legacy.frames, true).is_none());
 		assert!(position_group(seven.consume(), &legacy.frames, true).is_some());
+	}
+
+	/// Before lite-07, one max age bounds a named start too, so the start is a live join placed
+	/// there, exactly as lite-07's Joined anchor says it.
+	#[test]
+	fn a_legacy_start_with_a_max_age_is_a_placed_join() {
+		let at = track::Position { group: 5, frame: 0 };
+		let max = Duration::from_secs(2);
+		let legacy = Bounds::new(
+			&[lite::Range {
+				start: Some(lite::Anchor::Absolute(at)),
+				end: None,
+			}],
+			Some(crate::track::Start::within(max)),
+		);
+		let joined = Bounds::new(
+			&[lite::Range {
+				start: Some(lite::Anchor::Joined { at, max: Some(max) }),
+				end: None,
+			}],
+			None,
+		);
+		assert_eq!(legacy.ranges, joined.ranges);
+		assert_eq!(legacy.placed, joined.placed);
+		assert_eq!(legacy.frames.floor, 5);
 	}
 
 	/// A range inside one group keeps both of its bounds there.
@@ -11242,9 +11278,9 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 4), (6, 6)]);
 	}
 
-	/// A lowered start is a history floor, so a group it reaches that arrives long after its
-	/// successor is served whole, whatever max age the subscription carries, and the drops at
-	/// the end name only the groups the feed gave up.
+	/// A lowered start with no max age is a history floor, so a group it reaches that arrives
+	/// long after its successor is served whole, and the drops at the end name only the groups
+	/// the feed gave up.
 	#[kio::test]
 	async fn a_lowered_start_serves_a_late_group_whole() {
 		let version = Version::Lite06;
@@ -11269,7 +11305,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Some(Duration::from_secs(1)),
+			max_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 		});
 		{

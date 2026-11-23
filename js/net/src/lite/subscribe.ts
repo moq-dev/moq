@@ -279,7 +279,10 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 export function requestedRanges(msg: Span & { ranges?: WireRange[] }, legacy?: Start): Range[] {
 	if (msg.ranges) return msg.ranges.map(requestedRange);
 	const range: Range = {};
-	if (msg.startGroup !== undefined) range.start = msg.startGroup;
+	const max = legacyMax(legacy);
+	// One max age bounds a named start too: a live join placed there (see {@link requestedPlaced}).
+	if (msg.startGroup !== undefined && max !== undefined) range.start = { live: { min: ClockDuration.ZERO, max } };
+	else if (msg.startGroup !== undefined) range.start = msg.startGroup;
 	else if (legacy !== undefined) range.start = legacy;
 	if (msg.endGroup !== undefined) range.end = msg.endGroup;
 	return [range];
@@ -293,8 +296,8 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }, legacy?: S
  * An absent start takes every group still within that max age, or every group with none, as
  * lite-01/02 never carry one. Lite-06 resolves it there. Before lite-06 an absent start is the
  * latest group, which the publisher places as the floor once the source's feed says where it
- * starts (see `cursorFloor`). A named start is a history floor on every wire, bounded by the
- * publisher's max age. Mirrors the Rust `Bounds::legacy`.
+ * starts (see `cursorFloor`). A named start with a max age is a live join placed there; without
+ * one, a history floor bounded by the publisher's max age. Mirrors the Rust `Bounds::legacy`.
  */
 export function legacyStart(version: Version, maxDelay: number | null): Start | undefined {
 	if (hasRanges(version) || maxDelay === null) return undefined;
@@ -302,13 +305,24 @@ export function legacyStart(version: Version, maxDelay: number | null): Start | 
 	return { live: { min: PAST_EVERY_GROUP, max: ClockDuration.millis(maxDelay) } };
 }
 
+/** The max age a pre-07 `legacy` start carries, undefined when it carries none. */
+function legacyMax(legacy: Start | undefined): ClockDuration | undefined {
+	if (legacy === undefined || typeof legacy === "bigint" || legacy.live.max === null) return undefined;
+	return legacy.live.max ?? ClockDuration.ZERO;
+}
+
 /**
- * The group each live join already placed among lite-07 `ranges` starts at, by its index: see
- * {@link WireJoined} and `Subscription.placed`.
+ * The group each live join already placed among the ranges `msg` asks for starts at, by its index:
+ * a lite-07 {@link WireJoined}, or an older wire's named start under a max age (see
+ * {@link requestedRanges}). See `Subscription.placed`.
  */
-export function requestedPlaced(ranges: readonly WireRange[]): Map<number, bigint> {
+export function requestedPlaced(msg: Span & { ranges?: WireRange[] }, legacy?: Start): Map<number, bigint> {
 	const placed = new Map<number, bigint>();
-	for (const [index, range] of ranges.entries()) {
+	if (!msg.ranges) {
+		if (msg.startGroup !== undefined && legacyMax(legacy) !== undefined) placed.set(0, msg.startGroup);
+		return placed;
+	}
+	for (const [index, range] of msg.ranges.entries()) {
 		const joined = range.start?.joined;
 		if (joined !== undefined) placed.set(index, joined.absolute);
 	}
