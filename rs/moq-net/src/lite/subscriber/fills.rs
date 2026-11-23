@@ -374,13 +374,20 @@ impl RangeFills {
 			}
 		}
 		// TEMPORARY MIGRATION, see [`Recovery::walk`]: a fill owing keys a stalled recovery left
-		// goes to FETCH whole, as before per-run recoveries.
+		// goes to FETCH whole, as before per-run recoveries, once it takes what was refused
+		// already, which it may not have reached yet.
 		if !walk.is_empty() {
-			let (walking, held) = std::mem::take(&mut self.held)
+			let (walking, held): (Vec<_>, _) = std::mem::take(&mut self.held)
 				.into_iter()
 				.partition(|fill| walk.overlaps(&(fill.start().group..fill.end())));
 			self.held = held;
-			self.walking.extend::<Vec<_>>(walking);
+			for fill in &walking {
+				let span = fill.start().group..fill.end();
+				for (groups, refusal) in self.refused.overlapping(&span) {
+					refusal.answer(fill, groups.start.max(span.start)..groups.end.min(span.end));
+				}
+			}
+			self.walking.extend(walking);
 		}
 		// What a recovery still out refused since the last poll answers the fills owing it now,
 		// rather than waiting on its other streams.
@@ -862,10 +869,12 @@ impl Recovery {
 						Recv::Ended if *finished => self.end(StreamError::NotFound),
 						// Or once it finished the track, before every stream it opened landed.
 						Recv::Ended if active.end.is_some() => {
-							*draining = Some(Box::new(Settle::new(
-								&self.serve.subscriber.runtime,
-								active.tail.consume(),
-							)));
+							// At most the grace: no max delay bounds the tail's own, and before lite-07
+							// nothing names a key after the FIN.
+							*draining = Some(Box::new(
+								Settle::new(&self.serve.subscriber.runtime, active.tail.consume())
+									.at_most(crate::tail::GRACE),
+							));
 						}
 
 						Recv::Ended => {

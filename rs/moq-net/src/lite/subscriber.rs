@@ -5877,23 +5877,43 @@ mod tests {
 		);
 	}
 
-	/// TEMPORARY MIGRATION, delete with `fills::Recovery::walk`: a relay of the previous release
-	/// starts a lite-06 recovery at its floor, sends the next group it holds, and never accounts
-	/// for the keys between. Once the grace passes, the fill owing them goes to FETCH instead.
-	#[kio::test]
-	async fn a_stalled_recovery_walks_its_keys() {
+	/// What a lite-06 copy holds and what its reader owes.
+	struct Missing {
+		/// The groups written to the copy.
+		written: Vec<u64>,
+		/// Those evicted again.
+		evicted: std::ops::Range<u64>,
+		/// The keys the reader reads in order.
+		read: std::ops::Range<u64>,
+	}
+
+	impl Missing {
+		/// Groups 0..6 written, 2..4 evicted and read.
+		fn evicted() -> Self {
+			Self {
+				written: (0..6).collect(),
+				evicted: 2..4,
+				read: 2..4,
+			}
+		}
+	}
+
+	/// A lite-06 copy over `session` whose reader owes `missing`, its run already recovered on a
+	/// SUBSCRIBE of its own.
+	struct Recovering {
+		serve: TrackServe,
+		copy: crate::track::Producer,
+		fills: fills::RangeFills,
+		/// The reader, the session, and the copy's requests, held for the test.
+		held: (
+			crate::track::Ordered,
+			crate::lite::test_transport::ScriptedSession,
+			crate::track::Requests,
+		),
+	}
+
+	fn recovering(session: crate::lite::test_transport::ScriptedSession, missing: Missing) -> Recovering {
 		let version = Version::Lite06;
-		let mut responses = Vec::new();
-		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest: None,
-			starts: vec![Some(2)],
-		})
-		.encode(
-			&mut crate::coding::Encoder::new(&mut responses, version.into()),
-			version,
-		)
-		.unwrap();
-		let session = crate::lite::test_transport::ScriptedSession::new(responses);
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -5925,31 +5945,70 @@ mod tests {
 				.with_max_age(None),
 		);
 		let requests = copy.requests();
-		for key in 0..6 {
+		for &key in &missing.written {
 			let mut group = copy.create_group(group::Info { start: key }).unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
 			group.finish().unwrap();
 		}
-		for key in 2..4 {
+		for key in missing.evicted {
 			copy.evict(key);
 		}
 		let mut reader = copy
 			.subscribe(
 				crate::track::Subscription::default()
 					.with_delay(crate::track::Delay::default().with_max(None))
-					.with_range(2..4),
+					.with_range(missing.read),
 			)
 			.ordered();
-		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 2..4 are owed");
+		assert!(reader.poll_next_group(&waiter).is_pending(), "the read is owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
-			panic!("groups 2..4 are a miss");
+			panic!("the read is a miss");
 		};
 		let mut fills = fills::RangeFills::new(version);
 		fills.push(fill);
 		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
-		assert!(fills.recovering(), "2..4 recovered on its own subscription");
+		assert!(fills.recovering(), "the miss is recovered on its own subscription");
+		Recovering {
+			serve,
+			copy,
+			fills,
+			held: (reader, session, requests),
+		}
+	}
+
+	/// Encode lite-06 subscribe `responses`.
+	fn lite06_responses(responses: impl IntoIterator<Item = lite::SubscribeResponse>) -> Vec<u8> {
+		let version = Version::Lite06;
+		let mut bytes = Vec::new();
+		for response in responses {
+			response
+				.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
+				.unwrap();
+		}
+		bytes
+	}
+
+	/// TEMPORARY MIGRATION, delete with `fills::Recovery::walk`: a relay of the previous release
+	/// starts a lite-06 recovery at its floor, sends the next group it holds, and never accounts
+	/// for the keys between. Once the grace passes, the fill owing them goes to FETCH instead.
+	#[kio::test]
+	async fn a_stalled_recovery_walks_its_keys() {
+		let responses = lite06_responses([lite::SubscribeResponse::Start(lite::SubscribeStart {
+			largest: None,
+			starts: vec![Some(2)],
+		})]);
+		let Recovering {
+			serve,
+			copy,
+			mut fills,
+			held: _held,
+		} = recovering(
+			crate::lite::test_transport::ScriptedSession::new(responses),
+			Missing::evicted(),
+		);
+		let waiter = kio::Waiter::noop();
 
 		// The relay sends group 4, the next it holds, and nothing for 2 or 3.
 		{
@@ -5967,6 +6026,38 @@ mod tests {
 		assert_eq!(walks.len(), 1, "the fill owing 2..4 goes to FETCH");
 		assert_eq!(walks[0].wanted(), Some(2));
 		assert!(!fills.recovering(), "the stalled recovery ended");
+	}
+
+	/// A lite-06 publisher that finished the track FINs a recovery before the group streams
+	/// it opened land. Nothing names a key after that FIN, so one that never lands is given up
+	/// after the grace, even when no max delay bounds the copy's own.
+	#[kio::test]
+	async fn a_drained_recovery_gives_up_a_missing_key() {
+		let responses = lite06_responses([
+			lite::SubscribeResponse::Start(lite::SubscribeStart {
+				largest: None,
+				starts: vec![Some(2)],
+			}),
+			lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 6, error: None }),
+		]);
+		let Recovering {
+			serve,
+			copy,
+			mut fills,
+			held: _held,
+		} = recovering(
+			crate::lite::test_transport::ScriptedSession::eof(responses),
+			Missing::evicted(),
+		);
+		let waiter = kio::Waiter::noop();
+
+		// The FIN is read, and group 2 never lands.
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert!(fills.recovering(), "group 2 may still land");
+
+		kio::clock::sleep(crate::tail::GRACE * 2).await;
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert!(!fills.recovering(), "the drained recovery gave up group 2");
 	}
 
 	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the narrowest budget

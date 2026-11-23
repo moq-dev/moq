@@ -2408,11 +2408,12 @@ export class Subscriber {
 					await responses;
 					// The publisher FINs unprompted once it finished the track, before every group stream
 					// it opened may have landed: those are waited for, at most the grace, before the rest
-					// is refused.
+					// is refused. No max delay bounds the tail's own, and before lite-07 nothing names a
+					// key after the FIN.
 					if (!fin) {
 						const drained = new Once<null>();
 						try {
-							await race([entry.tail.settle(covered, drained), leaving]);
+							await race([entry.tail.settle(covered, drained, GRACE), leaving]);
 						} finally {
 							drained.set(null);
 						}

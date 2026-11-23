@@ -281,12 +281,21 @@ export class RangeFills {
 			for (const run of done.walk) insertRun(walk, run.start, run.end);
 		}
 		// TEMPORARY MIGRATION, see `RecoveryHandle.walk`: a fill owing keys a stalled recovery left
-		// goes to FETCH whole, as before per-run recoveries.
+		// goes to FETCH whole, as before per-run recoveries, once it takes what was refused already,
+		// which it may not have reached yet.
 		if (walk.length > 0) {
 			const kept: track.FillGroups[] = [];
 			for (const fill of this.#held) {
-				if (clip(walk, fill.start, fill.end).length > 0) this.#walking.push(fill);
-				else kept.push(fill);
+				if (clip(walk, fill.start, fill.end).length === 0) {
+					kept.push(fill);
+					continue;
+				}
+				for (const refused of this.#refused) {
+					const start = max(refused.start, fill.start);
+					const end = min(refused.end, fill.end);
+					if (start < end) answer(refused.refusal, fill, start, end);
+				}
+				this.#walking.push(fill);
 			}
 			this.#held = kept;
 		}

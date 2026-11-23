@@ -386,10 +386,10 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s recovers a run past the t
 		await clock.advance(Duration.secs(60));
 
 		// Upstream answers and, the track being over, FINs the run's subscription before its group
-		// streams land, as QUIC may deliver them.
+		// streams land, as QUIC may deliver them, within the grace.
 		peer.server.holdUnis();
 		answer();
-		await clock.advance(Duration.secs(1));
+		await clock.advance(Duration.millis(500));
 		while (peer.server.heldUnis() > 0) peer.server.releaseOldestUni();
 		expect(sorted(await got)).toEqual([
 			[2n, "old 2"],

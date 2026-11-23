@@ -625,3 +625,32 @@ test("a recovery behind a slow relay still answering is not fetched", async () =
 	);
 	expect(await settlesWithin(fetched, clock, Duration.millis(2000))).toBe(false);
 });
+
+// A lite-05 publisher that finished the track FINs a recovery before the group streams it opened
+// land. Nothing names a key after that FIN, so one that never lands is given up after the grace,
+// not the reader's max delay. Mirrors the Rust `a_drained_recovery_gives_up_a_missing_key`.
+test("a drained recovery gives up a missing key after the grace", async () => {
+	using clock = manual();
+	const version = Version.DRAFT_05;
+	const { subscriber, reader, respond, accept } = await subscribed(version, Duration.millis(60_000), {
+		start: 1n,
+	});
+	await respond({ start: new SubscribeStart([4n]) });
+	const group = groupStream(subscriber, 4n);
+	group.finish();
+	await group.handled;
+	expect((await reader.recvGroup())?.start).toBe(4n);
+	// The reader still owes 1..4, which the copy recovers on a SUBSCRIBE of its own.
+	void reader.recvGroup().catch(() => undefined);
+	const recovery = defined(await accept());
+	expect(await recovery.reader.u53()).toBe(StreamId.Subscribe);
+	await Subscribe.decode(recovery.reader, version);
+	await encodeSubscribeResponse(recovery.writer, { start: new SubscribeStart([1n]) }, version);
+	await encodeSubscribeResponse(recovery.writer, { finish: new SubscribeFinish(5n) }, version);
+	recovery.writer.close();
+
+	// The copy closes its side once it gives up.
+	const ended = recovery.reader.done();
+	expect(await settlesWithin(ended, clock, Duration.millis(900))).toBe(false);
+	expect(await settlesWithin(ended, clock, Duration.millis(200))).toBe(true);
+});

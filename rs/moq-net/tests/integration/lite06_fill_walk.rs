@@ -308,11 +308,11 @@ async fn a_recovery_outlives_the_finished_subscription() {
 	);
 
 	// Upstream answers the run and, the track being over, FINs at once: its group streams
-	// land only after that FIN, as QUIC may deliver them. The FETCH and the reader still get
+	// land only after that FIN, within the grace, as QUIC may deliver them. The FETCH and the reader still get
 	// the run's groups.
 	upstream.server_transport.hold_unis();
 	upstream.client_transport.release_bidis();
-	kio::clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 	assert!(!fetch.is_finished(), "the FETCH was answered before its group landed");
 	upstream.server_transport.release_unis();
 	let fetched = kio::clock::timeout(TIMEOUT, fetch)

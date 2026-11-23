@@ -220,6 +220,7 @@ impl Drop for Reading {
 
 /// Waits out a subscription's tail: until the owed streams are accounted for, or the grace.
 pub(crate) struct Settle {
+	runtime: crate::time::Deadlines,
 	tail: kio::Consumer<Tail>,
 	grace: Deadline,
 }
@@ -229,9 +230,21 @@ impl Settle {
 	pub fn new(runtime: &crate::time::Deadlines, tail: kio::Consumer<Tail>) -> Self {
 		let grace = tail.read().ledger.grace();
 		Self {
+			runtime: runtime.clone(),
 			tail,
 			grace: Deadline::after(runtime, grace),
 		}
+	}
+
+	/// Give up on missing streams after `grace` at the latest.
+	pub fn at_most(mut self, grace: Duration) -> Self {
+		let limit = self.runtime.now().checked_add(grace);
+		if let Some(limit) = limit
+			&& self.grace.deadline().is_none_or(|at| limit < at)
+		{
+			self.grace.set(Some(limit));
+		}
+		self
 	}
 
 	/// Ready once no stream is being read and either `complete` holds or the grace
