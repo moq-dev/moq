@@ -3230,13 +3230,16 @@ impl Connection {
 			&& self.side.is_server()
 			&& self.state.is_handshake()
 			&& !self.handshake_ack_heard
+			&& !self.spaces[space].has_in_flight()
+			&& self.spaces[space].pending.crypto.is_empty()
 		{
-			// A client's ACK-only packet before its Finished, such as its answer to our PING. Until
-			// we acknowledge one of its Handshake packets, it cannot declare a lost Finished lost,
-			// and keeps its PTO armed and backed off as if we had not validated its address (RFC
-			// 9002 §6.2.1, §6.2.2.1), which can hold the Finished past a handshake timeout. RFC
-			// 9000 §13.2.1 forbids answering a non-ack-eliciting packet with another, so the ACK
-			// rides with a PING; the exchange ends once the client acknowledges one.
+			// A client's ACK-only packet before its Finished, leaving it holding our whole flight,
+			// such as its answer to our PING. We have nothing left to send that would carry an
+			// ACK, and until we acknowledge one of its Handshake packets it cannot declare a lost
+			// Finished lost, and keeps its PTO backed off as if we had not validated its address
+			// (RFC 9002 §6.2.1, §6.2.2.1), which can hold the Finished past a handshake timeout.
+			// RFC 9000 §13.2.1 forbids answering a non-ack-eliciting packet with another, so the
+			// ACK rides with a PING; the exchange ends once the client acknowledges one.
 			self.spaces[space].pending_acks.set_immediate_ack_required();
 			self.spaces[space].ping_pending = true;
 		}
