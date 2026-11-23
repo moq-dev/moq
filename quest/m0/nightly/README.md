@@ -167,3 +167,49 @@ now skips the ES_Descriptor's optional fields and refuses truncated
 descriptors, so AAC with those flags set gets its decoder config. The
 thresholds are unchanged: the failed report became the next daily baseline,
 and 6,249 is 8% over the 5,783 that will be the 30-day anchor, inside its 10%.
+
+Triaged 2026-11-23 (maintainer away; agent recommendation, for review), from runs
+[44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952),
+[44916717292](https://github.com/moq-dev/moq/actions/runs/44916717292), and
+[45035580806](https://github.com/moq-dev/moq/actions/runs/45035580806): one more child,
+the mesh replay's reader stranded after every link of its source's relay reopened
+(11-21's `ring6-4`). The Firefox player's `replacement` failures went to
+[interop green](/quest/m0/interop-green/README.md). Fixed on `main` since: features
+([moq-dev/moq#9428](https://github.com/moq-dev/moq/pull/9428)), route-sweep
+([moq-dev/moq#9200](https://github.com/moq-dev/moq/pull/9200)), the 11-20 and 11-21 mutants
+([moq-dev/moq#9294](https://github.com/moq-dev/moq/pull/9294),
+[moq-dev/moq#9312](https://github.com/moq-dev/moq/pull/9312)), cli-export
+([moq-dev/moq#9311](https://github.com/moq-dev/moq/pull/9311)), the Gate's moq-ffi dial
+([moq-dev/moq#9431](https://github.com/moq-dev/moq/pull/9431)), the audit
+([moq-dev/moq#9429](https://github.com/moq-dev/moq/pull/9429)), the benches
+([moq-dev/moq#9099](https://github.com/moq-dev/moq/pull/9099),
+[moq-dev/moq#9235](https://github.com/moq-dev/moq/pull/9235),
+[moq-dev/moq#9251](https://github.com/moq-dev/moq/pull/9251),
+[moq-dev/moq#9305](https://github.com/moq-dev/moq/pull/9305),
+[moq-dev/moq#9310](https://github.com/moq-dev/moq/pull/9310),
+[moq-dev/moq#9433](https://github.com/moq-dev/moq/pull/9433),
+[moq-dev/moq#9434](https://github.com/moq-dev/moq/pull/9434)), drain
+([moq-dev/moq#9213](https://github.com/moq-dev/moq/pull/9213)), drill sensitivity
+([moq-dev/moq#9292](https://github.com/moq-dev/moq/pull/9292)), and the 11-20 mesh replay
+([moq-dev/moq#9236](https://github.com/moq-dev/moq/pull/9236)). Owned by open PRs or
+quests: the 11-22 resume mutants
+([moq-dev/moq#9393](https://github.com/moq-dev/moq/pull/9393),
+[resume and route mutants](/quest/m0/nightly/resume-route-mutants.md)), quic-interop's
+lossy handshake cells ([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445),
+[moq-dev/moq#9447](https://github.com/moq-dev/moq/pull/9447),
+[moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)), the TLA+ failover model's
+deadlock ([moq-dev/moq#9430](https://github.com/moq-dev/moq/pull/9430)), and quic-sim's
+live-edge budget ([moq-dev/moq#9439](https://github.com/moq-dev/moq/pull/9439)). Infra:
+the Benchmark site's artifact listing missed the `github-pages` artifact uploaded a second
+before (11-20 and 11-22, so no longer a one-off; re-check if it fails a third night), and
+the 11-20 Windows C and Cpp release builds failed on Chocolatey not finding `nasm` 3.2.0,
+not a runner bash startup failure as recorded above.
+
+Accepted the same day: `routes/lagging` doubled on 11-20 (`100c_1l` +92%, `100c_100l`
++89%), from [moq-dev/moq#9179](https://github.com/moq-dev/moq/pull/9179). Measured locally
+in alternating pairs: 2.62 µs at its parent, 4.82 µs with it, and 4.8 to 4.9 µs on every
+later commit. Its rule that a request follows a claim only through a neighbour whose copy
+holds it makes the lagging stream's older batch a real change, which marks the claim dirty
+so the relay works its ways out again, a constant cost per step. The bench's comment now
+says so. Nightly compares against a base that already carries the cost, so it will not
+flag it again.
