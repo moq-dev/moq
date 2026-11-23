@@ -6260,7 +6260,7 @@ impl Producer {
 	/// An empty bill against this track's cache account, for a subscription's tail ledger.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn tail_bill(&self) -> cache::Reader {
-		self.state.read().cache.tail()
+		self.state.read().cache.reader()
 	}
 
 	/// Create a [`Requests`] handle that serves on-demand fetches of uncached
@@ -11850,10 +11850,8 @@ impl Subscriber {
 			Poll::Ready(Ok(Some(group))) => Some(group.start),
 			_ => None,
 		};
-		match self.settle_record(handed) {
-			Ok(()) => res,
-			Err(err) => Poll::Ready(Err(err)),
-		}
+		self.settle_record(handed);
+		res
 	}
 
 	fn poll_group_unsettled(
@@ -11862,9 +11860,6 @@ impl Subscriber {
 		admit: (ops::Bound<u64>, ops::Bound<u64>),
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
-		if self.record().failed() {
-			return Poll::Ready(Err(Error::Lagged));
-		}
 		// Ahead of the meter: a read that parks again counts only what a peek skipped.
 		let walk = idle::Walk::new(ordered);
 		match &self.inner {
@@ -12107,22 +12102,30 @@ impl Subscriber {
 		self.record().delivered.runs()
 	}
 
-	/// Bill what this reader settled, and pay what it can of the debt its track left its
-	/// readers; [`Error::Lagged`] once that needed a run it was promised.
-	pub(super) fn settle_record(&mut self, handed: Option<u64>) -> Result<()> {
-		let reader = Standing {
-			from: self.floor().unwrap_or(0),
-			handed,
-		};
+	/// Bill what this reader settled, retire the gaps its ranges left behind, and pay what it
+	/// can of the debt its track left its readers.
+	pub(super) fn settle_record(&mut self, handed: Option<u64>) {
+		let from = self.floor().unwrap_or(0);
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
+				let window = &cursor.filter.window;
+				let reader = Standing {
+					from,
+					handed,
+					ranges: window.is_settled().then(|| window.groups().cloned()).flatten(),
+				};
 				let state = &cursor.state;
 				match cursor.misses.as_deref_mut() {
 					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses, reader),
 					None => cursor.record.settle(|| state.read().cache.clone(), &mut (), reader),
 				}
 			}
-			Inner::Resume(_, logical) => {
+			Inner::Resume(resume, logical) => {
+				let reader = Standing {
+					from,
+					handed,
+					ranges: resume.ranges(),
+				};
 				let state = &logical.state;
 				logical.record.settle(|| state.read().cache.clone(), &mut (), reader)
 			}
@@ -12135,12 +12138,6 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.record,
 			Inner::Resume(_, logical) => &logical.record,
 		}
-	}
-
-	/// Whether the pool ended this reader, needing a run it was promised.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn lagged(&self) -> bool {
-		self.record().failed()
 	}
 
 	/// What this reader settled, for its publisher to record what its wire was told.
@@ -12591,11 +12588,8 @@ impl Subscriber {
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_drop_probing(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, Hole)> {
-		// What a publisher told its wire since is billed now. A reader the pool ended reports
-		// nothing more: its reads fail with the reason.
-		if self.settle_record(None).is_err() {
-			return Poll::Pending;
-		}
+		// What a publisher told its wire since is billed now.
+		self.settle_record(None);
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_drop(probe, waiter),
 			// Each copy reports to its own route; the logical record keeps one route's run from
@@ -12794,8 +12788,8 @@ impl Subscriber {
 			// sources even while nobody reads.
 			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
-		// A reader the pool ended reports it on its next read.
-		let _ = self.settle_record(None);
+		// Retire the gaps the ranges left behind now, not on the next read.
+		self.settle_record(None);
 		Ok(())
 	}
 
@@ -12824,7 +12818,8 @@ impl Subscriber {
 			}
 			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
-		let _ = self.settle_record(None);
+		// Retire the gaps the ranges left behind now, not on the next read.
+		self.settle_record(None);
 		Ok(())
 	}
 
@@ -31785,6 +31780,38 @@ mod test {
 		assert_eq!(subscriber.delivered_runs(), 1000);
 	}
 
+	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,
+	/// grows no record however long it hops, at any capacity: each gap its ranges leave
+	/// behind is retired once they no longer cover it.
+	#[test]
+	fn a_reader_hopping_between_single_groups_keeps_a_bounded_record() {
+		const HOPS: u64 = 200;
+		for capacity in [0, 1 << 30] {
+			for descending in [false, true] {
+				let (producer, _pool) = pooled_producer(capacity);
+				let mut keys: Vec<u64> = (0..HOPS).map(|hop| 2 * hop).collect();
+				if descending {
+					keys.reverse();
+				}
+				let mut subscriber = producer.subscribe(Subscription::default().with_range(keys[0]..keys[0] + 1));
+				let mut most = 0;
+				for key in keys {
+					subscriber
+						.update(Subscription::default().with_range(key..key + 1))
+						.unwrap();
+					write_group(&producer, key);
+					assert_eq!(
+						drain_groups(&mut subscriber),
+						[key],
+						"capacity {capacity}, descending {descending}"
+					);
+					most = most.max(subscriber.delivered_runs() + subscriber.record().reported.len());
+				}
+				assert!(most <= 4, "capacity {capacity}, descending {descending}: {most} runs");
+			}
+		}
+	}
+
 	/// A track whose newest group is `newest`, every group fresh to [`replay`].
 	#[cfg(feature = "async")]
 	fn quiet_track(newest: u64) -> Producer {
@@ -32979,7 +33006,7 @@ mod test {
 	/// can, the reader folds the runs, stale or not, and the groups it read into its floor and
 	/// stays within the pool: every report is final.
 	#[test]
-	fn a_reported_flood_folds_or_ends_the_reader() {
+	fn a_reported_flood_folds_into_the_floor() {
 		const RUNS: u64 = 1000;
 		let budget = Duration::from_secs(1);
 		for stale in [false, true] {

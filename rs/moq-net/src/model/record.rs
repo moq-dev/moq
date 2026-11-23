@@ -9,8 +9,8 @@ use rangemap::{RangeMap, RangeSet};
 use super::cache;
 use super::delivered::Delivered;
 use super::skipped::Skipped;
+use super::subscription::Cover;
 use super::track::Hole;
-use crate::Error;
 
 /// Heap a record keeps per run: its widest entry, doubled for half-full `BTreeMap` nodes as
 /// the cache's own overheads are. Billed to the pool, so a peer fragmenting what a reader
@@ -39,8 +39,8 @@ pub(crate) struct Record {
 	floor: u64,
 	/// What the runs above the floor bill to the track's account, opened on the first run.
 	bill: Option<cache::Reader>,
-	/// The pool needed a run this reader was promised, so it ended.
-	failed: bool,
+	/// The ranges the last retirement judged the gaps against (see [`Self::retire`]).
+	retired: Option<Cover>,
 	/// A fold forgot the runs copied from the track's drop set, which the next drop scan
 	/// folds in again in full.
 	pub(super) rescan: bool,
@@ -169,12 +169,16 @@ impl Record {
 }
 
 /// Where a reader stands, which shapes what its record's fold settles.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Default)]
 pub(super) struct Standing {
 	/// The lowest key the reader's ranges name now.
 	pub from: u64,
 	/// The group this read hands out, which its publisher has yet to tell its wire of.
 	pub handed: Option<u64>,
+	/// The groups the reader's ranges hold, once nothing in them is left to place: `None`
+	/// while a live join waits or a start is still being looked up, when no gap can be known
+	/// to lie outside them.
+	pub ranges: Option<Cover>,
 }
 
 /// Runs a reader keeps beside its record, billed with it and settled by its fold: the
@@ -184,6 +188,8 @@ pub(super) trait Beside {
 	fn runs(&self) -> u64;
 	/// One past the run holding `key` that this reader gave up for good, if it did.
 	fn given_up_end(&self, key: u64) -> Option<u64>;
+	/// The lowest key from `key` on that it gave up, or still asks or awaits a fill for.
+	fn next_held(&self, key: u64) -> Option<u64>;
 	/// Forget every run within `folded`, which the record folded as settled.
 	fn forget(&mut self, folded: std::ops::Range<u64>);
 }
@@ -197,7 +203,40 @@ impl Beside for () {
 		None
 	}
 
+	fn next_held(&self, _key: u64) -> Option<u64> {
+		None
+	}
+
 	fn forget(&mut self, _folded: std::ops::Range<u64>) {}
+}
+
+/// A final stretch of keys a fold may settle.
+struct Stretch {
+	/// One past its last key.
+	end: u64,
+	/// How many runs it spans.
+	runs: usize,
+	/// Where each gap it passes through that the reader's ranges left behind starts.
+	gaps: Vec<u64>,
+}
+
+/// What a walk through the gaps the reader's ranges left behind found, and folded.
+#[derive(Default)]
+struct Walk {
+	gaps: Vec<u64>,
+	folded: Vec<std::ops::Range<u64>>,
+}
+
+/// Which keys a fold may settle.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fold {
+	/// Under a debt: every final key, a stale skip and what `beside` gave up included, which
+	/// costs a wider budget the offer of them again.
+	Debt,
+	/// After the ranges moved: only groups handed out, reports, and the gaps left outside the
+	/// ranges that start below `below`, so a stale skip stays for a wider budget to offer
+	/// again.
+	Retire { below: u64 },
 }
 
 /// What a record bills, and the debt its track left to its readers.
@@ -212,15 +251,13 @@ impl Record {
 			+ self.reported.len()) as u64
 	}
 
-	/// Whether the pool needed a run this reader was promised, which ended it.
-	pub(super) fn failed(&self) -> bool {
-		self.failed
-	}
-
-	/// Bill this record to `account`, opened on its first run, and pay what it can of the
-	/// debt the track left its readers by folding what it settled for good into its floor.
-	/// Ends the reader with [`Error::Lagged`] when a debt is left that only a run it was
-	/// promised could pay, and its record is one to end (see [`cache::Reader::ends`]).
+	/// Bill this record to `account`, opened on its first run. Once the reader's ranges
+	/// moved, retire the gaps they left behind (see [`Self::retire`]); under a debt the track
+	/// left its readers, pay what it can by folding what it settled for good into its floor.
+	///
+	/// A record is its reader's owed gaps, not cached media, so it never ends its reader:
+	/// what is left after both is owed for a moment, a drop not reported yet or a miss still
+	/// asked, or lies in the ranges the reader asks for now.
 	///
 	/// Call with no track lock held: a growing bill settles the track's debt.
 	pub(super) fn settle(
@@ -228,31 +265,86 @@ impl Record {
 		account: impl FnOnce() -> Arc<cache::Track>,
 		beside: &mut dyn Beside,
 		reader: Standing,
-	) -> Result<(), Error> {
-		if self.failed {
-			return Err(Error::Lagged);
+	) {
+		let moved = reader.ranges.is_some() && reader.ranges != self.retired;
+		if moved {
+			self.retired = reader.ranges.clone();
 		}
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = match &mut self.bill {
 			Some(bill) => bill,
-			None if bytes == 0 => return Ok(()),
+			None if bytes == 0 => return,
 			None => self.bill.insert(account().reader()),
 		};
 		bill.set(bytes);
-		if bill.debt() == 0 {
-			return Ok(());
+		let owed = bill.debt() > 0;
+		if !owed && !moved {
+			return;
 		}
-		for folded in self.fold(reader, &*beside) {
+		let mut folded = Vec::new();
+		if moved {
+			folded.extend(self.retire(&reader, &*beside));
+		}
+		if owed {
+			folded.extend(self.fold(&reader, &*beside));
+		}
+		for folded in folded {
 			beside.forget(folded);
 		}
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
-		let bill = self.bill.as_mut().expect("opened above");
-		bill.set(bytes);
-		if bill.debt() > 0 && bill.ends() {
-			self.fail();
-			return Err(Error::Lagged);
+		self.bill.as_mut().expect("opened above").set(bytes);
+	}
+
+	/// Retire the gaps the reader's ranges left behind, which nothing settles while they stay
+	/// where they are: keys nothing settled, between two that something did, that the ranges
+	/// no longer hold, and that nothing owes for a moment (a run given up and not reported
+	/// yet, or a miss `beside` still asks). A record keeps as many such gaps as its ranges
+	/// hold runs, so a narrowing its reader undoes still offers what it narrowed past, as the
+	/// ranges themselves bound; past that, the lowest retire. Each final stretch through them
+	/// folds into one handed-out and reported run, as [`Self::fold`]'s does, so a reader whose
+	/// ranges keep moving to disjoint groups keeps a record no larger than its ranges' share.
+	/// Should the ranges widen over a retired key again, a group there counts as handed out.
+	///
+	/// Only a stretch through a retired gap folds, and stale skips stop one: without a debt,
+	/// the record otherwise stays as it was, and a wider budget still offers a stale skip
+	/// again. Returns the runs it folded.
+	fn retire(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
+		let Some(ranges) = &reader.ranges else {
+			return Vec::new();
+		};
+		let gaps = self.walk(reader, beside, u64::MAX, false).gaps;
+		let excess = gaps.len().saturating_sub(ranges.runs(0).count());
+		match excess {
+			0 => Vec::new(),
+			excess => {
+				let below = gaps.get(excess).copied().unwrap_or(u64::MAX);
+				self.walk(reader, beside, below, true).folded
+			}
 		}
-		Ok(())
+	}
+
+	/// Walk each final stretch through the gaps the ranges left behind below `below`, from the
+	/// floor up, folding those worth it when `fold` says so.
+	fn walk(&mut self, reader: &Standing, beside: &dyn Beside, below: u64, fold: bool) -> Walk {
+		let mut walk = Walk::default();
+		let retire = Fold::Retire { below };
+		let floor = self.final_end(self.floor, reader, beside, retire);
+		walk.gaps.extend(&floor.gaps);
+		if fold && !floor.gaps.is_empty() {
+			self.raise(floor.end);
+			walk.folded.push(0..floor.end);
+		}
+		let mut from = floor.end.max(self.floor);
+		while let Some(start) = self.next_told(from) {
+			let stretch = self.final_end(start, reader, beside, retire);
+			walk.gaps.extend(&stretch.gaps);
+			if fold && !stretch.gaps.is_empty() && stretch.runs > 2 {
+				self.settle_stretch(start..stretch.end);
+				walk.folded.push(start..stretch.end);
+			}
+			from = stretch.end.max(start + 1);
+		}
+		walk
 	}
 
 	/// Raise the floor over the final prefix: each run from it up to the lowest one that is
@@ -267,7 +359,7 @@ impl Record {
 	/// the lowest key it settled when they name none or less. The keys below stay owed, should
 	/// a group arrive there or its ranges widen. Returns the runs it folded, below the floor
 	/// and the stretch.
-	fn fold(&mut self, reader: Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
+	fn fold(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
@@ -283,30 +375,92 @@ impl Record {
 			}
 			self.rescan = true;
 		}
-		let (floor, _) = self.final_end(self.floor, reader.handed, beside);
+		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
 		if floor > self.floor {
-			self.floor = floor;
-			self.delivered.forget_below(floor);
-			self.skipped.forget(0..floor);
-			self.written_off.remove(0..floor);
-			self.pending.remove(0..floor);
-			self.reported.remove(0..floor);
+			self.raise(floor);
 			folded.push(0..floor);
 		}
 		let from = reader.from.max(self.lowest_settled().unwrap_or(0));
 		if from > self.floor {
 			// Folded, the stretch costs two runs: only one spanning more is worth it.
-			let (end, runs) = self.final_end(from, reader.handed, beside);
-			if runs > 2 {
-				let stretch = from..end;
-				self.delivered.insert_run(stretch.clone());
-				self.skipped.forget(stretch.clone());
-				self.written_off.remove(stretch.clone());
-				self.reported.insert(stretch.clone(), Report::Settled);
-				folded.push(stretch);
+			let stretch = self.final_end(from, reader, beside, Fold::Debt);
+			if stretch.runs > 2 {
+				self.settle_stretch(from..stretch.end);
+				folded.push(from..stretch.end);
 			}
 		}
 		folded
+	}
+
+	/// Settle everything below `floor` for good.
+	fn raise(&mut self, floor: u64) {
+		self.floor = floor;
+		self.delivered.forget_below(floor);
+		self.skipped.forget(0..floor);
+		self.written_off.remove(0..floor);
+		self.pending.remove(0..floor);
+		self.reported.remove(0..floor);
+	}
+
+	/// Settle `stretch` as one handed-out and reported run.
+	fn settle_stretch(&mut self, stretch: std::ops::Range<u64>) {
+		self.delivered.insert_run(stretch.clone());
+		self.skipped.forget(stretch.clone());
+		self.written_off.remove(stretch.clone());
+		self.reported.insert(stretch, Report::Settled);
+	}
+
+	/// The lowest key from `key` on that was handed out or reported.
+	fn next_told(&self, key: u64) -> Option<u64> {
+		let reported = self.reported.overlapping(&(key..u64::MAX)).next();
+		[
+			self.delivered.next_from(key),
+			reported.map(|(run, _)| run.start.max(key)),
+		]
+		.into_iter()
+		.flatten()
+		.min()
+	}
+
+	/// The lowest key from `key` on that anything in the record holds.
+	fn next_held(&self, key: u64) -> Option<u64> {
+		let span = key..u64::MAX;
+		[
+			self.next_told(key),
+			self.pending
+				.overlapping(&span)
+				.next()
+				.map(|(run, _)| run.start.max(key)),
+			self.written_off.overlapping(&span).next().map(|run| run.start.max(key)),
+			self.skipped.next_from(key),
+		]
+		.into_iter()
+		.flatten()
+		.min()
+	}
+
+	/// One past the gap at `key` the reader's ranges left behind, which the walk from `start`
+	/// may settle (see [`Self::retire`]), if `key` starts one.
+	fn retirable(&self, key: u64, start: u64, reader: &Standing, beside: &dyn Beside, below: u64) -> Option<u64> {
+		let ranges = reader.ranges.as_ref()?;
+		// Only between settled keys: the walk passed one, or starts on a raised floor.
+		if key >= below || key == start && (key != self.floor || self.floor == 0) {
+			return None;
+		}
+		let past = self
+			.delivered
+			.end()
+			.max(self.reported.last_range_value().map(|(run, _)| run.end));
+		let end = [
+			past,
+			ranges.first(key, u64::MAX).map(|run| *run.start()),
+			self.next_held(key),
+			beside.next_held(key),
+		]
+		.into_iter()
+		.flatten()
+		.min()?;
+		(end > key).then_some(end)
 	}
 
 	/// The lowest key above the floor that anything settled.
@@ -323,24 +477,40 @@ impl Record {
 		.min()
 	}
 
-	/// One past the final stretch starting at `start`, and how many runs it spans: `start`
-	/// itself when its key is not final, or is the group this read hands out.
-	fn final_end(&self, start: u64, handed: Option<u64>, beside: &dyn Beside) -> (u64, usize) {
+	/// The final stretch starting at `start`, which ends at `start` itself when its key is not
+	/// final, or is the group this read hands out. A retirement counts a gap the reader's
+	/// ranges left behind as final too (see [`Self::retire`]).
+	fn final_end(&self, start: u64, reader: &Standing, beside: &dyn Beside, fold: Fold) -> Stretch {
 		let mut end = start;
 		let mut runs = 0;
+		let mut gaps = Vec::new();
 		loop {
 			let next = match self.reported.get_key_value(&end) {
 				Some((run, _)) => run.end,
 				None if self.pending.contains_key(&end) => break,
 				None => {
-					let local = [
-						self.delivered.run_end(end),
-						self.written_off.get(&end).map(|run| run.end),
-						self.skipped.run_end(end),
-						beside.given_up_end(end),
-					];
+					let local = match fold {
+						Fold::Debt => [
+							self.delivered.run_end(end),
+							self.written_off.get(&end).map(|run| run.end),
+							self.skipped.run_end(end),
+							beside.given_up_end(end),
+						],
+						Fold::Retire { .. } => [self.delivered.run_end(end), None, None, None],
+					};
 					let Some(run_end) = local.into_iter().flatten().max() else {
-						break;
+						let Fold::Retire { below } = fold else {
+							break;
+						};
+						match self.retirable(end, start, reader, beside, below) {
+							Some(next) => {
+								gaps.push(end);
+								end = next;
+								runs += 1;
+								continue;
+							}
+							None => break,
+						}
 					};
 					// A report or a run given up inside it is judged on its own.
 					let span = end..run_end;
@@ -355,7 +525,7 @@ impl Record {
 			};
 			// The group this read hands out stays above: its publisher has yet to tell its wire
 			// of it, and would take one below the floor as told already.
-			let next = match handed {
+			let next = match reader.handed {
 				Some(handed) if end <= handed && handed < next => handed,
 				_ => next,
 			};
@@ -365,17 +535,7 @@ impl Record {
 			end = next;
 			runs += 1;
 		}
-		(end, runs)
-	}
-
-	/// End this reader: forget every run, releasing its bill against the debt.
-	fn fail(&mut self) {
-		let bill = self.bill.take();
-		*self = Self {
-			failed: true,
-			..Self::default()
-		};
-		drop(bill);
+		Stretch { end, runs, gaps }
 	}
 }
 
@@ -406,12 +566,12 @@ mod test {
 		for key in 0..4 {
 			record.delivered.insert(key);
 		}
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 0, "a lone prefix bills nothing");
 		for key in (10..1_000).step_by(2) {
 			record.reported.insert(key..key + 1, Report::Dropped);
 		}
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 495 * RUN_OVERHEAD);
 		drop(record);
 		assert_eq!(pool.used(), 0);
@@ -428,10 +588,10 @@ mod test {
 		record.reported.insert(1..u64::MAX / 2, Report::Dropped);
 		record.delivered.insert(u64::MAX / 2);
 		record.reported.insert(u64::MAX / 2 + 1..u64::MAX / 2 + 2, Report::Skip);
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 3 * RUN_OVERHEAD);
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 0, "all of it folded");
 		assert!(
 			record.told(7) && record.delivered.contains(7),
@@ -457,9 +617,9 @@ mod test {
 		record
 			.pending
 			.insert(4_000..4_001, Pending::own(Hole::drop(StreamError::NotFound)));
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(
 			pool.used(),
 			2 * RUN_OVERHEAD,
@@ -484,9 +644,9 @@ mod test {
 			record.delivered.insert(key);
 			record.reported.insert(key + 1..key + 1_000, Report::Dropped);
 		}
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(
 			pool.used(),
 			4 * RUN_OVERHEAD,
@@ -495,11 +655,11 @@ mod test {
 
 		let started = Standing {
 			from: 2_000,
-			handed: None,
+			..Standing::default()
 		};
 		// What the reader gave up inside the stretch is settled with it, so it bills nothing.
 		let mut forgotten = Forgotten(Vec::new());
-		record.settle(|| track.clone(), &mut forgotten, started).unwrap();
+		record.settle(|| track.clone(), &mut forgotten, started);
 		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the stretch, and the key below it");
 		assert!(record.delivered.contains(3_500) && record.told(3_500));
 		assert!(!record.told(1_500), "below its start stays owed");
@@ -522,6 +682,10 @@ mod test {
 			None
 		}
 
+		fn next_held(&self, _key: u64) -> Option<u64> {
+			None
+		}
+
 		fn forget(&mut self, folded: std::ops::Range<u64>) {
 			self.0.push(folded);
 		}
@@ -537,18 +701,16 @@ mod test {
 		record.reported.insert(1..3, Report::Dropped);
 		record.delivered.insert(3);
 		record.reported.insert(5..6, Report::Skip);
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		owe(&track, pool.used());
-		record
-			.settle(
-				|| track.clone(),
-				&mut (),
-				Standing {
-					from: 0,
-					handed: Some(3),
-				},
-			)
-			.unwrap();
+		record.settle(
+			|| track.clone(),
+			&mut (),
+			Standing {
+				handed: Some(3),
+				..Standing::default()
+			},
+		);
 		assert!(record.told(2), "the drops below it fold");
 		assert!(!record.told(3), "the handed group stays to be told");
 	}
@@ -566,6 +728,12 @@ mod test {
 			fn given_up_end(&self, key: u64) -> Option<u64> {
 				self.0.as_ref().filter(|run| run.contains(&key)).map(|run| run.end)
 			}
+			fn next_held(&self, key: u64) -> Option<u64> {
+				self.0
+					.as_ref()
+					.filter(|run| run.end > key)
+					.map(|run| run.start.max(key))
+			}
 			fn forget(&mut self, folded: Range<u64>) {
 				self.0 = self
 					.0
@@ -579,45 +747,34 @@ mod test {
 		record.delivered.insert(0);
 		record.delivered.insert(2);
 		record.reported.insert(4..5, Report::Dropped);
-		record
-			.settle(|| track.clone(), &mut beside, Standing::default())
-			.unwrap();
+		record.settle(|| track.clone(), &mut beside, Standing::default());
 		owe(&track, pool.used());
-		record
-			.settle(|| track.clone(), &mut beside, Standing::default())
-			.unwrap();
+		record.settle(|| track.clone(), &mut beside, Standing::default());
 		assert!(record.told(1) && record.told(2), "folded over the gap it gave up");
 		assert_eq!(beside.0, None, "and forgot it below the floor");
 		assert!(!record.told(3), "a key nothing settled stops the fold");
 	}
 
-	/// A debt that needs a run this reader was promised ends it with `TooFarBehind`: one given
-	/// up and not reported yet, or a run above one. What is final below it still folds.
+	/// A debt that needs a run this reader was promised, one given up and not reported yet or
+	/// a run above one, never ends it, at any capacity: the run is owed for a moment, and
+	/// what is final below it still folds.
 	#[test]
-	fn a_debt_on_a_promise_ends_the_reader() {
-		let (pool, track) = account();
-		let mut record = Record::default();
-		record.delivered.insert(0);
-		record.reported.insert(1..2, Report::Dropped);
-		record
-			.pending
-			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
-		// Enough runs above it that ending the reader frees more than evicting a group.
-		for key in (5..1_000).step_by(2) {
-			record.reported.insert(key..key + 1, Report::Dropped);
+	fn a_debt_on_a_promise_leaves_the_reader() {
+		for capacity in [0, 1] {
+			let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+			let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+			let mut record = record_with_promise();
+			record.settle(|| track.clone(), &mut (), Standing::default());
+			owe(&track, pool.used());
+			record.settle(|| track.clone(), &mut (), Standing::default());
+			assert!(record.told(1), "capacity {capacity}: the drop below it folded");
+			assert!(!record.told(2), "capacity {capacity}: the promise stays owed");
+			assert_eq!(
+				pool.used(),
+				499 * RUN_OVERHEAD,
+				"capacity {capacity}: the promise and the reports above it"
+			);
 		}
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		owe(&track, pool.used());
-		let err = record
-			.settle(|| track.clone(), &mut (), Standing::default())
-			.unwrap_err();
-		assert_eq!(StreamError::from(&err), StreamError::TooFarBehind);
-		assert_eq!(pool.used(), 0, "its record went with it");
-		assert!(record.failed());
-		assert!(
-			record.settle(|| track.clone(), &mut (), Standing::default()).is_err(),
-			"it stays ended"
-		);
 	}
 
 	/// A run given up and not reported yet, or a key nothing settled, is no fold's to
@@ -632,56 +789,30 @@ mod test {
 			.pending
 			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
 		record.skipped.insert(4, Duration::from_secs(1));
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		owe(&track, RUN_OVERHEAD);
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the drop folded");
 		assert!(!record.told(2), "the run given up is still owed");
 	}
 
-	/// A pool held past its capacity by its live edges alone owes its readers nothing. A
-	/// record beside them is over, but the live edges are what fill the pool, so it ends no
-	/// reader; once the capacity leaves room beside them, a record over it ends its reader.
-	#[test]
-	fn a_record_ends_its_reader_only_once_the_pins_leave_room() {
-		let pool = cache::Pool::new(cache::Config::default().with_capacity(0));
-		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
-		let mut edge = track.charge();
-		edge.add(1 << 20);
-		edge.promote();
-		edge.finish(true);
-		assert_eq!(pool.excess(), None, "past its capacity by the live edge alone");
-
-		let mut record = record_with_promise();
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		let excess = pool.excess().expect("the record is over");
-		assert_eq!(excess, pool.used() - pool.pinned(), "the live edge owes nothing");
-		owe(&track, excess);
-		record
-			.settle(|| track.clone(), &mut (), Standing::default())
-			.expect("the live edges fill the pool");
-
-		pool.resize(pool.pinned() + 1);
-		owe(&track, excess);
-		assert!(record.settle(|| track.clone(), &mut (), Standing::default()).is_err());
-		assert_eq!(pool.excess(), None, "ending it brought the pool back to its pins");
-	}
-
 	/// A pool over its capacity by cached groups its tracks could not evict yet owes its
-	/// readers only what their records are over: one whose records fit ends none.
+	/// readers only what their records are over: none, when they fit.
 	#[test]
-	fn cached_groups_past_the_capacity_end_no_reader() {
+	fn cached_groups_past_the_capacity_owe_no_reader() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(1 << 20));
 		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut cached = track.charge();
 		cached.add(4 << 20);
 		let mut record = record_with_promise();
-		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default());
 		let excess = pool.excess().expect("the cached group is over");
 		owe(&track, excess);
-		record
-			.settle(|| track.clone(), &mut (), Standing::default())
-			.expect("the record fits the capacity");
+		assert_eq!(
+			record.bill.as_ref().map(cache::Reader::debt),
+			Some(0),
+			"the record fits the capacity"
+		);
 	}
 
 	/// A record holding a promise it cannot fold, and enough reports above it that ending it
@@ -699,51 +830,101 @@ mod test {
 		record
 	}
 
-	/// Of a track's readers, one holding little never ends for one holding much, nor one
-	/// holding less than a cached group costs.
-	#[test]
-	fn a_debt_ends_only_a_reader_holding_much() {
-		let (pool, track) = account();
-		let promise = Pending::own(Hole::drop(StreamError::NotFound));
-		let mut small = Record::default();
-		small.pending.insert(1..2, promise.clone());
-		let mut large = Record::default();
-		for key in (1..1_000).step_by(2) {
-			large.pending.insert(key..key + 1, promise.clone());
-		}
-		small.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		large.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		owe(&track, RUN_OVERHEAD);
-		small.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		assert!(large.settle(|| track.clone(), &mut (), Standing::default()).is_err());
-		assert_eq!(pool.used(), RUN_OVERHEAD);
-		small.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+	/// A record on a pool with room, so it owes no debt.
+	fn roomy() -> (cache::Pool, Arc<cache::Track>) {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(1 << 30));
+		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+		(pool, track)
 	}
 
-	/// A tail's bill pays the readers' debt but is no record to end: it never joins the mean
-	/// that picks which record ends, whether it is small or large.
+	/// Standing for a reader whose ranges hold each first to last key in `runs`.
+	fn ranged(runs: &[(u64, u64)]) -> Standing {
+		Standing {
+			ranges: Some(Cover::new(runs.iter().map(|(first, last)| *first..=*last))),
+			..Standing::default()
+		}
+	}
+
+	/// Once the ranges move, the gaps they left between settled keys retire without a debt,
+	/// past one per run the ranges hold, lowest first: the runs around them fold into one.
+	/// The gap kept, and the keys below the lowest settled, stay owed should the ranges widen
+	/// over them again.
 	#[test]
-	fn a_tail_bill_never_skews_which_record_ends() {
-		let (_pool, track) = account();
-		let mut records = [track.reader(), track.reader()];
-		records[0].set(1_536);
-		records[1].set(2_880);
-		let mut tail = track.tail();
-		tail.set(RUN_OVERHEAD);
+	fn moved_ranges_retire_the_gaps_they_left() {
+		let (_pool, track) = roomy();
+		let mut record = Record::default();
+		for key in (10..=50).step_by(10) {
+			record.delivered.insert(key);
+		}
+		record.settle(|| track.clone(), &mut (), ranged(&[(50, 50)]));
+		assert_eq!(record.delivered.runs(), 2, "10 through 40, then 50");
+		assert_eq!(record.reported.len(), 1, "and one report");
 		assert!(
-			!records[0].ends(),
-			"the mean is the records' 2208 B, not the tail's share"
+			record.delivered.contains(25) && record.told(25),
+			"a retired gap is settled"
 		);
-		assert!(records[1].ends());
-		assert!(!tail.ends(), "a tail never ends");
-		tail.set(100_000);
-		assert!(
-			records[1].ends(),
-			"a large tail does not lift the mean over every record"
-		);
-		drop(tail);
-		assert!(records[1].ends());
-		assert!(!records[0].ends());
+		assert!(!record.delivered.contains(45), "the highest gap is kept");
+		assert!(!record.delivered.contains(5), "below the lowest settled stays owed");
+
+		// Its ranges move above it: the gap kept retires for the one the move left.
+		record.delivered.insert(70);
+		record.settle(|| track.clone(), &mut (), ranged(&[(70, 70)]));
+		assert_eq!(record.delivered.runs(), 2, "10 through 50, then 70");
+		assert_eq!(record.reported.len(), 1);
+		assert!(record.delivered.contains(45));
+		assert!(!record.delivered.contains(60));
+	}
+
+	/// A gap the ranges still hold stays owed, as does one owed for a moment: a run given up
+	/// and not reported yet, or a miss still asked. So does a stale skip, which a wider budget
+	/// offers again while no debt folds it. Each stops the stretch that would retire past it.
+	#[test]
+	fn moved_ranges_keep_what_is_still_owed() {
+		struct Asked(Range<u64>);
+		impl Beside for Asked {
+			fn runs(&self) -> u64 {
+				0
+			}
+			fn given_up_end(&self, _key: u64) -> Option<u64> {
+				None
+			}
+			fn next_held(&self, key: u64) -> Option<u64> {
+				(self.0.end > key).then(|| self.0.start.max(key))
+			}
+			fn forget(&mut self, _folded: Range<u64>) {}
+		}
+		let (_pool, track) = roomy();
+		let mut record = Record::default();
+		for key in (10..=80).step_by(10) {
+			record.delivered.insert(key);
+		}
+		record
+			.pending
+			.insert(25..26, Pending::own(Hole::drop(StreamError::NotFound)));
+		record.skipped.insert(65, Duration::from_secs(1));
+		let mut asked = Asked(15..16);
+		record.settle(|| track.clone(), &mut asked, ranged(&[(35, 38)]));
+		for owed in [15, 25, 36, 65, 75] {
+			assert!(!record.delivered.contains(owed), "{owed} stays owed");
+		}
+		for retired in [45, 55, 62] {
+			assert!(record.delivered.contains(retired), "{retired} retired");
+		}
+	}
+
+	/// A gap retires only once the ranges move: the same ranges again judge nothing anew.
+	#[test]
+	fn unmoved_ranges_retire_nothing_anew() {
+		let (_pool, track) = roomy();
+		let mut record = Record::default();
+		let reader = ranged(&[(0, 0)]);
+		record.delivered.insert(0);
+		record.settle(|| track.clone(), &mut (), reader.clone());
+		for key in [10, 20, 30] {
+			record.delivered.insert(key);
+		}
+		record.settle(|| track.clone(), &mut (), reader);
+		assert_eq!(record.delivered.runs(), 4, "no move, no retirement");
 	}
 
 	/// A debt never exceeds what the records are over the capacity, whatever paid it, and is

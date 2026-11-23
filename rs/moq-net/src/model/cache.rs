@@ -298,11 +298,6 @@ impl Pool {
 		self.pinned().saturating_add(self.held()) <= self.inner.capacity.load(Ordering::Relaxed)
 	}
 
-	/// Whether the live edges leave any of the capacity to the rest of the pool.
-	pub(super) fn edges_leave_room(&self) -> bool {
-		self.pinned() < self.inner.capacity.load(Ordering::Relaxed)
-	}
-
 	/// Whether a fill could hold one more group: the capacity leaves room beside the pins and
 	/// every hold.
 	pub(super) fn hold_room(&self) -> bool {
@@ -972,20 +967,15 @@ pub(super) struct Track {
 	// account drops. Raw codec only: an Extra here would keep this account alive.
 	encoder: Mutex<Option<flate::Encoder>>,
 
-	// What this track's readers' records bill, how many bill anything, the tail ledgers' bills,
-	// and the eviction debt the track could not pay itself, which those readers pay; see
-	// [`Reader`].
+	// What this track's readers' records and tail ledgers bill, and the eviction debt the
+	// track could not pay itself, which those readers pay; see [`Reader`].
 	readers: Readers,
 }
 
 /// What a track's readers bill for their records, and the debt they owe.
 #[derive(Default)]
 struct Readers {
-	// Records only: the mean [`Reader::ends`] compares against, which a tail never skews.
 	bytes: AtomicU64,
-	count: AtomicU64,
-	// Tail ledgers: room for the debt like the records, but never one to end.
-	tails: AtomicU64,
 	debt: AtomicU64,
 }
 
@@ -1242,22 +1232,12 @@ impl Track {
 		}
 	}
 
-	/// Open an empty bill against this account for one reader's record.
+	/// Open an empty bill against this account for one reader's record, or a subscription's
+	/// tail ledger.
 	pub(super) fn reader(self: &Arc<Self>) -> Reader {
 		Reader {
 			track: self.clone(),
 			bytes: 0,
-			record: true,
-		}
-	}
-
-	/// Open an empty bill against this account for a subscription's tail ledger: it pays the
-	/// readers' debt by folding, but never ends, since a publisher's drops are final.
-	pub(super) fn tail(self: &Arc<Self>) -> Reader {
-		Reader {
-			track: self.clone(),
-			bytes: 0,
-			record: false,
 		}
 	}
 
@@ -1268,7 +1248,7 @@ impl Track {
 		let mut shifted = 0;
 		let over = self.pool.records_over();
 		let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owed| {
-			let billed = readers.bytes.load(Ordering::Relaxed) + readers.tails.load(Ordering::Relaxed);
+			let billed = readers.bytes.load(Ordering::Relaxed);
 			let room = billed.min(over).saturating_sub(owed);
 			shifted = room.min(*debt);
 			(shifted > 0).then_some(owed + shifted)
@@ -2015,14 +1995,11 @@ impl Drop for Charge {
 }
 
 /// What one reader's record, or one subscription's tail ledger, bills to its track's account,
-/// and its share of the debt the track could not pay. Released on drop.
-///
-/// Only a record can [`Self::ends`]; a tail pays by folding, so it stays out of the mean
-/// that decides which record to end.
+/// and its share of the debt the track could not pay, which each pays by folding. Released
+/// on drop.
 pub(crate) struct Reader {
 	track: Arc<Track>,
 	bytes: u64,
-	record: bool,
 }
 
 impl Reader {
@@ -2033,14 +2010,7 @@ impl Reader {
 			return;
 		}
 		let readers = &self.track.readers;
-		let billed = if self.record { &readers.bytes } else { &readers.tails };
-		if self.record {
-			match (self.bytes, bytes) {
-				(0, _) => readers.count.fetch_add(1, Ordering::Relaxed),
-				(_, 0) => readers.count.fetch_sub(1, Ordering::Relaxed),
-				_ => 0,
-			};
-		}
+		let billed = &readers.bytes;
 		if bytes > self.bytes {
 			let grown = bytes - self.bytes;
 			billed.fetch_add(grown, Ordering::Relaxed);
@@ -2072,24 +2042,6 @@ impl Reader {
 			return 0;
 		}
 		readers.debt.load(Ordering::Relaxed).min(over)
-	}
-
-	/// Whether this record is one to end when folding leaves a debt: it bills more than a
-	/// cached group's overhead, so ending it frees more than evicting a group would, and at
-	/// least its readers' average, so a reader holding little never ends for one holding much.
-	///
-	/// A debt only ever stands for what records and tails, beside the pins and the holds that
-	/// fit, are past the capacity, or past the pins when they are more, and a reader ends only
-	/// while the pins leave room: so records and holds, never cached groups or live edges, are
-	/// what ends one. In a pool the pins alone fill, records still fold, and stay bounded since
-	/// no hold fits there, so each miss is given up rather than asked again.
-	pub(super) fn ends(&self) -> bool {
-		let readers = &self.track.readers;
-		let count = readers.count.load(Ordering::Relaxed);
-		self.record
-			&& self.bytes > ENTRY_OVERHEAD
-			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
-			&& self.track.pool.edges_leave_room()
 	}
 }
 

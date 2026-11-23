@@ -1916,6 +1916,27 @@ impl super::super::record::Beside for Misses {
 		self.given_up.get(&key).map(|run| run.end)
 	}
 
+	fn next_held(&self, key: u64) -> Option<u64> {
+		let span = key..u64::MAX;
+		let deferred = match self.deferred.runs.range(..=key).next_back() {
+			Some((_, (end, _))) if *end > key => Some(key),
+			_ => self.deferred.runs.range(key..).next().map(|(start, _)| *start),
+		};
+		[
+			self.given_up.overlapping(&span).next().map(|run| run.start.max(key)),
+			self.refused.overlapping(&span).next().map(|run| run.start.max(key)),
+			self.holders
+				.overlapping(&span)
+				.next()
+				.map(|(run, _)| run.start.max(key)),
+			self.filled.range(key..).next().copied(),
+			deferred,
+		]
+		.into_iter()
+		.flatten()
+		.min()
+	}
+
 	fn forget(&mut self, folded: ops::Range<u64>) {
 		if !folded.is_empty() {
 			self.given_up.remove(folded.clone());
