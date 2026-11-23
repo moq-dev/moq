@@ -40,8 +40,10 @@ Decided with the maintainer on 2026-11-15 (/quest-plan):
 - **Quiet scenes.** ✅ Keep `min(cap, grant)` and BBR3's app-limited aging
   ([moq-dev/moq#7017](https://github.com/moq-dev/moq/pull/7017), kept on
   2026-10-27), and measure a quiet-to-busy switch (rejected: ignoring
-  estimate drops while the encoder sends below the estimate, since BBR's own
-  pacing aged too, so the extra bits would only queue at the sender). If
+  estimate drops while the encoder sends below the estimate). Since
+  [moq-dev/moq#9460](https://github.com/moq-dev/moq/pull/9460) only the
+  reported estimate ages; BBR's pacing keeps the probed rate, so a backlog
+  drains at the path's rate. If
   reaching the cap after a quiet stretch is slow, the fix belongs to
   [probing](/quest/m3/probe/README.md), not to an override of the estimate.
 

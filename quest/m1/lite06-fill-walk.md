@@ -73,8 +73,3 @@ Recommended, not decided:
   would hide content upstream still holds), and a publisher-only fix (it
   already names finished spans, and a third-party lite-06 publisher would
   still trigger the walk).
-
-## Related
-
-- [A relay rides out a receive blackout its subscriber's delay covers](/quest/m1/relay-blackout-old.md) -
-  another path where a relay resets groups `Old`
