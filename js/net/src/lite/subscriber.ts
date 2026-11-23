@@ -1618,7 +1618,7 @@ export class Subscriber {
 				settle = resolve;
 			}),
 		);
-		const sending = this.#fitted(this.#withRanges(msg, ranges, placed)).then((msg) =>
+		const sending = this.#fitted(this.#withRanges(msg, asked.ranges, asked.placed)).then((msg) =>
 			this.#sendSubscribe(state, msg, deadline),
 		);
 		try {
@@ -2184,6 +2184,7 @@ export class Subscriber {
 			requested: msg.startGroup,
 			floor: msg.startGroup,
 			asked: ranges,
+			askedPlaced: new Map(),
 			live,
 			starts: new Map(),
 			joinTicks: new Map(),
