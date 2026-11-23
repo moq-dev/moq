@@ -57,10 +57,10 @@ just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
 just test ts --passthrough      # carry the multiplex whole, grade it packet by packet
 just test ts --passthrough --mpts # the same with two programs on their own clocks
-just test ts --mpts --program 2 --join 5 # each program its own broadcast, one exported 5 s in
 just test ts --passthrough --splice [forward] # the same across an unflagged encoder switch
 just test ts --passthrough --restart 10 # SIGKILL the import 10 s in, restart it, grade the gap
 just test ts-passthrough-capture # the same over an in-repo capture the T-STD model passes
+just test ts --mpts --program 2 --join 5 # each program its own broadcast, one exported 5 s in
 ```
 
 `--fragment-pes` shifts generated audio/video PES bursts into their following
