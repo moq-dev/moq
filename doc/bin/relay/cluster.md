@@ -25,9 +25,9 @@ itself. A relay that loses a session names it to its neighbours, so every route
 through it is dropped at once. There is no hold: a claim left with no route
 shows as unavailable for 800 ms, the time a reroute across the longest path
 (32 hops of 25 ms) takes to settle, and then it is withdrawn.
-The first relay a request reaches picks the claim that serves it, the same one
-every relay would pick ([Link costs](#link-costs)), and names its node on the
-request so later hops follow their own route to that node. A relay running both
+The first relay a request reaches picks the claim that serves it by its own
+costs ([Link costs](#link-costs)) and names its node on the request, so later
+hops follow their own route to that node instead of picking again. A relay running both
 versions translates: a moq-lite-06 peer's routes enter the route layer as the
 relay's own claims, keeping their hop list, which lite-07 carries alongside
 them. A lite-07 route reaches a moq-lite-06 peer as that hop list followed by
@@ -38,11 +38,17 @@ rolling upgrade's mix of versions ends a withdrawn broadcast everywhere.
 moq-lite-07-wip is opt-in, and `listen.version` replaces the default list
 rather than adding to it. That list serves clients and peers alike, the cluster
 port included, so enable moq-lite-07-wip by listing every default too, or older
-clients and relays are refused. Give `connect.version` the same list, so this
-relay still dials peers that predate it:
+clients and relays are refused. Dialing a peer offers `connect.version`, so
+give it the same list, or this relay's own dials never negotiate moq-lite-07-wip:
 
 ```toml
 [listen]
+version = [
+  "moq-lite-07-wip", "moq-lite-06", "moq-lite-05", "moq-lite-04", "moq-lite-03",
+  "moq-lite-02", "moq-lite-01", "moq-transport-22", "moq-transport-20", "moq-transport-18",
+]
+
+[connect]
 version = [
   "moq-lite-07-wip", "moq-lite-06", "moq-lite-05", "moq-lite-04", "moq-lite-03",
   "moq-lite-02", "moq-lite-01", "moq-transport-22", "moq-transport-20", "moq-transport-18",
