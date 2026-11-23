@@ -107,10 +107,10 @@ WebSocket Binary Message {
 
 The frames inside a message are encoded exactly as in [qmux], including the in-order STREAM frame requirement: for each QUIC stream, a sender MUST send that stream's payload in order, so a receiver can deliver payload to the application as it arrives without reassembly.
 
-An endpoint MAY place multiple frames in a single binary message and MAY split a logical sequence of frames across multiple messages, subject to the constraint that each STREAM frame's payload bytes are delivered in order.
+An endpoint MAY place multiple frames in a single binary message, except as {{versions}} restricts, and MAY split a logical sequence of frames across multiple messages, subject to the constraint that each STREAM frame's payload bytes are delivered in order.
 An empty binary message (zero frames) is permitted and carries no frames; a receiver MUST accept it and treat it as a no-op.
 
-The maximum size of a binary message is bounded by the `max_record_size` transport parameter defined in [qmux] and by any WebSocket implementation limits.
+For a QMux version with the Record layer, the maximum size of a binary message is bounded by the `max_record_size` transport parameter defined in [qmux] and by any WebSocket implementation limits.
 An endpoint MUST NOT send a binary message whose payload exceeds the peer's advertised `max_record_size`, and MAY treat receipt of an oversized message as a connection error.
 
 
@@ -129,7 +129,9 @@ The first QMux frame sent by each endpoint MUST be the `QX_TRANSPORT_PARAMETERS`
 The QMux version is the one named by the negotiated subprotocol ({{negotiation}}); there is no separate QMux version negotiation.
 An application protocol MAY restrict which QMux versions it pairs with.
 
-A QMux version without the Record layer, such as draft-ietf-quic-qmux-00, is framed as in {{framing}} with each binary message carrying whole frames, bounded only by WebSocket implementation limits.
+A QMux version without the Record layer, such as draft-ietf-quic-qmux-00, is framed as in {{framing}} except that each binary message carries exactly one frame, and a PADDING byte counts as a frame.
+A receiver MUST treat a message carrying more than one frame as a connection error of type FRAME_ENCODING_ERROR.
+The message is bounded by the peer's `max_frame_size`, initially 16384 bytes, instead of `max_record_size`: an endpoint MUST NOT send a frame larger than it, and MAY treat receipt of a larger one as a connection error of type FRAME_ENCODING_ERROR.
 
 
 # Keep-Alive and Idle Timeout {#keepalive}

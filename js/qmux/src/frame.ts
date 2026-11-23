@@ -710,8 +710,15 @@ export function decodeRecord(buffer: Uint8Array): Any[] {
 	return frames;
 }
 
+/** Decode a draft-00 message, which carries exactly one frame; a PADDING byte counts as one. */
 function decodeQMux(buffer: Uint8Array): Any | null {
-	return decodeQMuxOne(buffer)?.[0] ?? null;
+	const result = decodeQMuxOne(buffer);
+	if (result === null) return null;
+	const [frame, remaining] = result;
+	if (remaining.byteLength > 0) {
+		throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "draft-00 message carries more than one frame");
+	}
+	return frame;
 }
 
 /** Decode a single QMux frame, returning the frame and remaining buffer.
