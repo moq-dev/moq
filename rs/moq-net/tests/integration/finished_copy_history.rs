@@ -26,7 +26,8 @@ async fn a_finished_copy_reads_back_what_it_evicted() {
 /// The copy receives groups 0 to 5, expires them, and the publisher finishes the track after
 /// one more. A reader then asks for 1 to 3, and a FETCH of 4 follows: while the copy's tail
 /// still waits for the last group (`during_tail`), or once the copy finished. The FETCH asks
-/// outside the reader's run, so it joins no fill of the reader's.
+/// outside the reader's run, so it joins no fill of the reader's. During the tail, the copy
+/// ends and finishes while the reader's history is still on its way.
 async fn read_back(version: Version, during_tail: bool) {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
 	config.proxy = true;
@@ -92,6 +93,19 @@ async fn read_back(version: Version, during_tail: bool) {
 			.expect("a group");
 	}
 	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+	// Lite-05/06 carry the name's datagrams on the copy's subscription, so they end as the
+	// copy finishes.
+	let mut datagrams = match version.as_str() != "moq-lite-07-wip" {
+		true => {
+			let datagrams = remote.datagrams("video").unwrap();
+			kio::clock::timeout(TIMEOUT, datagrams.info())
+				.await
+				.expect("datagram info timeout")
+				.expect("the datagram track resolves");
+			Some(datagrams)
+		}
+		false => None,
+	};
 
 	// The publisher writes one more group and finishes the track. During the tail, that group's
 	// stream is held, so the copy's subscription ends while its tail still waits for it.
@@ -137,7 +151,32 @@ async fn read_back(version: Version, during_tail: bool) {
 		}
 	});
 	if during_tail {
+		// Only the last group's stream arrives: the reader's history, still held, keeps back
+		// neither the copy's end nor its finish.
 		kio::clock::sleep(Duration::from_millis(100)).await;
+		assert!(
+			upstream.server_transport.held_unis() > 1,
+			"{version}: the reader's history is held behind the last group"
+		);
+		upstream.server_transport.release_oldest_uni();
+		let last = kio::clock::timeout(TIMEOUT, first.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("the last group");
+		assert_eq!(last.start, 6);
+		let end = kio::clock::timeout(TIMEOUT, first.recv_group())
+			.await
+			.expect("end timeout");
+		assert!(matches!(end, Ok(None)), "{version}: the copy ended");
+		if let Some(datagrams) = &mut datagrams {
+			// Well inside the recovery's one-second grace, past which it gives the held
+			// history up.
+			let end = kio::clock::timeout(Duration::from_millis(100), datagrams.recv())
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the copy's finish waits on the reader's history"));
+			assert!(matches!(end, Ok(None)), "{version}: {end:?}");
+		}
 		upstream.server_transport.release_unis();
 	}
 
@@ -156,5 +195,5 @@ async fn read_back(version: Version, during_tail: bool) {
 		Some(b"x".to_vec()),
 		"{version}, during tail {during_tail}"
 	);
-	drop((broadcast, upstream, publisher, relay, written, first));
+	drop((broadcast, upstream, publisher, relay, written, first, datagrams));
 }

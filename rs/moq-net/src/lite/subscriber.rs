@@ -13102,16 +13102,22 @@ impl TrackServeRun {
 							let _ = serve_loop.serving.finish_shared();
 							// No FETCH before lite-05: nothing but the subscription fills a group.
 							if serve_loop.supports_fetch {
+								// Before lite-07 every run is on a subscription of its own already, which
+								// outlives this one, so its recoveries carry on as they are.
+								let per_run = !self.serve.subscriber.version.has_ranges();
+								let mut range_fills = serve_loop.range_fills;
 								let mut finished = FinishedServe {
 									serving: Some(serve_loop.serving),
 									demand: serve_loop.demand,
 									dynamic: serve_loop.dynamic,
 									fetches: serve_loop.fetches,
-									range_fills: RangeFills::per_run(),
+									range_fills: match per_run {
+										true => std::mem::take(&mut range_fills),
+										false => RangeFills::per_run(),
+									},
 									closed: serve_loop.closed,
 								};
-								// Each fill the subscription carried goes on its own now.
-								let mut range_fills = serve_loop.range_fills;
+								// Each fill the lite-07 subscription carried goes on its own now.
 								ServeLoop::walk_fills(
 									&self.serve,
 									&mut range_fills,
@@ -14250,13 +14256,14 @@ impl ServeLoop {
 						return Poll::Ready(ServeEnd::GiveBack(err));
 					}
 					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
-					// Ending drops a recovery still out, as a lite-07 track waits for them too.
+					// Ending lite-07's subscription drops a recovery still out, so its end waits for
+					// them, as a lite-07 track does. Before lite-07 the finished copy takes them over.
 					if settle
 						.poll(waiter, |tail| {
 							owed.as_ref()
 								.is_some_and(|owed| owed.iter().all(|owed| tail.covers(owed.clone())))
 						})
-						.is_ready() && !self.range_fills.recovering()
+						.is_ready() && (!serve.subscriber.version.has_ranges() || !self.range_fills.recovering())
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}
