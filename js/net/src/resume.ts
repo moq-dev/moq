@@ -2179,6 +2179,12 @@ class Reader implements ResumeSource {
 		return serving && hooks.feedStart(serving.sub);
 	}
 
+	// The reader's ranges placed since the last call; see `hooks.takePlaced`.
+	takePlaced(): Set<bigint> {
+		this.sync();
+		return this.#window().takePlaced();
+	}
+
 	// The lowest group the serving copy holds at or after `from`; see `hooks.nextHeld`.
 	nextHeld(from: bigint): bigint | undefined {
 		this.sync();

@@ -52,7 +52,7 @@ import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
 import { max, min, UNBOUNDED } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
-import { isEmpty, type Resolved, rangeKey } from "../window.ts";
+import { ByTime, isEmpty, type Resolved, rangeKey, type Timed } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
@@ -731,6 +731,95 @@ interface Source {
 	oldest: bigint | undefined;
 	/** Where the source's feed starts, placed or not; see `hooks.feedStart`. */
 	feed: bigint | "pending" | undefined;
+}
+
+/** What a lite-07 range still waiting for its SUBSCRIBE_START waits on. Mirrors the Rust `Wait`. */
+type Wait =
+	/** The cursor telling of the group held at this key. */
+	| { told: bigint }
+	/** A group held at or past this key, with none held there yet. */
+	| { held: bigint }
+	/** The range landing somewhere; see `hooks.takePlaced`. */
+	| "placed"
+	/** What the track says as a whole: where its feed starts, or that it has a largest. */
+	| "track";
+
+const compareIds = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * The lite-07 ranges still waiting for their SUBSCRIBE_START, by what each waits on, so a pass
+ * costs the ranges due, and every range once the track says something new as a whole, which it
+ * does a few times at most. Mirrors the Rust `Waits`.
+ */
+class Waits {
+	// Looked at on the next pass: added since, or woken.
+	#due = new Set<bigint>();
+	// What each parked range waits on, by Range ID.
+	#parked = new Map<bigint, Wait>();
+	// The ranges waiting on a key told, and on a group held, by key.
+	#told = new ByTime();
+	#held = new ByTime();
+	// What the track said as a whole on the last pass.
+	#whole: string | undefined;
+
+	/** Look at range `id` on the next pass. */
+	wake(id: bigint): void {
+		this.remove(id);
+		this.#due.add(id);
+	}
+
+	/** Forget range `id`. */
+	remove(id: bigint): void {
+		this.#due.delete(id);
+		const wait = this.#parked.get(id);
+		this.#parked.delete(id);
+		if (typeof wait !== "object") return;
+		if ("told" in wait) this.#told.remove(wait.told, id);
+		else this.#held.remove(wait.held, id);
+	}
+
+	/** Park range `id` until `wait` changes. */
+	park(id: bigint, wait: Wait): void {
+		this.remove(id);
+		this.#parked.set(id, wait);
+		if (typeof wait !== "object") return;
+		if ("told" in wait) this.#told.add(wait.told, id);
+		else this.#held.add(wait.held, id);
+	}
+
+	/**
+	 * The cursor told of `[start, end)`, which holds a group when `held`: wake the ranges waiting
+	 * where any of it is, or on a group held at or past where they wait.
+	 */
+	tell(start: bigint, end: bigint, held: boolean): void {
+		if (start >= end) return;
+		this.#wakeAll(this.#told.takeIn(start, end));
+		this.#wakeAll(this.#held.takeIn(held ? 0n : start, end));
+	}
+
+	/**
+	 * The ranges a pass looks at, in Range ID order: those due, those `placed`, and every range
+	 * once what the track says as a whole, `whole`, is new.
+	 */
+	take(whole: string, placed: Set<bigint>): bigint[] {
+		if (whole !== this.#whole) {
+			this.#whole = whole;
+			for (const id of [...this.#parked.keys()]) this.wake(id);
+		}
+		for (const id of placed) if (this.#parked.has(id)) this.wake(id);
+		const ids = [...this.#due].sort(compareIds);
+		this.#due.clear();
+		return ids;
+	}
+
+	#wakeAll(entries: Timed[]): void {
+		for (const entry of entries) {
+			for (const id of entry.keys) {
+				this.#parked.delete(id);
+				this.#due.add(id);
+			}
+		}
+	}
 }
 
 /** A lite-07 range still waiting for its SUBSCRIBE_START, as it was asked. Mirrors the Rust `Unstarted`. */
@@ -1720,6 +1809,12 @@ export class Publisher {
 				if (range) unstarted.set(id, asked(range));
 			}
 		}
+		// Lite-07: what each range in `unstarted` waits on.
+		const waits = new Waits();
+		for (const id of unstarted.keys()) waits.wake(id);
+		// Wake the ranges waiting on the cursor telling of `[start, end)`; see `Waits.tell`.
+		const told = (start: bigint, end: bigint) =>
+			waits.tell(start, end, (hooks.nextHeld(track, start) ?? end) < end);
 		// Lite-07: where each range a SUBSCRIBE_START answered starts, by Range ID, undefined for
 		// one answered with no group: it owes its groups from there to its end. Mirrors the Rust
 		// `TrackRun::started`.
@@ -1772,25 +1867,26 @@ export class Publisher {
 		// start none, the stale runs still held, and those no group held here starts at, which a
 		// group arriving later may take: the source's feed accounts for that. Mirrors the Rust
 		// `TrackRun::first_group`.
-		const firstGroup = (from: bigint): bigint | undefined => {
+		const firstGroup = (from: bigint): bigint | Wait => {
 			let at = from;
 			for (;;) {
 				at = passStale(at);
-				const told = record?.reportAt(at);
-				if (told?.kind === "skip") {
-					at = told.end;
+				const report = record?.reportAt(at);
+				if (report?.kind === "skip") {
+					at = report.end;
 					continue;
 				}
-				if (told) return at;
+				if (report) return at;
 				const next = hooks.nextHeld(track, at);
-				if (next === undefined) return undefined;
+				if (next === undefined) return { held: at };
 				if (next > at) {
 					at = next;
 					continue;
 				}
 				// The cursor tells of each group held in its ranges, so this waits for it to.
 				const covered = hooks.nextInRange(track, at);
-				if (covered === undefined || covered === at) return undefined;
+				if (covered === undefined) return { held: at };
+				if (covered === at) return { told: at };
 				at = covered;
 			}
 		};
@@ -1801,15 +1897,15 @@ export class Publisher {
 		// where the copy's whole feed starts. Anywhere else, a range starts at the first group from
 		// `from` the cursor served or dropped, unless the source's feed starts lower. Once nothing
 		// more arrives, it starts at the feed or the floor. Mirrors the Rust `TrackRun::first_start`.
-		const firstStart = (from: bigint, source: Source, finished: boolean): bigint | undefined => {
+		const firstStart = (from: bigint, source: Source, finished: boolean): bigint | Wait => {
 			if (source.upstream && source.oldest !== undefined) return max(from, source.oldest);
-			if (source.feed === "pending" && !finished) return undefined;
+			if (source.feed === "pending" && !finished) return "track";
 			const feed =
 				source.feed === "pending" || source.feed === undefined ? undefined : passStale(max(from, source.feed));
 			if (source.upstream && feed !== undefined) return feed;
-			const told = firstGroup(from);
-			if (told !== undefined) return feed === undefined ? told : min(feed, told);
-			if (!finished) return undefined;
+			const first = firstGroup(from);
+			if (typeof first === "bigint") return feed === undefined ? first : min(feed, first);
+			if (!finished) return first;
 			return feed ?? max(from, floor);
 		};
 
@@ -1868,11 +1964,12 @@ export class Publisher {
 				oldest: upstream ? hooks.oldestStart(track) : undefined,
 				feed: hooks.feedStart(track),
 			};
-			// An update not taken yet retired one, and taking that update forgets it. In Range ID
-			// order, as the Rust `TrackRun::report_started` reports them.
-			const held = [...unstarted.keys()]
-				.filter((id) => controls.holds(id))
-				.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+			// Once nothing more can arrive every range is answered; until then a pass looks only at
+			// the ranges something changed for. An update not taken yet retired one, and taking that
+			// update forgets it. In Range ID order, as the Rust `TrackRun::report_started` reports them.
+			const whole = `${upstream}|${source.oldest}|${source.feed}|${largest !== "unknown"}`;
+			const ids = finished ? [...unstarted.keys()].sort(compareIds) : waits.take(whole, hooks.takePlaced(track));
+			const held = ids.filter((id) => unstarted.has(id) && controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, held);
 			let reported = false;
 			for (const [index, id] of held.entries()) {
@@ -1881,21 +1978,32 @@ export class Publisher {
 				const ask = unstarted.get(id);
 				// Never answered without the largest, even once nothing else can resolve it: this hop's
 				// feed answering or ending tells it.
-				if (ask?.live && largest === "unknown") continue;
+				if (ask?.live && largest === "unknown") {
+					waits.park(id, "track");
+					continue;
+				}
 				const range = resolution[index];
-				if (!range && !finished) continue;
+				if (!range && !finished) {
+					waits.park(id, "placed");
+					continue;
+				}
 				let start: bigint | undefined;
 				if (range) {
 					// A live join starts where it was placed, past the groups its max expired. A range
 					// naming a group on a copy that places it as its upstream answered starts there. Any
 					// other starts at the first group from its start this hop delivers.
-					if (ask?.joins !== undefined) start = hooks.joinStart(track, range.start, ask.joins);
-					else if (range.floored && upstream) start = range.start;
-					else start = firstStart(range.start, source, finished);
-					if (start === undefined) continue;
-					if (range.end !== undefined && range.end <= start) start = undefined;
+					let placed: bigint | Wait;
+					if (ask?.joins !== undefined) placed = hooks.joinStart(track, range.start, ask.joins);
+					else if (range.floored && upstream) placed = range.start;
+					else placed = firstStart(range.start, source, finished);
+					if (typeof placed !== "bigint") {
+						waits.park(id, placed);
+						continue;
+					}
+					start = range.end !== undefined && range.end <= placed ? undefined : placed;
 				}
 				unstarted.delete(id);
+				waits.remove(id);
 				if (!(await sendStart(new SubscribeStart({ id, start, largest })))) return false;
 				reported = true;
 			}
@@ -1916,6 +2024,7 @@ export class Publisher {
 			for (const [id, ask] of [...unstarted]) {
 				if (!ask.oldest || !controls.holds(id)) continue;
 				unstarted.delete(id);
+				waits.remove(id);
 				if (!(await sendStart(new SubscribeStart({ id, start: 0n, largest: "empty" })))) return false;
 			}
 			return true;
@@ -1958,6 +2067,7 @@ export class Publisher {
 				const from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
 				if (from >= gap.end) continue;
 				record.tell(from, gap.end, report);
+				told(from, gap.end);
 				if (!(await sendHole(holeMessage(from, gap.end, hole)))) return false;
 			}
 			return true;
@@ -1970,6 +2080,7 @@ export class Publisher {
 			if (!record || start >= end) return true;
 			if (!hole.skip) end = reach(end);
 			record.tell(start, end, reportOf(hole));
+			told(start, end);
 			return sendHole(holeMessage(start, end, hole));
 		};
 
@@ -2114,11 +2225,17 @@ export class Publisher {
 								// A range retired before its start resolved is owed no SUBSCRIBE_START.
 								for (const id of control.applied.retired) {
 									unstarted.delete(id);
+									waits.remove(id);
 									started.delete(id);
 								}
 								// Retiring makes no stale run owed, so this names none.
 								settleStale();
-								for (const [id, range] of control.applied.added) unstarted.set(id, asked(range));
+								for (const [id, range] of control.applied.added) {
+									unstarted.set(id, asked(range));
+									waits.wake(id);
+								}
+								// Replaced in place, a retuned range may land elsewhere.
+								for (const [id] of control.applied.retuned) if (unstarted.has(id)) waits.wake(id);
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
@@ -2174,6 +2291,7 @@ export class Publisher {
 					case "drop":
 						if (!perRange && !startSent) skipped.push(recv);
 						else if (perRange && recv.stale !== undefined) {
+							told(recv.start, recv.end);
 							stale.set(recv.start, recv.end, recv);
 							for (const run of settleStale())
 								if (!(await forward(run.start, run.end, run))) return false;
@@ -2303,6 +2421,7 @@ export class Publisher {
 					if (!(await resolveStart(startKey))) return false;
 				}
 				record?.tell(group.start, group.start + 1n, { kind: "settled" });
+				waits.tell(group.start, group.start + 1n, true);
 				streaming.add(group.start);
 
 				const options: RunGroup = {
@@ -2319,7 +2438,9 @@ export class Publisher {
 					// The starts inside a group sent whole are accounted for by its GROUP_END, so the
 					// end-of-track scan never drops them.
 					ended: (end) => {
-						if (end > group.start + 1n) record?.tell(group.start + 1n, end, { kind: "settled" });
+						if (end <= group.start + 1n) return;
+						record?.tell(group.start + 1n, end, { kind: "settled" });
+						waits.tell(group.start + 1n, end, true);
 					},
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.

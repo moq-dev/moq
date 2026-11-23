@@ -592,6 +592,8 @@ export interface ResumeSource {
 	oldestStart(): bigint | undefined;
 	/** The lowest group the serving copy holds at or after `from`; see `hooks.nextHeld`. */
 	nextHeld(from: bigint): bigint | undefined;
+	/** The reader's ranges placed since the last call; see `hooks.takePlaced`. */
+	takePlaced(): Set<bigint>;
 	/** Whether the serving copy knows where the live feed is; see `hooks.knowsEdge`. */
 	knowsEdge(): boolean;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
@@ -946,6 +948,12 @@ export const hooks: {
 	 * Rust `Subscriber::next_held`; assigned by `track.ts`.
 	 */
 	nextHeld: (subscriber: Subscriber, from: bigint) => bigint | undefined;
+	/**
+	 * The Range IDs of a subscriber's ranges placed since the last call, which
+	 * `servingResolvedKeys` may now answer differently. Mirrors the Rust
+	 * `Subscriber::take_placed`; assigned by `track.ts`.
+	 */
+	takePlaced: (subscriber: Subscriber) => Set<bigint>;
 	/**
 	 * The lowest group at or after `from` a subscriber's ranges cover, past those given up for
 	 * good. Mirrors the Rust `Subscriber::next_in_range`; assigned by `track.ts`.
@@ -1518,6 +1526,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	nextHeld: () => {
+		throw new Error("track.ts not loaded");
+	},
+	takePlaced: () => {
 		throw new Error("track.ts not loaded");
 	},
 	nextInRange: () => {

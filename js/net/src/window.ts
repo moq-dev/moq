@@ -621,6 +621,9 @@ export class Window {
 	// How many spans name each start, and how many name none: see {@link start}.
 	#named = new Counts<bigint>();
 	#unnamed = 0;
+	// The keys of the spans placed since `takePlaced`, once each: what a publisher answering each
+	// range on its own looks at again, rather than every range still waiting.
+	#placed = new Set<bigint>();
 	// The budgets of the live joins among the ranges, counted, for the widest asked.
 	#budgets = new Counts<number>();
 	// The non-empty history ranges among the ranges, placed or not.
@@ -824,6 +827,7 @@ export class Window {
 
 	// Take out what the range keyed `key` placed, leaving the range itself.
 	#retire(key: bigint): void {
+		this.#placed.delete(key);
 		const pending = this.#pending.delete(key);
 		if (this.#reaching.delete(key) || pending) this.#budget = undefined;
 		const span = this.#spans.get(key);
@@ -1040,6 +1044,16 @@ export class Window {
 		const span = this.#spans.get(key);
 		if (!span || span.looking || span.waiting) return undefined;
 		return { start: span.start, end: span.end === UNBOUNDED ? undefined : span.end, floored: span.floored };
+	}
+
+	/**
+	 * The keys of the spans placed since the last call, which {@link resolvedKey} may now answer
+	 * differently. Mirrors the Rust `Window::take_placed`.
+	 */
+	takePlaced(): Set<bigint> {
+		const placed = this.#placed;
+		this.#placed = new Set();
+		return placed;
 	}
 
 	/** Each range resolved, in key order, as {@link resolvedKey} reads it. Mirrors the Rust `Window::resolved`. */
@@ -1277,6 +1291,7 @@ export class Window {
 		else this.#unnamed++;
 		if (span.looking) this.#looking.add(span.looking.time, key);
 		if (span.waiting) this.#waiting.add(span.at ?? 0n, key);
+		if (!span.looking && !span.waiting) this.#placed.add(key);
 		this.#spans.set(key, span);
 	}
 
@@ -1448,7 +1463,7 @@ export class Budget {
 }
 
 /** Spans by key, keyed by the time each waits on or looks up, lowest first. */
-type Timed = { time: bigint; keys: Set<bigint> };
+export type Timed = { time: bigint; keys: Set<bigint> };
 
 const compareTimes = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -1456,7 +1471,7 @@ const compareTimes = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 :
  * {@link Timed} entries ordered by time, so the times in a run are found without a walk, and a
  * span joins or leaves its time without shifting every other.
  */
-class ByTime {
+export class ByTime {
 	#entries = new Sorted<bigint, Timed>((entry) => entry.time, compareTimes);
 
 	get size(): number {

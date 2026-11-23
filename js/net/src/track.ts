@@ -4894,6 +4894,11 @@ export class Subscriber {
 			return keys[keyIndex(keys, from)];
 		};
 		hooks.nextInRange = (subscriber, from) => subscriber.#nextInRange(from);
+		hooks.takePlaced = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.takePlaced();
+			subscriber.#settle();
+			return subscriber.#window.takePlaced();
+		};
 		hooks.oldestStart = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.oldestStart();
 			const producer = subscriber.#state.producer;
