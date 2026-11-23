@@ -1402,6 +1402,11 @@ impl Schedule {
 		let Some(psi) = &self.psi else {
 			return;
 		};
+		// Under a mux rate a copy the media leads has a deadline, so a repeat in Bsys must leave
+		// room for a whole one beside it: tables over half of Bsys go out on the media's cadence.
+		if self.rate.is_some() && 2 * psi.packets.len() as u128 > BSYS {
+			return;
+		}
 		self.repeated = Some(period);
 		let packets = psi.packets.clone();
 		let by = (index + 1) * PCR_INTERVAL.as_nanos();
@@ -2319,6 +2324,72 @@ mod tests {
 		}
 		assert_eq!(begun, 2);
 		assert_eq!(marks, [[2; 13], [3; 13]].concat());
+	}
+
+	/// Under a mux rate, repeats leave Bsys room for the copies the media leads to meet their
+	/// frames' deadlines, however short the send-ahead and however large the tables.
+	#[test]
+	fn repeats_leave_bsys_to_the_media_led_copies() {
+		const AUDIO: Buffer = Buffer {
+			rate: 2_000_000,
+			leak: None,
+			size: Some(3_584),
+			transport: 512,
+			reach: Duration::from_millis(40),
+		};
+		let mut failed = Vec::new();
+		let windows = [Duration::ZERO, Duration::from_millis(40), Duration::from_secs(1)];
+		for (delay, count) in windows
+			.into_iter()
+			.flat_map(|delay| [1, 3, 6].map(|count| (delay, count)))
+		{
+			let mut schedule = Schedule::new(delay);
+			schedule.set_rate(Some(RATE));
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, AUDIO);
+			schedule.set_psi(Psi {
+				packets: marked_tables(1, count),
+				flagged: None,
+				clock: 1,
+			});
+			let mut result = Ok(());
+			let mut pats = 0;
+			for ms in (0..5_000).step_by(20) {
+				if ms % 500 == 0 {
+					schedule.lead(Tables {
+						rate: Some(RATE),
+						added: Vec::new(),
+					});
+				}
+				schedule.push(1, timing(ms), unit(1, 1), true).unwrap();
+				let horizon = Some(slot(self::ms(ms)));
+				loop {
+					match schedule.next(horizon) {
+						Ok(Some(slot)) => {
+							let packets = slot.packets.as_chunks::<{ TsPacket::SIZE }>().0;
+							pats += packets.iter().filter(|packet| pid(*packet) == 0).count();
+						}
+						Ok(None) => break,
+						Err(err) => {
+							result = Err(err.to_string());
+							break;
+						}
+					}
+				}
+				if result.is_err() {
+					break;
+				}
+			}
+			if let Err(err) = result {
+				failed.push(format!("{delay:?}, a {count}-packet PMT: {err}"));
+			}
+			// Ten copies are the media's; tables Bsys takes twice over also repeat on the grid.
+			if count < 6 {
+				assert!(pats > 40, "{delay:?}, a {count}-packet PMT: {pats} PATs");
+			}
+		}
+		assert!(failed.is_empty(), "{failed:#?}");
 	}
 
 	/// With the clock running, the grid repeats the tables in force every [`TABLE_REPEAT`]
