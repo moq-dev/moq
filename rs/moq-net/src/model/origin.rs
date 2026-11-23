@@ -771,8 +771,11 @@ impl RouteInfo {
 	/// The hop id of the session the route entered this origin from, 0 when that session
 	/// named none, or `None` for a route announced here.
 	///
-	/// Behind the `test-support` feature: a test's door, not an API.
-	#[cfg(feature = "test-support")]
+	/// The id is the one the session's peer declared, or else the one the session
+	/// assigned it (`with_peer_node` on the client or server). An embedder that holds
+	/// sessions with several peers over one origin reads it to tell which session the
+	/// route it is reading came in on, such as to report the link that serves a
+	/// broadcast or to wait for a route from one particular peer.
 	pub fn entered_from(&self) -> Option<u64> {
 		match self.source {
 			Source::Local => None,
@@ -13841,6 +13844,33 @@ mod tests {
 
 		drop(local);
 		assert_eq!(announced.expect_next_active("room").await.source(), Source::Peer(7));
+	}
+
+	/// A route reports the session it entered through: none for one announced here, and
+	/// the announcing session's hop for one a peer or upstream handle landed, 0 when that
+	/// handle named none.
+	#[kio::test]
+	async fn entered_from_names_the_session_a_route_entered_through() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().routes();
+
+		let _local = producer.route("local", RouteOptions::default()).unwrap();
+		assert_eq!(announced.expect_next_active("local").await.entered_from(), None);
+
+		let peer = producer.clone().with_link(Link::Peer);
+		let _peer = peer
+			.forward("peer", RouteInfo::new().with_hops(hops(&[7])).with_via(origin(7)))
+			.unwrap();
+		assert_eq!(announced.expect_next_active("peer").await.entered_from(), Some(7));
+
+		let upstream = producer.clone().with_link(Link::Upstream);
+		let _upstream = upstream
+			.forward("upstream", RouteInfo::new().with_hops(hops(&[8])).with_via(origin(8)))
+			.unwrap();
+		assert_eq!(announced.expect_next_active("upstream").await.entered_from(), Some(8));
+
+		let _unnamed = peer.route("unnamed", RouteOptions::default()).unwrap();
+		assert_eq!(announced.expect_next_active("unnamed").await.entered_from(), Some(0));
 	}
 
 	#[kio::test]
