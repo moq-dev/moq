@@ -24,7 +24,7 @@ const benchmarks: Record<string, { entry: string; rows: number }> = {
 	replay: { entry: "js/net/bench/replay.ts", rows: 72 },
 	"resume-history": { entry: "js/net/bench/resume-history.ts", rows: 72 },
 	buffered: { entry: "js/hang/bench/buffered.ts", rows: 36 },
-	pattern: { entry: "js/pattern/bench/algebra.ts", rows: 12 },
+	pattern: { entry: "js/pattern/bench/algebra.ts", rows: 21 },
 };
 const selected = Object.hasOwn(benchmarks, benchmark) ? benchmarks[benchmark] : undefined;
 if (!selected) throw new Error(`--bench must be one of: ${Object.keys(benchmarks).join(", ")}`);
@@ -158,7 +158,8 @@ try {
 		rows.set(variant, []);
 		await pages.get(variant)?.evaluate("globalThis.measure()");
 		const measured = rows.get(variant) ?? [];
-		if (measured.length !== selected.rows) throw new Error(`incomplete rows: ${variant}`);
+		if (measured.length !== selected.rows)
+			throw new Error(`${variant} printed ${measured.length} rows, expected ${selected.rows}`);
 		return measured;
 	};
 	for (let round = 0; round < rounds; round++) {

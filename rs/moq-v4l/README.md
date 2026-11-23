@@ -14,6 +14,12 @@ The unused high-level control API is removed; `moq-video` sets scalar controls
 through the raw `sys` and `v4l2` layers instead.
 `CaptureStream::next` can be retried after a timeout; upstream queues a buffer
 the driver already holds and fails with EINVAL.
+`OutputStream::next` waits on the dequeue rather than the queue, fills every
+buffer once before waiting, and can be retried after a failure; upstream waits
+for a buffer before queueing any and never streams.
+Each mapped buffer unmaps itself, `v4l2::open` returns an `OwnedFd` in place of
+upstream's `close`, and dropping a stream or device never panics, even after
+the device is unplugged.
 
 The bindings are arch-independent: layout tests are off, integer types are
 fixed-width, and `timeval` / `timespec` come from `libc`. Regenerate them on a

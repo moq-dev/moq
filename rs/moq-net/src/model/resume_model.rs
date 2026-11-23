@@ -269,6 +269,11 @@ impl Publisher {
 		self.routes.iter().flatten()
 	}
 
+	/// The route the front serves: the cheapest live one.
+	fn serving(&self) -> Option<&Copy> {
+		self.routes.iter().rev().flatten().next()
+	}
+
 	fn newest(&self) -> Option<u64> {
 		self.written.last_key_value().map(|(group, _)| *group)
 	}
@@ -921,7 +926,8 @@ impl Model {
 					Poll::Ready(Ok(None)) => {
 						// Short of whole only where a route closed it, and, unless the budget gave up or
 						// the group may have expired, only while a route that closed it lives: one whose
-						// route failed reads on from the route replacing it.
+						// route failed reads on from the route replacing it, unless that route gave the
+						// group up, so nothing continues it.
 						let whole = read.frames == frames(*key) && instance.complete.contains(key);
 						if !whole && !instance.short.contains(&(*key, read.frames)) {
 							return Err(fail(
@@ -933,6 +939,7 @@ impl Model {
 							&& reader.spec.budget == Budget::Hour
 							&& !reader.doomed && reader.floor.is_none_or(|floor| *key > floor)
 							&& !instance.live().any(|copy| copy.closed_at(*key, read.frames))
+							&& !instance.serving().is_some_and(|copy| copy.given_up.contains(key))
 						{
 							return Err(fail(
 								index,
@@ -1894,9 +1901,8 @@ fn regressions() {
 			finish: false,
 		},
 		// A group the local floor keeps out of where an earlier copy placed a range, below where
-		// the serving copy places it: the read runs without a stall. The oracle owes nothing
-		// below the serving copy's placement, so it does not check that group yet; see
-		// quest/m0/nightly/resume-model-placement.md.
+		// the serving copy places it: the read runs without a stall, and stays open for that
+		// group, which every live route held when the range placed, so the oracle owes it.
 		Case {
 			ops: vec![
 				Op::Join {
@@ -1914,6 +1920,180 @@ fn regressions() {
 					frames: 1,
 				},
 				Op::Up { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// A group read past where the serving copy then closes it short cannot end cleanly
+		// there: no route said it ends at the frames read.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(5),
+					frames: 2,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(5),
+					frames: 1,
+				},
+				Op::Down { instance: 0, slot: 0 },
+				Op::Close {
+					instance: 0,
+					slot: 1,
+					group: None,
+					down: false,
+				},
+			],
+			finish: false,
+		},
+		// A short close from a route that failed stands once the route replacing it gave the
+		// group up, so nothing continues it.
+		Case {
+			ops: vec![
+				Op::Up { instance: 0, slot: 2 },
+				Op::Up { instance: 0, slot: 1 },
+				Op::GiveUp {
+					instance: 0,
+					slot: 1,
+					group: 5,
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 2,
+					group: Some(5),
+					frames: 1,
+				},
+				Op::Close {
+					instance: 0,
+					slot: 2,
+					group: None,
+					down: true,
+				},
+			],
+			finish: false,
+		},
+		// A serving copy whose floor lies above every group the reader's range now names was
+		// asked for nothing, so its own resolution is empty: the copy replacing it, from a lower
+		// boundary, is asked from where the reader placed the range instead.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 3,
+					spec: spec(false, Budget::Hour, Some((0, 1)), false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(8),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::Ranges {
+					reader: 3,
+					range: Some((0, 6)),
+				},
+				Op::Up { instance: 0, slot: 2 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(2),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 2,
+					group: None,
+					frames: 1,
+				},
+			],
+			finish: false,
+		},
+		// The same once a failover moves the boundary below a time start the replaced copy
+		// placed at a lower group.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 2 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((6, 7)), false),
+				},
+				Op::Up { instance: 1, slot: 0 },
+				Op::Write {
+					instance: 1,
+					slot: 2,
+					group: Some(7),
+					frames: 1,
+				},
+				Op::Down { instance: 1, slot: 2 },
+				Op::Up { instance: 1, slot: 2 },
+				Op::Write {
+					instance: 1,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 2,
+					group: Some(1),
+					frames: 1,
+				},
+			],
+			finish: false,
+		},
+		// A backfill passed a group outside the reader's range, which a widening then owes: the
+		// serving route is asked for it, since the backfill will not hand it out again.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((3, 4)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(4),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::Down { instance: 0, slot: 0 },
+				Op::Ranges { reader: 0, range: None },
 			],
 			finish: false,
 		},

@@ -245,14 +245,20 @@ class Feeds {
 
 // `reads` stands in for the container consumer, unless `live`, which reads what tests publish into
 // `producer` through real consumers instead, or `feeds`, which gives each consumer its own queue.
-// `fields` add to the rendition's catalog entry, and `initial` is the delay the decoder subscribes with.
+// `fields` add to the rendition's catalog entry, and `initial` and `priority` are the delay and
+// priority the decoder subscribes with.
 async function guardedPlayback(
 	kind: "legacy" | "cmaf",
 	reads: Read[],
 	hold: readonly number[] = [],
 	live = false,
 	lookahead = 0,
-	{ fields = {}, initial, feeds }: { fields?: Partial<Catalog.VideoConfig>; initial?: Delay; feeds?: Feeds } = {},
+	{
+		fields = {},
+		initial,
+		feeds,
+		priority,
+	}: { fields?: Partial<Catalog.VideoConfig>; initial?: Delay; feeds?: Feeds; priority?: Signal<number> } = {},
 ) {
 	// Load the optional container before the fixture drains only reactive microtasks.
 	if (kind === "cmaf") await import("@moq/hang/cmaf");
@@ -392,7 +398,7 @@ async function guardedPlayback(
 				mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }),
 			)
 		: undefined;
-	const decoder = new Decoder({ source, sync, enabled });
+	const decoder = new Decoder({ source, sync, enabled, priority });
 	// Another track on the same clock, whose arrivals the tests drive by hand.
 	const audio = sync.track({ target: new Signal<Duration | undefined>(undefined) });
 	await microtasks();
@@ -827,6 +833,27 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 }
+
+// Priority orders every subscription on a connection, so a page ranks one player's video against another's.
+it("subscribes at the hang video priority unless given one, and follows a change", async () => {
+	const defaulted = await guardedPlayback("legacy", [], [], true);
+	try {
+		expect(defaulted.track?.subscription.peek()?.priority).toBe(Catalog.PRIORITY.video);
+	} finally {
+		defaulted.close();
+	}
+
+	const priority = new Signal(127);
+	const playback = await guardedPlayback("legacy", [], [], true, 0, { priority });
+	try {
+		expect(playback.track?.subscription.peek()?.priority).toBe(127);
+		priority.set(-128);
+		await microtasks();
+		expect(playback.track?.subscription.peek()?.priority).toBe(-128);
+	} finally {
+		playback.close();
+	}
+});
 
 it("releases a failed video subscription and recovers only on a new source", async () => {
 	const close = spyOn(Moq.Track.Subscriber.prototype, "close");

@@ -102,6 +102,10 @@ struct Case {
 	/// The frames in each group, one per millisecond from its start.
 	frames: u64,
 	append: bool,
+	/// How long after its start each group ends whole, `None` for no declared end.
+	span: Option<u64>,
+	/// The groups the origin leaves unfinished.
+	open: Vec<u64>,
 	copy: Vec<Ask>,
 	evict: bool,
 	read: Ask,
@@ -134,6 +138,8 @@ fn cases() -> Vec<Case> {
 			append: case
 				.get("append")
 				.is_none_or(|append| append.as_bool().expect("append")),
+			span: case.get("span").map(|span| span.as_u64().expect("a span")),
+			open: case.get("open").map(keys).unwrap_or_default(),
 			copy: case
 				.get("copy")
 				.map(|copy| copy.as_array().expect("copy").iter().map(Ask::parse).collect())
@@ -178,6 +184,8 @@ struct Source {
 	origin: origin::Producer,
 	track: track::Producer,
 	_route: origin::Route,
+	// The groups the case leaves unfinished, held so they stay open.
+	open: std::sync::Mutex<Vec<moq_net::group::Producer>>,
 }
 
 impl Source {
@@ -196,12 +204,13 @@ impl Source {
 			origin,
 			track,
 			_route: route,
+			open: Default::default(),
 		}
 	}
 
 	fn write(&self, case: &Case) {
 		if let Some(live) = self.write_head(case) {
-			Self::write_tail(case, live);
+			self.write_tail(case, live);
 		}
 	}
 
@@ -211,7 +220,7 @@ impl Source {
 		let mut last = None;
 		for &start in &case.groups {
 			if let Some(live) = last.take() {
-				Self::write_tail(case, live);
+				self.write_tail(case, live);
 			}
 			let mut group = match case.append {
 				true => self.track.append_group(Timestamp::from_millis(start).unwrap()).unwrap(),
@@ -227,13 +236,17 @@ impl Source {
 		last
 	}
 
-	fn write_tail(case: &Case, (start, mut group): (u64, moq_net::group::Producer)) {
+	fn write_tail(&self, case: &Case, (start, mut group): (u64, moq_net::group::Producer)) {
 		for frame in case.frames.div_ceil(2)..case.frames {
 			group
 				.write_frame(Timestamp::from_millis(start + frame).unwrap(), &b"x"[..])
 				.unwrap();
 		}
-		group.finish().unwrap();
+		match case.span {
+			_ if case.open.contains(&start) => self.open.lock().unwrap().push(group),
+			Some(span) => drop(group.finish_at(start + span).unwrap()),
+			None => drop(group.finish().unwrap()),
+		}
 	}
 }
 
@@ -289,8 +302,9 @@ impl Got {
 	}
 
 	/// The groups in order, failing a group received twice, one missing any of its
-	/// `frames` frames, or an error.
-	async fn delivered(&mut self, frames: u64) -> Result<Vec<u64>, String> {
+	/// `frames` frames, or an error. A group in `open` never ends, so it is read only
+	/// through its frames.
+	async fn delivered(&mut self, frames: u64, open: &[u64]) -> Result<Vec<u64>, String> {
 		let starts = self.starts();
 		if let Some(error) = &self.error {
 			return Err(format!("failed after {starts:?}: {error}"));
@@ -298,7 +312,7 @@ impl Got {
 		for group in &mut self.groups {
 			let want: Vec<u64> = (group.start..group.start + frames).collect();
 			let mut got = Vec::new();
-			loop {
+			while !(open.contains(&group.start) && got.len() == want.len()) {
 				match kio::clock::timeout(ARRIVAL, group.read_frame()).await {
 					Ok(Ok(Some(frame))) => got.push(frame.timestamp.value()),
 					Ok(Ok(None)) => break,
@@ -325,7 +339,10 @@ async fn warm(broadcast: &moq_net::broadcast::Consumer, case: &Case) -> Vec<trac
 	let mut readers = Vec::new();
 	for ask in &case.copy {
 		let mut reader = subscribe(broadcast, ask).await.expect("a copy reader subscribes");
-		Got::default().read(&mut reader, 0).await;
+		// Each group's frames too, so the copy pulls them whole, as a JavaScript copy always does.
+		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(QUIET, reader.recv_group()).await {
+			while let Ok(Ok(Some(_))) = kio::clock::timeout(QUIET, group.read_frame()).await {}
+		}
 		readers.push(reader);
 	}
 	readers
@@ -451,7 +468,7 @@ async fn run(case: &Case, mode: Mode) -> Result<bool, String> {
 			a_to_front.server.abort(moq_net::Error::Cancel);
 			a_to_front.client.abort(moq_net::Error::Cancel);
 			if let Some(live) = live {
-				Source::write_tail(case, live);
+				source.write_tail(case, live);
 			}
 			got.read(&mut reader, want).await;
 
@@ -462,7 +479,7 @@ async fn run(case: &Case, mode: Mode) -> Result<bool, String> {
 		}
 	}
 
-	let delivered = got.delivered(case.frames).await?;
+	let delivered = got.delivered(case.frames, &case.open).await?;
 	if delivered != case.deliver {
 		return Err(format!("delivered {delivered:?}, ended: {}", got.ended));
 	}
@@ -470,7 +487,7 @@ async fn run(case: &Case, mode: Mode) -> Result<bool, String> {
 	if let Some(mut after) = after {
 		ended &= after.ended;
 		let delivered = after
-			.delivered(case.frames)
+			.delivered(case.frames, &case.open)
 			.await
 			.map_err(|err| format!("after the switch: {err}"))?;
 		if delivered != case.deliver {
@@ -600,7 +617,7 @@ async fn chain_serves_a_placed_range_before_its_join() {
 
 	chain.upstream.client_transport.set_latency(Duration::ZERO);
 	got.read(&mut reader, case.deliver.len()).await;
-	assert_eq!(got.delivered(case.frames).await.unwrap(), case.deliver);
+	assert_eq!(got.delivered(case.frames, &case.open).await.unwrap(), case.deliver);
 }
 
 /// As [`chain_serves_a_placed_range_before_its_join`], for older history the warm relay
@@ -642,5 +659,8 @@ async fn chain_serves_a_placed_range_before_older_history() {
 
 	chain.upstream.client_transport.set_latency(Duration::ZERO);
 	got.read(&mut reader, 4).await;
-	assert_eq!(got.delivered(case.frames).await.unwrap(), [1000, 2000, 5000, 6000]);
+	assert_eq!(
+		got.delivered(case.frames, &case.open).await.unwrap(),
+		[1000, 2000, 5000, 6000]
+	);
 }

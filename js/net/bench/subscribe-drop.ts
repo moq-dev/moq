@@ -9,7 +9,7 @@ import { createMockTransportPair, textFrame } from "../src/mock.ts";
 import { Producer as OriginProducer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Stream } from "../src/stream.ts";
-import { Timescale } from "../src/time.ts";
+import { Timescale, Timestamp } from "../src/time.ts";
 
 const groups = 128;
 const counts = [1, 4, 16];
@@ -29,7 +29,8 @@ try {
 					const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 					for (let sequence = 0n; sequence < BigInt(groups); sequence++) {
 						const group = track.createGroup(sequence);
-						group.writeFrame(textFrame("frame"));
+						// A timed group holds frames from its start up to the next group's.
+						group.writeFrame(textFrame("frame", Timestamp.fromMillis(Number(sequence))));
 						group.finish();
 					}
 					track.finish();
