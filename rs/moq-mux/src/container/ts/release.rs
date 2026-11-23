@@ -30,8 +30,9 @@ const SPREAD: Duration = Duration::from_millis(100);
 /// object until that time plus the delay on the jitter buffer's clock, which follows the
 /// source's, then spreads its packets evenly up to the next object's time, seven at a time
 /// (a UDP datagram's worth), so the output keeps the source's rate whatever the arrival jitter.
-/// An object whose successor is not yet buffered when it comes due, or is more than ISO
-/// 13818-1's 100 ms PCR interval ahead, goes out whole, as does every object under no delay.
+/// An object whose successor is not yet buffered when it comes due, follows a loss, or is more
+/// than ISO 13818-1's 100 ms PCR interval ahead, goes out whole, as does every object under no
+/// delay.
 /// Two releases that each receive every object before its deadline write the same bytes; where
 /// each held an object's successor when it came due, at the same times
 /// too, so a delay longer than the arrival jitter by a PCR interval keeps them in step. An

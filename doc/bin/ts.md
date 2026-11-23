@@ -148,7 +148,7 @@ clock was, and the bytes still go out unchanged, step and all.
 source clock, spread evenly up to the next run's time seven packets (a UDP
 datagram) at a time, so the output keeps the source's rate and two exporters
 that each receive every run before it comes due emit the same bytes. A run
-whose successor has not arrived when it comes due,
+whose successor has not arrived when it comes due, follows a loss,
 or is more than 100 ms on, goes out whole, so the timing matches between
 exporters only where each had the successor: a `--delay` longer than the
 arrival jitter by a PCR interval. Runs that come due while stdout blocks go
