@@ -19,11 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [base, fix]
-        shard: [1, 2, 3, 4]
-        include:
-          - variant: fix-full
-            shard: 1
+        variant: [fix, base-denial, fix-denial]
+        shard: [1, 2]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,7 +29,7 @@ jobs:
           fetch-depth: 0
           filter: blob:none
       - name: Use the base's media driver
-        if: matrix.variant == 'base'
+        if: startsWith(matrix.variant, 'base')
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: git checkout "$BASE" -- test/interop/clients/js/media.ts
@@ -54,7 +51,7 @@ jobs:
         run: |
           runs=5
           cases=(--media-cases replacement)
-          if [[ "$VARIANT" == fix-full ]]; then runs=2; cases=(); fi
+          if [[ "$VARIANT" == *-denial ]]; then cases=(--media-cases capture-denial); fi
           pass=0
           fail=0
           for i in $(seq "$runs"); do
