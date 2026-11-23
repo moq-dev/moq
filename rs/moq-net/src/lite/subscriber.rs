@@ -5805,51 +5805,6 @@ mod tests {
 		}
 	}
 
-	/// A copy declares where its feed starts once every range but a live join is answered, so a
-	/// relay serving it answers the rest without the join, and lowers the start where the join
-	/// lands below. A copy that only joins feed waits for one of them.
-	#[kio::test]
-	async fn an_unanswered_join_holds_the_start_only_alone() {
-		let join = lite::Range {
-			start: Some(lite::Anchor::Live(Duration::from_secs(1))),
-			end: None,
-		};
-		let bounded = lite::Range {
-			start: Some(lite::Anchor::Time(1000)),
-			end: Some(lite::Anchor::Time(2000)),
-		};
-		let answer = |serve: &TrackServe, serving: &mut ServeLoop, id, start| {
-			let start = lite::SubscribeStart {
-				id,
-				start: Some(start),
-				largest: lite::Edge::Largest(lite::Largest {
-					position: track::Position::group(9000),
-					ended: false,
-				}),
-			};
-			let moved = serving.record_start(serve, &start).unwrap();
-			serving.apply_starts(serve, start.largest, moved).unwrap();
-		};
-		let waiter = kio::Waiter::noop();
-		for (ranges, starts) in [
-			(vec![bounded, join], vec![(0, 1000, Some(1000)), (1, 500, Some(500))]),
-			(vec![join], vec![(0, 8000, Some(8000))]),
-		] {
-			let (serve, mut serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
-			let Sub::Active(active) = &mut serving.sub else {
-				unreachable!("the helper opens a subscription");
-			};
-			active.live = lite::LiveRanges::new(Version::Lite07, &ranges);
-			let mut reader = serving.serving.subscribe(track::Subscription::default());
-			assert!(reader.poll_start(&waiter).is_pending(), "{ranges:?}: nothing answered");
-			for (id, start, declared) in starts {
-				answer(&serve, &mut serving, id, start);
-				assert!(reader.poll_start(&waiter).is_ready(), "{ranges:?}: range {id} answered");
-				assert_eq!(serving.serving.start_key(), declared, "{ranges:?}: range {id} answered");
-			}
-		}
-	}
-
 	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under the max age `budget`,
 	/// its broadcast, and the tail it accounts on.
 	async fn lite07_serving(
@@ -10459,13 +10414,6 @@ fn wire_span(mut subscription: Subscription) -> Subscription {
 	subscription.with_start(start)
 }
 
-/// Whether a live join still unanswered holds [`SubStream::lowest_start`] pending.
-#[derive(Clone, Copy, PartialEq)]
-enum Joins {
-	Wait,
-	Skip,
-}
-
 /// The at-most-one live upstream subscription: its control stream plus the params
 /// echoed in every SUBSCRIBE_UPDATE.
 struct SubStream {
@@ -10555,46 +10503,24 @@ impl SubStream {
 		self.started.is_none() && self.end.as_ref().is_some_and(|end| end.group > self.start.unwrap_or(0))
 	}
 
-	/// Lite-07: where the live feed starts, the lowest start the demand's live ranges report,
-	/// or the requested floor, pending, while a range's SUBSCRIBE_START has yet to say where
-	/// one starts. `None` before lite-07, whose one start describes only the SUBSCRIBE's
-	/// demand, and while the ranges ask only for fills. What the tail waits for from.
+	/// Lite-07's declaration of where the live feed starts: the lowest start the demand's live
+	/// ranges report, or the requested floor, pending, while SUBSCRIBE_START or a range's
+	/// SUBSCRIBE_START has yet to say where one starts. `None` before lite-07, whose one start
+	/// describes only the SUBSCRIBE's demand, and while the ranges ask only for fills.
 	fn feed_start(&self) -> Option<(Option<u64>, bool)> {
-		self.lowest_start(Joins::Wait)
-	}
-
-	/// [`Self::feed_start`] as this copy declares it to its readers: a live join still
-	/// unanswered holds it pending only while no other range is answered. The join's answer
-	/// places just the join, whose readers start where it places them, while every other
-	/// range's groups come from a range of its own. So a relay serving this copy answers a
-	/// range its upstream placed without waiting on a join that upstream still places.
-	fn declared_start(&self) -> Option<(Option<u64>, bool)> {
-		self.lowest_start(Joins::Skip)
-	}
-
-	fn lowest_start(&self, joins: Joins) -> Option<(Option<u64>, bool)> {
 		if !self.live.reports_starts() || self.demand.is_none() {
 			return None;
 		}
 		let mut start: Option<u64> = None;
-		let (mut answered, mut skipped) = (false, false);
-		for (id, range) in self.live.iter().filter(|(id, _)| self.feeds(*id)) {
+		for (id, _) in self.live.iter().filter(|(id, _)| self.feeds(*id)) {
 			match self.starts.get(&id) {
 				// A range with no group there serves nothing to start from.
 				Some(Some(at)) => start = Some(start.map_or(*at, |start| start.min(*at))),
 				Some(None) => {}
-				None if joins == Joins::Skip && matches!(range.start, Some(lite::Anchor::Live(_))) => {
-					skipped = true;
-					continue;
-				}
 				None => return Some((self.start, true)),
 			}
-			answered = true;
 		}
-		match skipped && !answered {
-			true => Some((self.start, true)),
-			false => Some((start, self.started.is_none())),
-		}
+		Some((start, self.started.is_none()))
 	}
 
 	/// Tell the copy where the publisher started each live range: one asked from a group, or
@@ -10647,10 +10573,10 @@ impl SubStream {
 		});
 	}
 
-	/// Declare on the copy where the live feed starts, by [`Self::declared_start`], so a reader
+	/// Declare on the copy where the live feed starts, by [`Self::feed_start`], so a reader
 	/// waiting on each group in key starts there rather than at whatever arrives first.
 	fn declare(&mut self, serving: &mut track::Producer) {
-		let Some(next) = self.declared_start() else {
+		let Some(next) = self.feed_start() else {
 			return;
 		};
 		if self.declared.replace(next) == Some(next) {
@@ -11561,8 +11487,7 @@ impl TrackServe {
 							// start returns to the demand that produced it (see
 							// `SubStream::requested`).
 							// Lite-07 declares from each live range's reported start instead, pending
-							// while a range the update adds awaits SUBSCRIBE_START (see
-							// `SubStream::declared_start`).
+							// while a range the update adds awaits SUBSCRIBE_START.
 							if active.live.reports_starts() {
 								active.declare(producer);
 							} else if start_moved {
@@ -13258,9 +13183,6 @@ impl ServeLoop {
 		// Where the live feed starts so far: the lowest start the demand's ranges report.
 		let served = active.feed_start().and_then(|(start, _)| start);
 		active.started = Some(served);
-		// Before the ranges are reported: a join placed below where the copy said its feed
-		// starts would read to its readers as never coming.
-		active.declare(&mut self.serving);
 		// Before the copy goes live, since a reader's live join resolves only then: where the
 		// publisher placed it, rather than at whichever group landed first.
 		if moved {
@@ -13297,6 +13219,7 @@ impl ServeLoop {
 		let live = &active.live;
 		active.fill_ids.retain(|id| live.get(*id).is_some());
 		active.probe_ids.retain(|id| live.get(*id).is_some());
+		active.declare(&mut self.serving);
 		// The groups the SUBSCRIBE asked for below where every demand range starts are not waited
 		// for, whatever the demand asks later. One that still arrives is delivered, so they are
 		// not dropped.

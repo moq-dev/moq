@@ -5973,13 +5973,18 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// The first group waits for the source to resolve where its feed starts.
-		if let Start::Unresolved {
-			first: first @ Some(_), ..
-		} = &mut self.start
-		{
-			let Poll::Ready(source) = self.track.poll_start(waiter) else {
-				return Poll::Pending;
+		// The first group waits for the source to resolve where its feed starts, or on lite-07
+		// for one of the SUBSCRIBE's ranges to be placed.
+		if matches!(self.start, Start::Unresolved { first: Some(_), .. }) {
+			let source = match self.track.poll_start(waiter) {
+				Poll::Ready(source) => source,
+				// Delivery starts at the floor, at or below where any range still unplaced starts,
+				// so its answer later is never raised past its own start.
+				Poll::Pending if self.places_any(waiter) => Some(self.floor),
+				Poll::Pending => return Poll::Pending,
+			};
+			let Start::Unresolved { first, .. } = &mut self.start else {
+				unreachable!("matched");
 			};
 			let group = first.take().expect("matched");
 			self.start(group, source, writer)?;
@@ -6300,6 +6305,21 @@ impl TrackRun {
 			starts.push((id, end.is_none_or(|end| end > from).then_some(from)));
 		}
 		starts
+	}
+
+	/// Lite-07, while the source has yet to say where its whole feed starts: whether
+	/// [`Self::resolve`] would answer one of the SUBSCRIBE's ranges now. Each range is
+	/// answered on its own, so one placed already, as a relay's copy places it from its
+	/// upstream's answer for that range, waits on no other, such as a live join or older
+	/// history that upstream still places. Registers `waiter` for the feed going live.
+	fn places_any(&mut self, waiter: &kio::Waiter) -> bool {
+		if !self.ctx.version.has_ranges() {
+			return false;
+		}
+		let known = self.largest(waiter) != lite::Edge::Unknown;
+		let floor = self.floor;
+		let starts = self.starts(floor);
+		starts.iter().any(|(id, _)| known || !self.unstarted[id].live)
 	}
 
 	/// What this hop knows of the track's largest position: only what its live feed says, so a
@@ -9585,6 +9605,41 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let answers = starts(&responses(&mut writer, &log).await);
 		assert_eq!(answers, [(1, Some(1000)), (2, Some(1000)), (3, Some(1000))]);
+	}
+
+	/// On a relay's copy whose upstream placed one range and still places an older one, the
+	/// placed range is answered and served at once. The older one is answered once placed,
+	/// where it starts, below the range answered first.
+	#[kio::test]
+	async fn lite07_a_placed_range_goes_out_before_an_older_unplaced_one() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		track.request_start(Some(0)).unwrap();
+		let budget = Duration::from_secs(3600);
+		track.time_starts([(5000, Some(5000), budget)]);
+		write_group(&mut track, 5000, 5000);
+		write_group(&mut track, 6000, 6000);
+		let (mut run, mut writer, log) = lite07_run_ranges(
+			&track,
+			&[
+				lite::Range::span(Some(1000), 0, Some(2000), None),
+				lite::Range::span(Some(5000), 0, Some(6000), None),
+			],
+		);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), [(1, Some(5000))]);
+
+		track.time_starts([(1000, Some(1000), budget), (5000, Some(5000), budget)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			starts(&responses(&mut writer, &log).await),
+			[(1, Some(5000)), (0, Some(1000))]
+		);
 	}
 
 	/// A gap the publisher never declared might have existed, so the end names it with a

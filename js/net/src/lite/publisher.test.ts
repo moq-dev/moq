@@ -1907,6 +1907,42 @@ test("lite draft-07: a time start a copy's oldest range covers waits for an answ
 	}
 });
 
+// On a relay's copy whose upstream placed one range and still places an older one, the placed range
+// is answered and served at once. The older one is answered once placed, where it starts, below the
+// range answered first. Mirrors the Rust `lite07_a_placed_range_goes_out_before_an_older_unplaced_one`.
+test("lite draft-07: a placed range goes out before an older unplaced one", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		maxAge: Duration.millis(3_600_000),
+		ranges: [
+			{ start: { absolute: 1000n }, end: { absolute: 2001n } },
+			{ start: { absolute: 5000n }, end: { absolute: 6001n } },
+		],
+	});
+	try {
+		hooks.receiveTrack(sub.track);
+		// The copy still waits on its upstream's answer for the demand from 1000.
+		hooks.startTrack(sub.track, { requested: 1000n });
+		hooks.timeStarts(sub.track, [[5000n, 5000n, NO_MAX_DELAY]]);
+		sub.serve(5000n);
+		const placed = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in placed)) throw new Error("expected SUBSCRIBE_START");
+		expect([placed.start.id, placed.start.start]).toEqual([1n, 5000n]);
+		expect(await sub.servedSequence()).toBe(5000n);
+
+		hooks.timeStarts(sub.track, [
+			[1000n, 1000n, NO_MAX_DELAY],
+			[5000n, 5000n, NO_MAX_DELAY],
+		]);
+		const older = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in older)) throw new Error("expected SUBSCRIBE_START");
+		expect([older.start.id, older.start.start]).toEqual([0n, 1000n]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A relay's group stream can beat the upstream START on its own stream. Resolving from that
 // group would give up the backlog the START still promises, so the first group waits for it.
 for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {

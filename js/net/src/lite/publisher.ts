@@ -1665,6 +1665,19 @@ export class Publisher {
 			return true;
 		};
 
+		// Lite-07, while the source has yet to say where its whole feed starts, `position` the newest
+		// this hop saw: whether `resolveStart` would answer one of the SUBSCRIBE's ranges now. Each
+		// range is answered on its own, so one placed already, as a relay's copy places it from its
+		// upstream's answer for that range, waits on no other, such as a live join or older history
+		// that upstream still places. Mirrors the Rust `TrackRun::places_any`.
+		const placesAny = (position: track.Position | undefined): boolean => {
+			if (!hasRanges(this.version)) return false;
+			const known = edge(position) !== "unknown";
+			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
+			const resolution = hooks.servingResolvedKeys(track, ids);
+			return ids.some((id, index) => resolution[index] !== undefined && (known || !unstarted.get(id)?.live));
+		};
+
 		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
 		// once nothing can resolve it (`finished`). One following the live edge also waits until this
 		// hop knows where it is. The first answers go out with `resolveStart`. Mirrors the Rust
@@ -2086,13 +2099,19 @@ export class Publisher {
 				const range = frameRange(bounds, group.start);
 
 				if (emitRange && !startSent) {
-					const source = hooks.sourceStart(track);
+					let source = hooks.sourceStart(track);
 					// A group stream can beat the upstream START on its own stream, and resolving
-					// from the group alone would give up the backlog that START still promises.
+					// from the group alone would give up the backlog that START still promises. On
+					// lite-07, one of the SUBSCRIBE's ranges placed already resolves it, with delivery
+					// at the floor, at or below where any range still unplaced starts, so its answer
+					// later is never raised past its own start.
 					if (source === "pending") {
-						first = { group, largest };
-						await waitForSubscription(controls, track, drops);
-						continue;
+						if (!placesAny(largest)) {
+							first = { group, largest };
+							await waitForSubscription(controls, track, drops);
+							continue;
+						}
+						source = floor;
 					}
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.

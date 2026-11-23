@@ -330,10 +330,15 @@ export class MockTransport implements WebTransport {
 		this.#held = {};
 	}
 
-	/** Deliver what {@link hold} and {@link holdOpen} stalled, in the order it was written, and stop holding. */
+	/**
+	 * Deliver what {@link hold}, {@link holdOpen}, and {@link holdUnis} stalled, each stream's in
+	 * the order it was written, and stop holding.
+	 */
 	release(): void {
 		for (const held of this.#heldOpen.splice(0)) deliver(held);
 		deliver(this.#held);
+		for (const held of this.#heldUnis?.splice(0) ?? []) deliver(held);
+		this.#heldUnis = undefined;
 	}
 
 	/**

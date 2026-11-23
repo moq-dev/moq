@@ -368,6 +368,43 @@ for (const mode of ["direct", "cold", "warm", "late", "switch"] as const) {
 	}
 }
 
+// The origin, then a warm relay holding what `copy` filled, a cold relay, and a front relay, each
+// pulling over the wire from the one before. Mirrors the Rust `Chain`.
+async function chainOf(clock: Manual, origin: ReturnType<typeof source>, copy: Ask[], cleanup: (() => void)[]) {
+	// An origin advertising the broadcast for the next hop and serving each request from `serve`, as
+	// a relay does: a session never announces a received broadcast to another.
+	const relay = (serve: () => BroadcastConsumer) => {
+		const published = new OriginProducer();
+		const claim = published.claim(path);
+		void (async () => {
+			for await (const request of claim.requested()) request.serve(serve());
+		})();
+		cleanup.push(
+			() => claim.close(),
+			() => published.close(),
+		);
+		return published;
+	};
+	const warmCopy = await copyOf(origin.origin);
+	cleanup.push(() => warmCopy.close());
+	const warmed = warmCopy.consume();
+	cleanup.push(() => warmed.close());
+	for (const ask of copy) {
+		const reader = warmed.track("data").subscribe(subscription(ask));
+		cleanup.push(() => reader.close());
+		const got = new Got();
+		await got.read(clock, reader, 0);
+		got.close();
+	}
+	const coldCopy = await copyOf(relay(warmCopy.consume));
+	cleanup.push(() => coldCopy.close());
+	const front = await copyOf(relay(coldCopy.consume));
+	cleanup.push(() => front.close());
+	const remote = front.consume();
+	cleanup.push(() => remote.close());
+	return { warmCopy, remote };
+}
+
 // Each range is answered on its own, through every hop: a cold relay behind a warm one serves a
 // time range its upstream placed from cache, over the wire, while a live join in the same
 // subscription still waits on the warm relay's held upstream. The join's groups follow once it is
@@ -379,33 +416,9 @@ test("range table chain: a placed range is served before its join", async () => 
 	const origin = source();
 	const got = new Got();
 	const cleanup: (() => void)[] = [() => got.close()];
-	// An origin advertising the broadcast for the next hop and serving each request from `copy`, as a
-	// relay does: a session never announces a received broadcast to another.
-	const relay = (copy: () => BroadcastConsumer) => {
-		const published = new OriginProducer();
-		const claim = published.claim(path);
-		void (async () => {
-			for await (const request of claim.requested()) request.serve(copy());
-		})();
-		cleanup.push(
-			() => claim.close(),
-			() => published.close(),
-		);
-		return published;
-	};
 	try {
 		origin.write(c);
-		const warmCopy = await copyOf(origin.origin);
-		cleanup.push(() => warmCopy.close());
-		const warmed = warmCopy.consume();
-		cleanup.push(() => warmed.close());
-		for (const reader of await warm(clock, warmed, c)) cleanup.push(() => reader.close());
-		const coldCopy = await copyOf(relay(warmCopy.consume));
-		cleanup.push(() => coldCopy.close());
-		const front = await copyOf(relay(coldCopy.consume));
-		cleanup.push(() => front.close());
-		const remote = front.consume();
-		cleanup.push(() => remote.close());
+		const { warmCopy, remote } = await chainOf(clock, origin, c.copy ?? [], cleanup);
 
 		// The origin's answers on the warm relay's open subscription wait, so the join it asks for
 		// there stays unplaced, while the relay's new requests, such as its TRACK, still flow.
@@ -418,6 +431,44 @@ test("range table chain: a placed range is served before its join", async () => 
 		warmCopy.server.release();
 		await got.read(clock, reader, c.deliver.length);
 		expect(await got.delivered(clock)).toEqual(c.deliver);
+	} finally {
+		for (const close of cleanup.reverse()) close();
+		origin.close();
+		installed.close();
+	}
+});
+
+// As "a placed range is served before its join", for older history the warm relay lacks: its range
+// waits on the warm relay's held upstream while the range it holds goes out. Once placed, the older
+// range starts where its upstream placed it, below the range answered first. Read newest first, so
+// the reader holds no group for an older one. Mirrors the Rust
+// `chain_serves_a_placed_range_before_older_history`.
+test("range table chain: a placed range is served before older history", async () => {
+	const c = defined(table.cases.find((c) => c.name === "a time range and a live join in one subscription"));
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = source();
+	const got = new Got();
+	const cleanup: (() => void)[] = [() => got.close()];
+	try {
+		origin.write(c);
+		const held = { start: 5000, end: 6000 };
+		const { warmCopy, remote } = await chainOf(clock, origin, [{ ranges: [held] }], cleanup);
+
+		// The origin's answers and Group Streams for the older range wait, so the warm relay can't
+		// place it from groups that arrive before its answer.
+		warmCopy.server.holdOpen();
+		warmCopy.server.holdUnis();
+		const read = subscription({ ranges: [{ start: 1000, end: 2000 }, held] });
+		const reader = remote.track("data").subscribe({ ...read, order: "descending" });
+		cleanup.push(() => reader.close());
+		await got.read(clock, reader, 0);
+		const starts = got.starts().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+		expect(starts, "the held range waited on the older one").toEqual([5000n, 6000n]);
+
+		warmCopy.server.release();
+		await got.read(clock, reader, 4);
+		expect(await got.delivered(clock)).toEqual([1000, 2000, 5000, 6000]);
 	} finally {
 		for (const close of cleanup.reverse()) close();
 		origin.close();
