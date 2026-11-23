@@ -922,18 +922,23 @@ async function captureDenial(broadcast: string): Promise<void> {
 		() => `denied capture exposed media: ${JSON.stringify(denied)}`,
 	);
 
+	// A viewer reports "connecting" until its session could have seen an announcement, which says
+	// nothing about whether the broadcast is absent, so the window opens once it can tell.
+	await waitForState(viewer, viewerErrors, {
+		deadline: Date.now() + timeoutMs,
+		assertion: "capture denial holds publication",
+		description: "the capture viewer's session to connect",
+		predicate: (state) => state.broadcastStatus !== "connecting",
+	});
 	const absent = await collect(viewer, viewerErrors, 1000);
+	const seen = absent.find(
+		(state) =>
+			state.broadcastActive || state.broadcastStatus !== "offline" || state.hasAudio || state.videoFrames > 0,
+	);
 	check(
-		absent.length > 0 &&
-			absent.every(
-				(state) =>
-					!state.broadcastActive &&
-					state.broadcastStatus === "offline" &&
-					!state.hasAudio &&
-					state.videoFrames === 0,
-			),
+		absent.length > 0 && seen === undefined,
 		"capture denial holds publication",
-		() => `a viewer saw a partial or announced broadcast: ${JSON.stringify(absent.at(-1))}`,
+		() => `a viewer saw a partial or announced broadcast: ${JSON.stringify(seen ?? absent.at(-1))}`,
 	);
 
 	await publisher.context().grantPermissions(["camera"]);
