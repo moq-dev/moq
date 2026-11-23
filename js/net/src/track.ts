@@ -1150,6 +1150,15 @@ function reaches(received: bigint, drops: DropSet, end: End, refused: readonly R
  * above it. A reader whose budget varies by group is held to its widest. Mirrors the Rust
  * `settles`.
  */
+// The parts of `drops` within `[start, end)`, each clipped there.
+function intersectDrops(drops: readonly DropRun[], start: bigint, end: bigint): DropRun[] {
+	const out: DropRun[] = [];
+	for (let i = runsFrom(drops, start); i < drops.length && drops[i].start < end; i++) {
+		out.push({ ...drops[i], start: max(drops[i].start, start), end: min(drops[i].end, end) });
+	}
+	return out;
+}
+
 function settles(run: DropRun, budget: Budget, coverage: Coverage): boolean {
 	if (run.stale === undefined) return true;
 	if ((budget.isUniform() ? budget.at(run.start) : budget.widest()) > run.stale) return false;
@@ -3333,6 +3342,11 @@ export class Subscriber {
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
+	// The track's drops that settled a hole this reader judged, taken as its own verdicts, stale ones
+	// under the budget the upstream judged them by: the track forgets its drop set under pool pressure
+	// or once it expires, which must not reopen what this reader already gave up. Only a wider budget
+	// takes a stale one back, and the read passing it forgets it. Mirrors the Rust `Misses::adopt_drops`.
+	#adopted: DropRun[] = [];
 	// The heads this reader asked a fill for, each once: one met again with no fill bringing it
 	// is given up, as the Rust `Heads` gives up a head whose fetch ended without one. Clipped to
 	// what it still reads, so a widening back over one asks it afresh.
@@ -4234,6 +4248,7 @@ export class Subscriber {
 			// A moving read floor retires only its prefix: what lies above it stays asked.
 			const read = max(this.#cursor.peek().start, this.#nextKey);
 			for (const runs of [this.#asked, this.#refilled, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
+			cutRun(this.#adopted, 0n, read);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
 			this.#reopen(producer, fills, budget, coverage);
@@ -4279,7 +4294,14 @@ export class Subscriber {
 					)) {
 						// Judged from where it meets the asked run, as the reader would read it.
 						const clipped = { ...dropped, start: max(dropped.start, run.start) };
-						if (settles(clipped, budget, coverage)) insertRun(gone, clipped.start, dropped.end);
+						if (!settles(clipped, budget, coverage)) continue;
+						insertRun(gone, clipped.start, dropped.end);
+						// The track's drop, kept as this reader's own verdict; its own fill's refusal is one already.
+						if (!dropped.own) this.#adopt(clipped.start, min(dropped.end, run.end), dropped);
+					}
+					// What this reader gave up before, though the track forgot the drop that settled it.
+					for (const verdict of intersectDrops(this.#adopted, run.start, run.end)) {
+						if (settles(verdict, budget, coverage)) insertRun(gone, verdict.start, verdict.end);
 					}
 					for (const open of runGaps(gone, run.start, run.end)) {
 						let next = open.start;
@@ -5845,6 +5867,16 @@ export class Subscriber {
 		}
 	}
 
+	// Hold `[start, end)` as given up by `drop`, its stale budget included, so it is never asked again
+	// unless a budget wider than that takes it back. Mirrors the Rust `Misses::hold_verdict`.
+	#adopt(start: bigint, end: bigint, drop: Hole): void {
+		if (start >= end) return;
+		const hole: Hole = { error: drop.error };
+		if (drop.skip) hole.skip = true;
+		if (drop.stale !== undefined) hole.stale = drop.stale;
+		this.#adopted = insertDrop(this.#adopted, start, end, hole);
+	}
+
 	// Keep a run the key cursor gave up, once the drop record started, so a read reports it.
 	#giveUp(run: Run, hole: Hole): void {
 		if (this.#dropsSeen) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
@@ -5865,6 +5897,9 @@ export class Subscriber {
 			if (run.start < end && start < run.end) insertRun(runs, run.start, run.end);
 		}
 		for (const run of intersect(this.#givenUp, start, end)) insertRun(runs, run.start, run.end);
+		for (const verdict of intersectDrops(this.#adopted, start, end)) {
+			if (settles(verdict, drift.budget, coverage)) insertRun(runs, verdict.start, verdict.end);
+		}
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, start); i < timeline.length && timeline[i].start < end; i++) {
 			const group = timeline[i];
