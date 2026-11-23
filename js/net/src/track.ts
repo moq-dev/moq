@@ -69,7 +69,9 @@ import {
 	joinsLive,
 	rangesOf,
 	UNHELD,
+	placedAsTimes,
 	Window,
+	wireHeld,
 	wireSpan,
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
@@ -2899,10 +2901,18 @@ export class Producer {
 	// back restores the START. Without either, the first arrival stands in for it.
 	// Until the START arrives, the feed start is pending; the requested floor still bounds it.
 	// A local track has no feed, so what its subscribers ask bounds nothing, as in Rust.
+	// The floor the wire asks below which nothing is requested, a placed join from its group, as
+	// the subscriber sends it. Mirrors the Rust `Subscription::start`.
+	#requestedStart(): bigint | undefined {
+		const requested = this.#requested.peek();
+		if (requested === undefined) return undefined;
+		const { ranges, placed } = wireHeld(requested);
+		return wireSpan(placedAsTimes(ranges, placed)).start;
+	}
+
 	#feedStart(): bigint | "pending" | undefined {
 		if (!this.#wire) return undefined;
-		const ranges = this.#requested.peek()?.ranges;
-		const requested = ranges && wireSpan(ranges).start;
+		const requested = this.#requestedStart();
 		const served = this.#wire?.served;
 		if (!served || served.requested !== requested) return requested;
 		if (served.start === null) return requested;
@@ -2924,12 +2934,11 @@ export class Producer {
 		if (start === undefined || start === 0n) return undefined;
 		if (wire.starts.fillsFromStart) return start;
 		// The START applies only while the demand keeps the floor it answered, as `#feedStart`.
-		const ranges = this.#requested.peek()?.ranges;
 		const served = wire.served;
 		const resolved =
 			wire.starts.resolvesStart === true &&
 			typeof served?.start === "bigint" &&
-			served.requested === (ranges && wireSpan(ranges).start);
+			served.requested === this.#requestedStart();
 		if (resolved) return undefined;
 		return named === undefined || named >= start ? start : undefined;
 	}
