@@ -13415,7 +13415,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Some(0),
+				start: track::Start::Time(0),
 				end: Some(4),
 			}]);
 		let mut sub = logical
