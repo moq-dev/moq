@@ -802,6 +802,38 @@ if [[ -z "${GITHUB_ACTIONS:-}" ]]; then
         done
     done
 fi
+# Prints the process tree under PID, one indented line per process.
+processes() {
+    local -A kids=() lines=()
+    local pid ppid row
+    while read -r pid ppid row; do
+        kids[$ppid]+=" $pid"
+        lines[$pid]=$row
+    done < <(ps -A -o pid= -o ppid= -o etime= -o args=)
+    walk() {
+        local each
+        printf '%*s%s %.240s\n' "$2" '' "$1" "${lines[$1]-}"
+        for each in ${kids[$1]-}; do walk "$each" $(($2 + 2)); done
+    }
+    walk "$1" 0
+}
+
+# A TERM is a cancel or a job timeout, and those come when a lane hangs, whose
+# output would otherwise die with it in its buffer. So before stopping the
+# lanes, print each running lane's processes and buffered output, naming what
+# it waits on. This comes first because a runner kills the job seconds after
+# its TERM. An INT is a local Ctrl-C, which needs neither.
+stopped() {
+    local pid name
+    for pid in "${!running[@]}"; do
+        name=${running[$pid]}
+        if github; then echo "::error::$action: lane $name was still running"; else echo "$action: lane $name was still running" >&2; fi
+        processes "$pid"
+        cat "$logs/$name.log"
+        ! github || echo "::endgroup::"
+    done
+}
+
 declare -A running=()
 lone=
 next=0
@@ -812,14 +844,14 @@ failed_status=0
 # trap already ran; the next wait blocks until every lane has exited.
 trap 'cancel; until wait; do :; done; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
 trap 'exit 130' INT
-trap 'exit 143' TERM
+trap '((limit == 1)) || stopped; exit 143' TERM
 
 # Each lane runs in its own process group, so a cancel reaches its whole tree;
 # a lane shell stops its running phase and waits for it before it exits.
 # Concurrent lanes buffer their output and print it whole when they finish; a
 # serial run streams instead. A buffered lane still announces each phase on the
-# run's stderr as it starts and ends, so a run cut off mid-phase, such as by a
-# job timeout that never reaches this script, names the phase it stopped in.
+# run's stderr as it starts and ends, so even a run killed mid-phase without a
+# signal it traps names the phase it stopped in.
 # Every lane completes even when another fails, so one unavailable check cannot
 # hide unrelated failures; under CHECK_FAIL_FAST the first failure cancels the
 # running lanes and starts no more.
