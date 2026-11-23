@@ -5799,6 +5799,7 @@ impl TrackRun {
 			return Ok(false);
 		}
 		let largest = self.largest(waiter);
+		let per_range = self.per_range(waiter);
 		let mut waiting = std::collections::BTreeMap::new();
 		let mut reported = false;
 		let unstarted = std::mem::take(&mut self.unstarted);
@@ -5816,10 +5817,20 @@ impl TrackRun {
 					// A live join placed behind where delivery started, further from the live edge
 					// than the first ranges, starts where it was placed, even once pinned there: the
 					// subscriber reads its answer as the join's start, so its groups from there are
-					// owed, and delivery now starts there too. Any other range starts no earlier
-					// than delivery.
-					let start = match asked.joins {
+					// owed, and delivery now starts there too. So does a range naming a group on a
+					// copy that places it as its upstream answered. One reaching back there starts
+					// where the copy's feed does, once the copy knows. Any other range starts no
+					// earlier than delivery.
+					let start = match asked.joins || (per_range && resolved.floored) {
 						true => resolved.start,
+						false if per_range => match self.track.poll_start(waiter) {
+							Poll::Ready(source) => resolved.start.max(source.unwrap_or(from)),
+							Poll::Pending if finished => resolved.start.max(from),
+							Poll::Pending => {
+								waiting.insert(id, asked);
+								continue;
+							}
+						},
 						false => resolved.start.max(from),
 					};
 					let started = resolved.end.is_none_or(|end| end > start);
@@ -6290,9 +6301,13 @@ impl TrackRun {
 			.iter()
 			.copied()
 			.zip(self.track.waiting_keys(unresolved.iter().copied()));
+		// A range reaching back to the oldest group, on a copy placing each range as its
+		// upstream answered it, starts where the copy's feed does, which it may not know yet.
+		let reaches = self.per_range(&kio::Waiter::noop()) && self.track.poll_start(&kio::Waiter::noop()).is_pending();
 		let mut starts = Vec::new();
 		for (id, resolved) in ids.into_iter().zip(resolved) {
 			let (from, end) = match resolved {
+				Some(resolved) if reaches && !resolved.floored => continue,
 				Some(resolved) => (resolved.start.max(start), resolved.end),
 				// A time start still waiting at or below the floor, as an update before the start
 				// leaves one: whichever group contains it is out of range, so the range starts
@@ -6307,20 +6322,27 @@ impl TrackRun {
 		starts
 	}
 
-	/// Lite-07, while the source has yet to say where its whole feed starts: whether
-	/// [`Self::resolve`] would answer one of the SUBSCRIBE's ranges now. Each range is
-	/// answered on its own, so one a relay's copy placed already, from its upstream's answer
-	/// for that range, waits on no other, such as a live join or older history that upstream
-	/// still places. A copy that places ranges from whatever groups it holds waits for all.
-	/// Registers `waiter` for the feed going live.
+	/// Lite-07: whether the track is a relay's copy that places each range only where its
+	/// upstream would, from that upstream's answer for it or groups proving it, so a range it
+	/// placed waits on no other. A copy that places ranges from whatever groups it holds, or a
+	/// local track, waits for where its whole feed starts.
+	fn per_range(&mut self, waiter: &kio::Waiter) -> bool {
+		self.ctx.version.has_ranges() && self.track.places_as_upstream(waiter)
+	}
+
+	/// While the source has yet to say where its whole feed starts: whether a range still
+	/// unanswered, one the SUBSCRIBE carried or an update added since, names a group the
+	/// copy placed as its upstream answered (see [`Self::per_range`]), so [`Self::resolve`]
+	/// answers it now rather than wait on a live join or older history upstream still places.
+	/// Registers `waiter` for the copy's placements and the feed going live.
 	fn places_any(&mut self, waiter: &kio::Waiter) -> bool {
-		if !self.ctx.version.has_ranges() || !self.track.places_as_upstream(waiter) {
+		if !self.per_range(waiter) {
 			return false;
 		}
 		let known = self.largest(waiter) != lite::Edge::Unknown;
-		let floor = self.floor;
-		let starts = self.starts(floor);
-		starts.iter().any(|(id, _)| known || !self.unstarted[id].live)
+		let resolved = self.track.resolved_keys(self.unstarted.keys().copied());
+		(self.unstarted.values().zip(resolved))
+			.any(|(asked, resolved)| resolved.is_some_and(|resolved| resolved.floored) && (known || !asked.live))
 	}
 
 	/// What this hop knows of the track's largest position: only what its live feed says, so a
@@ -6464,6 +6486,9 @@ impl TrackRun {
 						largest,
 					}))?;
 				}
+				// A range an update added before this start is answered with it, before the
+				// drops below, which a subscriber reads only once a range has started.
+				self.report_started(false, writer, &kio::Waiter::noop())?;
 			}
 			false => writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 				id: 0,
@@ -9606,6 +9631,72 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let answers = starts(&responses(&mut writer, &log).await);
 		assert_eq!(answers, [(1, Some(1000)), (2, Some(1000)), (3, Some(1000))]);
+	}
+
+	/// A relay's copy that placed one range from its upstream's answer, which also asked for
+	/// the oldest group held: that range starts where the copy's feed does, so it is answered
+	/// only once the copy knows, never at the floor delivery started from.
+	#[kio::test]
+	async fn lite07_a_range_reaching_back_waits_for_the_copys_start() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		track.request_start(Some(0)).unwrap();
+		let budget = Duration::from_secs(3600);
+		track.time_starts([(5000, Some(5000), budget)]);
+		write_group(&mut track, 5000, 5000);
+		write_group(&mut track, 6000, 6000);
+		let (mut run, mut writer, log) = lite07_run_ranges(
+			&track,
+			&[
+				lite::Range::span(None, 0, Some(5500), None),
+				lite::Range::span(Some(5000), 0, Some(6000), None),
+			],
+		);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), [(1, Some(5000))]);
+
+		track.start_resolved(5000).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			starts(&responses(&mut writer, &log).await),
+			[(1, Some(5000)), (0, Some(5000))]
+		);
+	}
+
+	/// An update before any SUBSCRIBE_START retires the range the SUBSCRIBE carried and adds
+	/// two on a relay's copy, whose upstream placed one of them: that one is answered at once,
+	/// where it was placed, without waiting on the other.
+	#[kio::test]
+	async fn lite07_a_range_added_before_the_start_is_answered_once_placed() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		track.request_start(Some(0)).unwrap();
+		let budget = Duration::from_secs(3600);
+		track.time_starts([(5000, Some(5000), budget)]);
+		write_group(&mut track, 5000, 5000);
+		write_group(&mut track, 6000, 6000);
+		let (mut run, mut writer, log) =
+			lite07_run_ranges(&track, &[lite::Range::span(Some(3000), 0, Some(4000), None)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), []);
+
+		let added = [
+			lite::Range::span(Some(1000), 0, Some(2000), None),
+			lite::Range::span(Some(5000), 0, Some(6000), None),
+		];
+		run.update(lite07_add(&run, &[], 1, &added));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), [(2, Some(5000))]);
 	}
 
 	/// On a relay's copy whose upstream placed one range and still places an older one, the

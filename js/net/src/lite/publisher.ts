@@ -1641,6 +1641,11 @@ export class Publisher {
 		}
 		const sendStart = (start: SubscribeStart) =>
 			controls.response(encodeSubscribeResponse(stream, { start }, this.version));
+		// Lite-07: whether the track is a relay's copy that places each range only where its upstream
+		// would, from that upstream's answer for it or groups proving it, so a range it placed waits
+		// on no other. A copy that places ranges from whatever groups it holds, or a local track,
+		// waits for where its whole feed starts. Mirrors the Rust `TrackRun::per_range`.
+		const perRange = () => hasRanges(this.version) && hooks.placesAsUpstream(track);
 
 		// Resolve delivery at `from`, `position` the newest this hop saw, and answer each of the
 		// SUBSCRIBE's ranges resolved there. Before lite-07 the one start answers the subscription.
@@ -1654,29 +1659,34 @@ export class Publisher {
 			const largest = edge(position);
 			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, ids);
+			// A range reaching back to the oldest group, on a copy placing each range as its upstream
+			// answered it, starts where the copy's feed does, which it may not know yet.
+			const reaches = perRange() && hooks.sourceStart(track) === "pending";
 			for (const [index, id] of ids.entries()) {
 				const range = resolution[index];
 				if (!range || (unstarted.get(id)?.live && largest === "unknown")) continue;
+				if (reaches && !range.floored) continue;
 				const start = max(range.start, from);
 				unstarted.delete(id);
 				const at = range.end === undefined || range.end > start ? start : undefined;
 				if (!(await sendStart(new SubscribeStart({ id, start: at, largest })))) return false;
 			}
-			return true;
+			// A range an update added before this start is answered with it, before the drops held
+			// for it, which a subscriber reads only once a range has started.
+			return reportStarted(false);
 		};
 
-		// Lite-07, while the source has yet to say where its whole feed starts, `position` the newest
-		// this hop saw: whether `resolveStart` would answer one of the SUBSCRIBE's ranges now. Each
-		// range is answered on its own, so one a relay's copy placed already, from its upstream's
-		// answer for that range, waits on no other, such as a live join or older history that
-		// upstream still places. A copy that places ranges from whatever groups it holds waits for
-		// all. Mirrors the Rust `TrackRun::places_any`.
+		// While the source has yet to say where its whole feed starts, `position` the newest this hop
+		// saw: whether a range still unanswered, one the SUBSCRIBE carried or an update added since,
+		// names a group the copy placed as its upstream answered (see `perRange`), so `resolveStart`
+		// answers it now rather than wait on a live join or older history upstream still places.
+		// Mirrors the Rust `TrackRun::places_any`.
 		const placesAny = (position: track.Position | undefined): boolean => {
-			if (!hasRanges(this.version) || !hooks.placesAsUpstream(track)) return false;
+			if (!perRange()) return false;
 			const known = edge(position) !== "unknown";
-			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
+			const ids = [...unstarted.keys()].filter((id) => controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, ids);
-			return ids.some((id, index) => resolution[index] !== undefined && (known || !unstarted.get(id)?.live));
+			return ids.some((id, index) => resolution[index]?.floored && (known || !unstarted.get(id)?.live));
 		};
 
 		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
@@ -1694,6 +1704,7 @@ export class Publisher {
 			// Every range clamps against where delivery started before this batch, so one reported
 			// later isn't clamped against a start an earlier join in the batch lowered.
 			const from = startKey;
+			const per = perRange();
 			const resolution = hooks.servingResolvedKeys(track, held);
 			for (const [index, id] of held.entries()) {
 				// Or one taken while an earlier start went out.
@@ -1709,8 +1720,15 @@ export class Publisher {
 					// A live join placed behind where delivery started, further from the live edge than
 					// the first ranges, starts where it was placed: the subscriber reads its answer as
 					// the join's start, so its groups from there are owed, and delivery now starts there
-					// too. Any other range starts no earlier than delivery.
-					start = ask?.joins ? range.start : max(range.start, from);
+					// too. So does a range naming a group on a copy that places it as its upstream
+					// answered. One reaching back there starts where the copy's feed does, once the copy
+					// knows. Any other range starts no earlier than delivery.
+					if (ask?.joins || (per && range.floored)) start = range.start;
+					else if (per) {
+						const source = hooks.sourceStart(track);
+						if (source === "pending" && !finished) continue;
+						start = max(range.start, source === "pending" ? from : (source ?? from));
+					} else start = max(range.start, from);
 					if (range.end !== undefined && range.end <= start) start = undefined;
 					else startKey = min(startKey, start);
 				}

@@ -1943,6 +1943,72 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 	}
 });
 
+// A relay's copy that placed one range from its upstream's answer, which also asked for the oldest
+// group held: that range starts where the copy's feed does, so it is answered only once the copy
+// knows, never at the floor delivery started from. Mirrors the Rust
+// `lite07_a_range_reaching_back_waits_for_the_copys_start`.
+test("lite draft-07: a range reaching back waits for the copy's start", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ end: { absolute: 5501n } }, { start: { absolute: 5000n }, end: { absolute: 6001n } }],
+	});
+	try {
+		hooks.receiveTrack(sub.track);
+		// The copy still waits on its upstream's answer for the demand from the oldest group.
+		hooks.startTrack(sub.track, { requested: 0n });
+		hooks.timeStarts(sub.track, [[5000n, 5000n, NO_MAX_DELAY]]);
+		sub.serve(5000n);
+		const placed = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in placed)) throw new Error("expected SUBSCRIBE_START");
+		expect([placed.start.id, placed.start.start]).toEqual([1n, 5000n]);
+		expect(await sub.servedSequence()).toBe(5000n);
+
+		hooks.startTrack(sub.track, { start: 5000n, requested: 0n });
+		const oldest = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in oldest)) throw new Error("expected SUBSCRIBE_START");
+		expect([oldest.start.id, oldest.start.start]).toEqual([0n, 5000n]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// An update before any SUBSCRIBE_START retires the range the SUBSCRIBE carried and adds two on a
+// relay's copy, whose upstream placed one of them: that one is answered at once, where it was
+// placed, without waiting on the other. Mirrors the Rust
+// `lite07_a_range_added_before_the_start_is_answered_once_placed`.
+test("lite draft-07: a range added before the start is answered once placed", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 3000n }, end: { absolute: 4001n } }],
+	});
+	try {
+		hooks.receiveTrack(sub.track);
+		await replayUpdate({
+			priority: 0,
+			ranges: [
+				{ start: { absolute: 1000n }, end: { absolute: 2001n } },
+				{ start: { absolute: 5000n }, end: { absolute: 6001n } },
+			],
+			remove: [0n],
+		}).encode(sub.client.writer, version);
+		await flush();
+		// The copy still waits on its upstream's answer for the demand from 1000.
+		hooks.startTrack(sub.track, { requested: 1000n });
+		hooks.timeStarts(sub.track, [[5000n, 5000n, NO_MAX_DELAY]]);
+		sub.serve(5000n);
+		const placed = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in placed)) throw new Error("expected SUBSCRIBE_START");
+		expect([placed.start.id, placed.start.start]).toEqual([2n, 5000n]);
+		expect(await sub.servedSequence()).toBe(5000n);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A relay's group stream can beat the upstream START on its own stream. Resolving from that
 // group would give up the backlog the START still promises, so the first group waits for it.
 for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
