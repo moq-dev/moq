@@ -687,17 +687,6 @@ impl Plain {
 		freed
 	}
 
-	/// Shed the inflated frames before group frame `end`, which a reader took.
-	fn shed_before(&self, end: usize) {
-		let mut state = self.lock();
-		while state.base < end && !state.frames.is_empty() {
-			self.pop(&mut state);
-		}
-		if state.frames.is_empty() {
-			state.frames = VecDeque::new();
-		}
-	}
-
 	/// Whether inflating failed on the group's content, rather than its release.
 	fn malformed(&self) -> bool {
 		let state = self.lock();
@@ -1147,10 +1136,6 @@ impl GroupState {
 			end += 1;
 		}
 		self.shed_to(end);
-		// A plain read takes the same frames on the same scale, so their inflated copies go too.
-		if let Some(flate) = &self.flate {
-			flate.plain.shed_before(end);
-		}
 	}
 
 	/// Whether a frame still arriving bills the session: its payload or its header's fields.

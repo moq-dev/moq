@@ -26038,32 +26038,6 @@ mod test {
 		drop(group);
 	}
 
-	/// The frames a plain reader took of a received compressed edge go with their slices: a
-	/// shed of what readers took leaves no inflated copy billing the session.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_shed_of_taken_frames_drops_their_inflated_copies() {
-		let info = Info::timed().with_compression(Compression::Deflate);
-		let stored = stored_slices(&info);
-		let pool = cache::Pool::unbounded();
-		let broadcast = session_broadcast(&pool, Some(1 << 30));
-		let producer = Producer::new(broadcast.clone(), "test", info);
-		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
-		for object in &stored {
-			group = ingest_slice(group, object);
-		}
-		let mut reader = producer.consume().peek_group(0).expect("cached");
-		for _ in 0..stored.len() {
-			assert!(reader.read_frame().await.unwrap().is_some());
-		}
-		assert!(broadcast.edges.used() > 1024);
-
-		let moves = producer.state.read().cache.moves();
-		producer.state.write().ok().expect("open").shed_edge_taken(moves);
-		assert!(broadcast.edges.used() < 1024, "{:?}", broadcast.edges);
-		drop((reader, group));
-	}
-
 	/// The stored slices a publisher of a compressed group would send.
 	#[cfg(feature = "async")]
 	fn stored_slices(info: &Info) -> arrayvec::ArrayVec<frame::Object, 4> {
