@@ -2146,11 +2146,12 @@ export class Subscriber {
 			const recovering = fills.recovering;
 			if (fills.poll(entry.tail, !isAbandoned(demand)) || fills.recovering !== recovering)
 				entry.fillsChanged.update((revision) => revision + 1);
-			for (const fill of fills.takeWalks())
-				void fetch(fill).then(
-					() => fills.walked(),
-					() => fills.walked(),
-				);
+			// Once fetched it may be the last thing the subscription's end waits on, which this wakes.
+			const walked = () => {
+				fills.walked();
+				entry.fillsChanged.update((revision) => revision + 1);
+			};
+			for (const fill of fills.takeWalks()) void fetch(fill).then(walked, walked);
 			await fills.changed(entry.tail);
 		}
 		entry.fillsChanged.update((revision) => revision + 1);

@@ -544,7 +544,7 @@ test("draft-07's SUBSCRIBE_START says the largest before any group arrives", asy
 test("a recovery stalled behind a relay of the previous release is fetched", async () => {
 	using clock = manual();
 	const version = Version.DRAFT_05;
-	const { subscriber, reader, respond, accept } = await subscribed(version, Duration.millis(60_000), {
+	const { subscriber, reader, respond, fin, accept } = await subscribed(version, Duration.millis(60_000), {
 		start: 1n,
 	});
 	await respond({ start: new SubscribeStart([4n]) });
@@ -569,5 +569,16 @@ test("a recovery stalled behind a relay of the previous release is fetched", asy
 	expect(await settlesWithin(fetched, clock)).toBe(true);
 	const fetch = defined(await fetched);
 	expect(await fetch.reader.u53()).toBe(StreamId.Fetch);
-	reader.close();
+
+	// The subscription ends while the walk is still out, which the copy waits for. Upstream answers
+	// keys 1 and 2 not found, and then the reader ends cleanly.
+	await respond({ finish: new SubscribeFinish(5n) });
+	await fin();
+	const closed = reader.closed;
+	expect(await settlesWithin(closed, clock, Duration.millis(100))).toBe(false);
+	fetch.abort(new StreamError(StreamCode.NotFound));
+	const second = defined(await accept());
+	expect(await second.reader.u53()).toBe(StreamId.Fetch);
+	second.abort(new StreamError(StreamCode.NotFound));
+	expect(await settlesWithin(closed, clock, Duration.millis(100))).toBe(true);
 });
