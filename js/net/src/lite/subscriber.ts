@@ -56,7 +56,20 @@ import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/deman
 import { max, min, UNBOUNDED } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
-import { AT_KEYS, EMPTY, rangesStart, sameRanges, span, Window, widest, wireRanges, wireSpan } from "../window.ts";
+import { samePlaced } from "../demand.ts";
+import {
+	AT_KEYS,
+	EMPTY,
+	placedAsTimes,
+	rangesStart,
+	sameRanges,
+	span,
+	Window,
+	widest,
+	wireHeld,
+	wireRanges,
+	wireSpan,
+} from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	type AnnounceBroadcast,
@@ -1338,8 +1351,8 @@ export class Subscriber {
 		state: SubscribeSetup,
 	) {
 		const { valid } = consumed;
-		const ranges = wireRanges(request.subscription.ranges ?? [{}]);
-		const msg = this.#subscribeMessage(id, broadcast, consumed, request.name, request.subscription, ranges);
+		const { ranges, placed } = wireHeld(request.subscription);
+		const msg = this.#subscribeMessage(id, broadcast, consumed, request.name, request.subscription, ranges, placed);
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
@@ -1408,8 +1421,9 @@ export class Subscriber {
 		await this.#serveStream(id, broadcast, consumed, state, stream, entry, msg);
 	}
 
-	// The SUBSCRIBE for `subscription`, asking for `ranges`, its wire ranges in the model. Its own
-	// wire ranges wait for the track's timescale when they name a time (see `#withRanges`).
+	// The SUBSCRIBE for `subscription`, asking for `ranges`, its wire ranges in the model, each live
+	// join `placed` at a group by index starting there. Its own wire ranges wait for the track's
+	// timescale when they name a time (see `#withRanges`).
 	#subscribeMessage(
 		id: bigint,
 		broadcast: Path.Valid,
@@ -1417,8 +1431,9 @@ export class Subscriber {
 		name: string,
 		subscription: Readonly<track.Subscription>,
 		ranges: readonly track.Range[],
+		placed: ReadonlyMap<number, bigint> = new Map(),
 	): Subscribe {
-		const span = wireSpan(ranges);
+		const span = wireSpan(placedAsTimes(ranges, placed));
 		return new Subscribe({
 			id,
 			broadcast,
@@ -1595,7 +1610,7 @@ export class Subscriber {
 				settle = resolve;
 			}),
 		);
-		const sending = this.#fitted(this.#withRanges(msg, ranges)).then((msg) =>
+		const sending = this.#fitted(this.#withRanges(msg, ranges, placed)).then((msg) =>
 			this.#sendSubscribe(state, msg, deadline),
 		);
 		try {
@@ -1633,10 +1648,10 @@ export class Subscriber {
 		}
 	}
 
-	// `msg` asking for `ranges` on a wire that carries them, its time anchors counted in `scale`,
-	// the timescale the track declares: refused on an untimed one.
-	#withRanges(msg: Subscribe, ranges: readonly track.Range[]): Subscribe {
-		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges);
+	// `msg` asking for `ranges` on a wire that carries them, each live join `placed` at a group by
+	// index as a Joined start there.
+	#withRanges(msg: Subscribe, ranges: readonly track.Range[], placed?: ReadonlyMap<number, bigint>): Subscribe {
+		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges, placed);
 		return msg;
 	}
 
@@ -2640,7 +2655,8 @@ export class Subscriber {
 	#covered(entry: SubscribeEntry): boolean {
 		// Without SUBSCRIBE_FINISH (older drafts) nothing says which groups are owed.
 		if (entry.end === undefined) return false;
-		const ranges = wireRanges(hooks.requested(entry.track).peek()?.ranges ?? [{}]);
+		const held = wireHeld(hooks.requested(entry.track).peek() ?? {});
+		const ranges = placedAsTimes(held.ranges, held.placed);
 		const end = min(entry.end, wireSpan(ranges).end ?? entry.end);
 		const floor = rangesStart(ranges);
 		// Lite-07 answers with SUBSCRIBE_OK once the track ends, unless nothing was asked below the
@@ -2752,15 +2768,18 @@ export class Subscriber {
 
 			// Demand collapsing to nothing is refused the same way an initial empty
 			// request is: the error closes the track, so every local subscriber sees it.
-			const ranges = wireRanges(current.ranges ?? [{}]);
+			const { ranges, placed } = wireHeld(current);
 			if (ranges.length === 0) throw new Error(EMPTY_RANGE);
-			const span = wireSpan(ranges);
+			// A wire before lite-07 narrows a placed join to a start at its group.
+			const times = placedAsTimes(ranges, placed);
+			const span = wireSpan(times);
 
 			// Changed ranges owe groups nobody asked for until now: below a lowered floor, or
 			// between ranges a widening joins while keeping the floor. Each gap they reach waits
 			// a fresh grace, which only delays giving up on one still owed.
-			const start = rangesStart(ranges);
-			if (!sameRanges(ranges, wireRanges(lastSent.ranges ?? [{}])))
+			const start = rangesStart(times);
+			const last = wireHeld(lastSent);
+			if (!sameRanges(ranges, last.ranges) || !samePlaced(placed, last.placed))
 				entry.tail.demand(start ?? entry.start ?? 0n, UNBOUNDED);
 
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
@@ -2769,7 +2788,7 @@ export class Subscriber {
 			if (hasRanges(this.version)) {
 				// The demand's ranges and the fills' groups, widened together until they fit. The fills
 				// keep their exact ask, so what they ask next is compared with that, not the wire.
-				const demanded = toWireRanges(ranges);
+				const demanded = toWireRanges(ranges, placed);
 				const fields = await this.#subscribeFields(msg, {
 					priority,
 					order: current.order,
@@ -2892,7 +2911,7 @@ export class Subscriber {
 				}
 				continue;
 			}
-			const asked = range.start?.time ?? range.start?.absolute ?? 0n;
+			const asked = range.start?.time ?? range.start?.absolute ?? range.start?.joined?.absolute ?? 0n;
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if (at !== undefined || reaches(range.end, asked)) times.push([asked, at]);
 		}
@@ -3512,7 +3531,7 @@ function wireJoin(range: WireRange): string | undefined {
 function narrowest(live: LiveRanges): number {
 	let narrowest = NO_MAX_DELAY;
 	for (const range of live.ranges()) {
-		const max = range.start?.live?.max;
+		const max = range.start?.live?.max ?? range.start?.joined?.max;
 		if (max !== undefined) narrowest = Math.min(narrowest, wireBudget(max));
 	}
 	return narrowest;

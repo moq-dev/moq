@@ -12,7 +12,7 @@
 import { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
 import { NO_MAX_DELAY, runsFrom, wireMillis } from "./internal.ts";
-import type { Range, Start } from "./track.ts";
+import type { Range, Start, Subscription } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import { Sorted } from "./util/sorted.ts";
 
@@ -262,6 +262,38 @@ export function rangesEnd(ranges: readonly Range[]): bigint | undefined {
 /** The ranges a SUBSCRIBE carries for `ranges`: all but the empty ones. Mirrors the Rust `wire_ranges`. */
 export function wireRanges(ranges: readonly Range[]): Range[] {
 	return ranges.filter((range) => !isEmpty(range));
+}
+
+/**
+ * {@link wireRanges} of `subscription`, and the group each live join among them was
+ * {@link Subscription.placed | placed} at, by its index there.
+ */
+export function wireHeld(subscription: Subscription): { ranges: Range[]; placed: Map<number, bigint> } {
+	const ranges: Range[] = [];
+	const placed = new Map<number, bigint>();
+	for (const [index, range] of (subscription.ranges ?? [{}]).entries()) {
+		if (isEmpty(range)) continue;
+		const group = subscription.placed?.get(index);
+		if (group !== undefined) placed.set(ranges.length, group);
+		ranges.push(range);
+	}
+	return { ranges, placed };
+}
+
+/**
+ * `ranges` with each live join `placed` at a group, by index, as a time start there: how a wire
+ * before lite-07 narrows it, whose one max age still takes the join's max (see the original
+ * ranges). Mirrors the Rust `Subscription::times`.
+ */
+export function placedAsTimes(ranges: readonly Range[], placed: ReadonlyMap<number, bigint>): Range[] {
+	if (placed.size === 0) return [...ranges];
+	return ranges.map((range, index) => {
+		const group = placed.get(index);
+		if (group === undefined) return range;
+		const out: Range = { start: group };
+		if (range.end !== undefined) out.end = range.end;
+		return out;
+	});
 }
 
 /** Whether every range has an end, so a lite-07 publisher ends the subscription once it covers them. */
