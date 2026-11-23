@@ -11,6 +11,9 @@
 //! plagues real-transport tests. Like a real CONNECTION_CLOSE, nothing written
 //! after it is delivered, and a stream left unfinished fails with the close once
 //! its earlier data is read.
+//!
+//! [`MockSession::limit_unis`] bounds the uni streams a side has open toward its peer, as
+//! QUIC's stream credit does: an open pends until the peer is done with one.
 
 use std::{
 	future::Future,
@@ -107,6 +110,25 @@ impl ClosedSignal {
 			*slot = Some(result);
 			self.waiters.wake();
 		}
+	}
+}
+
+/// The uni streams one side has open toward its peer, against the credit the peer grants.
+#[derive(Default)]
+struct UniCredit {
+	/// The most streams open at once, or `None` without limit.
+	max: Mutex<Option<usize>>,
+	/// Streams open: opened, and not yet read to the end, stopped, or dropped by the peer.
+	open: Mutex<usize>,
+	/// Wakes opens parked on the credit when a stream is done.
+	waiters: kio::Fan,
+}
+
+impl UniCredit {
+	/// Return one stream's credit.
+	fn release(&self) {
+		*self.open.lock().unwrap() -= 1;
+		self.waiters.wake();
 	}
 }
 
@@ -213,9 +235,19 @@ pub struct MockRecvStream {
 	closed: Arc<ClosedSignal>,
 	park: kio::Park,
 	conn: Arc<ConnectionState>,
+	/// The writer's credit this stream holds until it is done, under a limit.
+	credit: Option<Arc<UniCredit>>,
 }
 
 impl MockRecvStream {
+	/// End the stream for this reader, returning its credit once.
+	fn end(&mut self) {
+		self.done = true;
+		if let Some(credit) = self.credit.take() {
+			credit.release();
+		}
+	}
+
 	/// Pop the next chunk, mapping queue closure to an implicit FIN. Once everything
 	/// sent before a CONNECTION_CLOSE is read, an unfinished stream fails with it.
 	fn poll_chunk(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamChunk>> {
@@ -271,15 +303,15 @@ impl poll::RecvStream for MockRecvStream {
 				Poll::Ready(Ok(Some(n)))
 			}
 			Some(StreamChunk::Fin) | None => {
-				self.done = true;
+				self.end();
 				Poll::Ready(Ok(None))
 			}
 			Some(StreamChunk::Reset(code)) => {
-				self.done = true;
+				self.end();
 				Poll::Ready(Err(MockError::stream_reset(code)))
 			}
 			Some(StreamChunk::Closed) => {
-				self.done = true;
+				self.end();
 				Poll::Ready(Err(self.conn.error().unwrap_or_else(MockError::closed)))
 			}
 		}
@@ -287,7 +319,7 @@ impl poll::RecvStream for MockRecvStream {
 
 	fn stop(&mut self, _code: u32) {
 		self.closed.set(Ok(()));
-		self.done = true;
+		self.end();
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -299,15 +331,15 @@ impl poll::RecvStream for MockRecvStream {
 			match std::task::ready!(self.poll_chunk(cx)) {
 				Some(StreamChunk::Data(_)) => {}
 				Some(StreamChunk::Fin) | None => {
-					self.done = true;
+					self.end();
 					return Poll::Ready(Ok(()));
 				}
 				Some(StreamChunk::Reset(code)) => {
-					self.done = true;
+					self.end();
 					return Poll::Ready(Err(MockError::stream_reset(code)));
 				}
 				Some(StreamChunk::Closed) => {
-					self.done = true;
+					self.end();
 					return Poll::Ready(Err(self.conn.error().unwrap_or_else(MockError::closed)));
 				}
 			}
@@ -321,6 +353,7 @@ impl Drop for MockRecvStream {
 		// and fail its future writes.
 		self.closed.set(Ok(()));
 		self.rx.close();
+		self.end();
 	}
 }
 
@@ -347,6 +380,7 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 		closed,
 		park: kio::Park::default(),
 		conn: conn.clone(),
+		credit: None,
 	};
 	(send, recv)
 }
@@ -403,6 +437,8 @@ struct SessionSide {
 	held: Mutex<Option<Vec<MockRecvStream>>>,
 	/// Whether the peer has withheld uni stream credit, parking every open.
 	withheld: Mutex<bool>,
+	/// The uni stream credit the peer grants this side.
+	credit: Arc<UniCredit>,
 	/// Whether the datagrams this side sends are lost.
 	lossy: Mutex<bool>,
 	/// What [`poll::Session::stats`] reports.
@@ -511,7 +547,30 @@ impl poll::Session for MockSession {
 			};
 		}
 
-		let (mut our_send, peer_recv) = new_stream_pair(&self.side.conn);
+		let credit = &self.side.credit;
+		let limited = match *credit.max.lock().unwrap() {
+			Some(max) => {
+				// Register before checking, so a stream finishing meanwhile still wakes this.
+				let waiter = self.open_uni.hold(cx);
+				credit.waiters.register(waiter);
+				self.side.conn.waiters.register(waiter);
+				if let Some(err) = self.side.conn.error() {
+					return Poll::Ready(Err(err));
+				}
+				let mut open = credit.open.lock().unwrap();
+				if *open >= max {
+					return Poll::Pending;
+				}
+				*open += 1;
+				true
+			}
+			None => false,
+		};
+
+		let (mut our_send, mut peer_recv) = new_stream_pair(&self.side.conn);
+		if limited {
+			peer_recv.credit = Some(credit.clone());
+		}
 
 		if let Some(held) = self.side.held.lock().unwrap().as_mut() {
 			our_send.ack_fin = true;
@@ -645,6 +704,12 @@ impl MockSession {
 		*self.side.withheld.lock().unwrap() = true;
 	}
 
+	/// Let this side have at most `max` uni streams open toward its peer from now on. A
+	/// stream is open until the peer reads it to the end, stops, or drops it, accepted or not.
+	pub fn limit_unis(&self, max: usize) {
+		*self.side.credit.max.lock().unwrap() = Some(max);
+	}
+
 	/// Lose every datagram this side sends from now on.
 	pub fn lose_datagrams(&self) {
 		*self.side.lossy.lock().unwrap() = true;
@@ -694,6 +759,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		conn: conn.clone(),
 		held: Mutex::default(),
 		withheld: Mutex::default(),
+		credit: Arc::default(),
 		lossy: Mutex::default(),
 		stats: Mutex::default(),
 		stats_reads: AtomicUsize::default(),
@@ -710,6 +776,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		conn,
 		held: Mutex::default(),
 		withheld: Mutex::default(),
+		credit: Arc::default(),
 		lossy: Mutex::default(),
 		stats: Mutex::default(),
 		stats_reads: AtomicUsize::default(),

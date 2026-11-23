@@ -14,6 +14,10 @@
 //! Cache-clock advancement stays outside the timed region.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH.
+//! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
+//! subscriptions and the backlog each holds, so every group waits for a stream grant. A
+//! publisher that parks state per backlogged group pays for it on each grant, which shows
+//! as a slope over the backlog.
 //! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
 //! written plus charged cache bytes every 10s during long profiling runs. Each round
 //! advances the cache clock by a second, so the expiry window spans 30 rounds.
@@ -113,6 +117,8 @@ struct Shape {
 	burst: usize,
 	/// Cached groups per track before a join, whose older groups the live budget skips.
 	history: usize,
+	/// Group streams a viewer's relay may have open toward it at once.
+	credit: Option<usize>,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
 }
@@ -131,6 +137,7 @@ impl Shape {
 		paced: false,
 		burst: 1,
 		history: 1,
+		credit: None,
 		fetch: false,
 	};
 
@@ -155,6 +162,11 @@ impl Shape {
 	}
 
 	fn id(&self, version: &str) -> String {
+		// The credit sweep names only what it varies: the full form passes Criterion's
+		// 100-character title limit, which truncates and renumbers it.
+		if let Some(credit) = self.credit {
+			return format!("{version}/watch={}/burst={}/credit={credit}", self.watch, self.burst);
+		}
 		format!(
 			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}",
 			self.relays,
@@ -319,6 +331,7 @@ fn path(broadcast: usize) -> String {
 /// keeps a session or broadcast alive.
 struct Cluster {
 	version: Version,
+	credit: Option<usize>,
 	relays: Vec<origin::Producer>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
@@ -334,6 +347,7 @@ impl Cluster {
 	async fn new(version: &str, shape: Shape) -> Self {
 		let mut this = Self {
 			version: version.parse().unwrap(),
+			credit: shape.credit,
 			relays: Vec::new(),
 			tracks: Vec::new(),
 			_broadcasts: Vec::new(),
@@ -403,6 +417,8 @@ impl Cluster {
 	async fn join(&mut self, relay: usize) -> Viewer {
 		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
+		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
+		options.max_concurrent_uni_streams = self.credit.map(|credit| credit + usize::from(self.version.is_ietf()));
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(self.relays[relay].consume().with_hidden(true));
 		options.client_subscribe = Some(origin.clone());
@@ -1256,6 +1272,22 @@ fn session(c: &mut Criterion) {
 			watch,
 			burst,
 			..base
+		}),
+	);
+	// The same backlog behind one uni stream grant at a time.
+	delivery(
+		c,
+		"credit",
+		[1, 16, 64].into_iter().flat_map(|watch| {
+			[1, 16, 64].map(move |burst| Shape {
+				publishers: 1,
+				broadcasts: 64,
+				viewers: 1,
+				watch,
+				burst,
+				credit: Some(1),
+				..base
+			})
 		}),
 	);
 	delivery(
