@@ -40,7 +40,7 @@ import { abandoned as demandAbandoned, isAbandoned, unrequested, unwanted } from
 import { min } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
-import { bounded, wireSpan } from "../window.ts";
+import { bounded, placedAsTimes, wireHeld, wireSpan } from "../window.ts";
 import { wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
@@ -1577,7 +1577,9 @@ export class Subscriber {
 		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
 		this.#aliases.resubscribe({ broadcast, name: request.name });
-		const bounds = wireSpan(request.subscription.ranges ?? [{}]);
+		// A live join already placed starts at its group, as a time start would.
+		const held = wireHeld(request.subscription);
+		const bounds = wireSpan(placedAsTimes(held.ranges, held.placed));
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
