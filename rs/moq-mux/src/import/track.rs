@@ -129,7 +129,7 @@ fn build_av1<E: CatalogExt>(
 	// av1C (leading 0x81, ISO/IEC 14496-15) is an out-of-band config record, not an
 	// OBU stream, so it's read for config (above) and dropped here. Raw OBUs are the
 	// leading bytes of the stream and feed the splitter.
-	let frames = if init.len() >= 16 && init[0] == 0x81 {
+	let frames = if crate::codec::av1::is_av1c(init) {
 		Vec::new()
 	} else {
 		split.decode(init, None)?
@@ -787,7 +787,7 @@ impl TrackStream {
 				import.initialize(data)?;
 				// av1C (leading 0x81) is an out-of-band config record, not an OBU
 				// stream; read for config above and dropped here.
-				let frames = if data.len() >= 16 && data[0] == 0x81 {
+				let frames = if crate::codec::av1::is_av1c(data) {
 					Vec::new()
 				} else {
 					split.decode(data, None)?
@@ -1769,6 +1769,28 @@ mod tests {
 	async fn av01_init_headers_survive_reset() {
 		let (av1c, _) = av1_init_and_keyframe();
 		headers_survive_reset(VideoFormat::Av01, av1c[4..].to_vec(), vec![0x32, 0x01, 0x10]).await;
+	}
+
+	/// An av1C with no configOBUs, just its 4-byte header, is a config record the importer
+	/// reads, not an OBU stream for the splitter to refuse.
+	#[tokio::test(start_paused = true)]
+	async fn av01_header_only_av1c_init_is_a_config_record() {
+		let (av1c, keyframe) = av1_init_and_keyframe();
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let mut import = Track::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Av01, av1c[..4].to_vec()),
+		)
+		.unwrap();
+		let timestamp = Timestamp::from_micros(1_000).unwrap();
+		import.decode(&keyframe, Some(timestamp)).unwrap();
+		let _finished = import.finish().unwrap();
+		assert_eq!(
+			first_frame(&consumer, "video").await.payload.as_ref(),
+			keyframe.as_slice()
+		);
 	}
 
 	/// A keyframe after a pre-picture seek carries the retained init header ahead of its own. The

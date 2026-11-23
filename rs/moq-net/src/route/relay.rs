@@ -19,11 +19,16 @@
 //!
 //! A closed session is named once per neighbour in a fixed-size [`Msg::Dead`], which ends
 //! every route its sender offered through it until the sender offers it again or ends
-//! it. Per pair of relays a node keeps, for good, the highest session it knows closed
-//! (the session floor), and refuses any path naming that pair at or below it: a session
-//! orders by its node's start and then its number, so a restart replaces the pair's
-//! entry. A node that sent GOAWAY is named once per neighbour in a [`Msg::Drain`], and
-//! every route through it ranks as draining. A node advertises once per burst of input,
+//! it. A node names its own session only if none it numbered lower to the same relay is
+//! live when it closes; one that closes while such a session lives is never named, and
+//! its routes go as any route change does, so no name covers a live session. Per pair of relays a node keeps the
+//! highest session it knows closed (the session floor), and refuses any path naming that
+//! pair at or below it: a session orders by its node's start and then its number, so a
+//! restart replaces the pair's entry. A floor only refuses stale routes sooner, so a node
+//! keeps every floor of a pair a heard route joins and, of the rest, those heard routes
+//! stopped joining last, while they number no more than those pairs: the table is bounded
+//! by the heard routes. A node that sent GOAWAY is named once per neighbour in a
+//! [`Msg::Drain`], and every route through it ranks as draining. A node advertises once per burst of input,
 //! when the caller drains it. There is no hold, no doubt, and no routing timer: the only
 //! clock is the reader's debounce from unavailable to offline, which runs from when the
 //! reader first showed the claim unavailable. The route exchange between routing nodes
@@ -86,7 +91,7 @@ use crate::Path;
 
 use super::prefix::{ancestors, below, within_any, within_set};
 use super::reader::Reader;
-use super::{Error, Event, Id, Item, Key, MAX_HOPS, Metric, Rev, Shown};
+use super::{Error, Event, Id, Item, Key, MAX_COST, MAX_HOPS, Metric, Rev, Shown};
 
 /// How a forwarding node names itself on a path: its relay, and which start of that
 /// relay's process. A start only grows; one that repeats or goes back gets the relay's
@@ -329,7 +334,7 @@ impl<A: Item> Claim<A> {
 		let rank = (
 			draining || self.draining,
 			Reverse(priority.min(self.priority)),
-			cost.saturating_add(self.cost),
+			cost.saturating_add(self.cost).min(MAX_COST),
 		);
 		(rank, self.marked || route.marked)
 	}
@@ -371,7 +376,7 @@ impl<A: Item> Claim<A> {
 		let mut claim = self.clone();
 		// Saturating, as `model::origin`'s claim cost does, so a claim's cost never
 		// decides whether it can serve.
-		claim.cost = claim.cost.saturating_add(port.cost);
+		claim.cost = claim.cost.saturating_add(port.cost).min(MAX_COST);
 		claim.priority = claim.priority.min(port.priority);
 		claim.marked |= port.upstream;
 		stamp(&mut claim.chain, me, forwards);
@@ -642,6 +647,40 @@ impl<I, A> Default for Known<I, A> {
 	}
 }
 
+/// Pairs of relays in the order they were added, each once.
+#[derive(Clone, Debug, Default)]
+struct Loose {
+	next: u64,
+	by_age: BTreeMap<u64, (Id, Id)>,
+	age: BTreeMap<(Id, Id), u64>,
+}
+
+impl Loose {
+	fn len(&self) -> usize {
+		self.age.len()
+	}
+
+	fn insert(&mut self, pair: (Id, Id)) {
+		if let std::collections::btree_map::Entry::Vacant(entry) = self.age.entry(pair) {
+			entry.insert(self.next);
+			self.by_age.insert(self.next, pair);
+			self.next += 1;
+		}
+	}
+
+	fn remove(&mut self, pair: &(Id, Id)) {
+		if let Some(age) = self.age.remove(pair) {
+			self.by_age.remove(&age);
+		}
+	}
+
+	fn pop_oldest(&mut self) -> Option<(Id, Id)> {
+		let (_, pair) = self.by_age.pop_first()?;
+		self.age.remove(&pair);
+		Some(pair)
+	}
+}
+
 /// The route this node uses, as it stands here: the heard offer with the link added.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Best<N> {
@@ -715,7 +754,7 @@ pub(crate) struct Kept {
 	pub told: usize,
 	/// Dead hops and draining nodes.
 	pub pending: usize,
-	/// Pairs of relays with a session known closed, kept for good.
+	/// Pairs of relays with a session known closed, as the floors keep them.
 	pub closed: usize,
 	/// Claims shown unavailable while the reader waits to show them offline.
 	pub waiting: usize,
@@ -757,6 +796,8 @@ pub(crate) struct Router<N, I, A> {
 	/// Per pair of relays, the highest session known closed, as the near relay's start
 	/// and its session number.
 	closed: BTreeMap<(Id, Id), (u64, u64)>,
+	/// The floors of pairs no heard route joins, oldest first.
+	loose: Loose,
 	/// Nodes named as draining that a live heard route still crosses.
 	draining: BTreeSet<NodeId>,
 	/// Forwarding nodes whose route changed since the neighbours were last told.
@@ -874,6 +915,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			unnamed: (BTreeSet::new(), BTreeSet::new()),
 			dead: BTreeMap::new(),
 			closed: BTreeMap::new(),
+			loose: Loose::default(),
 			draining: BTreeSet::new(),
 			stale: BTreeSet::new(),
 			best: BTreeMap::new(),
@@ -1009,8 +1051,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			return Err(Error::Duplicate);
 		}
 		// A start only grows. Every path through a session of a start below one known
-		// closed is refused for good, so a relay whose clock went back would peer and
-		// route nothing: refuse it here, where its operator sees why.
+		// closed is refused while its floor is kept, so a relay whose clock went back would
+		// peer and route nothing: refuse it here, where its operator sees why.
 		if let Role::Routing(node) = &port.role {
 			let known = (self.closed).range((node.relay, Id::MIN)..=(node.relay, Id::MAX));
 			if known.into_iter().any(|(_, (start, _))| *start > node.start) {
@@ -1191,13 +1233,21 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		// The session is named before any route it carried is withdrawn: a neighbour that
 		// hears only the withdrawal still takes the routes others offer through it.
+		// A floor covers every session of its pair at or below it, so a session closing while
+		// an older one to the same relay lives is never named: its floor would cover the
+		// older, live one, and every route still crossing it. Its routes go by replacement.
 		if let Role::Routing(far) = gone.port.role {
-			let hop = Hop {
-				node: self.me,
-				session: gone.session,
-			};
-			self.closed(hop, far, None, &mut touched);
+			let older = (self.peers.values())
+				.any(|peer| peer.session < gone.session && peer.routing().is_some_and(|id| id.relay == far.relay));
+			if !older {
+				let hop = Hop {
+					node: self.me,
+					session: gone.session,
+				};
+				self.closed(hop, far, None, &mut touched);
+			}
 		}
+		self.forget();
 		for &origin in &gone.offers {
 			self.unheard(origin);
 		}
@@ -1592,6 +1642,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		for (pair, _) in pairs(path) {
 			self.rx_pairs.entry(pair).or_default().insert((origin, from));
+			self.loose.remove(&pair);
 		}
 	}
 
@@ -1618,6 +1669,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				routes.remove(&(origin, from));
 				if routes.is_empty() {
 					self.rx_pairs.remove(&pair);
+					if self.closed.contains_key(&pair) {
+						self.loose.insert(pair);
+					}
 				}
 			}
 		}
@@ -1633,8 +1687,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 	}
 
-	/// Forget each dead hop and draining node no live heard route names.
+	/// Forget each dead hop and draining node no live heard route names, and the oldest
+	/// floors no heard route joins while they outnumber the pairs heard routes join.
 	fn forget(&mut self) {
+		// Bounded by the heard routes, as the floors they join are.
+		while self.loose.len() > self.rx_pairs.len() {
+			self.visit();
+			let pair = self.loose.pop_oldest().expect("a loose floor");
+			self.closed.remove(&pair);
+		}
 		for hop in std::mem::take(&mut self.unnamed.0) {
 			self.visit();
 			if !self.live.contains_key(&hop) && !mutated!(self, KeepDead) {
@@ -3105,6 +3166,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			unnamed,
 			dead,
 			closed,
+			loose,
 			draining,
 			stale,
 			best,
@@ -3144,9 +3206,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let since: BTreeMap<&Broadcast<I>, Duration> = (since.iter())
 			.map(|(broadcast, at)| (broadcast, now.saturating_duration_since(*at).min(*debounce)))
 			.collect();
+		// Only the order the loose floors go in matters, not the count behind it.
+		let loose: Vec<&(Id, Id)> = loose.by_age.values().collect();
 		let state = (
 			(me, forwards, debounce, sessions, peers, routing, fresh, heard, unnamed),
-			(dead, closed, draining, stale, best, marks, known, revs),
+			(dead, closed, loose, draining, stale, best, marks, known, revs),
 			(sources, ended, dirty, waiting, since, gone, reader.shown(), out),
 			withdrawn,
 		);
@@ -3180,6 +3244,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		assert_eq!(self.rx_hops, rx_hops, "heard hops");
 		assert_eq!(self.rx_pairs, rx_pairs, "heard pairs");
+		let loose: BTreeSet<&(Id, Id)> = self
+			.closed
+			.keys()
+			.filter(|pair| !rx_pairs.contains_key(*pair))
+			.collect();
+		assert_eq!(self.loose.age.keys().collect::<BTreeSet<_>>(), loose, "loose floors");
+		assert_eq!(self.loose.by_age.len(), loose.len(), "loose order");
+		assert!(loose.len() <= rx_pairs.len(), "loose floors outnumber the joined pairs");
+
 		assert_eq!(self.live, live, "live hops");
 		let mut tx_hops: BTreeMap<Hop, BTreeMap<N, BTreeSet<NodeId>>> = BTreeMap::new();
 		let mut sent_to: BTreeMap<NodeId, BTreeSet<N>> = BTreeMap::new();
@@ -3623,8 +3696,8 @@ mod tests {
 	}
 
 	/// A route whose cost a link would carry past the metric is never used, and never wraps
-	/// round to a cheap one. A claim's cost saturates there instead, so it never decides
-	/// whether the claim can serve.
+	/// round to a cheap one. A claim's cost saturates at the wire ceiling instead, so it
+	/// never decides whether the claim can serve.
 	#[test]
 	fn a_route_past_the_metric_is_never_used() {
 		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
@@ -3652,7 +3725,7 @@ mod tests {
 		let told = router.drain().into_iter().any(|(to, msg)| {
 			to == 3
 				&& matches!(&msg, Msg::Announce { changes } if changes.iter().any(|(broadcast, change)| {
-					*broadcast == far && matches!(change, Change::Live(claim) if claim.cost == Metric::MAX)
+					*broadcast == far && matches!(change, Change::Live(claim) if claim.cost == MAX_COST)
 				}))
 		});
 		assert!(told, "told at the metric's ceiling");
@@ -3660,7 +3733,7 @@ mod tests {
 			changes: vec![((p("near"), 7), claim(run(0), Metric::MAX))],
 		};
 		router.recv(3, announce).unwrap();
-		assert_eq!(router.own().1[&(p("near"), 7)].cost, Metric::MAX, "an endpoint's claim");
+		assert_eq!(router.own().1[&(p("near"), 7)].cost, MAX_COST, "an endpoint's claim");
 	}
 
 	/// A route that moves onto another path at the same rank changes no way to its claims,
@@ -5387,6 +5460,182 @@ mod tests {
 		// It ended the route: no live one crosses the hop or names the node now.
 		assert_eq!(router.recv(2, dead), Err(Error::Unrouted));
 		assert_eq!(router.recv(2, Msg::Drain { node: node(5) }), Err(Error::Unrouted));
+	}
+
+	/// Relays exchanging messages until none is left. Each keys a neighbour as
+	/// `10 * relay + link`, so two relays may hold more than one session.
+	struct Mesh(BTreeMap<Id, Relay>);
+
+	impl Mesh {
+		fn new(relays: &[Id]) -> Self {
+			Self(relays.iter().map(|&id| (id, relay(id))).collect())
+		}
+
+		fn link(&mut self, a: Id, b: Id, link: usize) {
+			for (x, y) in [(a, b), (b, a)] {
+				let (key, router) = (10 * y as usize + link, self.0.get_mut(&x).unwrap());
+				router.connect(key, port(Role::Routing(node(y)))).unwrap();
+			}
+			self.settle();
+		}
+
+		fn close(&mut self, a: Id, b: Id, link: usize) {
+			for (x, y) in [(a, b), (b, a)] {
+				self.0.get_mut(&x).unwrap().disconnect(10 * y as usize + link);
+			}
+			self.settle();
+		}
+
+		/// An endpoint at `relay` claims `live`, so the relay offers a route to itself.
+		fn claim(&mut self, relay: Id) {
+			let router = self.0.get_mut(&relay).unwrap();
+			open(router, 0, Role::Endpoint);
+			let changes = vec![((p("live"), 7), live(0))];
+			router.recv(0, Msg::Announce { changes }).unwrap();
+			self.settle();
+		}
+
+		fn settle(&mut self) {
+			loop {
+				let mut sent = Vec::new();
+				for (&id, router) in &mut self.0 {
+					for (key, msg) in router.drain() {
+						sent.push((key / 10, 10 * id as usize + key % 10, msg));
+					}
+				}
+				let mut delivered = false;
+				for (to, from, msg) in sent {
+					if let Some(router) = self.0.get_mut(&(to as Id)) {
+						router.recv(from, msg).unwrap();
+						delivered = true;
+					}
+				}
+				if !delivered {
+					return;
+				}
+			}
+		}
+
+		fn routes(&self, at: Id, to: Id) -> bool {
+			self.0[&at].best(node(to)).is_some()
+		}
+	}
+
+	/// Two sessions between the same pair of relays: whichever closes first, even the one
+	/// the route crosses, a relay that reaches the far one only through them keeps its
+	/// route.
+	#[test]
+	fn a_second_session_keeps_the_route() {
+		for (older, used) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
+			let mut mesh = Mesh::new(&[1, 2, 3]);
+			mesh.link(1, 2, older);
+			mesh.link(1, 2, 3 - older);
+			mesh.link(1, 3, 1);
+			mesh.claim(2);
+			assert!(mesh.routes(3, 2), "routed before any close");
+			// Close the link the route crosses, or the other one, first.
+			let via = mesh.0[&1].best(node(2)).expect("a route").0 % 10;
+			let first = if used == 1 { via } else { 3 - via };
+			mesh.close(1, 2, first);
+			assert!(mesh.routes(3, 2), "closing link {first} first keeps the route");
+			mesh.close(1, 2, 3 - first);
+			assert!(!mesh.routes(3, 2), "both closed");
+		}
+	}
+
+	/// A routing neighbour naming made-up relays on its routes, and each of their sessions
+	/// closed, grows the floors only by what its live routes hold, and they go with it.
+	#[test]
+	fn a_peer_naming_made_up_relays_leaves_no_floors() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Routing(node(2)));
+		for made_up in 100..300 {
+			let through = Hop {
+				node: node(made_up),
+				session: 1,
+			};
+			let path = vec![
+				Hop {
+					node: node(5),
+					session: 0,
+				},
+				through,
+				Hop {
+					node: node(2),
+					session: 1,
+				},
+			];
+			let offer = Offer {
+				path: path.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 2,
+				marked: false,
+			};
+			let route = Msg::Route {
+				origin: node(5),
+				offer: Some(offer),
+			};
+			router.recv(2, route).unwrap();
+			let dead = Msg::Dead {
+				hop: through,
+				far: node(5),
+			};
+			router.recv(2, dead).unwrap();
+			// The pairs one route joins, and as many it stopped joining.
+			assert!(router.kept().closed <= 4, "{:?}", router.kept());
+		}
+		router.disconnect(2);
+		assert_eq!(router.kept().closed, 0);
+	}
+
+	/// A relay that restarts under a higher start replaces its pair's floor rather than
+	/// adding one: its new sessions, numbered from 1 again, order above the old start's.
+	#[test]
+	fn a_restart_replaces_the_pairs_floor() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Routing(node(2)));
+		for start in [5, 6] {
+			let through = Hop {
+				node: NodeId {
+					relay: 7,
+					start,
+					marked: false,
+				},
+				session: 1,
+			};
+			let path = vec![
+				Hop {
+					node: node(5),
+					session: 0,
+				},
+				through,
+				Hop {
+					node: node(2),
+					session: 1,
+				},
+			];
+			let offer = Offer {
+				path: path.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 2,
+				marked: false,
+			};
+			let route = Msg::Route {
+				origin: node(5),
+				offer: Some(offer),
+			};
+			router.recv(2, route).unwrap();
+			assert!(router.best(node(5)).is_some(), "start {start} is above every floor");
+			let dead = Msg::Dead {
+				hop: through,
+				far: node(5),
+			};
+			router.recv(2, dead).unwrap();
+			assert_eq!(router.best(node(5)), None, "start {start} closed");
+			assert_eq!(router.kept().closed, 1, "one floor for the pair after start {start}");
+		}
 	}
 
 	/// A relay whose start is below one of its sessions known closed is refused as a

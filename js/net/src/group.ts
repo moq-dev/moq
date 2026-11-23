@@ -1044,6 +1044,9 @@ export class Consumer {
 	#attempt?: Attempt;
 	// The frame a replacement copy resumes at: frames below it were read from an earlier copy.
 	#skip = 0;
+	// One past the last frame handed to this reader's caller: frames a filtered read discarded
+	// below its `from` were never delivered.
+	#delivered = 0;
 	// This reader's own failure, set once, including a budget that gave up on the group: it
 	// ends the consumer whatever its copy does. See `#fail`.
 	#verdict = new Once<Error>();
@@ -1185,9 +1188,21 @@ export class Consumer {
 		return false;
 	}
 
-	// Judge a short close final.
-	#end(): void {
-		this.#ended = true;
+	// Judge a short close final. One below a frame an earlier copy delivered is no end of
+	// this read, since no route said the group ends there, so it fails the reader instead: with
+	// the error a recovery that found nothing `failed` with, Old once its budget gave up, or
+	// NotFound.
+	#end(expired = false, failed?: unknown): void {
+		if (this.#delivered > this.#state.total.peek()) {
+			this.#fail(
+				failed ??
+					new StreamError(expired ? StreamCode.Old : StreamCode.NotFound, {
+						message: `group ${this.start} closed below frame ${this.#delivered}`,
+					}),
+			);
+		} else {
+			this.#ended = true;
+		}
 		this.#refresh();
 	}
 
@@ -1199,7 +1214,7 @@ export class Consumer {
 		if (!this.#continues(false) || (!decide && !this.#recover?.wants(undefined)) || !this.#continues(true))
 			return false;
 		if (this.#expiry?.expired()) {
-			this.#end();
+			this.#end(true);
 			return false;
 		}
 		await this.#resume({ kind: "closed" });
@@ -1349,7 +1364,7 @@ export class Consumer {
 				(err: unknown) => {
 					started.settled = true;
 					if (abort.signal.aborted) return;
-					if (cause.kind === "closed") this.#end();
+					if (cause.kind === "closed") this.#end(false, err);
 					else this.#fail(err);
 				},
 			);
@@ -1448,6 +1463,7 @@ export class Consumer {
 			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
 				frames.shift();
 				const index = this.#state.index++;
+				this.#delivered = index + 1;
 				this.#streamed = front;
 				this.#refresh();
 				this.#state.charge?.touch();
@@ -1472,6 +1488,7 @@ export class Consumer {
 		}
 		if (frames.length === 0 && this.#state.closed.peek() !== undefined) this.#state.flate = undefined;
 		const index = this.#state.index++;
+		this.#delivered = index + 1;
 		this.#refresh();
 		this.#state.charge?.touch();
 		return { index, frame, inflated: slice?.inflated };
@@ -1586,10 +1603,12 @@ export class Consumer {
 
 			// A whole read streams a frame still being written into its own buffer, rather
 			// than waiting for it whole while the group sheds its head.
+			const delivered = this.#delivered;
 			const read = this.#readBufferedFrame(compressed, streaming ? "stream" : "collect");
 			if (read) {
 				if (read.index < from) {
 					if (read.chunks) this.#streamed = undefined;
+					this.#delivered = delivered;
 					continue;
 				}
 				if (read.chunks && !streaming) return this.#join(read.index, read.chunks);
@@ -1603,8 +1622,9 @@ export class Consumer {
 				throw closed;
 			}
 			if (closed !== undefined) {
-				// Closed short after a newer route took over, which may hold more.
-				if (await this.#readOn(true)) continue;
+				// Closed short after a newer route took over, which may hold more. A close that
+				// failed the reader throws above.
+				if ((await this.#readOn(true)) || this.#verdict.peek()) continue;
 				// The copy finished the group: a replacement asked for meanwhile is moot.
 				this.#abandon();
 				this.#refresh();

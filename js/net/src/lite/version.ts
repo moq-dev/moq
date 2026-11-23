@@ -236,8 +236,8 @@ export function hasRouteCost(version: Version): boolean {
 
 /** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices alongside
  * their group keys, so a subscription or fetch can start partway through a group. Added in
- * lite-06; lite-07 bounds only a range's start. Older versions only address whole groups, so a
- * route change has to wait for the next group before it can resume.
+ * lite-06; lite-07 bounds a range's start or end at a Position. Older versions only address
+ * whole groups, so a route change has to wait for the next group before it can resume.
  *
  * SUBSCRIBE_OK is deliberately not in that list: the resolved start frame follows from
  * its group plus the subscriber's own request, so it needs no frame field. */
@@ -275,23 +275,6 @@ export function hasOrder(version: Version): boolean {
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one, so 0
  * says no limit. Added in lite-07; earlier wires carry bare milliseconds. */
 export function hasUnlimitedMaxDelay(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
-/** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the optional `Subscriber Min Age`. Added in
- * lite-07; an earlier subscription decodes it as not stated. */
-export function hasMinDelay(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

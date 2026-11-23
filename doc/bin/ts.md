@@ -153,8 +153,12 @@ or is more than 100 ms on, goes out whole, so the timing matches between
 exporters only where each had the successor: a `--delay` longer than the
 arrival jitter by a PCR interval. Runs that come due while stdout blocks go
 out together once it drains, so a stalled reader sees a burst whatever the
-delay. It takes neither
-`--follow`, `--stitch` nor `--mux-rate`. Only the hang catalog names the
+delay. It takes no `--mux-rate`.
+`--follow` and `--stitch` carry it across the broadcast's returns and
+replacements: a restarted import is a new publisher instance, so `--stitch`
+writes its packets verbatim from the first group its live subscription delivers,
+after what the old one delivered, with no overlap window. The seam shows as each PID's
+continuity break, as a splice in the source would. Only the hang catalog names the
 track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
 
@@ -256,6 +260,7 @@ details each grader and its negative controls.
 | --- | --- | --- |
 | The capture is the source in place over the admitted interval, with the source's compliance verdicts | `just test ts --passthrough`; `just test ts-passthrough-capture` (a hardware encoder's capture with a dirty start) | Nightly |
 | A whole MPTS, two programs on their own clocks | `just test ts --passthrough --mpts` | Nightly |
+| An import killed and restarted under a running export costs no more than its downtime and the restarted import's first group | `just test ts --passthrough --restart 10`; [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_stitched_release_carries_on_into_a_restarted_import`, `a_stitched_release_carries_on_into_a_rewound_clock`, `the_same_instance_returning_resumes_the_release` | Nightly, PR |
 | Byte identity from the first group; nothing before PMT and PCR; off-grid junk dropped | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_broadcast_capture_is_byte_identical_from_the_first_group`, `nothing_is_published_before_the_pmt_and_a_pcr`, `leading_junk_does_not_hide_the_grid` | PR |
 | Scrambled input groups and paces like its clear twin | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_scrambled_twin_groups_and_paces_the_same` | PR |
 | `randomAccess` false for several programs or video streams | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `two_programs_on_one_clock_publish_no_random_access`, `two_video_streams_in_one_program_publish_no_random_access` | PR |
