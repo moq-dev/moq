@@ -2555,8 +2555,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.closest(&(from, instance.clone())).map(|(origin, _)| origin)
 	}
 
-	/// Where a request for `broadcast` naming `origin` goes from here. `None` fails it.
-	pub fn step(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> Option<Next<N>> {
+	/// Where a request for `broadcast` naming `origin` goes from here, never back to the
+	/// neighbour `asker` that sent it. `None` fails it.
+	pub fn step(&self, origin: NodeId, (path, instance): &Broadcast<I>, asker: Option<N>) -> Option<Next<N>> {
 		match self.is_self(origin) {
 			// As `pick`, the claim at the most specific path covering it that the reader
 			// shows: the neighbour behind it if it is this node's own, available, and of the
@@ -2580,21 +2581,33 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					.map(|above| (above, instance.clone()))
 					.find(|claim| known.is_some_and(|known| known.items.contains_key(claim)));
 				match claim {
-					Some(claim) => self.lead(origin, &claim).map(Next::Via),
-					None => self.best.get(&origin).map(|best| Next::Via(best.via)),
+					Some(claim) => self.lead(origin, &claim, asker).map(Next::Via),
+					None => (self.best.get(&origin))
+						.filter(|best| Some(best.via) != asker)
+						.map(|best| Next::Via(best.via)),
 				}
 			}
 		}
 	}
 
-	/// Whether a request for `broadcast` naming `origin`, which [`Self::step`] has nowhere
-	/// to send, waits for a way rather than fails: this node routes to `origin` and knows its
-	/// claim available and of the best precedence, so it shows the claim, but no neighbour's
-	/// copy holds it yet. A route arrives before the claims behind it, and a copy that held
-	/// the claim can leave with its session while this node's own copy stays, so nothing it
-	/// shows changes when a way appears: a request it refused now would never be asked again.
-	pub fn awaits(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> bool {
-		if self.is_self(origin) || !self.best.contains_key(&origin) {
+	/// Whether a request for `broadcast` naming `origin` from `asker`, which [`Self::step`]
+	/// has nowhere to send, waits for a way rather than fails: this node routes to `origin`
+	/// other than through `asker` and knows its claim available and of the best precedence,
+	/// so it shows the claim, but no other neighbour's copy holds it yet. A route arrives
+	/// before the claims behind it, and a copy that held the claim can leave with its session
+	/// while this node's own copy stays, so nothing it shows changes when a way appears: a
+	/// request it refused now would never be asked again.
+	pub fn awaits(&self, origin: NodeId, (path, instance): &Broadcast<I>, asker: Option<N>) -> bool {
+		if self.is_self(origin) {
+			return false;
+		}
+		// The asker's own copy is no way, so a route only through it leads nowhere.
+		let routed = match self.best.get(&origin) {
+			None => false,
+			Some(best) if Some(best.via) != asker => true,
+			Some(_) => self.usable(origin).iter().any(|route| Some(route.via) != asker),
+		};
+		if !routed {
 			return false;
 		}
 		let Some(known) = self.known.get(&origin) else {
@@ -2625,15 +2638,17 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			.is_some_and(|heard| !heard.unavailable && precedence(&heard.item) == precedence(&known.item))
 	}
 
-	/// The neighbour a request for `origin`'s claim of `broadcast` leaves by: the route to
-	/// `origin` when its neighbour holds the claim, else the best usable route whose does.
-	fn lead(&self, origin: NodeId, broadcast: &Broadcast<I>) -> Option<N> {
+	/// The neighbour a request for `origin`'s claim of `broadcast` from `asker` leaves by:
+	/// the route to `origin` when its neighbour holds the claim, else the best usable route
+	/// whose does, never `asker`'s.
+	fn lead(&self, origin: NodeId, broadcast: &Broadcast<I>, asker: Option<N>) -> Option<N> {
 		let best = self.best.get(&origin)?;
-		if self.holds(origin, best.via, broadcast) {
+		let leads = |via: N| Some(via) != asker && self.holds(origin, via, broadcast);
+		if leads(best.via) {
 			return Some(best.via);
 		}
 		(self.usable(origin).into_iter())
-			.filter(|route| self.holds(origin, route.via, broadcast))
+			.filter(|route| leads(route.via))
 			.min_by_key(|route| order(route, Some(best.via)))
 			.map(|route| route.via)
 	}
@@ -2692,7 +2707,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 			// Every usable route to its claimant whose neighbour holds the claim serves it,
 			// for the same reason.
-			let lead = self.lead(origin, broadcast);
+			let lead = self.lead(origin, broadcast, None);
 			for route in self.usable(origin) {
 				if !self.holds(origin, route.via, broadcast) {
 					continue;
@@ -3526,11 +3541,11 @@ mod tests {
 		for (path, endpoint) in [("live", 2), ("live/b/x", 2), ("live/a", 3), ("live/a/x", 3)] {
 			let broadcast = (p(path), 7);
 			assert_eq!(router.pick(&broadcast), Some(me), "{path}");
-			assert_eq!(router.step(me, &broadcast), Some(Next::Local(endpoint)), "{path}");
+			assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(endpoint)), "{path}");
 		}
 		for broadcast in [(p("other"), 7), (p("live/a"), 8)] {
 			assert_eq!(router.pick(&broadcast), None, "{broadcast:?}");
-			assert_eq!(router.step(me, &broadcast), None, "{broadcast:?}");
+			assert_eq!(router.step(me, &broadcast, None), None, "{broadcast:?}");
 		}
 		// The narrower claim lost, a request under it fails closed, even one already
 		// naming this node, until the reader lets it go.
@@ -3544,10 +3559,10 @@ mod tests {
 			.unwrap();
 		let under = (p("live/a/x"), 7);
 		assert_eq!(router.pick(&under), None);
-		assert_eq!(router.step(me, &under), None);
+		assert_eq!(router.step(me, &under, None), None);
 		router.timeout(router.deadline().expect("a debounce"));
 		assert_eq!(router.pick(&under), Some(me));
-		assert_eq!(router.step(me, &under), Some(Next::Local(2)));
+		assert_eq!(router.step(me, &under, None), Some(Next::Local(2)));
 	}
 
 	/// A neighbour routes to a node before that node's claims reach it, and refuses a request
@@ -3575,10 +3590,10 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		assert_eq!(ways(&router), [(Next::Via(3), true)]);
-		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(3)));
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(3)));
 		router.recv(2, claims(1)).unwrap();
 		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
-		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(2)));
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(2)));
 	}
 
 	/// A neighbour whose copy holds the claim only unavailable refuses a request for it too,
@@ -3610,10 +3625,10 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		assert_eq!(ways(&router), [(Next::Via(3), true)]);
-		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(3)));
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(3)));
 		router.recv(2, claims(false, 3)).unwrap();
 		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
-		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(2)));
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(2)));
 	}
 
 	/// Among claims of one Instance at one path, one exactly there outranks a broader one
@@ -3633,14 +3648,14 @@ mod tests {
 		router.recv(3, announce(claim(run(2), 9))).unwrap();
 		let me = router.me();
 		assert_eq!(
-			router.step(me, &broadcast),
+			router.step(me, &broadcast, None),
 			Some(Next::Local(3)),
 			"a newer epoch, however dear"
 		);
 		assert_eq!(router.own().1[&broadcast].item, run(2));
 		router.recv(2, announce(claim(Run { epoch: 3, above: 1 }, 0))).unwrap();
 		assert_eq!(
-			router.step(me, &broadcast),
+			router.step(me, &broadcast, None),
 			Some(Next::Local(3)),
 			"a broader claim, however new"
 		);
@@ -3656,7 +3671,7 @@ mod tests {
 		router.recv(4, claims(run(2), 2)).unwrap();
 		assert_eq!(router.pick(&broadcast), Some(node(5)), "the same run, closer");
 		assert_eq!(
-			router.step(me, &broadcast),
+			router.step(me, &broadcast, None),
 			Some(Next::Local(3)),
 			"named, its own run serves"
 		);
@@ -3664,13 +3679,17 @@ mod tests {
 		assert_eq!(router.pick(&broadcast), Some(me), "a broader claim, however new");
 		router.recv(4, claims(run(3), 4)).unwrap();
 		assert_eq!(router.pick(&broadcast), Some(node(5)), "a newer claim");
-		assert_eq!(router.step(me, &broadcast), None, "named, its older run never serves");
+		assert_eq!(
+			router.step(me, &broadcast, None),
+			None,
+			"named, its older run never serves"
+		);
 		// The newer claim's route goes while its claim stays known: the older run never
 		// stands in for it.
 		router.recv(4, route(5, 4, Metric::MAX)).unwrap();
 		assert_eq!(router.best(node(5)), None);
 		assert_eq!(router.pick(&broadcast), None);
-		assert_eq!(router.step(me, &broadcast), None, "named, still closed");
+		assert_eq!(router.step(me, &broadcast, None), None, "named, still closed");
 		let shown = &router.shown()[&(7, p("live"))];
 		assert_eq!((shown.item, shown.available), (run(3), false));
 	}
@@ -5624,11 +5643,11 @@ mod tests {
 		let kinds = |router: &mut Relay| router.events().into_iter().map(|event| event.kind).collect::<Vec<_>>();
 		let request = (p("live/x"), 7);
 		router.recv(2, claim(live(0))).unwrap();
-		assert_eq!(router.step(node(1), &request), Some(Next::Local(2)));
+		assert_eq!(router.step(node(1), &request, None), Some(Next::Local(2)));
 		let since = Instant::ZERO;
 		router.recv(2, claim(unavailable.clone())).unwrap();
 		assert_eq!(kinds(&mut router), [Kind::Start, Kind::Unavailable]);
-		assert_eq!(router.step(node(1), &request), None, "fails closed");
+		assert_eq!(router.step(node(1), &request, None), None, "fails closed");
 		assert_eq!(router.pick(&request), None, "fails closed");
 		assert_eq!(router.deadline(), None, "a claim kept waits for nothing");
 		router.timeout(since.saturating_add(debounce(HOP) / 2));
@@ -5680,19 +5699,19 @@ mod tests {
 		assert!(router.events().is_empty());
 		router.recv(2, told(1, false)).unwrap();
 		assert_eq!(own(&router), Some((1, false)), "then available");
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(2)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(2)));
 
 		// Two neighbours give the run; the one still available serves.
 		router.recv(3, told(1, false)).unwrap();
 		router.recv(2, told(1, true)).unwrap();
 		assert_eq!(own(&router), Some((1, false)));
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(3)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(3)));
 		router.recv(3, told(1, true)).unwrap();
 		assert_eq!(own(&router), Some((1, true)), "every one unavailable");
-		assert_eq!(router.step(me, &broadcast), None, "fails closed");
+		assert_eq!(router.step(me, &broadcast, None), None, "fails closed");
 		assert_eq!(router.pick(&broadcast), None, "fails closed");
 		router.recv(2, told(1, false)).unwrap();
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(2)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(2)));
 		assert_eq!(
 			(router.events().into_iter().map(|event| event.kind)).collect::<Vec<_>>(),
 			[Kind::Start, Kind::Unavailable, Kind::Available]
@@ -5704,19 +5723,19 @@ mod tests {
 		router.recv(2, told(2, true)).unwrap();
 		assert_eq!(own(&router), Some((1, false)), "the older run stands");
 		assert_eq!(
-			router.step(me, &broadcast),
+			router.step(me, &broadcast, None),
 			Some(Next::Local(3)),
 			"where it is still given"
 		);
 		router.recv(4, told(2, true)).unwrap();
 		assert_eq!(own(&router), Some((1, false)), "the older run stands");
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(3)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(3)));
 		router.recv(4, told(2, false)).unwrap();
 		assert_eq!(own(&router), Some((2, false)), "taken, the newer run outranks");
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(4)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(4)));
 		router.recv(4, told(2, true)).unwrap();
 		assert_eq!(own(&router), Some((2, true)), "unavailable or not");
-		assert_eq!(router.step(me, &broadcast), None);
+		assert_eq!(router.step(me, &broadcast, None), None);
 		// The last neighbour giving the older run moves to the newer one unavailable: the
 		// older run is lost, and the newer one, which neighbour 4 gave, stays.
 		router.recv(3, told(2, true)).unwrap();
