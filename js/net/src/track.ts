@@ -4635,6 +4635,11 @@ export class Subscriber {
 			if (filling === undefined) return floor;
 			return floor === undefined ? filling : min(floor, filling);
 		};
+		hooks.placesAsUpstream = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.placesAsUpstream();
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && receivedCopy(producer) && !subscriber.#state.dropsAnchors.peek();
+		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.parked = (subscriber) => {
 			subscriber.#parks = true;

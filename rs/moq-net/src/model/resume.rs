@@ -1342,6 +1342,17 @@ impl Subscriber {
 		self.reader().window().start()
 	}
 
+	/// Whether the serving copy places ranges as its publisher would; see
+	/// [`track::Subscriber::places_as_upstream`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn places_as_upstream(&mut self, waiter: &kio::Waiter) -> bool {
+		let mut reader = self.reader();
+		match reader.poll_serving(waiter) {
+			Poll::Ready(Some(sub)) => sub.places_as_upstream(waiter),
+			_ => false,
+		}
+	}
+
 	/// The reader's ranges keyed in `keys` resolved; see [`track::Subscriber::resolved_keys`].
 	pub(super) fn resolved_keys(&self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
 		let mut reader = self.reader();

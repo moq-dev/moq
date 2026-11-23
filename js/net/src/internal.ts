@@ -578,6 +578,8 @@ export interface ResumeSource {
 	latest(): bigint | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): bigint | "pending" | undefined;
+	/** Whether the serving copy places ranges as its publisher would; see `hooks.placesAsUpstream`. */
+	placesAsUpstream(): boolean;
 	/** Whether the serving copy knows where the live feed is; see `hooks.knowsEdge`. */
 	knowsEdge(): boolean;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
@@ -902,6 +904,13 @@ export const hooks: {
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
 	 */
 	sourceStart: (subscriber: Subscriber) => bigint | "pending" | undefined;
+	/**
+	 * Whether the copy the subscriber reads places a range only where its publisher would, from
+	 * that publisher's answer for it or groups proving it, so `servingResolvedKeys` needs no other
+	 * range answered first; false while a front's reader has no copy serving. Mirrors the Rust
+	 * `track::Subscriber::places_as_upstream`; assigned by `track.ts`.
+	 */
+	placesAsUpstream: (subscriber: Subscriber) => boolean;
 	/**
 	 * Whether this hop knows where the live feed is: always on a track's own publisher, and on a
 	 * received copy once its upstream said so or the track ended; assigned by `track.ts`. A relay
@@ -1407,6 +1416,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	sourceStart: () => {
+		throw new Error("track.ts not loaded");
+	},
+	placesAsUpstream: () => {
 		throw new Error("track.ts not loaded");
 	},
 	knowsEdge: () => {

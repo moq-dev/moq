@@ -6309,11 +6309,12 @@ impl TrackRun {
 
 	/// Lite-07, while the source has yet to say where its whole feed starts: whether
 	/// [`Self::resolve`] would answer one of the SUBSCRIBE's ranges now. Each range is
-	/// answered on its own, so one placed already, as a relay's copy places it from its
-	/// upstream's answer for that range, waits on no other, such as a live join or older
-	/// history that upstream still places. Registers `waiter` for the feed going live.
+	/// answered on its own, so one a relay's copy placed already, from its upstream's answer
+	/// for that range, waits on no other, such as a live join or older history that upstream
+	/// still places. A copy that places ranges from whatever groups it holds waits for all.
+	/// Registers `waiter` for the feed going live.
 	fn places_any(&mut self, waiter: &kio::Waiter) -> bool {
-		if !self.ctx.version.has_ranges() {
+		if !self.ctx.version.has_ranges() || !self.track.places_as_upstream(waiter) {
 			return false;
 		}
 		let known = self.largest(waiter) != lite::Edge::Unknown;

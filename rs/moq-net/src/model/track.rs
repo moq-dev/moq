@@ -11877,6 +11877,17 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether the copy this subscriber reads places a range only where its publisher would,
+	/// from that publisher's answer for it or groups proving it, so [`Self::resolved_keys`]
+	/// needs no other range answered first. `false` while a front's reader has no copy serving.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn places_as_upstream(&mut self, waiter: &kio::Waiter) -> bool {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.state.read().anchors == Anchors::Wire,
+			Inner::Resume(resume, _) => resume.places_as_upstream(waiter),
+		}
+	}
+
 	/// This subscriber's ranges keyed in `keys` while their time starts wait on the groups
 	/// held to place them, or on its route copies for a reader following them: each one's
 	/// time, and the exclusive end it resolved to. `None` for one that resolved.

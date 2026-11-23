@@ -1667,11 +1667,12 @@ export class Publisher {
 
 		// Lite-07, while the source has yet to say where its whole feed starts, `position` the newest
 		// this hop saw: whether `resolveStart` would answer one of the SUBSCRIBE's ranges now. Each
-		// range is answered on its own, so one placed already, as a relay's copy places it from its
-		// upstream's answer for that range, waits on no other, such as a live join or older history
-		// that upstream still places. Mirrors the Rust `TrackRun::places_any`.
+		// range is answered on its own, so one a relay's copy placed already, from its upstream's
+		// answer for that range, waits on no other, such as a live join or older history that
+		// upstream still places. A copy that places ranges from whatever groups it holds waits for
+		// all. Mirrors the Rust `TrackRun::places_any`.
 		const placesAny = (position: track.Position | undefined): boolean => {
-			if (!hasRanges(this.version)) return false;
+			if (!hasRanges(this.version) || !hooks.placesAsUpstream(track)) return false;
 			const known = edge(position) !== "unknown";
 			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, ids);
