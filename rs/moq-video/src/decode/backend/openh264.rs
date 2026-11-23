@@ -112,6 +112,8 @@ pub(crate) struct Openh264 {
 	/// Whether openh264 holds the current sequence's pictures in its reordering
 	/// buffer, rather than outputting each as it decodes.
 	reordering: bool,
+	/// The parameter sets seen, to tell which SPS each picture uses.
+	sequences: output_order::Sequences,
 	ready: VecDeque<Frame>,
 }
 
@@ -167,6 +169,7 @@ impl Openh264 {
 			pending: BinaryHeap::new(),
 			lost: 0,
 			reordering: false,
+			sequences: output_order::Sequences::default(),
 			ready: VecDeque::new(),
 		})
 	}
@@ -314,7 +317,7 @@ impl Backend for Openh264 {
 
 		// openh264 holds a picture of a Main or High stream until the next one
 		// even when the SPS rules reordering out; relabelled, it does not.
-		let relabelled = output_order::relabel(&access_unit);
+		let relabelled = self.sequences.relabel(&access_unit);
 		if let Some(immediate) = relabelled.immediate {
 			// A sequence openh264 outputs immediately skips its reordering buffer,
 			// abandoning the pictures held there while their timestamps stay

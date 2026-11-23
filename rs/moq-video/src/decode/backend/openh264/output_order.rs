@@ -34,88 +34,157 @@
 use bytes::Bytes;
 use h264_reader::nal::sps::{PicOrderCntType, SeqParameterSet};
 use h264_reader::nal::{Nal, RefNal, UnitType};
+use h264_reader::rbsp::BitRead;
 use moq_mux::codec::annexb;
 
 /// `nal_unit_type` of a sequence parameter set.
 const SPS: u8 = 7;
+/// `nal_unit_type` of a picture parameter set.
+const PPS: u8 = 8;
 const BASELINE: u8 = 66;
 const MAIN: u8 = 77;
 const HIGH: u8 = 100;
 /// The profile openh264 parses as High and outputs as Baseline.
 const SCALABLE_BASELINE: u8 = 83;
 
-/// What [`relabel`] made of an access unit.
+/// What [`Sequences::relabel`] made of an access unit.
 pub(super) struct Relabelled {
 	/// The access unit with every SPS that rules out reordering relabelled, or
 	/// `None` when no SPS in it needs that.
 	pub access_unit: Option<Bytes>,
-	/// Whether openh264 outputs the pictures of the access unit's last SPS as
-	/// soon as they decode, or `None` when it carries no SPS.
+	/// Whether openh264 outputs the access unit's picture as soon as it
+	/// decodes, by the SPS its first slice uses, or `None` when that is unknown.
 	pub immediate: Option<bool>,
 }
 
-/// Relabels every SPS in `access_unit` that rules out reordering so openh264
-/// outputs each picture as soon as it is decoded, and reports how openh264
-/// outputs the sequence the access unit starts, if any.
-///
-/// Parameter sets come ahead of the first slice of an access unit (7.4.1.2.3),
-/// so the scan stops at that slice: an access unit without an SPS costs a look
-/// at the headers of the NAL units ahead of it, and only one with an SPS to
-/// relabel is copied.
-pub(super) fn relabel(access_unit: &Bytes) -> Relabelled {
-	let data = access_unit.as_ref();
-	let mut relabelled = Vec::new();
-	let mut immediate = None;
-	let Some((offset, size)) = annexb::find_start_code(data) else {
-		return Relabelled {
-			access_unit: None,
-			immediate,
-		};
-	};
-	let mut start = offset + size;
-	while let Some(&header) = data.get(start) {
-		// Coded slices, and the slice extensions of SVC (20) and MVC (21).
-		if matches!(header & 0x1f, 1..=5 | 20 | 21) {
-			break;
-		}
-		let next = annexb::find_start_code(&data[start..]);
-		let end = next.map_or(data.len(), |(offset, _)| start + offset);
-		if header & 0x1f == SPS {
-			if let Some(sps) = sps(&data[start..end]) {
-				relabelled.push((start..end, sps));
-				immediate = Some(true);
-			} else {
-				// openh264 outputs by `profile_idc`, the first payload byte.
-				let profile = data[start..end].get(1).copied();
-				immediate = Some(matches!(profile, Some(BASELINE | SCALABLE_BASELINE)));
-			}
-		}
-		let Some((offset, size)) = next else { break };
-		start += offset + size;
-	}
-	if relabelled.is_empty() {
-		return Relabelled {
-			access_unit: None,
-			immediate,
-		};
-	}
+/// The parameter sets seen so far, by ID: how openh264 outputs each SPS, and
+/// which SPS each PPS uses. A slice names its PPS, so this finds the SPS that
+/// sets its output order even when an access unit carries several.
+pub(super) struct Sequences {
+	sps: [Option<bool>; 32],
+	pps: [Option<u8>; 256],
+}
 
-	let grown: usize = relabelled
-		.iter()
-		.map(|(at, sps)| sps.len().saturating_sub(at.len()))
-		.sum();
-	let mut out = Vec::with_capacity(data.len() + grown);
-	let mut copied = 0;
-	for (at, sps) in relabelled {
-		out.extend_from_slice(&data[copied..at.start]);
-		out.extend_from_slice(&sps);
-		copied = at.end;
+impl Default for Sequences {
+	fn default() -> Self {
+		Self {
+			sps: [None; 32],
+			pps: [None; 256],
+		}
 	}
-	out.extend_from_slice(&data[copied..]);
-	Relabelled {
-		access_unit: Some(out.into()),
-		immediate,
+}
+
+impl Sequences {
+	/// Relabels every SPS in `access_unit` that rules out reordering so openh264
+	/// outputs each picture as soon as it is decoded, and reports how openh264
+	/// outputs the access unit's picture.
+	///
+	/// Parameter sets come ahead of the first slice of an access unit (7.4.1.2.3),
+	/// so the scan stops at that slice: an access unit without an SPS costs a look
+	/// at the headers of the NAL units ahead of it and the start of that slice's,
+	/// and only one with an SPS to relabel is copied.
+	pub(super) fn relabel(&mut self, access_unit: &Bytes) -> Relabelled {
+		let data = access_unit.as_ref();
+		let mut relabelled = Vec::new();
+		let mut immediate = None;
+		let Some((offset, size)) = annexb::find_start_code(data) else {
+			return Relabelled {
+				access_unit: None,
+				immediate,
+			};
+		};
+		let mut start = offset + size;
+		while let Some(&header) = data.get(start) {
+			let next = annexb::find_start_code(&data[start..]);
+			let end = next.map_or(data.len(), |(offset, _)| start + offset);
+			let nal = &data[start..end];
+			match header & 0x1f {
+				// The first slice: its PPS names the SPS that sets the output order.
+				1 | 5 => {
+					immediate = slice_pps(nal)
+						.and_then(|pps| self.pps[usize::from(pps)])
+						.and_then(|sps| self.sps[usize::from(sps)]);
+					break;
+				}
+				// Data partitions, and the slice extensions of SVC (20) and MVC (21).
+				2..=4 | 20 | 21 => break,
+				SPS => {
+					let output = match sps(nal) {
+						Some(sps) => {
+							relabelled.push((start..end, sps));
+							true
+						}
+						// openh264 outputs by `profile_idc`, the first payload byte.
+						None => matches!(nal.get(1), Some(&(BASELINE | SCALABLE_BASELINE))),
+					};
+					if let Some(id) = sps_id(nal) {
+						self.sps[usize::from(id)] = Some(output);
+					}
+				}
+				PPS => {
+					if let Some((pps, sps)) = pps_ids(nal) {
+						self.pps[usize::from(pps)] = Some(sps);
+					}
+				}
+				_ => {}
+			}
+			let Some((offset, size)) = next else { break };
+			start += offset + size;
+		}
+		if relabelled.is_empty() {
+			return Relabelled {
+				access_unit: None,
+				immediate,
+			};
+		}
+
+		let grown: usize = relabelled
+			.iter()
+			.map(|(at, sps)| sps.len().saturating_sub(at.len()))
+			.sum();
+		let mut out = Vec::with_capacity(data.len() + grown);
+		let mut copied = 0;
+		for (at, sps) in relabelled {
+			out.extend_from_slice(&data[copied..at.start]);
+			out.extend_from_slice(&sps);
+			copied = at.end;
+		}
+		out.extend_from_slice(&data[copied..]);
+		Relabelled {
+			access_unit: Some(out.into()),
+			immediate,
+		}
 	}
+}
+
+/// The `seq_parameter_set_id` of an SPS NAL unit, after its profile,
+/// constraint flags, and level.
+fn sps_id(nal: &[u8]) -> Option<u8> {
+	let mut bits = RefNal::new(nal, &[], true).rbsp_bits();
+	for _ in 0..24 {
+		bits.read_bit("profile, constraints, level").ok()?;
+	}
+	u8::try_from(bits.read_ue("seq_parameter_set_id").ok()?)
+		.ok()
+		.filter(|&id| id < 32)
+}
+
+/// A PPS NAL unit's own ID and the ID of the SPS it uses.
+fn pps_ids(nal: &[u8]) -> Option<(u8, u8)> {
+	let mut bits = RefNal::new(nal, &[], true).rbsp_bits();
+	let pps = u8::try_from(bits.read_ue("pic_parameter_set_id").ok()?).ok()?;
+	let sps = u8::try_from(bits.read_ue("seq_parameter_set_id").ok()?)
+		.ok()
+		.filter(|&id| id < 32)?;
+	Some((pps, sps))
+}
+
+/// The `pic_parameter_set_id` of a slice NAL unit.
+fn slice_pps(nal: &[u8]) -> Option<u8> {
+	let mut bits = RefNal::new(nal, &[], true).rbsp_bits();
+	bits.read_ue("first_mb_in_slice").ok()?;
+	bits.read_ue("slice_type").ok()?;
+	u8::try_from(bits.read_ue("pic_parameter_set_id").ok()?).ok()
 }
 
 /// Returns the NAL unit `nal` relabelled, when it is an SPS of a Main or High
@@ -318,12 +387,12 @@ mod tests {
 	#[test]
 	fn other_sps_pass_unchanged() {
 		assert_eq!(sps(X264_MAIN_BFRAMES), None);
-		let bframes = relabel(&Bytes::from_static(include_bytes!(
+		let bframes = Sequences::default().relabel(&Bytes::from_static(include_bytes!(
 			"../../test_data/bframes_64x64_pattern_30f.h264"
 		)));
 		assert_eq!(bframes.access_unit, None, "High with two frames of reordering");
 		assert_eq!(bframes.immediate, Some(false), "High with two frames of reordering");
-		let baseline = relabel(&Bytes::from_static(include_bytes!(
+		let baseline = Sequences::default().relabel(&Bytes::from_static(include_bytes!(
 			"../../test_data/seq_64x64_pattern_5f.h264"
 		)));
 		assert_eq!(baseline.access_unit, None, "Constrained Baseline");
@@ -344,12 +413,13 @@ mod tests {
 			nals
 		};
 		let units = crate::decode::conformance::split(include_bytes!("../../test_data/main_64x64_yellow_5f.h264"));
+		let mut sequences = Sequences::default();
 		for unit in units {
 			let before = nals(&unit.payload);
 			let Relabelled {
 				access_unit: Some(relabelled),
 				immediate,
-			} = relabel(&unit.payload)
+			} = sequences.relabel(&unit.payload)
 			else {
 				assert!(
 					before.iter().all(|nal| nal[0] & 0x1f != SPS),
@@ -367,5 +437,42 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// An access unit can carry several SPS, as one whose decoder configuration
+	/// lists them all: the output order is the one of the SPS its slice uses,
+	/// through its PPS, and stays known for the access units after it.
+	#[test]
+	fn the_output_order_follows_the_slice_s_sps() {
+		// High (reorders) as SPS 0, and Baseline (outputs immediately) as SPS 1.
+		let high = [0x67, HIGH, 0, 30, 0b1000_0000];
+		let baseline = [0x67, BASELINE, 0, 30, 0b0100_0000];
+		// PPS 0 uses SPS 0, PPS 1 uses SPS 1.
+		let pps0 = [0x68, 0b1100_0000];
+		let pps1 = [0x68, 0b0100_1000];
+		// IDR slices: first_mb_in_slice 0, slice_type 2, then the PPS.
+		let slice0 = [0x65, 0b1011_1000];
+		let slice1 = [0x65, 0b1011_0100];
+		let unit = |nals: &[&[u8]]| {
+			let mut out = Vec::new();
+			for nal in nals {
+				out.extend_from_slice(&[0, 0, 0, 1]);
+				out.extend_from_slice(nal);
+			}
+			Bytes::from(out)
+		};
+
+		let mut sequences = Sequences::default();
+		let first = sequences.relabel(&unit(&[&high, &baseline, &pps0, &pps1, &slice0]));
+		assert_eq!(first.immediate, Some(false), "the slice uses the High SPS");
+		let switched = sequences.relabel(&unit(&[&high, &baseline, &pps0, &pps1, &slice1]));
+		assert_eq!(switched.immediate, Some(true), "the slice uses the Baseline SPS");
+		let later = sequences.relabel(&unit(&[&[0x41, 0b1011_1000]]));
+		assert_eq!(later.immediate, Some(false), "a later picture uses PPS 0 again");
+		assert_eq!(
+			Sequences::default().relabel(&unit(&[&slice0])).immediate,
+			None,
+			"a slice whose parameter sets are unknown"
+		);
 	}
 }
