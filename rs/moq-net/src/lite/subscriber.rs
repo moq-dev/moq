@@ -14217,14 +14217,18 @@ impl ServeLoop {
 				}
 				ServeMode::Tail { .. } => {
 					// A reader's miss is history the tail does not settle, such as a group the copy
-					// evicted, so it goes upstream as it would while the subscription is open.
-					match self.dynamic.poll_requested_fill(waiter) {
-						Poll::Ready(Ok(fill)) => {
-							self.take_fill(serve, fill);
-							continue;
+					// evicted, so it goes upstream. Before lite-07 it goes on a subscription of its
+					// own, which the finished copy takes over. Lite-07's would ride this subscription,
+					// which the publisher already ended, so it waits for the finished copy.
+					if !serve.subscriber.version.has_ranges() {
+						match self.dynamic.poll_requested_fill(waiter) {
+							Poll::Ready(Ok(fill)) => {
+								self.take_fill(serve, fill);
+								continue;
+							}
+							Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
+							Poll::Pending => {}
 						}
-						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
-						Poll::Pending => {}
 					}
 					let ServeMode::Tail { settle, requested_end } = &mut self.mode else {
 						unreachable!()

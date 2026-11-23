@@ -404,6 +404,63 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s recovers a run past the t
 	}
 });
 
+// The publisher finishes the track while a lite-05/06 copy still recovers a run it evicted: the
+// copy ends at once, the datagrams its subscription carried with it, and the recovery still lands.
+// Mirrors the tail case of the Rust
+// `finished_copy_history::a_finished_copy_reads_back_what_it_evicted`.
+test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s ends a copy while its recovery is out", async (alpn) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	let answer = () => {};
+	const peer = await peers(
+		alpn,
+		false,
+		new Promise<void>((resolve) => {
+			answer = resolve;
+		}),
+	);
+	try {
+		const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
+		const first = peer.remote.track("video").subscribe(history);
+		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
+		const datagrams = peer.remote.datagrams("video");
+		await datagrams.info();
+
+		// Both caches age out what nobody touched; only the live edge stays.
+		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
+		write(peer.track.createGroup(4n), 4n, "live");
+		expect((await first.recvGroup())?.start).toBe(4n);
+
+		// The run goes out on a recovery the archive holds, and the publisher ends the track.
+		const again = peer.remote.track("video").subscribe({ ...history, ranges: [{ start: 2n, end: 3n }] });
+		const got = take(again, 2);
+		await clock.advance(Duration.millis(100));
+		peer.track.finish();
+		expect(await first.recvGroup()).toBeUndefined();
+		let ended = false;
+		const end = datagrams.recv().then((datagram) => {
+			ended = true;
+			return datagram;
+		});
+		await clock.advance(Duration.millis(100));
+		expect(ended).toBe(true);
+		expect(await end).toBeUndefined();
+
+		answer();
+		expect(sorted(await got)).toEqual([
+			[2n, "old 2"],
+			[3n, "old 3"],
+		]);
+		first.close();
+		again.close();
+		datagrams.close();
+	} finally {
+		peer.close();
+		installed.close();
+	}
+});
+
 // The publisher finishes the track and the copy's reader reaches the end, and only then does a
 // second reader ask for a run the copy evicted: the copy's tail settled what its subscription
 // owed, not this, so the run still goes upstream. Mirrors the Rust
