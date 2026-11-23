@@ -847,12 +847,15 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce,
+			..
 		} => (announce, false),
 		moq_net::origin::RouteEvent {
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce,
+			..
 		} => (announce, true),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }
 
@@ -3623,5 +3626,6 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Present(route) => Some((route, true)),
 		moq_net::announce::Event::Absent(route) => Some((route, false)),
+		event => panic!("unexpected announce event {event:?}"),
 	}
 }

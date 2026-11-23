@@ -596,7 +596,7 @@ impl Routed {
 		// Only its floor closes a batch of claim messages.
 		let claim = matches!(
 			announce,
-			Wire::Start { .. } | Wire::Change { .. } | Wire::End { .. } | Wire::Floor { .. } | Wire::Skipped
+			Wire::Start { .. } | Wire::Change { .. } | Wire::End { .. } | Wire::Floor { .. }
 		);
 		if !claim && !self.pending.is_empty() {
 			return Err(Error::ProtocolViolation);
@@ -737,10 +737,11 @@ impl Routed {
 			| Wire::Active { .. }
 			| Wire::Ended { .. }
 			| Wire::EndedId { .. }
-			| Wire::Update { .. } => {
+			| Wire::Update { .. }
+			// Decoding refuses an unknown lite-07 type; only lite-06 skips one.
+			| Wire::Skipped => {
 				return Err(Error::ProtocolViolation);
 			}
-			Wire::Skipped => {}
 		}
 		Ok(())
 	}

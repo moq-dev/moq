@@ -3,8 +3,8 @@
 ## Goal
 
 `moq play` and any other native player place received audio on the shared
-clock through one `moq-audio` type, so every rule of the
-[audio playout](/quest/m2/audio-playout/README.md) epic reaches each native
+clock through one `moq-audio` type, so every rule of
+`doc/concept/audio-jitter.md` reaches each native
 player without a copy. `rs/moq-cli/src/play/media.rs` keeps only CLI wiring.
 
 ## Plan
@@ -35,9 +35,9 @@ delay estimator. In the browser each video track measures its own target
 from its arrivals, and the shared delay is the largest target of any track
 (`js/watch/src/video/decoder.ts`, `js/watch/src/sync.ts`). In `moq play`
 the delay follows audio's estimate alone and is a constant 100 ms with no
-audio (`rs/moq-cli/src/play/args.rs:14-19`, `:137`), though the
-[audio playout](/quest/m2/audio-playout/README.md) epic promises one
-written algorithm both players implement. Recommended: the library gives a
+audio (`rs/moq-cli/src/play/args.rs:14-19`, `:137`), though
+`doc/concept/audio-jitter.md` is one written algorithm
+both players implement. Recommended: the library gives a
 video reader the same arrival estimator audio has
 (`moq_audio::decode::Options::estimate`), fed through the shared clock, so
 `auto` means the same in both players; if it stays out of scope, say so in

@@ -876,7 +876,8 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/home"
           mkdir -p "$HOME"
-          nix develop --command just gate
+          # exec, so a cancel reaches the dispatcher (see queue.yml).
+          exec nix develop --command just gate
 
   fuzz:
     name: Fuzz (${{ matrix.target }})

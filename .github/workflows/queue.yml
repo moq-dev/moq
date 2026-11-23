@@ -29,14 +29,8 @@ on:
         description: The PR head commit to report the skipped Queue context on.
         required: true
 
-# `quest suite` reads the PR's review record and checks, and
-# sh/gh/queue-suite.sh its author's permission.
 permissions:
   contents: read
-  pull-requests: read
-  checks: read
-  statuses: read
-  actions: read
 
 # Each group has its own ref, so a group never cancels another; a pull request's
 # skipped runs replace their own. Dispatches all run on main, so each PR head's
@@ -51,8 +45,7 @@ jobs:
     if: github.event_name == 'merge_group'
     runs-on: [self-hosted, moq-queue]
     # A merge group is one PR at build concurrency 1; `just ci` takes about 5-15
-    # minutes, and the full suite about 13. Backstop a hang instead of holding
-    # the queue.
+    # minutes. Backstop a hang instead of holding the queue.
     timeout-minutes: 90
     env:
       # The diff the dispatcher selects from: the group's base, as the host gate
@@ -76,20 +69,12 @@ jobs:
         uses: ./.github/actions/rust-cache
 
       - name: Check
-        env:
-          GH_TOKEN: ${{ github.token }}
-          QUEST_FORGE: github
-          # refs/heads/gh-readonly-queue/main/pr-<number>-<head sha>
-          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+        # A cancel or timeout signals only the step's own process, so exec
+        # makes that just (nix develop execs it too), which passes the TERM to
+        # the dispatcher; it then prints what each unfinished lane waits on.
         run: |
           rm -rf target/cargo-timings
-          suite=$(nix develop --command just gh queue-suite "$HEAD_REF")
-          if [ -n "$suite" ]; then
-            echo "Full suite: $suite"
-            nix develop --command bash -c "$suite"
-          else
-            nix develop --command just ci "$BASE"
-          fi
+          exec nix develop --command just ci "$BASE"
 
       - name: Upload build timings
         if: ${{ !cancelled() }}

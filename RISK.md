@@ -4,9 +4,7 @@
 low, medium, or high, from its diff alone. Changing this file, a workflow
 under `.github/workflows/`, or an action under `.github/actions/` is
 always high: `quest` holds those itself, and the `## High` list below adds
-the paths whose every change is high. The tier also picks which PRs land
-without the maintainer's pick (`## Automatic`) and which run the whole
-suite in the merge queue (`## Full suite`).
+the paths whose every change is high.
 
 A merge to `main` publishes nothing: packages ship only when a release cut
 merges `main` into `release`, as [RELEASE.md](RELEASE.md) describes. A bad
@@ -44,17 +42,6 @@ Low is a change to tests, benchmarks, TLA+ models, quest plans, examples,
 demos, or documentation, which nothing a consumer or peer relies on reads;
 a revert fully undoes it.
 
-## Automatic
-
-A low PR whose author has write access lands without the maintainer's pick
-when its whole diff falls in one class below. Only a PR the maintainer
-picks adds or removes a class.
-
-- `tests` - only tests, their fixtures, or benchmarks change
-- `internal-docs` - only code comments, plans under `quest/`, or docs only
-  contributors read, such as a test's README, change; never `doc/`, a
-  package's README, or agent instructions
-
 ## High
 
 - `RELEASE.md` - agents follow it to cut a release or backport a fix
@@ -66,9 +53,3 @@ picks adds or removes a class.
   the phase is additive
 - `sh/gh/release.sh` - every release workflow reads tags and versions
   through it
-
-## Full suite
-
-```sh
-just gate
-```

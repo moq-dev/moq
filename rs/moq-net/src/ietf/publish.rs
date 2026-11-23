@@ -131,11 +131,27 @@ pub(crate) enum PublishDoneStatus {
 	UpdateFailed,
 	/// A relay found the track malformed, so it ended every subscription to it.
 	MalformedTrack,
+	/// The authorization token that authorized the subscription expired. Registered from
+	/// draft-23 on (section 12.4), so only [`PublishDoneStatus::token_expired`] picks it.
+	ExpiredAuthToken,
 }
 
 impl PublishDoneStatus {
+	/// The status for a subscription whose authorization token expired.
+	///
+	/// Draft-23 registers EXPIRED_AUTH_TOKEN for it (section 12.4, moq-transport PR 1970).
+	/// Earlier drafts register no token expiry, and their EXPIRED means the subscription's
+	/// own lifetime ran out, so there the subscriber is told it is no longer authorized.
+	pub(crate) const fn token_expired(version: Version) -> Self {
+		match version {
+			Version::Draft18 | Version::Draft20 | Version::Draft22 => Self::Unauthorized,
+			_ => Self::ExpiredAuthToken,
+		}
+	}
+
 	/// Return the registered wire code. Draft-22 removed SUBSCRIPTION_ENDED (0x3), which
-	/// this implementation never emitted, and left the rest of the registry alone.
+	/// this implementation never emitted, and draft-23 added EXPIRED_AUTH_TOKEN (0x7); the
+	/// rest of the registry is the same in every draft.
 	pub(crate) const fn code(self) -> u64 {
 		match self {
 			Self::InternalError => 0x0,
@@ -143,6 +159,7 @@ impl PublishDoneStatus {
 			Self::TrackEnded => 0x2,
 			Self::UpdateFailed => 0x8,
 			Self::MalformedTrack => 0x12,
+			Self::ExpiredAuthToken => 0x7,
 		}
 	}
 }
@@ -179,6 +196,15 @@ impl PublishDone<'_> {
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
 			// Draft-22 removed it and left 0x3 unassigned.
 			0x3 if matches!(version, Version::Draft18) => Ok(()),
+			// EXPIRED_AUTH_TOKEN, registered from draft-23: the token that authorized the
+			// subscription expired. Read as the UNAUTHORIZED an earlier draft's publisher
+			// sends for the same end, so a subscriber and a relay act on it as they always
+			// have. Before draft-23 the value is unassigned and stays the peer's code.
+			code if code == PublishDoneStatus::ExpiredAuthToken.code()
+				&& !matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22) =>
+			{
+				Err(crate::Error::Unauthorized)
+			}
 			code => Err(crate::Error::Remote(u32::try_from(code).unwrap_or(u32::MAX))),
 		}
 	}
@@ -263,7 +289,8 @@ impl<'a> Message<'a> for Publish<'a> {
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
 			0x09 => self.largest_location,
-			0x10 => self.forward,
+			0x10 => (!version.paused()).then_some(self.forward),
+			0x11 => version.paused().then_some(!self.forward),
 			0x20 => self.subscriber_priority.filter(|_| draft20),
 			0x21 => self.filter.filter(|_| draft20),
 			0x22 => self.group_order.filter(|_| draft20),
@@ -294,10 +321,15 @@ impl<'a> Message<'a> for Publish<'a> {
 			0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft20(version),
 			0x08 => _expires: Option<u64>,
 			0x09 => largest_location: Option<Location>,
-			0x10 => forward: Option<bool>,
+			0x10 => forward: Option<bool> where !version.paused(),
+			0x11 => paused: Option<bool> where version.paused(),
 			0x20 => subscriber_priority: Option<u8> where Filter::is_draft20(version),
 			0x21 => filter: Option<Filter> where Filter::is_draft20(version),
 			0x22 => group_order: Option<GroupOrder> where Filter::is_draft20(version),
+			// Draft-23 adds two (section 9.8). Both are read and dropped: neither changes
+			// the refusal the request is headed for.
+			0x23 => _fill: Option<super::Fill> where Self::has_fill(version),
+			0x36 => _subscribe_tracks_id: Option<u64> where Self::has_fill(version),
 		);
 		let properties = Properties::decode(r, version)?;
 		// Last, so a malformed field closes the session before a token refusal.
@@ -310,12 +342,20 @@ impl<'a> Message<'a> for Publish<'a> {
 			track_name,
 			track_alias,
 			largest_location,
-			forward: forward.unwrap_or(true),
+			forward: Version::forward_state(forward, paused).unwrap_or(true),
 			properties,
 			subscriber_priority,
 			group_order,
 			filter,
 		})
+	}
+}
+
+impl Publish<'_> {
+	/// Whether PUBLISH may carry FILL_PARAMETERS and SUBSCRIBE_TRACKS_ID (draft-23 section
+	/// 9.8). Before draft-23 neither is listed for it, so either closes the session.
+	fn has_fill(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
 	}
 }
 
@@ -414,6 +454,50 @@ mod tests {
 		Ok(())
 	}
 
+	/// Draft-23 (section 9.8) lets a PUBLISH carry FILL_PARAMETERS and SUBSCRIBE_TRACKS_ID.
+	/// Like the draft-22 ones they have to parse for the request to reach its refusal; on
+	/// draft-22 they are still unlisted, which closes the session.
+	#[test]
+	fn publish_accepts_fill_parameters_and_subscribe_tracks_id_at_draft23() -> Result<(), EncodeError> {
+		let body = |version: Version| -> Result<Vec<u8>, EncodeError> {
+			let mut body = Vec::new();
+			let w = &mut Encoder::new(&mut body, version.into());
+			RequestId(1).encode(w, version)?;
+			super::super::namespace::encode_track(w, &crate::Path::from_static("broadcast"), "video")?;
+			w.varint(1u64)?; // track alias
+
+			// FILL_PARAMETERS (0x23) holding a Location Filter, then SUBSCRIBE_TRACKS_ID
+			// (0x36) = 4, delta encoded.
+			w.varint(2u64)?;
+			w.varint(0x23u64)?;
+			crate::ietf::Param::param_encode(
+				&super::super::Fill {
+					filter: Some(Filter::NextObject),
+					..Default::default()
+				},
+				w,
+				Version::Draft23,
+			)?;
+			w.varint(0x13u64)?;
+			w.varint(4u64)?;
+			Properties::default().encode(w, version)?;
+			Ok(body)
+		};
+
+		let version = Version::Draft23;
+		let bytes = body(version)?;
+		Publish::decode_msg(&mut Decoder::new(&bytes, version.into()), version)
+			.expect("draft-23 PUBLISH parameters must parse");
+
+		let version = Version::Draft22;
+		let bytes = body(version)?;
+		assert!(matches!(
+			Publish::decode_msg(&mut Decoder::new(&bytes, version.into()), version),
+			Err(DecodeError::InvalidValue)
+		));
+		Ok(())
+	}
+
 	/// They arrived in draft-22, so an earlier peer sending one is still a violation.
 	#[test]
 	fn older_drafts_reject_the_relocated_parameters() -> Result<(), EncodeError> {
@@ -487,7 +571,7 @@ mod tests {
 
 	#[test]
 	fn test_publish_done_registered_statuses_all_versions() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			for (status, expected) in [
 				(PublishDoneStatus::InternalError, 0x0),
 				(PublishDoneStatus::TrackEnded, 0x2),
@@ -510,6 +594,17 @@ mod tests {
 		}
 	}
 
+	/// An expired token ends a subscription with EXPIRED_AUTH_TOKEN (0x7) on draft-23, which
+	/// registers it (section 12.4). Earlier drafts have no such status, so they say
+	/// UNAUTHORIZED.
+	#[test]
+	fn publish_done_names_an_expired_token_from_draft23() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(PublishDoneStatus::token_expired(version).code(), 0x1, "{version:?}");
+		}
+		assert_eq!(PublishDoneStatus::token_expired(Version::Draft23).code(), 0x7);
+	}
+
 	/// A subscriber ends the track the way the publisher said it ended: cleanly for a
 	/// finished track or a reached filter end, with the publisher's code otherwise.
 	#[test]
@@ -520,7 +615,7 @@ mod tests {
 			reason_phrase: "".into(),
 		};
 
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			assert!(done(0x2).end(version).is_ok(), "{version:?}");
 			assert!(
 				matches!(done(0x1).end(version), Err(crate::Error::Unauthorized)),
@@ -537,6 +632,18 @@ mod tests {
 				),
 				"{version:?}"
 			);
+			// EXPIRED_AUTH_TOKEN is registered from draft-23, and reads as the UNAUTHORIZED an
+			// earlier publisher sends when a token expires. Before that 0x7 is unassigned.
+			match version {
+				Version::Draft18 | Version::Draft20 | Version::Draft22 => assert!(
+					matches!(done(0x7).end(version), Err(crate::Error::Remote(0x7))),
+					"{version:?}"
+				),
+				Version::Draft23 => assert!(
+					matches!(done(0x7).end(version), Err(crate::Error::Unauthorized)),
+					"{version:?}"
+				),
+			}
 		}
 
 		// SUBSCRIPTION_ENDED is clean until draft-22 unassigned it.
@@ -545,6 +652,33 @@ mod tests {
 			done(0x3).end(Version::Draft22),
 			Err(crate::Error::Remote(0x3))
 		));
+	}
+
+	/// Draft-23 announces a paused PUBLISH with PAUSED = 1 and a forwarding one with
+	/// PAUSED = 0 (section 9.19.18).
+	#[test]
+	fn draft23_publish_carries_paused() {
+		let version = Version::Draft23;
+		for forward in [true, false] {
+			let msg = Publish {
+				authorization_token: None,
+				request_id: RequestId(1),
+				track_namespace: Path::from_static("test/ns"),
+				track_name: "video".into(),
+				track_alias: 42,
+				largest_location: None,
+				forward,
+				properties: Properties::default(),
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
+			};
+			let wire = encode_message(&msg, version);
+			let decoded: Publish = decode_message(&wire, version).unwrap();
+			assert_eq!(decoded.forward, forward);
+			// The same bytes mean nothing to draft-22, which knows no parameter 0x11.
+			assert!(decode_message::<Publish>(&wire, Version::Draft22).is_err());
+		}
 	}
 
 	#[test]
@@ -579,7 +713,7 @@ mod tests {
 
 	#[test]
 	fn publish_priority_property_bytes_on_every_draft() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut msg = Publish {
 				authorization_token: None,
 				request_id: RequestId(1),

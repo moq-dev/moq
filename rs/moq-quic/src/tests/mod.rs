@@ -7214,6 +7214,151 @@ fn pacing_blocked_backlog_is_not_app_limited() {
 	});
 }
 
+/// Drains a backlog that `factory`'s controllers hold back, and returns the client's
+/// `(cwnd_blocked, pacing_blocked)` with the span from its first send of the backlog to its last.
+///
+/// The backlog waits on the controller from its first send to its last, and the simulated
+/// clock sends in no time, so the limit that held it must account for that whole span.
+fn congestion_waits(factory: PacketRecorderFactory) -> (Duration, Duration, Duration) {
+	let _guard = subscribe();
+	let (mut pair, client_ch, log) = recorded_pair(factory);
+	pair.latency = Duration::from_millis(20);
+	// Refill a pacer the handshake drained, as `check_blocked_backlog_is_not_app_limited` does.
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
+	pair.drive();
+	let before = log.lock().unwrap().len();
+	// The handshake may have waited on the pacer already.
+	let start = pair.client_conn_mut(client_ch).stats().path;
+
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.client_send(client_ch, s).finish().unwrap();
+	pair.drive();
+
+	let sent: Vec<Instant> = log.lock().unwrap()[before..]
+		.iter()
+		.filter_map(|e| match e {
+			PacketEvent::Sent { at } => Some(*at),
+			_ => None,
+		})
+		.collect();
+	let span = *sent.last().unwrap() - sent[0];
+	let end = pair.client_conn_mut(client_ch).stats().path;
+	(
+		end.cwnd_blocked - start.cwnd_blocked,
+		end.pacing_blocked - start.pacing_blocked,
+		span,
+	)
+}
+
+#[test]
+fn congestion_waits_time_a_full_window() {
+	let (window, pacing, span) = congestion_waits(PacketRecorderFactory {
+		window: Some(12_000),
+		..Default::default()
+	});
+	// 64 KiB through a 12 kB window takes several 40 ms round trips.
+	assert!(span >= Duration::from_millis(160), "{span:?}");
+	assert_eq!((window, pacing), (span, Duration::ZERO));
+}
+
+#[test]
+fn congestion_waits_time_the_pacer() {
+	let (window, pacing, span) = congestion_waits(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	// 64 KiB at 125 kB/s takes about half a second.
+	assert!(span >= Duration::from_millis(400), "{span:?}");
+	assert_eq!((window, pacing), (Duration::ZERO, span));
+}
+
+/// A wait ends when its limit clears, though the driver holds transmits back past it, as while
+/// its send buffers are full: an ACK that opens the window, the pacer's deadline passing, or the
+/// path that imposed it being replaced.
+#[test]
+fn congestion_waits_end_when_the_limit_clears() {
+	let backlog = |factory| {
+		let _guard = subscribe();
+		let (mut pair, ch, _log) = recorded_pair(factory);
+		pair.latency = Duration::from_millis(20);
+		pair.time = pair.time.saturating_add(Duration::from_millis(100));
+		pair.drive();
+		let start = pair.client_conn_mut(ch).stats().path;
+		let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+		pair.client_send(ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+		pair.drive_client();
+		(pair, ch, start)
+	};
+	let held = Duration::from_millis(100);
+
+	// A full window clears when the server's ACK arrives, a round trip after the client blocked.
+	let (mut pair, ch, start) = backlog(PacketRecorderFactory {
+		window: Some(12_000),
+		..Default::default()
+	});
+	let blocked = pair.time;
+	pair.time = pair.time.saturating_add(Duration::from_millis(20));
+	pair.drive_server();
+	pair.time = pair.time.saturating_add(Duration::from_millis(20));
+	let acked = pair.time;
+	pair.client.receive_only(acked, pair.server.addr);
+	pair.time = pair.time.saturating_add(held);
+	let now = pair.time;
+	pair.client_conn_mut(ch).handle_timeout(now);
+	let stats = pair.client_conn_mut(ch).stats().path;
+	assert_eq!(stats.cwnd_blocked - start.cwnd_blocked, acked - blocked);
+
+	// The pacer clears at its deadline, the connection's next timer.
+	let (mut pair, ch, start) = backlog(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	let blocked = pair.time;
+	let until = pair.client_conn_mut(ch).poll_timeout().unwrap();
+	assert!(until > blocked);
+	pair.time = until.saturating_add(held);
+	let now = pair.time;
+	pair.client_conn_mut(ch).handle_timeout(now);
+	let stats = pair.client_conn_mut(ch).stats().path;
+	assert_eq!(stats.pacing_blocked - start.pacing_blocked, until - blocked);
+
+	// A path change ends the wait the old path imposed: the server, held by its pacer, hears the
+	// client from a new address before the pacer's deadline.
+	let _guard = subscribe();
+	let (mut pair, client_ch, _log) = recorded_pair(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
+	pair.drive();
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	let start = pair.server_conn_mut(server_ch).stats().path;
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.drive_server();
+	let blocked = pair.time;
+	let until = pair.server_conn_mut(server_ch).poll_timeout().unwrap();
+	pair.time = blocked.saturating_add((until - blocked) / 2);
+	let moved = pair.time;
+	pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	pair.server.receive_only(moved, pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	pair.time = until.saturating_add(held);
+	let now = pair.time;
+	pair.server_conn_mut(server_ch).handle_timeout(now);
+	let stats = pair.server_conn_mut(server_ch).stats().path;
+	assert_eq!(stats.pacing_blocked - start.pacing_blocked, moved - blocked);
+}
+
 /// The last packet in a poll can drain the application while bytes remain in flight.
 #[test]
 fn partial_poll_reports_starvation() {

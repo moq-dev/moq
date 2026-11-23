@@ -97,13 +97,7 @@ assert.equal(queue.jobs.report.steps.length, 1, "the report job checks nothing o
 assert.deepEqual(queue.on.pull_request.branches, ["main"]);
 assert.ok(queue.on.pull_request.types.includes("edited"), "retargeting to main must report the context");
 assert.equal(queue.on.pull_request.paths, undefined, "the required context must always report");
-assert.deepEqual(queue.permissions, {
-	contents: "read",
-	"pull-requests": "read",
-	checks: "read",
-	statuses: "read",
-	actions: "read",
-});
+assert.deepEqual(queue.permissions, { contents: "read" });
 assert.equal(queue.jobs.queue.name, "Queue");
 assert.equal(queue.jobs.queue.if, "github.event_name == 'merge_group'");
 assert.deepEqual(queue.jobs.queue["runs-on"], ["self-hosted", "moq-queue"]);
@@ -113,10 +107,13 @@ const checkout = queue.jobs.queue.steps.find((step: { uses?: string }) => step.u
 assert.equal(checkout.with["persist-credentials"], false);
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(queue.jobs.queue.env.BASE, "${{ github.event.merge_group.base_sha }}");
-// A high-risk head runs RISK.md's full suite in place of the checks its diff selects.
-const gateStep = queue.jobs.queue.steps.find((step: { name?: string }) => step.name === "Check");
-assert.match(gateStep.run, /just gh queue-suite "\$HEAD_REF"/);
-assert.match(gateStep.run, /just ci "\$BASE"/);
+// A cancel or timeout signals only the step's process; exec makes that just, so
+// the dispatcher hears it and prints what a hung lane waits on.
+const gates = [queue.jobs.queue.steps, check.jobs.check.steps, nightly.jobs.gate.steps]
+	.flat()
+	.filter((step: { run?: string }) => /\bjust (ci|gate)\b(?!-)/.test(step.run ?? ""));
+assert.equal(gates.length, 3);
+for (const step of gates) assert.match(step.run, /^exec nix develop --command just (ci|gate)\b/m, step.name);
 
 // Every other workflow stays out of main PRs and main's merge groups: optional
 // checks run nightly on main, and on release PRs through the Release gate.
@@ -284,7 +281,7 @@ const features = await workflow("features");
 assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features"]);
 // Nightly runs the whole gate over every package on the queue's runners, on main's code alone.
 // The exact command: `just gate -rs` would skip a module.
-assert.match(nightly.jobs.gate.steps.at(-1).run, /^nix develop --command just gate$/m);
+assert.match(nightly.jobs.gate.steps.at(-1).run, /^exec nix develop --command just gate$/m);
 assert.deepEqual(nightly.jobs.gate["runs-on"], ["self-hosted", "moq-queue"]);
 assert.equal(
 	nightly.jobs.gate.if,

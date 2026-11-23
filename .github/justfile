@@ -159,11 +159,6 @@ formula *args:
 install-formula *args:
     python3 sh/gh/install-formula.py "$@"
 
-# Print the full suite a merge group's PR runs in place of its scoped checks, or nothing.
-[positional-arguments]
-queue-suite *args:
-    sh/gh/queue-suite.sh "$@"
-
 # Trigger the apt-repo and rpm-repo workflows for a release tag.
 [positional-arguments]
 trigger-repo-publish *args:

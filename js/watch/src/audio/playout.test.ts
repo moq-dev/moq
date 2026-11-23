@@ -234,6 +234,7 @@ describe("ring replay", () => {
 });
 
 describe("subscription budget", () => {
+	// `rs/moq-audio`'s decode-path tests replay the same trace through `moq play`'s budget.
 	// A minute of evenly paced audio, long enough to spend the prior and settle the target at its
 	// floor, then six seconds of 100ms flushes.
 	const PACED = 3000;

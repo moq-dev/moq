@@ -138,7 +138,8 @@ fn bench_lagging(c: &mut Criterion) {
 		group.bench_function(id, |b| {
 			let relay = fixture.get_or_insert_with(|| fuzz::RouteRelay::lagging(claims, lag));
 			// The first stream's change is served through both streams and forwarded;
-			// the second's older one changes nothing.
+			// the second's older one queues nothing, though its copy now holds the claim,
+			// so the relay works out that claim's ways again.
 			b.iter(|| assert_eq!(relay.step(), 3));
 		});
 	}

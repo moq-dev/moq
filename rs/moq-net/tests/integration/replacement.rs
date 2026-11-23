@@ -101,6 +101,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => {
 			assert_eq!(announce.prefix.as_str(), "cam");
 			let carried = announce.route.instance();
@@ -143,6 +144,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		Some(origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		}) => assert_eq!(announce.prefix.as_str(), "cam"),
 		other => panic!("{version}: expected the restart, got {other:?}"),
 	}
@@ -183,7 +185,7 @@ async fn carried_lite07() {
 /// does over older lite.
 #[kio::test]
 async fn minted_ietf() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, replace(version, Some("cam".parse().unwrap())))
 			.await
 			.expect("timed out");
@@ -313,7 +315,7 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 
 #[kio::test]
 async fn restart_while_the_old_session_lingers_wins() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		for (old_hop, new_hop) in [(1, 4), (4, 1)] {
 			kio::clock::timeout(
 				TEST_TIMEOUT,

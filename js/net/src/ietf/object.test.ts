@@ -109,7 +109,7 @@ test("an object or fetched object declaring more than 32 MiB is refused at its h
 });
 
 test("a data stream's header goes out in one write, stream type included", async () => {
-	for (const version of [Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_22, Version.DRAFT_23]) {
 		const chunks: Uint8Array[] = [];
 		const writer = new Writer(
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),

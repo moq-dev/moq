@@ -23,6 +23,8 @@ pub(crate) const NEGOTIATED: [Version; 7] = [
 /// ALPN strings for supported versions, most-preferred first. `ALPNS[0]` is the
 /// newest moq-lite ALPN that both sides converge on.
 ///
+/// `ALPN_23` is absent for the same reason as lite-07: the draft-23 port is a spike, so it
+/// is only offered by a caller that names `moq-transport-23`.
 /// `ALPN_LITE_07_WIP` is deliberately absent: lite-07's wire format is still
 /// work-in-progress, so it is never advertised or negotiated by default. It is only
 /// reachable when both peers explicitly opt in (e.g. `--version moq-lite-07-wip`).
@@ -47,8 +49,9 @@ pub(crate) const ALPN_LITE_07_WIP: &str = "moq-lite-07-wip";
 pub(crate) const ALPN_18: &str = "moqt-18";
 pub(crate) const ALPN_20: &str = "moqt-20";
 pub(crate) const ALPN_22: &str = "moqt-22";
+pub(crate) const ALPN_23: &str = "moqt-23";
 
-const ALL: [Version; 10] = [
+const ALL: [Version; 11] = [
 	Version::lite(lite::Version::Lite07),
 	Version::lite(lite::Version::Lite06),
 	Version::lite(lite::Version::Lite05),
@@ -56,6 +59,7 @@ const ALL: [Version; 10] = [
 	Version::lite(lite::Version::Lite03),
 	Version::lite(lite::Version::Lite02),
 	Version::lite(lite::Version::Lite01),
+	Version::ietf(ietf::Version::Draft23),
 	Version::ietf(ietf::Version::Draft22),
 	Version::ietf(ietf::Version::Draft20),
 	Version::ietf(ietf::Version::Draft18),
@@ -131,6 +135,7 @@ impl Version {
 			Draft::Ietf(ietf::Version::Draft18) => "moq-transport-18",
 			Draft::Ietf(ietf::Version::Draft20) => "moq-transport-20",
 			Draft::Ietf(ietf::Version::Draft22) => "moq-transport-22",
+			Draft::Ietf(ietf::Version::Draft23) => "moq-transport-23",
 		}
 	}
 
@@ -147,6 +152,7 @@ impl Version {
 			0xff000012 => Some(Self::ietf(ietf::Version::Draft18)),
 			0xff000014 => Some(Self::ietf(ietf::Version::Draft20)),
 			0xff000016 => Some(Self::ietf(ietf::Version::Draft22)),
+			0xff000017 => Some(Self::ietf(ietf::Version::Draft23)),
 			_ => None,
 		}
 	}
@@ -164,6 +170,7 @@ impl Version {
 			Draft::Ietf(ietf::Version::Draft18) => 0xff000012,
 			Draft::Ietf(ietf::Version::Draft20) => 0xff000014,
 			Draft::Ietf(ietf::Version::Draft22) => 0xff000016,
+			Draft::Ietf(ietf::Version::Draft23) => 0xff000017,
 		}
 	}
 
@@ -179,6 +186,7 @@ impl Version {
 			Draft::Ietf(ietf::Version::Draft18) => ALPN_18,
 			Draft::Ietf(ietf::Version::Draft20) => ALPN_20,
 			Draft::Ietf(ietf::Version::Draft22) => ALPN_22,
+			Draft::Ietf(ietf::Version::Draft23) => ALPN_23,
 		}
 	}
 
@@ -271,10 +279,16 @@ impl Versions {
 	/// `Lite07` is intentionally excluded: its wire format is still work-in-progress,
 	/// so it is not advertised until a caller opts in explicitly (e.g. a pinned
 	/// `version = ["moq-lite-07-wip"]`). An opt-in set that includes it negotiates normally.
+	/// `Draft23` is excluded the same way while its port is incomplete.
 	pub fn all() -> Self {
 		Self(
 			ALL.iter()
-				.filter(|version| **version != Version::lite(lite::Version::Lite07))
+				.filter(|version| {
+					!matches!(
+						version.0,
+						Draft::Lite(lite::Version::Lite07) | Draft::Ietf(ietf::Version::Draft23)
+					)
+				})
 				.copied()
 				.collect(),
 		)

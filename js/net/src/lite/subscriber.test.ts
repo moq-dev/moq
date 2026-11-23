@@ -3072,10 +3072,10 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 		const probe = await SubscribeUpdate.decode(sent, version);
 		expect(probe.remove ?? []).toEqual([]);
 		expect(probe.ranges).toEqual([{ start: { time: 3n }, end: { time: 3n } }]);
-		// Answered past its time: no group at or before 3, so the reader starts at the oldest group.
+		// Answered past its time: the range from 3 starts at 5, whatever older groups the copy holds.
 		await respond(request, version, [{ started: new SubscribeStarted(1n, 5n) }]);
 		await drainReactions();
-		expect(hooks.servingResolved(reader)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+		expect(hooks.servingResolved(reader)).toEqual([{ start: 5n, end: undefined, floored: true }]);
 		const retired = await SubscribeUpdate.decode(sent, version);
 		expect(retired.remove).toEqual([1n]);
 	} finally {
