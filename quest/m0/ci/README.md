@@ -192,5 +192,13 @@ points delegate to non-generic bodies, and BTreeMap instantiations are shared.
 moq-dev/rust2's driver lints the rule later. Making IETF support a cargo
 feature was considered and not planned: the churn outweighs the build saving.
 
+Decided 2026-11-13 (maintainer, moq-dev/quest#711): a high-risk PR runs
+the full suite `RISK.md` names (`just gate`) in the queue, so "builds and
+tests only what its diff can affect" holds for the low and medium tiers
+alone. `quest suite` also picks it for a head no review record covers. Over
+the 400 merges from 2026-11-17 to 11-23, 96 recorded high and 39 no tier:
+about a third of entries, at about 13 minutes against the queue's 7.2
+median.
+
 Measure each change against a current baseline and record the result in its PR.
 The historical samples locate candidates; they are not controlled benchmarks.

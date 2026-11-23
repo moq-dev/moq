@@ -97,7 +97,7 @@ assert.equal(queue.jobs.report.steps.length, 1, "the report job checks nothing o
 assert.deepEqual(queue.on.pull_request.branches, ["main"]);
 assert.ok(queue.on.pull_request.types.includes("edited"), "retargeting to main must report the context");
 assert.equal(queue.on.pull_request.paths, undefined, "the required context must always report");
-assert.deepEqual(queue.permissions, { contents: "read" });
+assert.deepEqual(queue.permissions, { contents: "read", "pull-requests": "read" });
 assert.equal(queue.jobs.queue.name, "Queue");
 assert.equal(queue.jobs.queue.if, "github.event_name == 'merge_group'");
 assert.deepEqual(queue.jobs.queue["runs-on"], ["self-hosted", "moq-queue"]);
@@ -107,6 +107,10 @@ const checkout = queue.jobs.queue.steps.find((step: { uses?: string }) => step.u
 assert.equal(checkout.with["persist-credentials"], false);
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(queue.jobs.queue.env.BASE, "${{ github.event.merge_group.base_sha }}");
+// A high-risk head runs RISK.md's full suite, which `quest suite` reads from main.
+const gateStep = queue.jobs.queue.steps.find((step: { name?: string }) => step.name === "Check");
+assert.match(gateStep.run, /quest suite "\$GITHUB_SERVER_URL\/\$GITHUB_REPOSITORY\/pull\/\$pr"/);
+assert.match(gateStep.run, /just ci "\$BASE"/);
 
 // Every other workflow stays out of main PRs and main's merge groups: optional
 // checks run nightly on main, and on release PRs through the Release gate.
