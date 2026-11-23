@@ -2920,12 +2920,14 @@ export class Subscriber {
 					const { min, max } = range.start.live;
 					const budget = Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max));
 					entry.joinTicks.set(id, hooks.answerJoin(entry.track, min, through(range.end), at, budget));
+					console.log("DBG answerJoin", this.version, String(id), min, String(through(range.end)), String(at), budget);
 				}
 				continue;
 			}
 			const asked = range.start?.time ?? range.start?.absolute ?? range.start?.joined?.absolute ?? 0n;
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if (at !== undefined || reaches(range.end, asked)) times.push([asked, at]);
+			console.log("DBG timeStart", this.version, String(id), String(asked), String(at));
 		}
 		hooks.timeStarts(entry.track, times);
 		const live = new Set(entry.live.ranges().map(wireJoin));
@@ -2986,6 +2988,7 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runGroup(group: GroupMessage, stream: Reader) {
+		console.log("DBG group", this.version, String(group.key));
 		// One that beats its subscription's TRACK_INFO waits for it unread, which flow control
 		// bounds. Waiters resume in the order they arrived.
 		const entry = this.#subscribes.get(group.subscribe) ?? (await this.#pending.get(group.subscribe));

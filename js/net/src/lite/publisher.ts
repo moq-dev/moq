@@ -1639,6 +1639,7 @@ export class Publisher {
 					// and delivery now starts there too. Any other range starts no earlier than delivery.
 					const budget = unstarted.get(id);
 					start = budget !== undefined ? hooks.joinStart(track, range.start, budget) : max(range.start, from);
+					console.log("DBG started", String(id), String(range.start), String(range.end), budget, String(start), String(from));
 					if (range.end !== undefined && range.end <= start) start = undefined;
 					else startKey = min(startKey, start);
 				}
