@@ -1248,15 +1248,18 @@ impl Holdings for TrackState {
 	/// An idle copy waits as [`Self::latest_live`] does: what an ended feed left measures no
 	/// live edge, and the groups it missed since leave a hole the next feed may not fill.
 	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
+		// An answer its upstream gave places the join, even one that arrived after the end was
+		// declared: nothing measures the groups held better than the publisher that holds them.
+		if let Some(answer) = self.join_answers.get(&(min, end))
+			&& answer.tick > since
+			&& budget <= answer.budget
+		{
+			return answer.start.map_or(Join::Empty, Join::Group);
+		}
 		// Once the end is declared, nothing more is answered: it places as the groups held
 		// measure it, as its upstream's would, holding the same final groups.
 		if self.joins_answered() {
-			return match self.join_answers.get(&(min, end)) {
-				Some(answer) if answer.tick > since && budget <= answer.budget => {
-					answer.start.map_or(Join::Empty, Join::Group)
-				}
-				_ => Join::Unknown,
-			};
+			return Join::Unknown;
 		}
 		if !self.readable() {
 			return Join::Unknown;
@@ -17676,6 +17679,29 @@ mod test {
 		let mut below = producer.subscribe(from(500)).with_range(499..);
 		assert!(below.poll_start(&kio::Waiter::noop()).is_pending());
 		assert_eq!(drain(&mut floored), vec![1000]);
+	}
+
+	/// An upstream answer that lands after a lite-07 copy's end was declared still places the
+	/// join: the end stops further answers, not one already given. The groups held measure no
+	/// live edge, so without it the join would end with nothing read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_takes_an_answer_landing_after_its_end() {
+		let past = Subscription::default().with_ranges([Range::from(Start::within(Duration::ZERO))]);
+		let mut producer = track_producer("test", Info::default());
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		let mut reader = producer.subscribe(past);
+		let start = Timestamp::unscaled(0);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(start, &b"x"[..]).unwrap();
+		group.finish().unwrap();
+		producer.finish_at(Position::group(1)).unwrap();
+		assert_eq!(drain_groups(&mut reader), Vec::<u64>::new(), "waits on its upstream");
+
+		producer.answer_join(subscription::PAST_EVERY_GROUP, None, Some(0), Duration::ZERO);
+		assert_eq!(drain_groups(&mut reader), vec![0]);
 	}
 
 	/// A lite-07 copy holds only part of the track, so it places a live join only where its
