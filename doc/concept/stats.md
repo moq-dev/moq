@@ -388,9 +388,8 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
-    "wire_tx": 2048, "wire_rx": 1024, "wire_lost": 0, "credit_stalls": 2, "credit_stalled_us": 350000,
-    "credit_held_readers_us": 120000, "credit_held_evicted_us": 0,
-    "cwnd_blocked_us": 0, "pacing_blocked_us": 40000,
+    "wire_tx": 2048, "wire_rx": 1024, "credit_stalls": 2, "credit_stalled_us": 350000,
+    "credit_held_readers_us": 120000, "pacing_blocked_us": 40000,
     "routes_refused": 0,
     "routes": {
       "changed": 4, "rewritten": 120,
@@ -468,6 +467,9 @@ running behind holds the window. `evicted` counts while an evicted reader had
 yet to stop its stream, keeping the credit of the bytes it took. A window held
 by a rate cap rather than by readers counts in neither. The same transports
 report them, at the same lag.
+
+The four credit fields and the three congestion fields above are omitted while
+zero, as they are on most labels, and readers default a missing one to zero.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
 They never start a session. `expired` counts a verified credential that expired

@@ -589,6 +589,11 @@ impl Traffic {
 	}
 }
 
+/// Whether a counter is zero, which serializing skips.
+fn is_zero(value: &u64) -> bool {
+	*value == 0
+}
+
 /// Request admissions and connected-session presence for a label on a tier, or their sum.
 /// The session counters are cumulative connects and disconnects, so
 /// `sessions_started - sessions_ended` is the current live session count. The peaks
@@ -624,22 +629,31 @@ pub struct Presence {
 	/// Cumulative transport bytes received, including transport framing.
 	pub wire_rx: u64,
 	/// Cumulative sent transport bytes declared lost, part of `wire_tx`.
+	// Zero on every transport but QUIC, so a zero stays off the wire like the credit counters.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub wire_lost: u64,
 	/// Cumulative times a connection's write blocked with all the peer's connection-level
 	/// credit (`MAX_DATA`) spent.
+	// The credit counters stay zero on most labels, so a zero stays off the wire; readers default it.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub credit_stalls: u64,
 	/// Cumulative microseconds connections spent blocked on the peer's connection-level credit.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub credit_stalled_us: u64,
 	/// Cumulative microseconds the peer had a connection's whole receive window spent while a
 	/// reader had data it had not looked at yet: readers behind holding the window.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub credit_held_readers_us: u64,
 	/// Cumulative microseconds the peer had a connection's whole receive window spent while an
 	/// evicted reader had not stopped its stream.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub credit_held_evicted_us: u64,
 	/// Cumulative microseconds connections had data ready to send held back by a full
 	/// congestion window.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub cwnd_blocked_us: u64,
 	/// Cumulative microseconds connections had data ready to send held back by the pacer.
+	#[serde(skip_serializing_if = "is_zero")]
 	pub pacing_blocked_us: u64,
 	/// Cumulative routes and claims a lite-07 session forwarded that this
 	/// node refused, withdrawing each and keeping the session: the total of
@@ -1534,7 +1548,11 @@ impl WireInner {
 		let read = WIRE.map(|read| read(&self.counters));
 		if let Some(presence) = &current.presence {
 			for ((counter, now), then) in presence.wire.iter().zip(read).zip(last.read) {
-				counter.fetch_add(now.saturating_sub(then), Ordering::Relaxed);
+				// Most counters hold still between ticks, and an atomic add costs even when zero.
+				let delta = now.saturating_sub(then);
+				if delta > 0 {
+					counter.fetch_add(delta, Ordering::Relaxed);
+				}
 			}
 		}
 		*last = WireState { read, closed: close };
@@ -2465,6 +2483,31 @@ mod tests {
 		let output = serde_json::to_value(presence).unwrap();
 		assert_eq!(output["routes"]["closed"]["other"], 1);
 		assert_eq!(output["routes"]["changed"], 0);
+		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
+	}
+
+	/// A zero credit counter stays off the wire and reads back as zero; a nonzero one is written.
+	#[test]
+	fn presence_credit_counters_stay_off_the_wire_while_zero() {
+		let mut presence = Presence::default();
+		let output = serde_json::to_value(presence).unwrap();
+		for key in [
+			"credit_stalls",
+			"credit_stalled_us",
+			"credit_held_readers_us",
+			"credit_held_evicted_us",
+			"wire_lost",
+			"cwnd_blocked_us",
+			"pacing_blocked_us",
+		] {
+			assert!(output.get(key).is_none(), "{output}");
+		}
+		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
+
+		presence.credit_held_evicted_us = 5;
+		let output = serde_json::to_value(presence).unwrap();
+		assert_eq!(output["credit_held_evicted_us"], 5);
+		assert!(output.get("credit_stalls").is_none(), "{output}");
 		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
 	}
 
