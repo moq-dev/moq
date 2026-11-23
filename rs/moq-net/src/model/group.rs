@@ -2909,10 +2909,16 @@ impl Handle {
 			(timeline, _) => timeline,
 		};
 		state.adopted = Some(head.first_object);
-		if let Some(wire) = state.wire_mut() {
+		if let Some(relay) = state.relay.as_mut()
+			&& let Some(wire) = &mut relay.wire
+		{
 			wire.first_object = head.first_object;
 			wire.first_id = head.start as u64;
 			wire.last = wire.last.or(Some(offset as u64 - 1));
+			// A terminal object held before any frame leaves the head's last as the newest data.
+			if relay.end_object.is_some() {
+				relay.last_before_end = relay.last_before_end.or(Some(offset as u64 - 1));
+			}
 		}
 		let extra = metadata + growth + if state.content.is_none() { payload } else { 0 };
 		Some(Adopted {
@@ -6189,6 +6195,46 @@ mod test {
 				"a reader keeps its place"
 			);
 		}
+	}
+
+	/// A head adopted into a copy that already holds its terminal object, and no frame,
+	/// leaves the head's last object as the newest data object, not the terminal one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_adopted_head_below_a_terminal_object_is_the_last_data() {
+		let head = Head {
+			content: None,
+			start: 0,
+			first_object: true,
+			entries: vec![
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"a")).into(), 0),
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"b")).into(), 0),
+			],
+			compressed: false,
+		};
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
+		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		tail.start_at(2).unwrap();
+		tail.set_wire(Wire {
+			sparse: false,
+			first_object: false,
+			first_id: 2,
+			extensions: false,
+			has_end: true,
+			fetchable: true,
+			last: None,
+		})
+		.unwrap();
+		tail.set_end_object(super::super::object::Fields {
+			id: 2,
+			properties: Default::default(),
+		})
+		.unwrap();
+		assert_eq!(tail.handle.last_data_object(), None, "no data object yet");
+		tail.handle.adopt_head(&head);
+		assert_eq!(tail.handle.state.read().offset, 0, "the head is adopted");
+		assert_eq!(tail.handle.last_data_object(), Some(1));
 	}
 
 	#[test]
