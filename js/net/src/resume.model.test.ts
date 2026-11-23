@@ -1677,6 +1677,22 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A group taken from its copy only after that copy's route failed is continued by a fetch from
+		// the serving route, which closes it short and fails too: it reads on from the next route
+		// instead of ending at that close.
+		{
+			ops: [
+				{ kind: "join", reader: 1, spec: spec(true, "hour", undefined, false) },
+				{ kind: "ranges", reader: 1, range: [3, 8] },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 7, frames: 1 },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "close", instance: 0, slot: 2, group: undefined, down: true },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {
