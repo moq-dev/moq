@@ -168,6 +168,11 @@ export class Prefs implements Getter<Subscription | undefined> {
 	readonly revision = new Signal(0);
 	/** Told each change, so the aggregates this subscriber joins move by what changed. */
 	watch?: (change: Change) => void;
+	/**
+	 * Whether the ranges last changed by a retune alone, each live join kept under its key with
+	 * another max, rather than replaced or restated.
+	 */
+	retuned = false;
 
 	/** Start with `subscription`, already checked and defaulted, or none. */
 	constructor(subscription?: Subscription) {
@@ -284,10 +289,11 @@ export class Prefs implements Getter<Subscription | undefined> {
 	/**
 	 * Replace every preference, already checked and defaulted, rekeying the ranges by position when
 	 * they change. Ranges that change only a live join's max keep their keys, so each stays where it
-	 * joined: those come back as the keyed ranges they now read. Returns whether the ranges changed,
-	 * and how; nothing happens unless something did.
+	 * joined, unless `retune` is false, as a subscription restated whole: those come back as the keyed
+	 * ranges they now read. Returns whether the ranges changed, and how; nothing happens unless
+	 * something did. Mirrors the Rust `Prefs::replace`.
 	 */
-	set(next: Subscription): false | "replaced" | (readonly [bigint, Range])[] {
+	set(next: Subscription, retune = true): false | "replaced" | (readonly [bigint, Range])[] {
 		const scalars = this.#scalars;
 		const old = [...this.#ranges.values()];
 		const placed = samePlaced(this.#placedByIndex(), next.placed);
@@ -296,7 +302,8 @@ export class Prefs implements Getter<Subscription | undefined> {
 		const before = this.contribution();
 		const [gone, came] = same ? [[], []] : moved(this.held(), heldOf(next.ranges ?? [], next.placed));
 		const retuned =
-			!same && placed && retunes(old, next.ranges ?? []) ? this.#retune(next.ranges ?? []) : undefined;
+			!same && retune && placed && retunes(old, next.ranges ?? []) ? this.#retune(next.ranges ?? []) : undefined;
+		if (!same) this.retuned = retuned !== undefined;
 		this.#replace(next, retuned !== undefined);
 		this.watch?.({ before, after: this.contribution(), gone, came });
 		this.touch();

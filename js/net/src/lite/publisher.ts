@@ -1313,8 +1313,9 @@ export class Publisher {
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
 						hooks.askSubscriber(track, "refresh");
 					if (!hasRanges(this.version)) {
-						// An older update restates its one span, replacing every range.
-						track.update({
+						// An older update restates its one span, replacing every range: an absent start is
+						// placed afresh within the new max age rather than retuned where the old one joined.
+						hooks.restateSubscriber(track, {
 							priority: update.priority,
 							order: update.order,
 							ranges: requestedRanges(update, legacyStart(this.version, update.maxDelay)),

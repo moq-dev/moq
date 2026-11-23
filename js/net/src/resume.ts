@@ -935,7 +935,11 @@ class Reader implements ResumeSource {
 		// A closed copy still resolves replaced ranges against the groups it holds, for the window.
 		const wire = this.#wire(copy);
 		if (copy.sub.closed.peek() === undefined) {
-			copy.sub.update(wire);
+			// Restated, as the reader's ranges were, unless they only retuned a live join's max: a join
+			// whose max alone changed is then placed afresh rather than retuned where the copy placed
+			// the old one. Mirrors the Rust `Copy::ask_whole`.
+			if (this.#shell.retuned()) copy.sub.update(wire);
+			else hooks.restateSubscriber(copy.sub, wire);
 			this.#stamp(copy);
 		}
 	}

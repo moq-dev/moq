@@ -4719,6 +4719,7 @@ export class Subscriber {
 			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
+		hooks.restateSubscriber = (subscriber, subscription) => subscriber.#update(subscription, false);
 		hooks.stampSubscriber = (subscriber, since) => subscriber.#stamp(since);
 		hooks.preferences = (subscriber) => subscriber.#state.update;
 		hooks.resolveRanges = (subscriber, subscription) => {
@@ -4843,6 +4844,7 @@ export class Subscriber {
 			subscriber.#resume = source({
 				subscription: state.update,
 				since: () => Array.from(state.update.entries(), ([key]) => state.update.since(key)),
+				retuned: () => state.update.retuned,
 				cursor: subscriber.#cursor,
 				closed: state.closed,
 				info: () => state.info.peek(),
@@ -6209,9 +6211,16 @@ export class Subscriber {
 	 * Mirrors the Rust `Subscriber::update`.
 	 */
 	update(options: Subscription) {
+		this.#update(options, true);
+	}
+
+	// {@link update}, keeping a live join whose max alone changed where it joined only with `retune`;
+	// without, as a subscription restated whole, every range is placed afresh. Mirrors the Rust
+	// `Subscriber::replace`.
+	#update(options: Subscription, retune: boolean): void {
 		const subscription = subscriptionDefaults(options);
 		const reordered = subscription.order !== this.#state.update.scalars()?.order;
-		const replaced = this.#state.update.set(subscription);
+		const replaced = this.#state.update.set(subscription, retune);
 		if (replaced === "replaced" || (replaced && this.#refusal)) this.#resolve();
 		else if (replaced) {
 			// Only a live join's max changed: each keeps where it joined.

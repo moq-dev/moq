@@ -442,6 +442,12 @@ export interface ResumeShell {
 	 * live: each copy it asks takes an answer recorded since (see `hooks.stampSubscriber`).
 	 */
 	since(): readonly number[];
+	/**
+	 * Whether the reader's ranges last changed by a retune alone, each live join kept where it joined
+	 * under another max: each copy then retunes its own in place, and otherwise is asked whole,
+	 * restated. Mirrors the Rust `Change::Edit` against `Change::All`.
+	 */
+	retuned(): boolean;
 	/** The reader's group cursor: an inclusive start and an exclusive end. */
 	readonly cursor: Getter<{ start: bigint; end?: bigint }>;
 	/** Settles once the logical track ends. */
@@ -960,6 +966,13 @@ export const hooks: {
 	 */
 	editSubscriber: (subscriber: Subscriber, edit: Edit) => void;
 	/**
+	 * Replace a subscriber's preferences as a subscription restated whole, as a SUBSCRIBE_UPDATE
+	 * before lite-07 restates it: every range is placed afresh, a live join whose max alone changed
+	 * included, since that wire names no range to retune. What the reader already handed out stays
+	 * settled. Mirrors the Rust `Subscriber::restate`. Assigned by `track.ts`.
+	 */
+	restateSubscriber: (subscriber: Subscriber, subscription: Subscription) => void;
+	/**
 	 * Note each of a subscriber's live join ranges keyed in `since` as added at its tick instead: a
 	 * front's reader stamps each copy it asks with the tick it added the range at, so an answer the
 	 * copy recorded since places it. Mirrors the Rust `Preferences::stamp`. Assigned by `track.ts`.
@@ -1362,6 +1375,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	editSubscriber: () => {
+		throw new Error("track.ts not loaded");
+	},
+	restateSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	stampSubscriber: () => {
