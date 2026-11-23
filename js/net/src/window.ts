@@ -333,27 +333,56 @@ export function clamped(
 }
 
 /**
- * `ranges` as a copy asked from `floor` through the exclusive `end` asks for them: as {@link clamped}
- * places them, except a live join with a max. Placed at the group it resolved to, that join would
- * read as history, whose groups never go stale, so it is asked again as a live join taking every
- * group still within its max ({@link PAST_EVERY_GROUP} behind). The copy's local floor keeps out the
- * groups below where it resolved; those its upstream sends are within the max, so the cost is
- * bounded by it. Mirrors the Rust `Range::asked`.
+ * How a received copy places a live join's range: from an upstream answer recorded after join tick
+ * `since`, the live edge having moved since any earlier one (see {@link Holdings.join}), or `at`
+ * the group it was already placed at (see {@link Subscription.placed}). Mirrors the Rust `Joining`.
+ */
+export type Joining = { since: number; at?: never } | { at: bigint; since?: never };
+
+/** A live join placed from any answer. Mirrors the Rust `Joining::default`. */
+export const SINCE_ZERO: Joining = { since: 0 };
+
+// The group `joining` places a join at, if it was placed already.
+function placedAt(joining: Joining | undefined): bigint | undefined {
+	return joining?.at;
+}
+
+/**
+ * `ranges` as a copy asked from `floor` through the exclusive `end` asks for them, and the group each
+ * live join among them is {@link Subscription.placed | placed} at, by index: as {@link clamped} places
+ * them, except a live join with a max, which stays itself, placed at the group {@link clamped} starts
+ * it at. As a time start it would read as history, whose groups never go stale. A join `placed`
+ * already starts no earlier than where it was placed, and stays placed whatever the bounds. Mirrors
+ * the Rust `Range::asked` and the resume `asked`.
  */
 export function asked(
 	ranges: readonly Range[],
 	floor: bigint | undefined,
 	end: bigint | undefined,
 	resolved: readonly (Resolved | undefined)[],
-): Range[] {
-	return clamped(ranges, floor, end, resolved).map((out, index) => {
-		const start = ranges[index].start;
-		if (typeof start !== "object" || start.live.max === null || typeof out.start !== "bigint" || isEmpty(out))
-			return out;
-		const within: Range = { start: { live: { min: PAST_EVERY_GROUP, max: start.live.max ?? Duration.ZERO } } };
-		if (out.end !== undefined) within.end = out.end;
-		return within;
-	});
+	placed: ReadonlyMap<number, bigint> = new Map(),
+): { ranges: Range[]; placed: Map<number, bigint> } {
+	const out: Range[] = [];
+	const at = new Map<number, bigint>();
+	for (const [index, range] of ranges.entries()) {
+		const group = placed.get(index);
+		const clamp =
+			group === undefined
+				? clamped([range], floor, end, [resolved[index]])[0]
+				: clamped([range], floor === undefined ? group : max(floor, group), end, [
+						resolved[index] ?? { start: group, floored: true },
+					])[0];
+		const start = range.start;
+		if (typeof start !== "object" || start.live.max === null || typeof clamp.start !== "bigint" || isEmpty(clamp)) {
+			out.push(clamp);
+			continue;
+		}
+		const join: Range = { start };
+		if (clamp.end !== undefined) join.end = clamp.end;
+		at.set(index, clamp.start);
+		out.push(join);
+	}
+	return { ranges: out, placed: at };
 }
 
 /** Where a time falls among the groups a hop holds. Mirrors the Rust `Containing`. */
@@ -538,11 +567,8 @@ export class Window {
 	 * no reason to start at it.
 	 */
 	#reaching = new Set<bigint>();
-	/**
-	 * The join tick each live join's range was added at, by key: a hop that
-	 * {@link Holdings.answersJoins} places it only from an answer recorded since.
-	 */
-	#since = new Map<bigint, number>();
+	/** How each live join's range is placed, by key. */
+	#joining = new Map<bigint, Joining>();
 	// How many spans name each start, and how many name none: see {@link start}.
 	#named = new Counts<bigint>();
 	#unnamed = 0;
@@ -569,20 +595,20 @@ export class Window {
 	}
 
 	/**
-	 * {@link Window} for ranges the caller keys itself, in key order, each live join's range added at
-	 * join tick `since` of its key (0 by default). Mirrors the Rust `Window::keyed_since`.
+	 * {@link Window} for ranges the caller keys itself, in key order, each live join's range placed as
+	 * `joining` of its key says (from join tick 0 by default). Mirrors the Rust `Window::keyed_since`.
 	 */
 	static keyed(
 		ranges: Iterable<readonly [bigint, Range]>,
 		latest: bigint | undefined,
 		holdings: Holdings = UNHELD,
-		since: (key: bigint) => number = () => 0,
+		joining: (key: bigint) => Joining = () => SINCE_ZERO,
 	): Window {
 		const window = new Window([], undefined, holdings);
 		for (const [key, range] of ranges) {
 			window.#ranges.set(key, range);
 			window.#countBudget(range, 1);
-			if (liveMillis(range) !== undefined) window.#since.set(key, since(key));
+			if (liveMillis(range) !== undefined) window.#joining.set(key, joining(key));
 		}
 		window.#place(latest, holdings);
 		return window;
@@ -638,22 +664,28 @@ export class Window {
 	/**
 	 * Retire the ranges keyed `retire`, then resolve `add`, leaving every other range where it
 	 * resolved. A key added again replaces its range in place, but a live join added again with only
-	 * its max changed keeps where it started; any other key added is past every key held. Each live
-	 * join's range is added at join tick `since` of its key (0 by default). Costs the ranges edited,
-	 * never the rest. Mirrors the Rust `Window::edit_since`.
+	 * its max changed, and placed as it was, keeps where it started; any other key added is past every
+	 * key held. Each live join's range is placed as `joining` of its key says (from join tick 0 by
+	 * default). Costs the ranges edited, never the rest. Mirrors the Rust `Window::edit_since`.
 	 */
 	edit(
 		retire: Iterable<bigint>,
 		add: readonly (readonly [bigint, Range])[],
 		latest: bigint | undefined,
 		holdings: Holdings = UNHELD,
-		since: (key: bigint) => number = () => 0,
+		joining: (key: bigint) => Joining = () => SINCE_ZERO,
 	): void {
 		const retuned = new Set<bigint>();
 		for (const [key, range] of add) {
 			const join = joinOf(range);
 			const old = this.#ranges.get(key);
-			if (join !== undefined && old !== undefined && joinOf(old) === join) retuned.add(key);
+			if (
+				join !== undefined &&
+				old !== undefined &&
+				joinOf(old) === join &&
+				placedAt(this.#joining.get(key)) === placedAt(joining(key))
+			)
+				retuned.add(key);
 		}
 		const readded = new Set(add.map(([key]) => key));
 		for (const key of retire) {
@@ -664,7 +696,7 @@ export class Window {
 				const range = this.#ranges.get(key);
 				if (range) this.#countBudget(range, -1);
 				this.#ranges.delete(key);
-				this.#since.delete(key);
+				this.#joining.delete(key);
 			}
 		}
 		for (const [key, range] of add) {
@@ -677,8 +709,8 @@ export class Window {
 			}
 			this.#retire(key);
 			this.#ranges.set(key, range);
-			if (liveMillis(range) !== undefined) this.#since.set(key, since(key));
-			else this.#since.delete(key);
+			if (liveMillis(range) !== undefined) this.#joining.set(key, joining(key));
+			else this.#joining.delete(key);
 			if (!isEmpty(range)) this.#placeRange(key, latest, holdings);
 		}
 	}
@@ -686,8 +718,8 @@ export class Window {
 	/**
 	 * Note each live join range keyed in `since` as added at its tick instead (see
 	 * `Prefs.stamp`), placing again any still waiting on an answer, which an answer recorded since
-	 * that tick may now place. One already placed stays where it started. Returns whether the groups
-	 * in range moved.
+	 * that tick may now place. One already placed stays where it started, and one placed at a group
+	 * takes no tick. Returns whether the groups in range moved.
 	 */
 	stamp(
 		since: Iterable<readonly [bigint, number]>,
@@ -696,8 +728,8 @@ export class Window {
 	): boolean {
 		const placed = this.#spans.size;
 		for (const [key, tick] of since) {
-			if (!this.#since.has(key)) continue;
-			this.#since.set(key, tick);
+			if (!(this.#joining.get(key)?.since !== undefined)) continue;
+			this.#joining.set(key, { since: tick });
 			if (!this.#reaching.delete(key)) continue;
 			this.#placeRange(key, latest, holdings);
 		}
@@ -826,7 +858,7 @@ export class Window {
 		for (const key of this.#reaching) {
 			const range = this.#ranges.get(key);
 			const lag = range && liveMillis(range);
-			if (range && lag !== undefined) joins.push([lag, range.end, rangeBudget(range), this.#since.get(key) ?? 0]);
+			if (range && lag !== undefined) joins.push([lag, range.end, rangeBudget(range), this.#joining.get(key)?.since ?? 0]);
 		}
 		return joins;
 	}
@@ -1056,6 +1088,12 @@ export class Window {
 		const live = typeof range.start === "object" ? range.start.live.min : undefined;
 		const budget = rangeBudget(range);
 		const history = live === undefined;
+		// Placed already, where an earlier copy resolved it: its lag places nothing.
+		const placed = live === undefined ? undefined : this.#joining.get(key)?.at;
+		if (placed !== undefined) {
+			this.#count(key, { at: undefined, start: placed, end, floored: true, waiting: false, history });
+			return;
+		}
 		// A hop whose copies place the join waits on them, as one with no group yet does.
 		if (live !== undefined && holdings.defers?.()) {
 			this.#pending.add(key);
@@ -1067,7 +1105,7 @@ export class Window {
 			if (holdings.answersJoins?.()) {
 				// Only its upstream's answer places it, whatever this hop holds: read none of the groups
 				// held until it does.
-				join = holdings.join?.(live, range.end, budget, this.#since.get(key) ?? 0);
+				join = holdings.join?.(live, range.end, budget, this.#joining.get(key)?.since ?? 0);
 				// Nothing to deliver: a start past its end holds nothing.
 				if (join === "empty" && range.end !== undefined) join = { group: range.end + 1n };
 				if (join === undefined || join === "empty") {

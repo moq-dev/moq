@@ -616,31 +616,39 @@ describe("ranges", () => {
 		expect(clamped(ranges, undefined, undefined, [])).toEqual(ranges);
 	});
 
-	// A copy asked from a floor gets a resolved live join with a max as a live join taking every
-	// group within it, so its groups still go stale there; one with no max, and history, are asked
-	// from where they resolved. Mirrors the Rust `a_resolved_live_join_is_asked_with_its_max`.
-	test("a resolved live join is asked with its max", () => {
+	// A copy asked from a floor gets a resolved live join with a max as that join, placed at the
+	// group it resolved to, raised to the floor, so its groups still go stale there; one with no
+	// max, and history, are asked from where they resolved. Mirrors the Rust
+	// `a_resolved_live_join_is_asked_placed_with_its_max`.
+	test("a resolved live join is asked placed with its max", () => {
 		const max = Duration.secs(2);
 		const join = (max: Duration | null, end?: bigint): Range => {
 			const out: Range = { start: { live: { min: Duration.millis(2), max } } };
 			if (end !== undefined) out.end = end;
 			return out;
 		};
-		const within = (end?: bigint): Range => {
-			const out: Range = { start: { live: { min: PAST_EVERY_GROUP, max } } };
-			if (end !== undefined) out.end = end;
-			return out;
-		};
 		const at = (start: bigint, end?: bigint) => [{ start, end, floored: true }];
-		expect(asked([join(max)], 10n, undefined, at(8n))).toEqual([within()]);
+		const placed = (group?: bigint) => new Map(group === undefined ? [] : [[0, group]]);
+		// Placed at the floor it is raised to, still the join it was.
+		expect(asked([join(max)], 10n, undefined, at(8n))).toEqual({ ranges: [join(max)], placed: placed(10n) });
+		expect(asked([join(max)], 6n, undefined, at(8n))).toEqual({ ranges: [join(max)], placed: placed(8n) });
 		// Its end where it resolved, as a placed one's.
-		expect(asked([join(max, 500n)], 10n, undefined, at(8n, 12n))).toEqual([within(11n)]);
-		expect(asked([join(null)], 10n, undefined, at(8n))).toEqual([groups(10n)]);
-		expect(asked([groups(8n)], 10n, undefined, at(8n))).toEqual([groups(10n)]);
+		expect(asked([join(max, 500n)], 10n, undefined, at(8n, 12n))).toEqual({
+			ranges: [join(max, 11n)],
+			placed: placed(10n),
+		});
+		expect(asked([join(null)], 10n, undefined, at(8n))).toEqual({ ranges: [groups(10n)], placed: placed() });
+		expect(asked([groups(8n)], 10n, undefined, at(8n))).toEqual({ ranges: [groups(10n)], placed: placed() });
 		// Not yet resolved: asked as it is, for the copy to place.
-		expect(asked([join(max)], 10n, undefined, [])).toEqual([join(max)]);
+		expect(asked([join(max)], 10n, undefined, [])).toEqual({ ranges: [join(max)], placed: placed() });
 		// Capped at where it resolved: nothing, whatever its max.
-		expect(isEmpty(asked([join(max)], undefined, 8n, at(8n))[0])).toBe(true);
+		expect(isEmpty(asked([join(max)], undefined, 8n, at(8n)).ranges[0])).toBe(true);
+		// Placed already: no lower than where it was, whatever the floor, and placed still.
+		expect(asked([join(max)], 4n, undefined, [], placed(6n))).toEqual({ ranges: [join(max)], placed: placed(6n) });
+		expect(asked([join(max)], undefined, undefined, [], placed(6n))).toEqual({
+			ranges: [join(max)],
+			placed: placed(6n),
+		});
 	});
 
 	test("ranges are checked rather than served widened", () => {
