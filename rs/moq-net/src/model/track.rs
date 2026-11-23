@@ -13423,6 +13423,7 @@ mod test {
 		}
 	}
 
+	#[cfg(feature = "async")]
 	fn set_before_owed(hook: impl FnOnce() + 'static) {
 		BEFORE_OWED.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 	}
