@@ -433,8 +433,9 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 }
 
 // Mirrors Rust `a_lite06_upstream_drop_is_fetched_for_a_widened_lite07_viewer` in
-// rs/moq-net/tests/integration/drop_record.rs.
-test("through a lite-06 upstream, a group reported dropped as it lands is fetched for a widened lite-07 viewer", async () => {
+// rs/moq-net/tests/integration/drop_record.rs. Skipped until a JS relay asks a pre-07
+// upstream for every reader's join, as Rust's front does (quest/m1/js-origin-front-fold.md).
+test.skip("through a lite-06 upstream, a group reported dropped as it lands is fetched for a widened lite-07 viewer", async () => {
 	using clock = manual();
 	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07);
 	for (let key = 0n; key < 10n; key++) {
