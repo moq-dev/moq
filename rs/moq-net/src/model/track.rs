@@ -25939,8 +25939,10 @@ mod test {
 		const FRAME: usize = 10_000;
 		let pool = cache::Pool::unbounded();
 		let broadcast = session_broadcast(&pool, Some(25_000));
-		let track = |name: &str, priority| Producer::new(broadcast.clone(), name, Info::timed().with_priority(priority));
-		let (mut old, mut low, mut mid, mut new) = (track("old", 0), track("low", -5), track("mid", 0), track("new", 0));
+		let track =
+			|name: &str, priority| Producer::new(broadcast.clone(), name, Info::timed().with_priority(priority));
+		let (mut old, mut low, mut mid, mut new) =
+			(track("old", 0), track("low", -5), track("mid", 0), track("new", 0));
 		let kept = |producer: &Producer| {
 			let mut group = producer.consume().peek_group(0).expect("the edge stays cached");
 			matches!(group.read_frame().now_or_never(), Some(Ok(Some(_))))
@@ -25973,12 +25975,15 @@ mod test {
 		const FRAME: usize = 10_000;
 		let pool = cache::Pool::unbounded();
 		let broadcast = session_broadcast(&pool, Some(25_000));
-		let track = |name: &str, priority| Producer::new(broadcast.clone(), name, Info::timed().with_priority(priority));
+		let track =
+			|name: &str, priority| Producer::new(broadcast.clone(), name, Info::timed().with_priority(priority));
 		let (mut low, mut high, mut new) = (track("low", -5), track("high", 5), track("new", 0));
 		let write = |producer: &mut Producer| {
 			let mut group = producer.append_next().unwrap();
 			let reader = producer.consume().peek_group(group.start).expect("cached");
-			group.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; FRAME])).unwrap();
+			group
+				.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; FRAME]))
+				.unwrap();
 			(group, reader)
 		};
 
@@ -26133,7 +26138,7 @@ mod test {
 		let pool = cache::Pool::unbounded();
 		let broadcast = session_broadcast(&pool, Some(15_000));
 		let a = Producer::new(broadcast.clone(), "a", Info::timed());
-		let mut b = Producer::new(broadcast.clone(), "b", Info::timed());
+		let b = Producer::new(broadcast.clone(), "b", Info::timed());
 
 		let group = a.append_next().unwrap();
 		let mut partial = group
@@ -26146,7 +26151,9 @@ mod test {
 		// b's reader is owed its frame, so no frame a reader took can pay instead.
 		let mut written = b.append_next().unwrap();
 		let _reader = b.consume().peek_group(written.start).expect("cached");
-		written.write_frame(written.key_time(), bytes::Bytes::from(vec![0u8; 10_000])).unwrap();
+		written
+			.write_frame(written.key_time(), bytes::Bytes::from(vec![0u8; 10_000]))
+			.unwrap();
 		assert!(broadcast.edges.used() <= 15_000, "{:?}", broadcast.edges);
 		// The rest of the frame lands in an aborted copy, which finishing reports.
 		let _ = partial.write(bytes::Bytes::from(vec![0u8; 10_000]));
