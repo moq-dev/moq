@@ -9,6 +9,9 @@
 //! cap and the floor ([`MIN_QP`] unless [`Config::qp_floor`] sets another) is the
 //! quality: a scene that needs more bits than the cap gets a coarser quantizer,
 //! and one the floor already codes cleanly spends less.
+//!
+//! It holds that cap by skipping frames, unless [`Config::skip_frames`] turns
+//! that off: a frame that would overshoot codes to nothing.
 
 use std::collections::VecDeque;
 
@@ -89,20 +92,22 @@ impl Openh264 {
 		// Clamped here rather than left to openh264, which reads a floor of 0 as
 		// unset and swaps in its default range, lowering the ceiling to 42 as well.
 		let floor = config.qp_floor.unwrap_or(MIN_QP).clamp(CODEC_MIN_QP, 51);
+		// openh264's own default is to skip.
+		let skip = config.skip_frames.unwrap_or(true);
+		let controls = |complexity: &str| {
+			let skipping = if skip { "" } else { ", no frame skipping" };
+			format!("{complexity} complexity, QP {floor} floor{skipping}")
+		};
 
 		// Measured at 720p and 1080p (see `examples/encode-presets.rs`): Low saves
 		// about 1.5 ms and 15% CPU per frame over Medium for under 0.1 dB, and High
 		// codes the same stream as Medium, only slower. So Quality gets Medium and
 		// reports itself as Balanced.
 		let (complexity, applied) = match config.preset {
-			Preset::LowLatency => (
-				Complexity::Low,
-				Applied::new(Preset::LowLatency, format!("low complexity, QP {floor} floor")),
-			),
-			Preset::Balanced | Preset::Quality => (
-				Complexity::Medium,
-				Applied::new(Preset::Balanced, format!("medium complexity, QP {floor} floor")),
-			),
+			Preset::LowLatency => (Complexity::Low, Applied::new(Preset::LowLatency, controls("low"))),
+			Preset::Balanced | Preset::Quality => {
+				(Complexity::Medium, Applied::new(Preset::Balanced, controls("medium")))
+			}
 		};
 		let cfg = EncoderConfig::new()
 			.bitrate(BitRate::from_bps(
@@ -111,6 +116,7 @@ impl Openh264 {
 			.max_frame_rate(FrameRate::from_hz(config.framerate.as_f64() as f32))
 			.rate_control_mode(RateControlMode::Bitrate)
 			.qp(QpRange::new(floor, 51))
+			.skip_frames(skip)
 			// Real-time camera: prioritize latency over compression.
 			.usage_type(UsageType::CameraVideoRealTime)
 			.intra_frame_period(IntraFramePeriod::from_num_frames(interval))
@@ -166,6 +172,13 @@ impl Openh264 {
 	/// Read the quantizer range back off the live encoder, like `read_bitrate`.
 	#[cfg(test)]
 	fn read_qp(&mut self) -> (i32, i32) {
+		let params = self.read_params();
+		(params.iMinQp, params.iMaxQp)
+	}
+
+	/// Read the encoder's parameters back off the live encoder, like `read_bitrate`.
+	#[cfg(test)]
+	fn read_params(&mut self) -> SEncParamExt {
 		// SAFETY: a plain C struct of integers, bools, and nested structs of the same.
 		let mut params: SEncParamExt = unsafe { std::mem::zeroed() };
 		let status = unsafe {
@@ -176,7 +189,7 @@ impl Openh264 {
 			)
 		};
 		assert_eq!(status, 0, "openh264 get params failed");
-		(params.iMinQp, params.iMaxQp)
+		params
 	}
 
 	/// Set the rate on the live encoder. Only valid once it exists; see `pending`.
@@ -420,6 +433,64 @@ mod tests {
 				"{floor:?}"
 			);
 		}
+	}
+
+	/// The skipping setting reaches the codec, read back off the live encoder.
+	///
+	/// Unset keeps openh264's default of skipping.
+	#[test]
+	fn frame_skipping_reaches_the_codec() {
+		for (skip, expected) in [(None, true), (Some(true), true), (Some(false), false)] {
+			let mut enc = Openh264::new(&Config {
+				skip_frames: skip,
+				..config()
+			})
+			.unwrap();
+			enc.encode_all(&gray(), true).unwrap();
+			assert_eq!(enc.read_params().bEnableFrameSkip, expected, "{skip:?}");
+			assert_eq!(
+				enc.applied().controls.contains("no frame skipping"),
+				!expected,
+				"{skip:?}"
+			);
+		}
+	}
+
+	/// With skipping off, every frame comes out even under a cap it cannot hold.
+	///
+	/// The cap is far below what fresh noise costs, so with skipping on openh264
+	/// drops frames to hold it.
+	#[test]
+	fn with_skipping_off_every_frame_comes_out() {
+		let coded = |skip_frames| {
+			let mut enc = Openh264::new(&Config {
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(50_000)),
+				skip_frames,
+				..config()
+			})
+			.unwrap();
+			let size = crate::Size::new(320, 240);
+			let mut noise = 0x2545_f491_4f6c_dd1du64;
+			let mut coded = 0;
+			for index in 0..30u64 {
+				let pixels = (0..I420::len(size).unwrap())
+					.map(|_| {
+						noise ^= noise << 13;
+						noise ^= noise >> 7;
+						noise ^= noise << 17;
+						noise as u8
+					})
+					.collect();
+				let frame = Frame::new(
+					Surface::I420(I420::new(size, pixels).unwrap()),
+					moq_net::Timestamp::from_micros(index * 33_333).unwrap(),
+				);
+				coded += enc.encode_all(&frame, false).unwrap().len();
+			}
+			coded
+		};
+		assert!(coded(None) < 30, "nothing skipped to hold the cap");
+		assert_eq!(coded(Some(false)), 30, "a frame skipped with skipping off");
 	}
 
 	/// Without the floor, a calm scene buys a finer quantizer with more of a
