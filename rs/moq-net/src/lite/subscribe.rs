@@ -175,11 +175,14 @@ impl<'a> Message<'a> for Subscribe<'a> {
 const MAX_SAFE_DELAY_MS: u64 = (1 << 53) - 1;
 
 /// Decode the `Subscriber Max Age`: on lite-07 milliseconds plus one, zero meaning no limit;
-/// before it bare milliseconds.
+/// before it bare milliseconds, [`MAX_SAFE_DELAY_MS`] and up meaning no limit, as a lite-05/06
+/// track's max age does.
 fn decode_max_delay(r: &mut Decoder<'_>, version: Version) -> Result<Option<std::time::Duration>, DecodeError> {
 	Ok(match version.has_unlimited_max_delay() {
 		true => r.varint_opt()?.map(std::time::Duration::from_millis),
-		false => Some(std::time::Duration::from_millis(r.varint()?)),
+		false => Some(r.varint()?)
+			.filter(|millis| *millis < MAX_SAFE_DELAY_MS)
+			.map(std::time::Duration::from_millis),
 	})
 }
 
@@ -2131,9 +2134,10 @@ mod test {
 		assert_eq!(encoded(Version::Lite07, Some(ms(0))), (1, Some(ms(0))));
 		assert_eq!(encoded(Version::Lite07, Some(ms(250))), (251, Some(ms(250))));
 		assert_eq!(encoded(Version::Lite06, Some(ms(250))), (250, Some(ms(250))));
+		assert_eq!(encoded(Version::Lite06, None), (MAX_SAFE_DELAY_MS, None));
 		assert_eq!(
-			encoded(Version::Lite06, None),
-			(MAX_SAFE_DELAY_MS, Some(ms(MAX_SAFE_DELAY_MS)))
+			encoded(Version::Lite06, Some(ms(MAX_SAFE_DELAY_MS - 1))),
+			(MAX_SAFE_DELAY_MS - 1, Some(ms(MAX_SAFE_DELAY_MS - 1)))
 		);
 
 		let mut msg = subscribe_sample();

@@ -12,7 +12,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::track::{Delay, Subscription};
-use moq_net::{Error, Timestamp, Version, origin, track};
+use moq_net::{Error, Timestamp, Version, group, origin, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// One group per second of media, keyed by its start in microseconds.
@@ -330,74 +330,108 @@ async fn a_recovery_outlives_the_finished_subscription() {
 	drop((broadcast, upstream, publisher, relay, finished, first));
 }
 
-/// A relay copy recovers runs it evicted from a relay that still holds every group, so gave
-/// none up. That relay starts each run's SUBSCRIBE at the run's first key, which names no
-/// group, and the copy still asks each run once rather than one key at a time.
-#[kio::test]
-async fn a_relay_start_naming_no_group_costs_no_subscribe_per_key() {
-	const TIMEOUT: Duration = Duration::from_secs(600);
-	// The publisher and the first relay hold their groups for good; the last relay's cache
-	// expires them.
-	let publisher = holding(1);
-	let broadcast = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
-	let track = broadcast
-		.broadcast()
-		.create_track(
-			"video",
-			track::Info::default()
-				.with_timescale(moq_net::Timescale::MICRO)
-				.with_max_age(None),
-		)
-		.unwrap();
-	broadcast.announce().unwrap();
-	let mut finished = Vec::new();
-	for index in 0..6 {
-		let mut group = track
-			.create_group(moq_net::group::Info { start: index * GROUP })
+/// Publisher → relay A, which holds every group for good → relay B, whose cache expires them,
+/// over lite-06, with a reader's view of B.
+struct Chain {
+	track: track::Producer,
+	remote: moq_net::broadcast::Consumer,
+	/// B's link to A, where B's requests go.
+	last_link: support::harness::MockPair,
+	_held: (
+		origin::Producer,
+		origin::Producer,
+		origin::Producer,
+		moq_net::origin::Route,
+		support::harness::MockPair,
+	),
+}
+
+impl Chain {
+	async fn new(info: track::Info) -> Self {
+		let publisher = holding(1);
+		let route = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
+		let track = route.broadcast().create_track("video", info).unwrap();
+		route.announce().unwrap();
+		let middle = holding(2);
+		let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(middle.clone());
+		let first_link = connect_mock(options).await;
+		let relay = origin(3);
+		let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+		// Each request costs a round trip, as on a network, so a walk shows within the run.
+		options.latency = Duration::from_millis(5);
+		options.server_publish = Some(middle.consume());
+		options.client_subscribe = Some(relay.clone());
+		let last_link = connect_mock(options).await;
+		let remote = relay
+			.consume()
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
 			.unwrap();
-		group
-			.write_frame(Timestamp::from_micros(index * GROUP).unwrap(), &b"x"[..])
-			.unwrap();
-		finished.push(group.finish().unwrap());
+		Self {
+			track,
+			remote,
+			last_link,
+			_held: (publisher, middle, relay, route, first_link),
+		}
 	}
 
-	let middle = holding(2);
-	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
-	options.server_publish = Some(publisher.consume());
-	options.client_subscribe = Some(middle.clone());
-	let first_link = connect_mock(options).await;
-	let relay = origin(3);
-	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
-	// Each request costs a round trip, as on a network, so a walk shows within the run.
-	options.latency = Duration::from_millis(5);
-	options.server_publish = Some(middle.consume());
-	options.client_subscribe = Some(relay.clone());
-	let last_link = connect_mock(options).await;
-	let remote = relay
-		.consume()
-		.follow("bcast", None)
-		.unwrap()
-		.available()
-		.await
-		.unwrap()
-		.unwrap();
-	let history = |ranges: track::Range| {
-		let track = remote.track("video").unwrap();
-		async move {
-			track
-				.subscribe(
-					Subscription::default()
-						.with_delay(Delay::default().with_max(None))
-						.with_ranges([ranges]),
-				)
-				.await
-				.unwrap()
-		}
-	};
+	/// A group at `key` holding one frame at `at`, finished.
+	fn write(&self, key: u64, at: Timestamp) -> group::Finished {
+		let mut group = self.track.create_group(group::Info { start: key }).unwrap();
+		group.write_frame(at, &b"x"[..]).unwrap();
+		group.finish().unwrap()
+	}
 
-	// The live subscription delivers every group, which the last relay then expires while a
-	// reader keeps it live.
-	let mut live = history(track::Range::default()).await;
+	/// A read of B with no max delay over `ranges`.
+	async fn read(&self, ranges: track::Range) -> track::Subscriber {
+		self.remote
+			.track("video")
+			.unwrap()
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(None))
+					.with_ranges([ranges]),
+			)
+			.await
+			.unwrap()
+	}
+}
+
+/// Every group `reader` gets until its range ends, sorted.
+async fn keys(mut reader: track::Subscriber) -> Vec<u64> {
+	let mut keys = Vec::new();
+	while let Some(group) = reader.recv_group().await.unwrap() {
+		keys.push(group.start);
+	}
+	keys.sort();
+	keys
+}
+
+/// Relay B recovers runs it evicted from relay A, which still holds every group so gave none
+/// up, and starts each run's SUBSCRIBE at the run's first key, which names no group. A asks its
+/// own upstream about the keys it can't prove empty, so the reader's range ends while the track
+/// is still live, and B asks each run once rather than one key at a time.
+#[kio::test]
+async fn a_relay_chain_settles_an_evicted_run_live() {
+	const TIMEOUT: Duration = Duration::from_secs(60);
+	let chain = Chain::new(
+		track::Info::default()
+			.with_timescale(moq_net::Timescale::MICRO)
+			.with_max_age(None),
+	)
+	.await;
+	let _written: Vec<_> = (0..6)
+		.map(|index| chain.write(index * GROUP, Timestamp::from_micros(index * GROUP).unwrap()))
+		.collect();
+
+	// The live subscription delivers every group, which B then expires while a reader keeps it
+	// live.
+	let mut live = chain.read(track::Range::default()).await;
 	for _ in 0..6 {
 		kio::clock::timeout(TIMEOUT, live.recv_group())
 			.await
@@ -408,32 +442,38 @@ async fn a_relay_start_naming_no_group_costs_no_subscribe_per_key() {
 	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
 
 	// A reader from just past the first group misses the run up to the fourth.
-	let before = subscribes(&last_link);
-	let mut second = history(support::keys(1..4 * GROUP)).await;
-	let read = kio::clock::sim::spawn(async move {
-		let mut keys = Vec::new();
-		while let Some(group) = second.recv_group().await.unwrap() {
-			keys.push(group.start);
-		}
-		keys.sort();
-		keys
-	});
-	// The middle relay can't prove the keys between its groups empty, so the runs settle once
-	// the publisher ends the track and the middle relay drops each key it never served below
-	// the run's cap.
-	kio::clock::sleep(Duration::from_secs(10)).await;
-	let _ended = track.finish().unwrap();
-	let keys = kio::clock::timeout(TIMEOUT, read)
+	let before = subscribes(&chain.last_link);
+	let read = chain.read(support::keys(1..4 * GROUP)).await;
+	let keys = kio::clock::timeout(TIMEOUT, keys(read))
 		.await
-		.expect("the reader reaches the end of its range")
-		.unwrap();
+		.expect("the reader reaches the end of its range while the track is live");
 	assert_eq!(keys, [GROUP, 2 * GROUP, 3 * GROUP]);
-	let asked = subscribes(&last_link) - before;
 	// Three groups and the four gaps around them: a run's cap at the group its START named
 	// would walk the gaps a key at a time.
+	let asked = subscribes(&chain.last_link) - before;
 	assert!(asked <= 2 * 7, "{asked} SUBSCRIBEs for three groups and four gaps");
-	assert_eq!(fetches(&last_link), 0, "nothing fetched");
-	drop((
-		broadcast, first_link, last_link, publisher, middle, relay, finished, live,
-	));
+	assert_eq!(fetches(&chain.last_link), 0, "nothing fetched");
+}
+
+/// A sequence-keyed publisher skips groups 2 and 3 without saying so. A reader of relay B with
+/// no max delay waits out the gap, which A can't prove empty either: A asks its own upstream,
+/// so the reader's range ends while the track is still live.
+#[kio::test]
+async fn a_relay_chain_settles_a_small_undeclared_gap_live() {
+	const TIMEOUT: Duration = Duration::from_secs(60);
+	let chain = Chain::new(
+		track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None),
+	)
+	.await;
+	let read = chain.read(support::keys(0..6)).await;
+	let _written: Vec<_> = [0, 1, 4, 5]
+		.into_iter()
+		.map(|key| chain.write(key, Timestamp::from_millis(key * 1000).unwrap()))
+		.collect();
+	let keys = kio::clock::timeout(TIMEOUT, keys(read))
+		.await
+		.expect("the reader reaches the end of its range while the track is live");
+	assert_eq!(keys, [0, 1, 4, 5]);
 }

@@ -766,10 +766,11 @@ async function encodeMaxDelay(w: Writer, version: Version, maxDelay: number | nu
 	else await w.u53(maxDelay ?? MAX_SAFE_DELAY_MS);
 }
 
-/** Decode the inverse of {@link encodeMaxDelay}. */
+/** Decode the inverse of {@link encodeMaxDelay}, {@link MAX_SAFE_DELAY_MS} meaning no limit, as the Rust decoder reads it. */
 async function decodeMaxDelay(r: Reader, version: Version): Promise<number | null> {
 	if (hasUnlimitedMaxDelay(version)) return (await Duration.decodeOptional(r)) ?? null;
-	return r.u53();
+	const millis = await r.u53();
+	return millis < MAX_SAFE_DELAY_MS ? millis : null;
 }
 
 export class SubscribeUpdate {

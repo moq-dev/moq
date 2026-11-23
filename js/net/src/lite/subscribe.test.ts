@@ -660,7 +660,8 @@ test("a live start round-trips only on lite-07", async () => {
 });
 
 // Lite-07 sends milliseconds plus one, 0 for no limit. Earlier wires send bare milliseconds, so
-// no limit goes out as the largest value every peer reads, and lite-01/02 carry none at all.
+// no limit goes out as the largest value every peer reads and comes back as no limit, and
+// lite-01/02 carry none at all.
 test("max delay says no limit on lite-07, and the largest safe value before it", async () => {
 	// After the size, the priority, and the order.
 	const field = async (maxDelay: number | null) =>
@@ -668,13 +669,8 @@ test("max delay says no limit on lite-07, and the largest safe value before it",
 	expect([await field(null), await field(0), await field(5)]).toEqual([0, 1, 6]);
 
 	for (const version of [Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06, Version.DRAFT_07]) {
-		for (const maxDelay of [null, 0, 250]) {
-			const expected = {
-				[Version.DRAFT_01]: null,
-				[Version.DRAFT_03]: maxDelay ?? Number.MAX_SAFE_INTEGER,
-				[Version.DRAFT_06]: maxDelay ?? Number.MAX_SAFE_INTEGER,
-				[Version.DRAFT_07]: maxDelay,
-			}[version];
+		for (const maxDelay of [null, 0, 250, Number.MAX_SAFE_INTEGER - 1]) {
+			const expected = version === Version.DRAFT_01 ? null : maxDelay;
 			const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, maxDelay };
 			const subscribe = await encodeMessage(version, new Subscribe(props));
 			expect((await Subscribe.decode(new Reader(undefined, subscribe, version), version)).maxDelay).toBe(
