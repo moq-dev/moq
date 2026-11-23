@@ -897,12 +897,12 @@ test("a join packs frames until the minimum and restarts after a break", async (
 	expect(groups).toEqual([5, 2, 1, 2]);
 });
 
-test("default audio groups carry eighty milliseconds", async () => {
+test("default audio groups carry twenty milliseconds", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	for (const [frameMs, packets, groupMs] of [
-		[2.5, 32, undefined],
-		[10, 8, undefined],
-		[20, 4, undefined],
+		[2.5, 8, undefined],
+		[10, 2, undefined],
+		[20, 1, undefined],
 		[2.5, 1, 1],
 	] as const) {
 		using env = await setup(
@@ -1149,13 +1149,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
 	const enabled = new Signal(true);
 	const configuring = configured();
-	const encoder = new Encoder("audio", {
-		broadcast,
-		capture: capture as never,
-		bandwidth,
-		enabled,
-		join: Duration.millis(20),
-	});
+	const encoder = new Encoder("audio", { broadcast, capture: capture as never, bandwidth, enabled });
 	let subscriber: Moq.Track.Subscriber | undefined;
 	let siblingSubscriber: Moq.Track.Subscriber | undefined;
 	let catalog: Json.Snapshot.Consumer<Catalog.Root> | undefined;
@@ -1464,7 +1458,7 @@ test("default audio replays the last second after three seconds without a subscr
 	});
 	const feed = new Feed();
 	const configuring = configured();
-	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never, join: Duration.millis(20) });
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
 	let late: Moq.Track.Subscriber | undefined;
 	try {
 		await configuring;
@@ -1732,12 +1726,7 @@ test.each([false, true])("audio retained before a disable is encoded on demand (
 	});
 	const feed = new Feed();
 	const configuring = configured();
-	const encoder = new Encoder("audio", {
-		broadcast,
-		enabled,
-		capture: fakeCapture(feed) as never,
-		join: Duration.millis(20),
-	});
+	const encoder = new Encoder("audio", { broadcast, enabled, capture: fakeCapture(feed) as never });
 	let late: Moq.Track.Subscriber | undefined;
 	try {
 		await configuring;
@@ -1795,12 +1784,7 @@ test("audio retained across a disable and re-enable is served before the break",
 	});
 	const feed = new Feed();
 	const configuring = configured();
-	const encoder = new Encoder("audio", {
-		broadcast,
-		enabled,
-		capture: fakeCapture(feed) as never,
-		join: Duration.millis(20),
-	});
+	const encoder = new Encoder("audio", { broadcast, enabled, capture: fakeCapture(feed) as never });
 	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
 	let late: Moq.Track.Subscriber | undefined;
 	try {
@@ -1872,7 +1856,7 @@ test("a capture gap inside replayed audio keeps every frame on both sides of it"
 	});
 	const feed = new Feed();
 	const configuring = configured();
-	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never, join: Duration.millis(20) });
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
 	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
 	let late: Moq.Track.Subscriber | undefined;
 	try {
