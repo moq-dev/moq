@@ -7333,7 +7333,7 @@ impl kio::Task for GroupServe {
 			GroupState::Closed { .. } => "closed",
 			GroupState::Done => "done",
 		};
-		tracing::warn!(key = self.key, version = ?self.ctx.version, state, ready = ?res.as_ref().map(|r| r.as_ref().err().map(|e| e.to_string())), "SCRATCH group poll");
+		tracing::warn!(key = self.key, version = ?self.ctx.version, state, ready = ?match &res { Poll::Pending => None, Poll::Ready(r) => Some(r.as_ref().err().map(|e| e.to_string())) }, "SCRATCH group poll");
 		if let Err(err) = ready!(res) {
 			self.settle_failed(&err);
 		}
