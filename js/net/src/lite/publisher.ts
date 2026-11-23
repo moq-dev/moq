@@ -1315,7 +1315,6 @@ export class Publisher {
 					if (!hasRanges(this.version)) {
 						// An older update restates its one span, replacing every range: an absent start is
 						// placed afresh within the new max age rather than retuned where the old one joined.
-						console.log("DBG pub restate", update.maxDelay, update.startGroup, requestedRanges(update, legacyStart(this.version, update.maxDelay)).map((r: any) => `${typeof r.start === "object" ? `L${r.start.live.min.asMillis()}/${r.start.live.max?.asMillis() ?? "none"}` : r.start}..${r.end}`));
 						hooks.restateSubscriber(track, {
 							priority: update.priority,
 							order: update.order,
@@ -1639,7 +1638,6 @@ export class Publisher {
 					// and delivery now starts there too. Any other range starts no earlier than delivery.
 					const budget = unstarted.get(id);
 					start = budget !== undefined ? hooks.joinStart(track, range.start, budget) : max(range.start, from);
-					console.log("DBG started", String(id), String(range.start), String(range.end), budget, String(start), String(from));
 					if (range.end !== undefined && range.end <= start) start = undefined;
 					else startKey = min(startKey, start);
 				}
