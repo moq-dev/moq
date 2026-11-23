@@ -312,7 +312,7 @@ stream-credit epic (rejected: keep the gate). It was an ordering rule, not a
 code dependency, and with takeover moved to m3 the epic changes no wire.
 
 Decided 2026-11-13 (maintainer, /quest-plan from an audit of `main`'s audio):
-✅ the [audio playout](/quest/m2/audio-playout/README.md) epic moves here from
+✅ the audio playout epic moves here from
 m1, with its calibration in m3 (rejected: calibration here too; only the lag
 rule here). Its lag rule reshapes `main`-only API the cut would publish (the
 `stretch` setting, moq-audio's `Sink::due` and `bus::Positioned`), and the
