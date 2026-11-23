@@ -11,6 +11,8 @@ which holds the drops. lite-06 and earlier keep their one start.
 
 ## Plan
 
+Decided 2026-11-23 (maintainer, /quest-run): keep.
+
 Found in [moq-dev/moq#9444](https://github.com/moq-dev/moq/pull/9444), which
 answers each range on its own only on a relay's copy that places ranges as
 its upstream would (`TrackRun::per_range`, `places_any`; JS `perRange`,
