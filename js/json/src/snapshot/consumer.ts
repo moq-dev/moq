@@ -21,6 +21,8 @@ const GAPS: Moq.StreamCode[] = [
  * and {@link latest} skips to the newest state, for a caller that only wants the current value.
  * What {@link latest} skips is gone, so a later {@link next} resumes after it. Overlapping reads
  * take turns in call order.
+ * A value that fails the `schema` rejects the read like any other failure: the publisher broke the
+ * contract, so the caller ends the subscription instead of reading on.
  * When something else already owns the track, use the {@link Decoder} directly.
  *
  * A snapshot is superseded the moment a newer one exists, so by default the consumer subscribes

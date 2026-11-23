@@ -68,6 +68,19 @@ pub struct Config {
 	/// keeps apart for its grace, so a short linger on a flapping bucket
 	/// multiplies that reader's state.
 	pub linger: Duration,
+	/// Also publish each root's own view at
+	/// [`root_prefix`](crate::root_prefix)`(prefix, root)/node/<node>`, for every
+	/// non-empty root a session is scoped to (see
+	/// [`SessionInfo::root`](moq_net::stats::SessionInfo::root)). Default off.
+	///
+	/// A root's view carries the traffic on paths at or under the root, named
+	/// relative to it, and the sessions scoped to the root or beneath it, in the
+	/// same tracks as the node's broadcast, bucketed where the node's are: by the
+	/// leading [`Self::depth`] segments of the full path. It is announced while a session scoped
+	/// to exactly that root is counted, plus the [`Self::linger`], and a root
+	/// returning after that is a new broadcast. The registry also stops counting
+	/// `<prefix>` under each session's own root, where a relay mounts the view.
+	pub roots: bool,
 }
 
 impl Config {
@@ -82,6 +95,7 @@ impl Config {
 			interval: Duration::from_secs(1),
 			depth: 0,
 			linger: DEFAULT_LINGER,
+			roots: false,
 		}
 	}
 
@@ -120,6 +134,13 @@ impl Config {
 	/// See [`Self::linger`].
 	pub fn with_linger(mut self, linger: Duration) -> Self {
 		self.linger = linger;
+		self
+	}
+
+	/// Set whether each root's view is published too (default off). See
+	/// [`Self::roots`].
+	pub fn with_roots(mut self, roots: bool) -> Self {
+		self.roots = roots;
 		self
 	}
 }
@@ -168,6 +189,7 @@ impl Producer {
 			interval,
 			depth,
 			linger,
+			roots,
 		} = config;
 		// An empty node is indistinguishable from "no node set"; collapse it so
 		// downstream code only sees a single representation. We do this here
@@ -184,7 +206,12 @@ impl Producer {
 
 		// The prefix is a literal path, so its subtree claim cannot fail.
 		let exclude = moq_net::Pattern::subtree(prefix.as_str()).expect("the stats prefix is a literal path");
-		let registry = Registry::new(moq_net::stats::Config::new().with_exclude(exclude));
+		let mut registry = moq_net::stats::Config::new().with_exclude(exclude.clone());
+		if roots {
+			// Where a relay mounts each root's view: a read there counts as no root's traffic.
+			registry = registry.with_exclude_rooted(exclude);
+		}
+		let registry = Registry::new(registry);
 		let keepalive = Arc::new(Keepalive);
 		let task = Task {
 			registry: registry.clone(),
@@ -194,6 +221,7 @@ impl Producer {
 			depth,
 			linger,
 			interval,
+			roots,
 		};
 		let publisher = Publisher(Run::Idle(
 			Box::new(task),
@@ -317,6 +345,7 @@ struct Task {
 	depth: usize,
 	linger: Duration,
 	interval: Duration,
+	roots: bool,
 }
 
 /// The publish task's state, kept across drains so a steady-state drain
@@ -324,6 +353,8 @@ struct Task {
 struct Drain {
 	task: Task,
 	node: NodePublisher,
+	/// Each root's view, keyed by root, when [`Config::roots`] is on.
+	roots: HashMap<String, RootView>,
 	/// Refilled by every drain.
 	report: Report,
 	/// Drain counter, stamped on the change-detection state an entry touches
@@ -365,11 +396,15 @@ impl Drain {
 	/// Announce the node's broadcast, which lives for the producer's life;
 	/// `None` if the origin refused it.
 	fn new(task: Task) -> Option<Self> {
-		let node = NodePublisher::create(&task)?;
+		let advertised = advertised_path(&task.prefix, task.node.as_ref())
+			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
+			.ok()?;
+		let node = NodePublisher::create(&task, &advertised)?;
 		let now = kio::clock::now();
 		Some(Self {
 			task,
 			node,
+			roots: HashMap::new(),
 			report: Report::default(),
 			tick: 0,
 			base: (now, since_epoch(now)),
@@ -396,6 +431,58 @@ impl Drain {
 			.report(&mut self.report, moq_net::time::Instant::now());
 		self.tick += 1;
 		self.node.collect(&self.report, self.tick, self.task.depth);
+		if self.task.roots {
+			self.collect_roots();
+		}
+	}
+
+	/// Sort this drain's rows into each root's view, creating a view for every root
+	/// a session row names and running each through its own publisher.
+	///
+	/// A row reaches every view at or above it, so the cost is rows times path depth.
+	fn collect_roots(&mut self) {
+		for view in self.roots.values_mut() {
+			view.reset();
+		}
+		for entry in &self.report.sessions {
+			// The node's own broadcast is the empty root's view.
+			if entry.root.is_empty() {
+				continue;
+			}
+			if !self.roots.contains_key(entry.root.as_str()) {
+				let view = RootView::create(&self.task, &entry.root);
+				self.roots.insert(entry.root.as_str().to_string(), view);
+			}
+			self.roots.get_mut(entry.root.as_str()).expect("just ensured").live = true;
+		}
+		if self.roots.is_empty() {
+			return;
+		}
+		for entry in &self.report.sessions {
+			for (root, _) in ancestors(entry.root.as_str()) {
+				if let Some(view) = self.roots.get_mut(root) {
+					view.report.sessions.push(entry.clone());
+				}
+			}
+		}
+		for entry in &self.report.traffic {
+			for (root, _) in ancestors(entry.path.as_str()) {
+				let Some(view) = self.roots.get_mut(root) else {
+					continue;
+				};
+				let mut entry = entry.clone();
+				entry.path = entry
+					.path
+					.strip_prefix(&view.root)
+					.expect("an ancestor prefixes its path");
+				view.report.traffic.push(entry);
+			}
+		}
+		for view in self.roots.values_mut() {
+			if let Some(node) = &mut view.node {
+				node.collect(&view.report, self.tick, view.depth);
+			}
+		}
 	}
 
 	/// Write every pending frame, end bucket tracks that have lingered empty,
@@ -406,6 +493,15 @@ impl Drain {
 		// A label's presence track and a prefix's track exist only while
 		// requested. See `serve_requests`.
 		self.node.serve_requests(&self.report, self.tick, stamp);
+		let linger = self.task.linger;
+		// Dropping a view's publisher ends its broadcast.
+		self.roots.retain(|_, view| !view.lingered(stamp.at, linger));
+		for view in self.roots.values_mut() {
+			if let Some(node) = &mut view.node {
+				node.flush(self.tick, stamp, view.depth, linger);
+				node.serve_requests(&view.report, self.tick, stamp);
+			}
+		}
 	}
 
 	/// The largest bucket snapshot still held, and the largest bucket frame this
@@ -501,10 +597,6 @@ impl<T: Serialize> Snapshot<T> {
 		self
 	}
 
-	fn demand(&self) -> moq_net::track::Demand {
-		self.track.demand()
-	}
-
 	/// Write one frame, stamped by its drain. `Some(len)` is the payload written; `None`
 	/// means the value was unchanged, the interval already has a group for a snapshot, or
 	/// the track already ended, and nothing was written.
@@ -594,6 +686,20 @@ impl<T: Serialize> Snapshot<T> {
 		// The output keeps its own clone, whose appends the end refuses.
 		Ok(self.track.clone().finish().map(drop)?)
 	}
+
+	/// End the track, unlisting it, only while nobody wants it, returning whether it ended. The
+	/// check and the end are one step on the track, so a reader joining in between keeps it
+	/// instead of finding it ended. Nobody reads the abort that ends it.
+	fn reclaim(&mut self) -> bool {
+		if self.track.clone().abort_unwanted(moq_net::Error::Cancel).is_err() {
+			return false;
+		}
+		// The track's abort already failed the open group.
+		if let Some(group) = self.group.take() {
+			let _ = group.abort(moq_net::Error::Cancel);
+		}
+		true
+	}
 }
 
 /// A stats track and the frame it publishes each drain.
@@ -655,9 +761,9 @@ impl<V: Serialize> Output<V> {
 		}
 	}
 
-	/// Whether anyone wants the output.
-	fn is_wanted(&self) -> bool {
-		self.snapshot.demand().wanted()
+	/// End the track if nobody wants it, returning whether it ended; see [`Snapshot::reclaim`].
+	fn reclaim(&mut self) -> bool {
+		self.snapshot.reclaim()
 	}
 
 	/// Publish this drain's entries (`{}` when there are none) and clear them
@@ -675,6 +781,60 @@ impl<V: Serialize> Output<V> {
 	/// there is nothing left to close.
 	fn finish(&mut self) {
 		let _ = self.snapshot.finish();
+	}
+}
+
+/// One root's view of the node's counters: its rows, named relative to the root,
+/// and the publisher of its broadcast.
+struct RootView {
+	root: Path,
+	/// The node's depth less the root's own segments, so a view's buckets split the
+	/// root's paths where the node's do: a root at or below the depth is one bucket.
+	depth: usize,
+	/// `None` when the root's broadcast could not be announced, held anyway so the
+	/// refusal is logged once per run of the root rather than every drain.
+	node: Option<NodePublisher>,
+	/// This drain's rows at or under the root, refilled every drain.
+	report: Report,
+	/// Whether this drain carried a session scoped to exactly this root.
+	live: bool,
+	/// When the root's last session left; `None` while it has one.
+	empty_since: Option<Instant>,
+}
+
+impl RootView {
+	/// Announce `root`'s view at `<root prefix>/node/<node>`.
+	fn create(task: &Task, root: &Path) -> Self {
+		let node = crate::root_prefix(&task.prefix, root)
+			.and_then(|prefix| advertised_path(&prefix, task.node.as_ref()))
+			.inspect_err(|err| tracing::warn!(%err, %root, "stats: root path too long"))
+			.ok()
+			.and_then(|advertised| NodePublisher::create(task, &advertised));
+		Self {
+			root: root.clone(),
+			depth: task.depth.saturating_sub(root.parts().count()),
+			node,
+			report: Report::default(),
+			live: false,
+			empty_since: None,
+		}
+	}
+
+	/// Start a drain with no rows.
+	fn reset(&mut self) {
+		self.live = false;
+		self.report.traffic.clear();
+		self.report.sessions.clear();
+	}
+
+	/// Whether this drain left the root without a session for at least `linger`.
+	fn lingered(&mut self, now: Instant, linger: Duration) -> bool {
+		if self.live {
+			self.empty_since = None;
+			return false;
+		}
+		let since = *self.empty_since.get_or_insert(now);
+		now.saturating_duration_since(since) >= linger
 	}
 }
 
@@ -926,6 +1086,14 @@ struct BucketTier {
 	totals: Totals,
 	paths: Frame<PathUsage>,
 	labels: Frame<Presence>,
+	/// Each listed label's rows that ended on an earlier drain, while another row
+	/// keeps the label listed: a label's sessions in several roots are separate
+	/// rows, and one ending must not take its counts off the label.
+	#[serde(skip)]
+	ended: HashMap<Path, Presence>,
+	/// This drain's ending rows, folded into `ended` once published.
+	#[serde(skip)]
+	ending: Vec<(Path, Presence)>,
 }
 
 /// One path's entry on a bucket track; serializes as a [`Usage`](crate::Usage)
@@ -1017,6 +1185,9 @@ impl BucketTrack {
 			tier.folded.sessions.add(presence);
 		}
 		tier.labels.entries.push((label.clone(), presence));
+		if closed {
+			tier.ending.push((label.clone(), presence));
+		}
 	}
 
 	/// Whether this drain left the bucket empty for at least `linger`.
@@ -1037,6 +1208,27 @@ impl BucketTrack {
 		for (_, tier) in tiers.iter_mut() {
 			tier.paths.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 			tier.labels.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+			// Sessions under one label in several roots are separate rows.
+			tier.labels.entries.dedup_by(|row, kept| {
+				let same = row.0 == kept.0;
+				if same {
+					kept.1.add(row.1);
+				}
+				same
+			});
+			// A label's ended rows count while it stays listed, and leave with it.
+			let BucketTier {
+				labels, ended, ending, ..
+			} = tier;
+			ended.retain(|label, _| labels.entries.binary_search_by(|row| row.0.cmp(label)).is_ok());
+			for (label, presence) in &mut labels.entries {
+				if let Some(folded) = ended.get(label) {
+					presence.add(*folded);
+				}
+			}
+			for (label, presence) in ending.drain(..) {
+				ended.entry(label).or_default().add(presence);
+			}
 		}
 		if let Err(err) = self.snapshot.update(&self.body, stamp) {
 			tracing::warn!(?err, name = self.name, "stats: failed to write bucket frame");
@@ -1071,15 +1263,12 @@ fn ancestors(path: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
 }
 
 impl NodePublisher {
-	/// Announce the node's broadcast with its totals track and, at depth 0, the
-	/// one bucket's track, which both live for the producer's life.
-	fn create(task: &Task) -> Option<Self> {
-		let advertised = advertised_path(&task.prefix, task.node.as_ref())
-			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
-			.ok()?;
+	/// Announce a broadcast at `advertised` with its totals track and, at depth 0,
+	/// the one bucket's track, which both live for the publisher's life.
+	fn create(task: &Task, advertised: &Path) -> Option<Self> {
 		// A fresh instance per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
-		let route = match task.origin.route(&advertised, origin::RouteOptions::default()) {
+		let route = match task.origin.route(advertised, origin::RouteOptions::default()) {
 			Ok(route) => route,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
@@ -1259,20 +1448,8 @@ impl NodePublisher {
 	fn serve_requests(&mut self, report: &Report, tick: u64, stamp: Stamp) {
 		// Reclaim before adopting, so a request for a track just reclaimed is
 		// served again by this very drain.
-		self.presence.retain(|_, track| {
-			if track.output.is_wanted() {
-				return true;
-			}
-			track.output.finish();
-			false
-		});
-		self.prefixes.retain(|_, track| {
-			if track.output.is_wanted() {
-				return true;
-			}
-			track.output.finish();
-			false
-		});
+		self.presence.retain(|_, track| !track.output.reclaim());
+		self.prefixes.retain(|_, track| !track.output.reclaim());
 
 		// Pop everything queued, keeping one request per name so each track is
 		// built from an actual request.
@@ -1473,6 +1650,30 @@ mod tests {
 		}
 	}
 
+	/// Reclaiming ends a track only while nobody wants it, in one step with a reader's
+	/// arrival: a reader that joined since the last drain keeps the track open and live.
+	#[test]
+	fn reclaim_spares_a_track_a_reader_joined() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("t.json", info()).unwrap();
+		let mut snapshot = Snapshot::<Frame<u64>>::new(track.clone(), config());
+		let frame = |n| Frame {
+			entries: vec![(Path::from_static("a"), n)],
+		};
+		snapshot.update(&frame(1), stamp(1)).unwrap();
+		assert!(!track.demand().wanted(), "nobody reads it yet");
+
+		// Joins after the unwanted reading a two-step check acted on.
+		let reader = track.subscribe(None);
+		assert!(!snapshot.reclaim(), "the reader keeps it");
+		assert!(!track.is_closed());
+		assert!(snapshot.update(&frame(2), stamp(2)).unwrap().is_some(), "still live");
+
+		drop(reader);
+		assert!(snapshot.reclaim(), "unwanted again");
+		assert!(track.is_closed());
+	}
+
 	/// A joiner once the deltas outweigh the track's ratio gets a fresh snapshot group in
 	/// the next interval, even of an unchanged value, and deltas resume in it.
 	#[test]
@@ -1511,12 +1712,13 @@ mod tests {
 
 	/// A relay origin, and the cache pool its copies are billed to.
 	fn relay() -> (origin::Producer, moq_net::cache::Pool) {
-		let config = origin::Config::default();
+		let mut config = origin::Config::default();
+		// A relay carries what it learned on to its other peers (moq-lite-07).
+		config.proxy = true;
 		let pool = config.pool.clone();
 		let (origin, driver) = origin::Producer::new(config);
 		tokio::spawn(moq_net::time::run(driver));
-		// A relay carries what it learned on to its other peers (moq-lite-07).
-		(origin.with_proxy(true), pool)
+		(origin, pool)
 	}
 
 	/// Drive `drain` until `future` resolves.
@@ -1584,6 +1786,7 @@ mod tests {
 				linger: DEFAULT_LINGER,
 				// Hundreds of drains, each an interval apart, stay inside the relays' cache.
 				interval: Duration::from_millis(10),
+				roots: false,
 			})
 			.unwrap();
 			let (middle, middle_cache) = relay();
@@ -2093,6 +2296,7 @@ mod tests {
 			depth: 0,
 			linger: DEFAULT_LINGER,
 			interval,
+			roots: false,
 		})
 		.unwrap();
 		let start = kio::clock::now();
@@ -2407,6 +2611,132 @@ mod tests {
 		(producer, origin)
 	}
 
+	/// Each root's view carries only the traffic under the root, named relative to
+	/// it, and the sessions scoped to it or beneath it, merging one label's rows.
+	#[tokio::test(start_paused = true)]
+	async fn each_root_sees_only_its_own_subtree() {
+		let origin = produce_origin();
+		let producer = crate::produce::spawned(Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_roots(true)
+				.with_linger(Duration::ZERO),
+		));
+		let registry = producer.registry();
+		let session = |root: &'static str, label: &'static str| {
+			registry
+				.tier(Tier::default())
+				.session(moq_net::stats::SessionInfo::new(Path::from_static(label)).with_root(Path::from_static(root)))
+		};
+		let _a = session("a", "x");
+		let _ab = session("a/b", "x");
+		let c = session("c", "y");
+		let _top = session("", "z");
+		for (path, bytes) in [("a/live", 1), ("a/b/cam", 2), ("c/live", 4), ("d/live", 8)] {
+			moq_net::fuzz::bump_publisher_bytes(registry, Path::from_static(path), &Tier::default(), bytes);
+		}
+		drive_tick().await;
+
+		let view = |root: &str| {
+			let prefix = crate::root_prefix(&Path::from_static(".stats"), &Path::new(root).unwrap()).unwrap();
+			format!("{prefix}/node")
+		};
+		assert_eq!(view("a/b"), ".stats/root/a\\/b/node", "a root is one segment");
+		let read = |root: &str| {
+			let origin = origin.clone();
+			let path = view(root);
+			async move {
+				let broadcast = origin.consume().request(path.as_str(), None).await.expect("announced");
+				let mut frame = read_bucket(&broadcast, "").await;
+				frame.tiers.remove("").unwrap_or_default()
+			}
+		};
+
+		let a = read("a").await;
+		let paths: BTreeMap<_, _> = a
+			.paths
+			.iter()
+			.map(|(path, usage)| (path.as_str(), usage.publisher.bytes))
+			.collect();
+		assert_eq!(
+			paths,
+			BTreeMap::from([("live", 1), ("b/cam", 2)]),
+			"relative, nested root included"
+		);
+		assert_eq!(a.publisher.bytes, 3);
+		assert_eq!(a.labels.len(), 1, "one label across two roots");
+		assert_eq!(a.labels["x"].sessions_started, 2);
+
+		let ab = read("a/b").await;
+		let paths: Vec<_> = ab.paths.keys().map(String::as_str).collect();
+		assert_eq!(paths, ["cam"]);
+		assert_eq!(ab.labels["x"].sessions_started, 1, "a parent's session stays out");
+
+		let c_view = read("c").await;
+		assert_eq!(c_view.publisher.bytes, 4);
+		assert_eq!(c_view.labels.keys().collect::<Vec<_>>(), ["y"]);
+
+		// The empty root's view is the node's own broadcast, which sees everything.
+		let top = origin.consume().request(".stats/node", None).await.expect("node");
+		let mut frame = read_bucket(&top, "").await;
+		let top = frame.tiers.remove("").unwrap();
+		assert_eq!(top.publisher.bytes, 15);
+		assert_eq!(
+			top.labels["x"].sessions_started, 2,
+			"the node merges one label across roots"
+		);
+
+		// A root whose last session leaves ends its broadcast once it lingers.
+		let mut routes = origin.consume().with_hidden(true).routes();
+		let live = |routes: &mut origin::Routes| {
+			let mut live = None;
+			while let Some(Some((update, active))) = futures::FutureExt::now_or_never(next_update(routes)) {
+				if update.prefix.as_str() == view("c") {
+					live = Some(active);
+				}
+			}
+			live
+		};
+		assert_eq!(live(&mut routes), Some(true));
+		drop(c);
+		drive_tick().await;
+		drive_tick().await;
+		let ended = live(&mut routes) == Some(false);
+		assert!(ended, "root c's view ended");
+	}
+
+	/// A label's sessions in two roots are two rows; one ending keeps its counts on
+	/// the label while the other stays, so a reader never sees the label go back.
+	#[tokio::test(start_paused = true)]
+	async fn a_label_keeps_an_ended_roots_counts() {
+		let origin = produce_origin();
+		let producer = crate::produce::spawned(Producer::new(Config::new().with_origin(origin.clone())));
+		let session = |root: &'static str| {
+			producer
+				.registry()
+				.tier(Tier::default())
+				.session(moq_net::stats::SessionInfo::new(Path::from_static("x")).with_root(Path::from_static(root)))
+		};
+		let a = session("a");
+		let _b = session("b");
+		drive_tick().await;
+		let broadcast = origin.consume().request(".stats/node", None).await.expect("node");
+		let label = |frame: crate::BucketFrame| frame.tiers[""].labels["x"];
+		let started = label(read_bucket(&broadcast, "").await);
+		assert_eq!((started.sessions_started, started.sessions_ended), (2, 0));
+
+		drop(a);
+		for _ in 0..3 {
+			drive_tick().await;
+			let x = label(read_bucket(&broadcast, "").await);
+			assert_eq!(
+				(x.sessions_started, x.sessions_ended),
+				(2, 1),
+				"root a's row ended, not reset"
+			);
+		}
+	}
+
 	/// The announce events buffered so far in delivery order, as
 	/// `(path, active, instance)`.
 	fn take_instances(events: &mut origin::Routes) -> Vec<(String, bool, Instance)> {
@@ -2461,7 +2791,7 @@ mod tests {
 		let first = producer
 			.registry()
 			.tier(Tier::default())
-			.request(moq_net::Path::from_static("acme"));
+			.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 		let handle = broadcast
@@ -2492,7 +2822,7 @@ mod tests {
 		let second = producer
 			.registry()
 			.tier(Tier::default())
-			.request(moq_net::Path::from_static("acme"));
+			.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 		assert_eq!(drain(&mut track), [Some(2)]);
 
@@ -2623,6 +2953,7 @@ mod tests {
 			depth: 0,
 			linger: DEFAULT_LINGER,
 			interval: Duration::from_secs(1),
+			roots: false,
 		})
 		.expect("drain");
 		let mut tick = || {
@@ -2884,6 +3215,7 @@ mod tests {
 			depth: 0,
 			linger: DEFAULT_LINGER,
 			interval: Duration::from_secs(1),
+			roots: false,
 		})
 		.expect("drain");
 		let mut tick = || {
@@ -3117,6 +3449,7 @@ mod tests {
 					depth,
 					linger: DEFAULT_LINGER,
 					interval: Duration::from_secs(1),
+					roots: false,
 				})
 				.expect("drain");
 
@@ -3213,6 +3546,7 @@ mod tests {
 			depth: 1,
 			linger: Duration::from_secs(10),
 			interval: Duration::from_secs(1),
+			roots: false,
 		})
 		.unwrap();
 		let (edge, _cache) = relay();
@@ -3382,6 +3716,7 @@ mod tests {
 			depth: 1,
 			linger: Duration::ZERO,
 			interval: Duration::from_secs(1),
+			roots: false,
 		})
 		.unwrap();
 		let stats = crate::Consumer::new(drain.node.route.broadcast().consume(), Default::default());

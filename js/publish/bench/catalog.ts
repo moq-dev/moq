@@ -4,7 +4,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { CatalogProducer } from "../src/catalog";
 
@@ -25,7 +25,7 @@ async function measure(tracks: number, viewers: number, clock: Manual) {
 			),
 		};
 	});
-	const output = new Track.Producer("catalog.json");
+	const output = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(output, scope);
 	const subscribers = Array.from({ length: viewers }, () => {
 		return {

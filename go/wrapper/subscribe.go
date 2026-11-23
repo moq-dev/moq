@@ -208,7 +208,7 @@ func (f *VideoDecodedFrame) Height() uint32 {
 }
 
 // Pixels converts the frame to tightly packed pixels in format.
-func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
+func (f *VideoDecodedFrame) Pixels(format *VideoPixelFormat) ([]byte, error) {
 	return f.inner.Pixels(format)
 }
 

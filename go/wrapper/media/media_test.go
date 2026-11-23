@@ -82,7 +82,7 @@ func TestContainerTimebaseBelongsToOneBroadcast(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer timebase.Close()
-	if _, err := media.NewContainerProducer(other, media.ContainerInit{Format: media.ContainerFormatFmp4, Timebase: timebase}); !errors.Is(err, moq.ErrCodec) {
+	if _, err := media.NewContainerProducer(other, media.ContainerInit{Format: media.Fmp4ContainerFormat(), Timebase: timebase}); !errors.Is(err, moq.ErrCodec) {
 		t.Fatalf("foreign timebase: %v", err)
 	}
 	if err := owner.Close(); err != nil {

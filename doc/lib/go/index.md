@@ -32,7 +32,7 @@ Share `media.NewTimebase(broadcast)` through `ContainerInit` when several import
 source timeline; omitting it keeps an independent offset. Timebases belong to one broadcast
 and do not keep it open; release the handle with `Close` on the calling goroutine.
 `NewContainerProducer` takes chunks split anywhere, so a raw byte stream needs no other importer.
-`ContainerFormatFmp4` splits each fragment into one frame per sample.
+`Fmp4ContainerFormat()` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
@@ -97,7 +97,7 @@ import (
 // Hidden until the catalog is filled; keep the route reachable while publishing.
 route, _ := client.Route("my-stream.hang", moq.RouteOptions{Hidden: true})
 broadcast := route.Broadcast()
-audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
+audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: opusInit})
 timestamp := moq.TimestampFromScale(960, 48_000) // 20 ms on the Opus sample clock
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: timestamp})
 _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
@@ -105,7 +105,7 @@ _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
 video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
-    Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
+    Input: moqvideo.EncoderInput{Format: moq.RgbaVideoPixelFormat(), Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
     Output: moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.AutoEncoder()},
     Track: &track,
 })

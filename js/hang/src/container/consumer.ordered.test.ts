@@ -218,3 +218,54 @@ test("an open group that never delivers a frame is passed once the reader's wait
 		await t.close();
 	}
 });
+
+// Keys the ordered reader gave up on below an open GOP lose nothing when its leading pictures continue
+// the timeline, so the keyframe waits for them rather than read behind a gap.
+test("an open GOP past keys the reader gave up on waits for its leading picture", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const track = new Track.Producer("video");
+	const requests = track.requests();
+	const ordered = track.subscribe(subscription({ min: Duration.ZERO, max: Duration.millis(100) })).ordered();
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.secs(2) } }), {
+		format: new Format("video"),
+		delay: { min: Duration.ZERO, max: Duration.secs(2) },
+		ordered,
+	});
+	const reads: string[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			reads.push(read.kind === "frame" ? `frame ${read.frame.timestamp.asMillis()}` : read.kind);
+		}
+	})();
+	const frame = (group: ReturnType<typeof track.createGroup>, ms: number) =>
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Duration.millis(ms)),
+			timestamp: Time.Timestamp.fromMillis(ms),
+		});
+	try {
+		const first = track.createGroup(0n);
+		for (const ms of [0, 120, 40, 80]) frame(first, ms);
+		first.finish();
+		// Key 1 never lands, so the reader gives it up once the budget passes.
+		const open = track.createGroup(2n);
+		frame(open, 280);
+		await clock.advance(Duration.millis(100));
+		await flush();
+		expect(reads).toEqual(["frame 0", "frame 120", "frame 40", "frame 80"]);
+		frame(open, 160);
+		open.finish();
+		await clock.advance(Duration.ZERO);
+		await flush();
+		expect(reads).toEqual(["frame 0", "frame 120", "frame 40", "frame 80", "frame 280", "frame 160"]);
+	} finally {
+		consumer.close();
+		requests.close();
+		track.finish();
+		track.close();
+		await reading;
+		installed.close();
+	}
+});

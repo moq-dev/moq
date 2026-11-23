@@ -8551,6 +8551,33 @@ mod tests {
 		);
 	}
 
+	/// A wire without ranges has no Position end, so a switch's frame cap goes out as the whole
+	/// group, the update byte for byte the one an uncapped switch sends: lite-06 is the wire a
+	/// relay of the previous release speaks.
+	#[test]
+	fn lite06_caps_a_switch_by_whole_group() {
+		use crate::coding::Encoder;
+		use crate::lite::Message;
+		let uncapped = Subscription::default().with_range(3..6);
+		let mut capped = uncapped.clone();
+		capped.cap = Some(Position::new(5, 2));
+		let update = |subscription: &Subscription| {
+			let ranges = wire_ranges(&wire_span(subscription.clone())).unwrap();
+			let msg = lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay: None,
+				ranges: lite::RangeEdit::Replace(ranges),
+				order: track::Order::default(),
+			};
+			let mut buf = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
+				.unwrap();
+			buf
+		};
+		assert_eq!(update(&capped), update(&uncapped));
+	}
+
 	/// A wire without ranges asks from group 0 when no single start covers both a range
 	/// with no start and one with a start.
 	#[test]
@@ -9421,7 +9448,7 @@ mod tests {
 	/// reprice on the same connection keeps it and updates in place.
 	#[kio::test]
 	async fn an_unnamed_publisher_stays_anonymous() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()), false);
 
 		let mut announced = Announced::default();
 		subscriber
@@ -9459,8 +9486,11 @@ mod tests {
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 	}
 
-	pub(super) fn restart_subscriber(session: SinkSession) -> (Subscriber, crate::origin::Consumer) {
-		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+	/// A subscriber on a fresh origin, which forwards what it learned when `proxy`.
+	pub(super) fn restart_subscriber(session: SinkSession, proxy: bool) -> (Subscriber, crate::origin::Consumer) {
+		let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
+		config.proxy = proxy;
+		let origin = config.produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -10466,9 +10496,10 @@ mod tests {
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
 /// on every version: a time start as the start, from the frame it resumes at (see
 /// [`Subscription::resume`]), and a time end as the exclusive group past it, which lite-07
-/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]). A placed live join
-/// goes out as [`lite::Anchor::Joined`] from the frame it resumes at too, which only lite-07
-/// carries: the narrowing below makes it a time start first on an older wire.
+/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]), or before the frame
+/// it is capped at (see [`Subscription::cap`]). A placed live join goes out as
+/// [`lite::Anchor::Joined`] from the frame it resumes at too, which only lite-07 carries: the
+/// narrowing below makes it a time start first on an older wire.
 /// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
@@ -10498,10 +10529,12 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 			(track::Start::Live { min, max }, None) => Some(lite::Anchor::Live { min, max }),
 			(track::Start::Time(time), _) => Some(lite::Anchor::Absolute(resumed(time))),
 		};
-		let end = range
-			.end
-			.and_then(|time| time.checked_add(1))
-			.map(|end| lite::Anchor::Absolute(Position::group(end)));
+		// A switch caps the copy it replaces where the new one resumes, before a frame of the
+		// group it ends at.
+		let end = range.end.and_then(|time| match subscription.cap {
+			Some(cap) if cap.group == time && cap.frame != 0 => Some(lite::Anchor::Absolute(cap)),
+			_ => Some(lite::Anchor::Absolute(Position::group(time.checked_add(1)?))),
+		});
 		ranges.push(lite::Range { start, end });
 	}
 	(!ranges.is_empty()).then_some(ranges)
@@ -10516,7 +10549,12 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 /// live join reaching back past every group (see [`track::Start::within`]), or none while a
 /// range from the oldest group asks for history. One mixing the two asks from group 0,
 /// history, since no single start covers both: the latest group may sit below the start.
-fn wire_span(subscription: Subscription) -> Subscription {
+///
+/// It ends at a group's end, never at a Position: a publisher without ranges caps its cursor
+/// there and FINs the group, which would read as the group finishing short. A copy a switch
+/// replaces sends its boundary group whole there instead (see [`Subscription::cap`]).
+fn wire_span(mut subscription: Subscription) -> Subscription {
+	subscription.cap = None;
 	let start = match subscription.start() {
 		Some(start) => Some(start),
 		None if subscription.times().any(|(_, time)| time.is_some()) => Some(0),

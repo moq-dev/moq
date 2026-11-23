@@ -328,8 +328,9 @@ own 30s deadline.
 
 ## Authentication
 
-Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
-`connect.tls.cert`/`key` on the dialer) or a **JWT** (inline `?jwt=` on a peer
+Peers dial with **mTLS** (recommended: `connect.tls.cert`/`key` on the dialer,
+and on the listener a cluster port, `cluster.listen.bind` with its own `cert`,
+`key`, and the cluster CA as `root`) or a **JWT** (inline `?jwt=` on a peer
 URL, `token` on a peer object, or a shared `cluster.token` file for every
 listed peer). A new token, from a rewritten `cluster.token` file or a peer's
 changed token in the `api.url` list, renews the live session without dropping
@@ -346,6 +347,14 @@ only by asking, which a relay below moq-lite-07-wip, or on moq-transport
 without the hidden extension, cannot. Dials retry forever with jittered backoff
 capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
 [Authentication](/bin/relay/auth#mtls).
+
+The cluster port is QUIC only and refuses any client without a certificate at
+the handshake, so the public `listen` can ask for none: some browsers abort a
+connection whose server asks, even optionally. Peers name the port in the URL
+they dial, such as `https://relay.example.com:4443`, and each relay's
+`cluster.node` names its own cluster port too, so a shared peer list still
+skips itself. `listen.tls.root` instead makes the certificate optional on the
+public port.
 
 The NixOS module (`services.moq-relay` in this repository's flake) wires the
 same setup: `cluster.ca` and `auth.enable` on the relay peers dial into, and

@@ -18,10 +18,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Group 0 finished at 500ms and group 1000 closed, on a live track that keeps both.

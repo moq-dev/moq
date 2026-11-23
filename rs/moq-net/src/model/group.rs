@@ -3846,6 +3846,12 @@ struct Carry {
 	// The copy an end check waits on past the frames this reader prefetched, with the frame
 	// it reads that copy from: held between polls so the copy keeps this reader's demand.
 	finishing: Option<(usize, Consumer)>,
+	// What ended the read once a copy closed the group below the frames already read: no
+	// route change after undoes it.
+	failed: Option<Error>,
+	// The frames up to the cursor this reader skipped rather than read: where it started, or
+	// where a skip moved it, until it reads on. A copy closing inside them took no frame back.
+	unread: std::ops::Range<usize>,
 }
 
 impl Clone for Carry {
@@ -3858,6 +3864,8 @@ impl Clone for Carry {
 				..*ride
 			}),
 			finishing: None,
+			failed: self.failed.clone(),
+			unread: self.unread.clone(),
 		}
 	}
 }
@@ -4135,8 +4143,36 @@ impl Consumer {
 	/// Carry this group across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover) -> Self {
 		Idle::disarm(&mut self.idle);
-		self.carry.get_or_insert_default().recover = Some(recover);
+		let index = self.position();
+		let carry = self.carry.get_or_insert_default();
+		carry.recover = Some(recover);
+		carry.unread = 0..index;
 		self
+	}
+
+	/// The frame this reader reads next: the cursor, plus the frames a compressed flight it
+	/// boarded still inflates and drops to get back there.
+	fn position(&self) -> usize {
+		let skip = self
+			.carry
+			.as_ref()
+			.and_then(|carry| carry.ride.as_ref())
+			.map_or(0, |ride| ride.skip);
+		self.cursor.index.saturating_add(skip)
+	}
+
+	/// Note that the read moved from position `from` to where it is without reading the frames
+	/// between.
+	fn skipped(&mut self, from: usize) {
+		let to = self.position();
+		if let Some(carry) = self.carry.as_mut().filter(|carry| carry.recover.is_some())
+			&& to > from
+		{
+			match carry.unread.end == from {
+				true => carry.unread.end = to,
+				false => carry.unread = from..to,
+			}
+		}
 	}
 
 	/// Run `read`, and once this copy fails with its route, stalls while a newer route serves,
@@ -4150,6 +4186,9 @@ impl Consumer {
 		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<Option<T>>>,
 	) -> Poll<Result<Option<T>>> {
 		loop {
+			if let Some(err) = self.carry.as_ref().and_then(|carry| carry.failed.clone()) {
+				return Poll::Ready(Err(err));
+			}
 			let res = read(self, waiter);
 			// The reader's own budget gave up on it: that is no route's doing.
 			if self.expired {
@@ -4157,6 +4196,10 @@ impl Consumer {
 			}
 			let index = self.cursor.index;
 			let short = matches!(res, Poll::Ready(Ok(None))) && self.closed_short();
+			// A copy taken over mid-group may close it below the frames already read from the
+			// copy before it, so its close cannot be where this read ends. One below only frames
+			// the read skipped still ends it cleanly, as an empty range does.
+			let past = short && self.closed_past();
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
@@ -4193,6 +4236,12 @@ impl Consumer {
 			if !recover.wants(cause.error(), waiter) {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
+					// The copy being read still serves and holds no more than was read, so
+					// nothing continues the group.
+					Cause::Closed if past => {
+						recover.failed(index, &Error::NotFound);
+						return Poll::Ready(Err(self.fail(Error::NotFound)));
+					}
 					// The copy being read still serves, so its close is the group's end.
 					Cause::Closed => self.let_go(),
 					Cause::Stalled => {}
@@ -4200,7 +4249,8 @@ impl Consumer {
 				return res;
 			}
 			recover.recovering(index, &cause);
-			let closed = matches!(cause, Cause::Closed);
+			// A close stands only where the read is.
+			let closed = short && !past;
 			let replacement = match self.replacement(cause, waiter) {
 				Poll::Ready(Ok(replacement)) => replacement,
 				Poll::Ready(Err(err)) => {
@@ -4212,17 +4262,23 @@ impl Consumer {
 						self.let_go();
 						return res;
 					}
+					if past {
+						return Poll::Ready(Err(self.fail(err)));
+					}
 					return Poll::Ready(Err(err));
 				}
 				// The reader's budget bounds the wait for the rest, as it does a stall, and
-				// ends the group where it closed.
+				// ends the group where it closed, if that close stands.
 				Poll::Pending
-					if closed
+					if short
 						&& self
 							.expiry
 							.as_ref()
 							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
 				{
+					if !closed {
+						return Poll::Ready(Err(self.fail(Error::Old)));
+					}
 					self.let_go();
 					return res;
 				}
@@ -4399,7 +4455,9 @@ impl Consumer {
 	pub fn with_range(mut self, frames: impl RangeBounds<u64>) -> Self {
 		Idle::disarm(&mut self.idle);
 		let (start, end) = super::subscription::key_bounds(frames);
+		let from = self.position();
 		self.cursor.start_at(start);
+		self.skipped(from);
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 		self
 	}
@@ -4425,7 +4483,9 @@ impl Consumer {
 	/// handlers, and surfaces as [`Error::Lagged`] when neither can serve them.
 	pub fn skip_to(&mut self, index: u64) {
 		Idle::disarm(&mut self.idle);
+		let from = self.position();
 		self.cursor.skip_to(index);
+		self.skipped(from);
 	}
 
 	/// The number of frames written so far (completed plus any in-flight), independent of
@@ -4433,6 +4493,13 @@ impl Consumer {
 	pub fn frame_count(&self) -> usize {
 		let state = self.cursor.state.read();
 		state.outcome.frames().unwrap_or(state.next_index)
+	}
+
+	/// How many frames the group holds for good once its producer closed it, `None` while it
+	/// may still grow or after it failed.
+	#[cfg(feature = "async")]
+	pub(crate) fn settled_frames(&self) -> Option<usize> {
+		self.cursor.state.read().outcome.frames()
 	}
 
 	/// Where the group ends in its track's timescale, once its producer finished it whole
@@ -4451,7 +4518,7 @@ impl Consumer {
 	/// passed the [`Self::with_range`] cap.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		let res = match self.recover().is_none() {
+		let res = match !self.resumes() {
 			true => {
 				let res = self.poll_next_frame_once(waiter);
 				self.ended_on(res)
@@ -4551,7 +4618,7 @@ impl Consumer {
 		let read = gate.as_mut().map_or(waiter, |gate| gate.waiter());
 		// Read once, carried across route changes when the group came from a front. One call
 		// site keeps the read inline: a second costs every frame drained a call frame.
-		let res = match self.recover().is_none() {
+		let res = match !self.resumes() {
 			true => self.poll_read_frame_once(read, take),
 			false => self.poll_resumed(read, |this, waiter| this.poll_read_frame_once(waiter, take)),
 		};
@@ -4756,6 +4823,36 @@ impl Consumer {
 			)
 	}
 
+	/// End every later read with `err`, which a route change no longer undoes, and return it.
+	/// The recovery goes, so no replaced copy stays subscribed for a read that ended.
+	fn fail(&mut self, err: Error) -> Error {
+		let carry = self.carry.get_or_insert_default();
+		carry.recover = None;
+		carry.failed = Some(err.clone());
+		err
+	}
+
+	/// Whether reads go through [`Self::poll_resumed`]: the group carries on across route
+	/// changes, or a failure that ended it stands.
+	fn resumes(&self) -> bool {
+		self.carry
+			.as_ref()
+			.is_some_and(|carry| carry.recover.is_some() || carry.failed.is_some())
+	}
+
+	/// Whether the copy read closed the group short below a frame this reader read, from the
+	/// copy before it: not only below frames it skipped.
+	fn closed_past(&self) -> bool {
+		let index = self.position();
+		let unread = self.carry.as_ref().map_or(0..0, |carry| carry.unread.clone());
+		self.cursor
+			.state
+			.read()
+			.outcome
+			.frames()
+			.is_some_and(|frames| index > frames && !(unread.start <= frames && unread.end >= index))
+	}
+
 	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {
 		self.carry.as_mut()?.recover.as_mut()
 	}
@@ -4772,6 +4869,8 @@ impl Consumer {
 					recover: None,
 					ride: Some(ride),
 					finishing: None,
+					failed: None,
+					unread: 0..0,
 				}))
 			}
 			(None, None) => {}
@@ -4937,7 +5036,7 @@ impl Consumer {
 	/// failed upstream) and no route will continue them.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		let res = match self.recover().is_none() {
+		let res = match !self.resumes() {
 			true => self.poll_finished_once(waiter),
 			// A reader at the end of a copy that closed the group short reads on from the route
 			// that replaced it, as a frame read does, so its end is that copy's.

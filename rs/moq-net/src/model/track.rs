@@ -1238,28 +1238,23 @@ impl Holdings for TrackState {
 	/// on a scale-less track, by arrival on this hop's clock, as expiry measures it.
 	///
 	/// A received lite-07 copy places it only where its upstream answered a range asking the
-	/// same join, recorded after `since`, under a budget at least as wide as the reader's: the
-	/// live edge is the upstream's, which no group held here measures, and a start past groups a
-	/// narrower `max` expired would skip groups this reader still wants. Otherwise it waits on
-	/// its upstream, which its session asks with a range of its own. Another copy whose wire
-	/// reports where its ranges start places it only where the groups it holds prove, and waits
-	/// otherwise, until its end is declared and settled: then the join resolves as a time start.
+	/// same join (see [`Self::answered_join`]): the live edge is the upstream's, which no group held
+	/// here measures, and a start past groups a narrower `max` expired would skip groups this
+	/// reader still wants. Otherwise it waits on its upstream, which its session asks with a range
+	/// of its own. Another copy whose wire reports where its ranges start, or a lite-07 copy past
+	/// its declared end, places it only where the groups it holds prove, and waits otherwise,
+	/// until its end is declared and settled: then the join resolves as a time start.
 	///
 	/// An idle copy waits as [`Self::latest_live`] does: what an ended feed left measures no
 	/// live edge, and the groups it missed since leave a hole the next feed may not fill.
 	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
-		// An answer its upstream gave places the join, even one that arrived after the end was
-		// declared: nothing measures the groups held better than the publisher that holds them.
-		if let Some(answer) = self.join_answers.get(&(min, end))
-			&& answer.tick > since
-			&& budget <= answer.budget
-		{
-			return answer.start.map_or(Join::Empty, Join::Group);
-		}
 		// Once the end is declared, nothing more is answered: it places as the groups held
-		// measure it, as its upstream's would, holding the same final groups.
+		// measure it, unless an answer already named a group (see `Window::place_range`).
 		if self.joins_answered() {
-			return Join::Unknown;
+			return match self.join_answer(min, end, budget, since) {
+				Some(answer) => answer.start.map_or(Join::Empty, Join::Group),
+				None => Join::Unknown,
+			};
 		}
 		if !self.readable() {
 			return Join::Unknown;
@@ -1357,6 +1352,10 @@ impl Holdings for TrackState {
 
 	fn answers_joins(&self) -> bool {
 		self.joins_answered()
+	}
+
+	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+		Some(self.join_answer(min, end, budget, since)?.start)
 	}
 
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
@@ -1458,6 +1457,13 @@ impl TrackState {
 }
 
 impl TrackState {
+	/// The upstream's answer to the live join `min` through `end`, recorded after join tick
+	/// `since` under a budget at least as wide as the reader's `budget`.
+	fn join_answer(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<&JoinAnswer> {
+		let answer = self.join_answers.get(&(min, end))?;
+		(answer.tick > since && budget <= answer.budget).then_some(answer)
+	}
+
 	/// Whether only its upstream's answer places a reader's live join here: a lite-07 copy
 	/// whose end is still undeclared, so its session may still ask.
 	fn joins_answered(&self) -> bool {
@@ -7082,7 +7088,11 @@ impl Consumer {
 
 	/// Poll for a cached group, a terminal disposition, or a gap outliving its grace: the
 	/// group, the error a dropped or cut group was given up with, or `None` once it is gone.
+	/// A front's logical track answers from the copy serving it, which holds its groups.
 	pub(crate) fn poll_group(&self, key: u64, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(serving) = self.serving() {
+			return serving.poll_group(key, waiter);
+		}
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(Ok(None));
@@ -7485,7 +7495,6 @@ impl Consumer {
 	}
 
 	/// The keys of `span` the cache holds, lowest first.
-	#[cfg(feature = "async")]
 	pub(crate) fn cached_groups(&self, span: ops::Range<u64>) -> Vec<u64> {
 		if let Some(serving) = self.serving() {
 			return serving.cached_groups(span);
@@ -11436,8 +11445,27 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether a group in `groups` may still land for this subscriber, by the rule
+	/// [`Consumer::may_land`] applies: a front's logical track asks every route copy it still
+	/// keeps, since one it replaced may land a group the serving copy never will.
+	pub(super) fn may_land(
+		&self,
+		groups: ops::Range<u64>,
+		floor: bool,
+		grace: Duration,
+		delivered: Option<&Delivered>,
+		waiter: &kio::Waiter,
+	) -> bool {
+		match &self.inner {
+			Inner::Plain(cursor) => {
+				!cursor.state.is_closed() && cursor.state.read().may_land(groups, floor, grace, delivered, waiter)
+			}
+			Inner::Resume(resume, _) => resume.may_land(groups, floor, grace, delivered, waiter),
+		}
+	}
+
 	/// The parts of `groups` the publisher declared skipped, as this subscriber knows them: a
-	/// front's logical track counts every route it held or let go.
+	/// front's logical track counts every route it holds.
 	/// Parks `waiter` until a change while some of `groups` is not.
 	pub(super) fn skipped_in(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
 		match &self.inner {
@@ -11807,7 +11835,6 @@ impl Subscriber {
 	/// A publisher tells its peer where a live join or time start landed, which the peer
 	/// can't work out from the groups it receives. Settles the ranges once for the batch, so
 	/// asking for k of them costs O(k log n) past that.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn resolved_keys(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
@@ -11956,21 +11983,6 @@ impl Subscriber {
 				cursor.filter.window.covered_by(from, bounds.end, accounted)
 			}
 			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
-		}
-	}
-
-	/// This subscriber's own ranges keyed in `keys`, in that order, as resolved here: `None`
-	/// for one empty, still waiting, or not held, and for every range of a front's reader,
-	/// whose copies resolve them.
-	pub(super) fn resolved_ranges(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
-		match &mut self.inner {
-			Inner::Plain(cursor) => {
-				cursor.sync();
-				keys.into_iter()
-					.map(|key| cursor.filter.window.resolved_key(key))
-					.collect()
-			}
-			Inner::Resume(..) => keys.into_iter().map(|_| None).collect(),
 		}
 	}
 
@@ -17639,7 +17651,7 @@ mod test {
 				.with_max(None),
 		);
 		let placed = |subscriber: &mut Subscriber| {
-			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
+			subscriber.resolved_keys([0])[0].map(|resolved| (resolved.start, resolved.floored))
 		};
 		producer.time_starts([(0, Some(1000)), (300, Some(1000))]);
 		assert_eq!(placed(&mut before), None);
@@ -17968,6 +17980,63 @@ mod test {
 		// A time start at 5000, a second behind the final edge, never the stale edge's 2000: it
 		// reads from there while its lookup asks upstream for the group containing it.
 		assert_eq!(drain_groups(&mut reader), vec![6000]);
+	}
+
+	/// A received lite-07 copy's join answered with a group stays placed there once the end is
+	/// declared, at any lag: the copy holds only the groups from where its feed started, so the
+	/// edge it measures may fall behind all of them, and its newest group is past the answer.
+	/// One joining after the answer can't take it. Mirrors JS
+	/// `track: a received copy keeps a join answer past its declared end`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_keeps_a_join_answer_past_its_declared_end() {
+		for min in [Duration::ZERO, Duration::from_millis(1000)] {
+			let mut producer = track_producer("test", Info::timed());
+			producer.received();
+			producer.anchored();
+			producer.answers_joins();
+			let join = Subscription::default().with_ranges([Range::from(Start::Live {
+				min,
+				max: Some(Duration::from_secs(1)),
+			})]);
+			let mut reader = producer.subscribe(join.clone());
+			producer.answer_join(min, None, Some(4000), Duration::from_secs(1));
+			// An end past the groups held, still owed the ones between.
+			producer.finish_at(Position::group(7001)).unwrap();
+			write_group(&producer, 4000);
+			write_group(&producer, 6000);
+			let start = reader.resolved_range(0).map(|resolved| resolved.start);
+			assert_eq!(start, Some(4000), "{min:?}");
+			assert_eq!(drain_groups(&mut reader), [4000, 6000], "{min:?}");
+			let mut later = producer.subscribe(join);
+			let start = later.resolved_range(0).map(|resolved| resolved.start);
+			assert_ne!(start, Some(4000), "{min:?}");
+		}
+	}
+
+	/// A bounded live join answered with nothing to deliver still delivers nothing once the end
+	/// is declared, rather than wait on groups that can't measure it. Mirrors JS
+	/// `track: a bounded join answered empty delivers nothing past a declared end`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_keeps_an_empty_join_answer_past_its_declared_end() {
+		let min = Duration::from_millis(200);
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		let join = Subscription::default().with_ranges([Range {
+			start: Start::Live { min, max: None },
+			end: Some(500),
+		}]);
+		let mut reader = producer.subscribe(join);
+		producer.answer_join(min, Some(500), None, Duration::MAX);
+		// An end past the groups held, still owed the ones between.
+		producer.finish_at(Position::group(7001)).unwrap();
+		write_group(&producer, 1000);
+		assert!(reader.resolved_range(0).is_some());
+		assert!(reader.poll_start(&kio::Waiter::noop()).is_ready());
+		assert_eq!(drain_groups(&mut reader), Vec::<u64>::new());
 	}
 
 	/// A bounded live join that upstream answers with nothing to deliver, its start past its
@@ -31948,7 +32017,7 @@ mod test {
 		}]));
 		assert_eq!(drain(&mut subscriber), vec![0, 400]);
 		assert_eq!(
-			subscriber.resolved_ranges([0]),
+			subscriber.resolved_keys([0]),
 			vec![Some(Resolved {
 				start: 0,
 				end: Some(501),

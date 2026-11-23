@@ -523,6 +523,21 @@ async fn another_version_fails_the_resume() {
 	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v4[..]));
 }
 
+/// A foreign object beside the broadcast's `.end` is refused, even when the listing puts the
+/// `.end` first.
+#[tokio::test(start_paused = true)]
+async fn a_foreign_object_beside_the_end_fails_the_resume() {
+	let store = store();
+	for key in ["rec/.end", "rec/stray"] {
+		let path = object_store::path::Path::from(key);
+		store.inner().put(&path, Vec::new().into()).await.unwrap();
+	}
+	let broadcast = broadcast::Info::new().produce();
+	let _video = broadcast.create_track("video", timed()).unwrap();
+	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
+	assert!(matches!(&err, Error::Path(path) if path.ends_with("stray")), "{err}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn track_names_stay_one_segment_through_a_resume() {
 	let store = store();

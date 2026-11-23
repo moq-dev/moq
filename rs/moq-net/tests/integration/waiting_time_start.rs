@@ -21,10 +21,11 @@ const FILLED: u64 = 67;
 const LIVE: u64 = 66;
 
 fn origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(from: &moq_net::origin::Producer, to: &moq_net::origin::Producer) -> MockPair {

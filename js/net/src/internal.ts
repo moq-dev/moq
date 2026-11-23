@@ -602,6 +602,8 @@ export interface ResumeSource {
 	serving(): boolean;
 	/** The parts of `[start, end)` any copy held or let go says its publisher skipped; see `hooks.skippedIn`. */
 	skippedIn(start: bigint, end: bigint): Run[];
+	/** Whether a group in `land` may still land on a copy this reader keeps; see `hooks.mayLand`. */
+	mayLand(land: Land): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
 	holeEnd(key: bigint, dropped: boolean): bigint | undefined;
 	/** Where the group the serving copy holds whole at `key` ends; see `hooks.wholeEnd`. */
@@ -815,9 +817,10 @@ export const hooks: {
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
 	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
 	 * waits on its START, as the Rust `request_start`. Only after {@link receiveTrack}: the start
-	 * is that subscription's, and ends with it.
+	 * is that subscription's, and ends with it. `resolved` marks a start the publisher placed
+	 * itself, as the Rust `start_resolved`: every older group stays fillable.
 	 */
-	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint }) => void;
+	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint; resolved?: boolean }) => void;
 	/**
 	 * Mark a track as a copy received over a wire without ranges, whose publisher placed its live
 	 * join already, so its readers start one among the groups held by when each presented rather
@@ -1092,7 +1095,10 @@ export const hooks: {
 	 * `track::Subscriber::stale_held`.
 	 */
 	staleHeld: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
-	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
+	/**
+	 * Whether a group may still land on the live feed of the subscriber's track, or for a front's
+	 * reader on any copy it keeps; see {@link Land}.
+	 */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Position; ended: boolean };

@@ -54,6 +54,10 @@ pub(super) struct Subscriptions {
 	/// The time starts a received copy's readers wait on, by time, counted: see
 	/// [`Subscription::asks`].
 	asks: BTreeMap<u64, usize>,
+	/// Where capping subscribers stop; see [`Subscription::cap`].
+	caps: BTreeMap<Position, usize>,
+	/// How many subscribers cap, so the aggregate asks without summing [`Self::caps`].
+	capping: usize,
 	/// The live joins a received copy's readers wait on, by lag and end: see
 	/// [`Subscription::joins`].
 	joins: BTreeMap<(Duration, Option<u64>), Waiting>,
@@ -102,11 +106,11 @@ pub(super) enum Requested {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Order, bool, Option<Position>);
+type Scalars = (i8, Order, bool, Option<Position>, Option<Position>);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, order, feed, resume) = self.scalars()?;
+		let (priority, order, feed, resume, cap) = self.scalars()?;
 		let mut ranges = self.ranges.union();
 		let mut placed = BTreeMap::new();
 		// Each placed join once under the widest `max` asked of it; its lag places nothing.
@@ -128,6 +132,7 @@ impl Subscriptions {
 			feed,
 			resume,
 			placed,
+			cap,
 			asks: self.asks(),
 			joins: self.joins(),
 		})
@@ -195,7 +200,7 @@ impl Subscriptions {
 
 	/// [`Self::combined`] without its ranges, costing none of them.
 	pub(super) fn terms(&self) -> Option<Subscription> {
-		let (priority, order, feed, resume) = self.scalars()?;
+		let (priority, order, feed, resume, cap) = self.scalars()?;
 		Some(Subscription {
 			priority,
 			ranges: Vec::new(),
@@ -203,6 +208,7 @@ impl Subscriptions {
 			feed,
 			resume,
 			placed: BTreeMap::new(),
+			cap,
 			asks: Vec::new(),
 			joins: Vec::new(),
 		})
@@ -228,6 +234,11 @@ impl Subscriptions {
 				// A subscriber asking for the whole group outweighs any resuming one.
 				match self.resuming == self.count {
 					true => self.resumes.first_key_value().map(|(resume, _)| *resume),
+					false => None,
+				},
+				// So does one asking for the rest of the group past any cap.
+				match self.capping == self.count {
+					true => self.caps.last_key_value().map(|(cap, _)| *cap),
 					false => None,
 				},
 			)
@@ -404,6 +415,10 @@ impl Subscriptions {
 				add(&mut self.resumes, resume);
 				self.resuming += 1;
 			}
+			if let Some(cap) = new.cap {
+				add(&mut self.caps, cap);
+				self.capping += 1;
+			}
 			self.count += 1;
 		}
 		if let Some(old) = &old {
@@ -416,6 +431,10 @@ impl Subscriptions {
 			if let Some(resume) = old.resume {
 				remove(&mut self.resumes, resume);
 				self.resuming -= 1;
+			}
+			if let Some(cap) = old.cap {
+				remove(&mut self.caps, cap);
+				self.capping -= 1;
 			}
 			self.count -= 1;
 		}
@@ -506,6 +525,7 @@ pub(super) struct Contribution {
 	order: Order,
 	feed: bool,
 	resume: Option<Position>,
+	cap: Option<Position>,
 }
 
 /// A change to a subscriber's preferences that edits its ranges by key: the ranges keyed
@@ -530,6 +550,7 @@ pub(in crate::model) struct Prefs {
 	pub order: Order,
 	pub feed: bool,
 	pub resume: Option<Position>,
+	pub cap: Option<Position>,
 	/// In key order, which is the order given: a whole replacement keys by position, and each
 	/// key an edit adds is past every key before it.
 	ranges: BTreeMap<u64, Range>,
@@ -558,6 +579,7 @@ impl Prefs {
 			order: value.order,
 			feed: value.feed,
 			resume: value.resume,
+			cap: value.cap,
 			ranges: BTreeMap::new(),
 			placed: BTreeMap::new(),
 			since: BTreeMap::new(),
@@ -597,6 +619,7 @@ impl Prefs {
 			feed: self.feed,
 			resume: self.resume,
 			placed: self.placed_by_index(),
+			cap: self.cap,
 			asks: Vec::new(),
 			joins: Vec::new(),
 		}
@@ -665,6 +688,7 @@ impl Prefs {
 			order: self.order,
 			feed: self.feed,
 			resume: self.resume,
+			cap: self.cap,
 		}
 	}
 
@@ -748,7 +772,8 @@ impl Prefs {
 	/// `retune`, ranges that change only a live join's `max` keep their keys, so each stays
 	/// where it joined; without, as a restated subscription, every range is placed afresh.
 	fn replace(&mut self, next: Subscription, tick: u64, retune: bool) {
-		(self.priority, self.order, self.feed, self.resume) = (next.priority, next.order, next.feed, next.resume);
+		(self.priority, self.order, self.feed, self.resume, self.cap) =
+			(next.priority, next.order, next.feed, next.resume, next.cap);
 		let placed = self.placed_by_index();
 		if self.ranges.values().eq(&next.ranges) && placed == next.placed {
 			return;
@@ -828,6 +853,7 @@ impl Preferences {
 			order: next.order,
 			feed: next.feed,
 			resume: next.resume,
+			cap: next.cap,
 		};
 		let new: Vec<Held> = (0..)
 			.zip(&next.ranges)
@@ -1035,6 +1061,9 @@ mod tests {
 					.random_bool(0.5)
 					.then(|| Position::new(rng.random_range(0..8), rng.random_range(1..4))),
 				placed,
+				cap: rng
+					.random_bool(0.5)
+					.then(|| Position::new(rng.random_range(0..8), rng.random_range(1..4))),
 				asks: Vec::new(),
 				joins: Vec::new(),
 			};

@@ -565,8 +565,9 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 }
 
 /// Re-price a live mesh route with cursors watching different scopes.
-/// The challenger alternates between winning and losing, so selection must
-/// honor each cursor's scope rather than reuse one global winner.
+/// Each claim is broader than its grant, so it is filed at each granted prefix and
+/// contends there. The challenger alternates between winning and losing, so selection
+/// must honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
 	for incumbent_cost in [INCUMBENT_COST, MAX_COST - 1] {
@@ -592,9 +593,18 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						.unwrap()
 					})
 					.collect();
+				// Through both grants, so the challenger is filed beside the incumbents at each.
+				let both = producer
+					.scope(
+						"",
+						&(0..2)
+							.map(|i| Prefix::try_from(format!("{PATH}/p{i}")).unwrap())
+							.collect::<Prefixes>(),
+					)
+					.unwrap();
 				let challenger = duplicates as u64 + 1;
 				let route = moq_net::fuzz::requests_route(
-					&producer,
+					&both,
 					moq_net::Path::new(PATH).unwrap(),
 					peer_route(challenger, incumbent_cost + 1),
 				)

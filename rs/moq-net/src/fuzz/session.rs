@@ -573,9 +573,9 @@ impl Relay {
 		let mut config = origin::Config::new(1.try_into().expect("a nonzero hop"));
 		// The cache's idle expiry is the longest wait in the drain, so keep it short.
 		config.pool = cache::Pool::new(cache::Config::default().with_expiry(EXPIRY));
-		let (origin, driver) = origin::Producer::new(config);
 		// A relay carries every peer's routes on to the others.
-		let origin = origin.with_proxy(true);
+		config.proxy = true;
+		let (origin, driver) = origin::Producer::new(config);
 		let driver = Rc::new(RefCell::new(driver));
 		let driving = {
 			let driver = driver.clone();
