@@ -1712,7 +1712,8 @@ test("fill: a looked-up group ending before the time starts past it", async () =
 		}
 		const reader = track.subscribe(fromTime(1700n));
 		expect((await reader.ordered().nextGroup())?.start).toBe(3000n);
-		expect(times).toEqual(cached ? [1700n, 1401n] : [1700n, 401n]);
+		// From the End before the time, where a group may start.
+		expect(times).toEqual(cached ? [1700n, 1400n] : [1700n, 400n]);
 		reader.close();
 		requests.close();
 		broadcast.close();
@@ -1800,6 +1801,122 @@ test("fill: a looked-up group shedding its head before the time fails the read",
 	expect(read.start).toBe(1000n);
 	await expect(read.readFrame()).rejects.toThrow();
 	reader.close();
+	broadcast.close();
+});
+
+// A time past a held group's End is looked up from that End itself: a group the cache doesn't hold
+// may start there, and its own span places the time. Mirrors the Rust
+// `a_time_past_a_held_groups_end_looks_up_a_group_starting_there`.
+test("fill: a time past a held group's End looks up a group starting there", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const requests = track.requests();
+	const write = (group: ReturnType<typeof track.createGroup>, at: number) =>
+		group.writeFrame({ payload: enc.encode(`f${at}`), timestamp: Timestamp.fromMillis(at) });
+	const asked: bigint[][] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			asked.push([fill.start, fill.floor]);
+			// The index holds [1000, 1400), which a fill from above 1000 can't take.
+			if (fill.floor <= 1000n && 1000n < fill.end) {
+				const group = defined(fill.accept(1000n));
+				write(group, 1000);
+				group.finishAt(1400n);
+			} else fill.dropGroups(fill.floor, fill.end);
+			fill.close();
+		}
+	})();
+	const first = track.appendGroup(Timestamp.fromMillis(0));
+	write(first, 0);
+	first.finishAt(1000n);
+	const later = track.createGroup(3000n);
+	write(later, 3000);
+	later.finishAt(3400n);
+	const reader = track.subscribe(fromTime(1700n));
+	expect((await reader.ordered().nextGroup())?.start).toBe(3000n);
+	expect(asked[0]).toEqual([1700n, 1000n]);
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A lookup no group answers from its floor places the time by the span of the group the floor is
+// past, waiting for that group to reach the time. Mirrors the Rust
+// `a_dropped_lookup_places_the_time_by_the_group_below_its_floor`.
+test("fill: a dropped lookup places the time by the group below its floor", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const requests = track.requests();
+	const write = (group: ReturnType<typeof track.createGroup>, at: number) =>
+		group.writeFrame({ payload: enc.encode(`f${at}`), timestamp: Timestamp.fromMillis(at) });
+	const floors: bigint[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			floors.push(fill.floor);
+			fill.dropGroups(fill.floor, fill.end);
+			fill.close();
+		}
+	})();
+	const open = track.createGroup(1000n);
+	write(open, 1000);
+	const later = track.createGroup(3000n);
+	write(later, 3000);
+	later.finishAt(3400n);
+	const reader = track.subscribe(fromTime(1700n));
+	const next = reader.ordered().nextGroup();
+	let read: bigint | undefined;
+	void next.then((got) => {
+		read = got?.start;
+	});
+	for (let i = 0; i < 20; i++) await yieldNow();
+	expect(floors).toEqual([1001n]);
+	expect(read).toBeUndefined();
+	open.finishAt(1400n);
+	expect((await next)?.start).toBe(3000n);
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A history handler pacing on its readers writes the group a lookup waits on: the lookup reads it,
+// so neither waits on the other. Mirrors the Rust
+// `a_looked_up_group_is_read_while_its_writer_paces_on_readers`.
+test("fill: a looked-up group is read while its writer paces on readers", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const requests = track.requests();
+	const write = (group: ReturnType<typeof track.createGroup>, at: number) =>
+		group.writeFrame({ payload: enc.encode(`f${at}`), timestamp: Timestamp.fromMillis(at) });
+	let answered: ReturnType<typeof track.createGroup> | undefined;
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			if (fill.floor > 1000n) {
+				fill.dropGroups(fill.start, fill.end);
+				fill.close();
+				continue;
+			}
+			answered = defined(fill.accept(1000n));
+			fill.close();
+		}
+	})();
+	for (const start of [0, 3000]) {
+		const held = track.createGroup(BigInt(start));
+		write(held, start);
+		held.finishAt(BigInt(start + 400));
+	}
+	const reader = track.subscribe(fromTime(1300n));
+	const next = reader.ordered().nextGroup();
+	while (answered === undefined) await yieldNow();
+	const group = answered;
+	for (const at of [1000, 1350]) {
+		for (let i = 0; i < 20 && !group.demand().wanted.peek(); i++) await yieldNow();
+		expect([at, group.demand().wanted.peek()]).toEqual([at, true]);
+		write(group, at);
+	}
+	expect((await next)?.start).toBe(1000n);
+	group.finishAt(1400n);
+	reader.close();
+	requests.close();
 	broadcast.close();
 });
 

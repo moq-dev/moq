@@ -1139,7 +1139,10 @@ function startOf(
 function unresolved(at: bigint, start: bigint, floored: boolean, holdings: Holdings): bigint | undefined {
 	if (!holdings.looksUp?.()) return undefined;
 	if (!floored) return holdings.nextStart(0n) === undefined ? undefined : 0n;
-	const next = start + 1n;
+	// Past a group held at the start, or one starting at the time, which contains it whatever its End.
+	// A start below the time no group holds is a whole group's End, where a group the cache let go may
+	// start and end before the time, so the search takes it in. Mirrors the Rust `unresolved`.
+	const next = holdings.nextStart(start) === start || start >= at ? start + 1n : start;
 	const after = holdings.nextStart(next);
 	if (after === undefined) return undefined;
 	const gap = min(after, at + 1n);

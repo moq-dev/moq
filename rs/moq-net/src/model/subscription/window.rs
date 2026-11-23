@@ -1040,7 +1040,8 @@ fn start(anchor: Option<u64>, latest: Option<u64>, budget: Duration, holdings: &
 /// The oldest key a fill of the group containing time start `time`, resolved to `start`,
 /// asks from, when the groups held can't tell which group contains it and a handler may: it
 /// is before every group held, or a group the cache evicted may start after `start`, where the
-/// groups held placed it, and still at or before `time`. Keys the producer skipped hold none.
+/// groups held placed it, or at `start` itself when that is a whole group's End, and still at
+/// or before `time`. Keys the producer skipped hold none.
 fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) -> Option<u64> {
 	if !holdings.looks_up() {
 		return None;
@@ -1048,7 +1049,13 @@ fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) ->
 	if !floored {
 		return holdings.next_start(0).map(|_| 0);
 	}
-	let next = start.checked_add(1)?;
+	// Past a group held at the start, or one starting at the time, which contains it whatever
+	// its End. A start below the time no group holds is a whole group's End, where a group the
+	// cache let go may start and end before the time, so the search takes it in.
+	let next = match holdings.next_start(start) == Some(start) || start >= time {
+		true => start.checked_add(1)?,
+		false => start,
+	};
 	let after = holdings.next_start(next)?;
 	let gap = next..after.min(time.saturating_add(1));
 	(!holdings.never_produced(gap)).then_some(next)

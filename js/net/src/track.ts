@@ -1001,6 +1001,10 @@ let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
 // held. Mirrors the Rust `Slot::unplaced_from`; assigned in its static block.
 let unplacedFromAt: (producer: Producer, key: bigint) => bigint | undefined;
 
+// The group a lookup's floor is past: the held one just below it, or a whole one ending there.
+// Assigned in its static block.
+let belowFloor: (producer: Producer, floor: bigint) => { key: bigint; group: GroupProducer } | undefined;
+
 // Whether the held group at `key` places `time`: finished, or holding a frame past it.
 function placesAt(producer: Producer, key: bigint, time: bigint): boolean {
 	const from = unplacedFromAt(producer, key);
@@ -1012,6 +1016,40 @@ function placesAt(producer: Producer, key: bigint, time: bigint): boolean {
 function pastSpan(producer: Producer, key: bigint): bigint {
 	const end = wholeAt(producer, key);
 	return end === undefined ? key + 1n : max(end, key + 1n);
+}
+
+// Where a time start a reader looks up through a fill stands. Each way out places the time where the
+// origin would, whatever the cache holds meanwhile. Mirrors the Rust `Look`.
+type Look =
+	// The fill is out, or absent with no handler to answer. `below` is the group held just under the
+	// floor when it was asked, the one the floor is past: should the fill find no group from the
+	// floor, that group's span places the time.
+	| { kind: "asked"; lookup?: Lookup; below?: { key: bigint; group: GroupProducer } }
+	// Answered by a group starting below the time, or by none above `below`: that group's span places
+	// the time, once it holds a frame past it or ends.
+	| { kind: "placing"; probe: Probe };
+
+// A reader of the group whose span places a looked-up time. It takes each frame as it lands, reading
+// none, so a writer pacing on its readers goes on, and holds the group's End once the cache lets it
+// go. Mirrors the Rust `Probe`.
+interface Probe {
+	key: bigint;
+	group: GroupProducer;
+	reader: GroupConsumer;
+}
+
+// Where a range from `time` starts once the probed group places it, or aborts; undefined until then.
+function probed(probe: Probe, time: bigint): bigint | undefined {
+	while (probe.reader.tryReadFrame() !== undefined) {}
+	const from = hooks.groupUnplacedFrom(probe.group);
+	if (from !== undefined && time >= from && probe.group.closed.peek() === undefined) return undefined;
+	return reached(probe.key, time, hooks.groupWholeEnd(probe.group));
+}
+
+// Stop a lookup: leave its fill, or close its probe.
+function leaveLook(stage: Look): void {
+	if (stage.kind === "asked") stage.lookup?.leave();
+	else stage.probe.reader.close();
 }
 
 // Where a range from `time` starts, the group at `key` being the newest starting at or before it and
@@ -1628,6 +1666,14 @@ export class Producer {
 		wholeAt = (producer, key) => {
 			const entry = producer.#cached.get(key);
 			return entry && hooks.groupWholeEnd(entry.group);
+		};
+		belowFloor = (producer, floor) => {
+			const keys = producer.#keys;
+			const key = keys[keyIndex(keys, floor) - 1];
+			const entry = key === undefined ? undefined : producer.#cached.get(key);
+			if (key === undefined || entry === undefined) return undefined;
+			if (key + 1n !== floor && hooks.groupWholeEnd(entry.group) !== floor) return undefined;
+			return { key, group: entry.group };
 		};
 		unplacedFromAt = (producer, key) => {
 			const entry = producer.#cached.get(key);
@@ -3394,9 +3440,8 @@ export class Subscriber {
 	// again by the time it looks (a narrowing undone in one turn moves no signal), so it asks anew.
 	#fillMoves = new Signal(0);
 	// The time starts this reader asked its fills to look up, each with the floor it asked from and
-	// its fill, absent when no handler could take it.
-	// Each with the group it answered with below the time, held while it ends.
-	#lookups: { time: bigint; floor: bigint; lookup?: Lookup; answer?: GroupProducer }[] = [];
+	// where it stands.
+	#lookups: { time: bigint; floor: bigint; stage: Look }[] = [];
 	// A time start's refusal, which every read fails with until the ranges change. Mirrors the Rust
 	// `Filter::refused`.
 	#refusal?: Error;
@@ -4135,48 +4180,60 @@ export class Subscriber {
 		// The window stops looking once replaced, or looks again from lower down.
 		this.#lookups = this.#lookups.filter((lookup) => {
 			if (wanted.some((want) => want.time === lookup.time && want.floor === lookup.floor)) return true;
-			lookup.lookup?.leave();
+			leaveLook(lookup.stage);
 			return false;
 		});
 		for (const { time, floor } of wanted) {
 			if (this.#lookups.some((lookup) => lookup.time === time)) continue;
 			// With no handler open any more, nothing can answer.
 			const lookup = producer && fillsOf(producer).timeStart(time, floor, this.#askerOf());
-			this.#lookups.push({ time, floor, lookup });
+			const below = producer && belowFloor(producer, floor);
+			this.#lookups.push({ time, floor, stage: { kind: "asked", lookup, below } });
 		}
 		let moved = false;
 		let again = false;
 		for (const lookup of [...this.#lookups]) {
-			const answer = lookup.lookup?.answer();
-			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
-			// A group answered below the time may end whole before it, which then lies in the pause past
-			// it: wait for it to end or hold a frame past the time, then place the time by its End, held
-			// here so the start is the same whether the cache still holds it or not. Mirrors the Rust
-			// `Cursor::look_up_pass`.
-			if (answer?.kind === "group" && answer.group < lookup.time) {
-				lookup.answer ??= answer.answer;
-				const answered = lookup.answer;
-				const from = answered && hooks.groupUnplacedFrom(answered);
-				if (answered && from !== undefined && lookup.time >= from && answered.closed.peek() === undefined)
-					continue;
+			const { time, stage } = lookup;
+			let found: Found;
+			if (stage.kind === "placing") {
+				const start = probed(stage.probe, time);
+				if (start === undefined) continue;
+				found = { kind: "group", group: start };
+			} else {
+				const answer = stage.lookup?.answer();
+				if (answer === undefined && stage.lookup && !stage.lookup.done()) continue;
+				stage.lookup?.leave();
+				// A group answered below the time, or the one below a floor no group starts from, may end
+				// whole before the time, which then lies in the pause past it: its span places the time,
+				// read through a probe of the lookup's own. Mirrors the Rust `Cursor::look_up_pass`.
+				const placing =
+					answer?.kind === "group" && answer.group < time
+						? answer.answer && { key: answer.group, group: answer.answer }
+						: answer?.kind === "dropped"
+							? stage.below
+							: undefined;
+				if (placing) {
+					const probe = { ...placing, reader: placing.group.consume() };
+					lookup.stage = { kind: "placing", probe };
+					const start = probed(probe, time);
+					if (start === undefined) continue;
+					found = { kind: "group", group: start };
+				} else if (answer?.kind === "refused") {
+					// Where the time falls is unknown, so the reads fail rather than guess from the cache.
+					// The ranges resolve afresh once they change, asking again.
+					this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
+					this.#refusal = answer.error;
+					return { moved: true, again: false };
+				} else if (answer?.kind === "group") found = { kind: "group", group: answer.group };
+				// No group from the floor and none held below it: from 0, before every group; otherwise
+				// the group the floor was past is gone, so look again from lower down rather than guess.
+				else if (answer?.kind === "dropped" && lookup.floor === 0n) found = { kind: "dropped", floor: 0n };
+				else found = { kind: "unanswered" };
 			}
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
-			lookup.lookup?.leave();
-			// Where the time falls is unknown, so the reads fail rather than guess from the cache. The
-			// ranges resolve afresh once they change, asking again.
-			if (answer?.kind === "refused") {
-				this.#refusal = answer.error;
-				return { moved: true, again: false };
-			}
-			const ended = lookup.answer && hooks.groupWholeEnd(lookup.answer);
-			const found: Found =
-				answer === undefined
-					? { kind: "unanswered" }
-					: answer.kind === "group"
-						? { kind: "group", group: reached(answer.group, lookup.time, ended) }
-						: { kind: "dropped", floor: lookup.floor };
-			if (this.#window.found(lookup.time, found, this.#holdings())) moved = true;
-			if (this.#window.lookups().some((want) => want.time === lookup.time)) again = true;
+			leaveLook(lookup.stage);
+			if (this.#window.found(time, found, this.#holdings())) moved = true;
+			if (this.#window.lookups().some((want) => want.time === time)) again = true;
 		}
 		return { moved, again };
 	}
@@ -5571,9 +5628,12 @@ export class Subscriber {
 			this.#state.drops.version.changed(fn),
 			this.#state.refused.changed(fn),
 			this.#fillMoves.changed(fn),
-			...this.#lookups.flatMap((lookup) => (lookup.lookup ? [lookup.lookup.changed.changed(fn)] : [])),
-			...this.#lookups.flatMap((lookup) =>
-				lookup.answer ? [lookup.answer.closed.changed(fn), hooks.groupWrites(lookup.answer).changed(fn)] : [],
+			...this.#lookups.flatMap(({ stage }) =>
+				stage.kind === "asked"
+					? stage.lookup
+						? [stage.lookup.changed.changed(fn)]
+						: []
+					: [stage.probe.group.closed.changed(fn), hooks.groupWrites(stage.probe.group).changed(fn)],
 			),
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
