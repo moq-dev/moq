@@ -15180,7 +15180,7 @@ mod tests {
 		assert!((&mut fut).now_or_never().is_none());
 
 		// A covering prefix resolves the wait.
-		let _a = producer.announce("room", RouteInfo::new().with_cost(3)).unwrap();
+		let _a = producer.forward("room", RouteInfo::new().with_cost(3)).unwrap();
 		let route = started(fut.now_or_never().expect("covered"));
 		assert_eq!(route.cost, Cost::new(3));
 
@@ -15196,12 +15196,12 @@ mod tests {
 		let consumer = producer.consume();
 
 		// A deeper route does not cover the shorter path.
-		let _deep = producer.announce("room/alice/cam", RouteInfo::new()).unwrap();
+		let _deep = producer.forward("room/alice/cam", RouteInfo::new()).unwrap();
 		let mut routes = consumer.path_routes("room/alice").unwrap();
 		let mut fut = routes.next().boxed();
 		assert!((&mut fut).now_or_never().is_none());
 
-		let _exact = producer.announce("room/alice", RouteInfo::new()).unwrap();
+		let _exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
 		started(fut.now_or_never().expect("covered"));
 	}
 
@@ -15223,7 +15223,7 @@ mod tests {
 		assert!((&mut fut).now_or_never().is_none());
 
 		// A covering root still resolves: the lookup must not require `path/**`.
-		let _a = producer.announce("", RouteInfo::new()).unwrap();
+		let _a = producer.forward("", RouteInfo::new()).unwrap();
 		started(fut.now_or_never().expect("covered"));
 	}
 
@@ -18196,7 +18196,7 @@ mod tests {
 		let registry = stats::Registry::new(stats::Config::new());
 		let producer = origin(1).produce();
 		let local = producer.route("project/cam.chat", RouteOptions::default()).unwrap();
-		let overlap = producer.announce("project/room", RouteInfo::new()).unwrap();
+		let overlap = producer.forward("project/room", RouteInfo::new()).unwrap();
 		let consumer = (producer.consume().scope("project", &Prefixes::all()).unwrap())
 			.filter(&"**/*.chat".parse().unwrap())
 			.unwrap()
