@@ -1180,6 +1180,7 @@ impl Track {
 			content: 0,
 			edge: false,
 			whole: false,
+			held: AtomicBool::new(false),
 		}
 	}
 
@@ -1565,7 +1566,7 @@ impl Footprint {
 /// So they bill the session together: while one copy is itself its track's cached live
 /// edge, they all do, a copy that aborted included, since its frames may still be what the
 /// live copy holds; once none is, none does. Once one finished the whole group, they are all
-/// whole.
+/// whole. While a fill holds one, they all pin, for the same reason.
 #[derive(Default)]
 pub(super) struct Siblings(Mutex<Vec<Sibling>>);
 
@@ -1576,6 +1577,8 @@ struct Sibling {
 	edge: bool,
 	// Whether this copy finished the whole group, not just a range a transport bound cut.
 	whole: bool,
+	// Whether a fill holds this copy itself, not pinned for a sibling.
+	held: bool,
 }
 
 impl Siblings {
@@ -1593,12 +1596,14 @@ impl Siblings {
 			Some(sibling) => {
 				sibling.edge = charge.edge;
 				sibling.whole = charge.whole;
+				sibling.held = charge.is_held();
 			}
 			None => siblings.push(Sibling {
 				track: track.clone(),
 				footprint: charge.footprint.clone(),
 				edge: charge.edge,
 				whole: charge.whole,
+				held: charge.is_held(),
 			}),
 		}
 		Self::bill(&mut siblings);
@@ -1614,12 +1619,13 @@ impl Siblings {
 		Self::bill(&mut siblings);
 	}
 
-	/// Bill every copy while any is the live edge, and pin every copy's content once any
-	/// finished the whole group, since a copy's frames may be what that sibling holds. Forgets
-	/// copies nothing bills any more.
+	/// Bill every copy while any is the live edge, pin every copy's content once any finished
+	/// the whole group, and every byte while a fill holds any, since a copy's frames may be what
+	/// that sibling holds. Forgets copies nothing bills any more.
 	fn bill(siblings: &mut Vec<Sibling>) {
 		siblings.retain(|sibling| Arc::strong_count(&sibling.footprint) > 1);
 		let edge = siblings.iter().any(|sibling| sibling.edge);
+		let held = siblings.iter().any(|sibling| sibling.held);
 		if siblings.iter().any(|sibling| sibling.whole) {
 			for sibling in siblings.iter() {
 				sibling.footprint.finish(&sibling.track);
@@ -1630,6 +1636,7 @@ impl Siblings {
 				true => sibling.footprint.promote(&sibling.track),
 				false => sibling.footprint.demote(&sibling.track),
 			}
+			sibling.footprint.hold(&sibling.track, held);
 		}
 	}
 }
@@ -1665,6 +1672,9 @@ pub(super) struct Charge {
 	edge: bool,
 	// Whether this copy finished the whole group, which makes its siblings whole too.
 	whole: bool,
+	// Whether a fill holds this copy for a reader, which pins its siblings too. Atomic, since a
+	// hold goes through a shared guard.
+	held: AtomicBool,
 }
 
 /// The tick of one cached group's last cache access: its creation, every write, and
@@ -1843,11 +1853,18 @@ impl Charge {
 	}
 
 	/// Pin every byte the group bills while a fill holds it for a reader, which eviction and
-	/// shedding pass over until the reader takes it, or stop.
+	/// shedding pass over until the reader takes it, or stop. Frames a sibling copy wrote first
+	/// bill that copy, so update its [`Siblings`] after.
 	pub(super) fn hold(&self, held: bool) {
+		self.held.store(held, Ordering::Relaxed);
 		if let Some(track) = &self.track {
 			self.footprint.hold(track, held);
 		}
+	}
+
+	/// Whether a fill holds this copy for a reader.
+	fn is_held(&self) -> bool {
+		self.held.load(Ordering::Relaxed)
 	}
 
 	/// This copy finished, the `whole` group or only a range a transport bound cut: pin its
@@ -1906,10 +1923,11 @@ impl Charge {
 		self.track.as_ref()
 	}
 
-	/// Release everything this charge holds: bytes, overhead, and the access
-	/// sample. Idempotent; used when the group aborts and clears its frames.
+	/// Release everything this charge holds: bytes, overhead, a fill's hold, and the
+	/// access sample. Idempotent; used when the group aborts and clears its frames.
 	pub(super) fn clear(&mut self) {
 		self.leave_edge();
+		self.hold(false);
 		if let Some(track) = &self.track {
 			self.footprint.sub(track, self.content);
 			self.footprint.sub_fixed(track, self.bytes - self.content);
@@ -2506,6 +2524,37 @@ mod test {
 		siblings.update(&head);
 		assert_eq!(pool.pinned(), 2 * ENTRY_OVERHEAD + 1_000);
 		assert_eq!(pool.excess(), None);
+	}
+
+	/// A held copy pins the frames it shares with a sibling that wrote them first, which still
+	/// bills them after leaving the cache, and stops once the hold ends.
+	#[test]
+	fn a_held_sibling_pins_the_shared_content() {
+		let pool = bounded(0);
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+		let siblings = Siblings::default();
+		let mut evicted = track.charge();
+		evicted.add(1_000);
+		let shared = evicted.transfer(1_000);
+		siblings.update(&evicted);
+		evicted.clear();
+		siblings.update(&evicted);
+		let held = track.charge();
+		siblings.update(&held);
+		held.hold(true);
+		siblings.update(&held);
+		assert_eq!(
+			pool.pinned(),
+			ENTRY_OVERHEAD + 1_000,
+			"the shared frames are what it holds"
+		);
+		assert_eq!(pool.excess(), None);
+
+		held.hold(false);
+		siblings.update(&held);
+		assert_eq!(pool.pinned(), 0);
+		drop((shared, evicted, held));
+		assert_eq!(pool.used(), 0);
 	}
 
 	/// A live edge bills its session for every byte it holds, its extras included (shared

@@ -3360,7 +3360,12 @@ impl Handle {
 	/// Pin the group while a fill holds it for a reader, or stop: see [`cache::Charge::hold`].
 	/// Through a read guard, so holding wakes no consumer.
 	pub(super) fn cache_hold(&self, held: bool) {
-		self.state.read().charge.hold(held);
+		let state = self.state.read();
+		state.charge.hold(held);
+		// Frames a sibling copy wrote first bill that copy, so it pins with this one.
+		if let Some(content) = &state.content {
+			content.siblings.update(&state.charge);
+		}
 	}
 
 	/// Record a cache access (delivery to a subscriber, a FETCH hit, or a fetched
