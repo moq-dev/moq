@@ -893,6 +893,8 @@ export const hooks: {
 	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
+	/** A producer's committed {@link Info}, or undefined before it is accepted; assigned by `track.ts`. */
+	acceptedInfo: (producer: Producer) => Info | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
 	/**
@@ -1295,6 +1297,8 @@ export const hooks: {
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Reserve an on-demand track without listing it or enabling a request handler. */
 	reserveUnlistedTrack: (producer: BroadcastProducer, name: string) => Request;
+	/** The properties of the accepted copy of `name` a broadcast holds open, if any; assigned by `broadcast.ts`. */
+	heldInfo: (broadcast: BroadcastConsumer, name: string) => Info | undefined;
 	/** Whether a subscriber or a metadata lookup still holds a requested track. */
 	requestWanted: (request: Request) => Getter<boolean>;
 	/** Transfer a metadata-opened request to its session's producer lifetime. */
@@ -1455,6 +1459,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	acceptedInfo: () => {
 		throw new Error("track.ts not loaded");
 	},
 	demandPriority: () => {
@@ -1764,6 +1771,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	reserveUnlistedTrack: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	heldInfo: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	requestWanted: () => {
