@@ -10,6 +10,7 @@ import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import type { JoinAsk } from "../demand.ts";
+import { samePlaced } from "../demand.ts";
 import {
 	error,
 	NotFound,
@@ -56,7 +57,19 @@ import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/deman
 import { max, min, UNBOUNDED } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
-import { AT_KEYS, EMPTY, rangesStart, sameRanges, span, Window, widest, wireRanges, wireSpan } from "../window.ts";
+import {
+	AT_KEYS,
+	EMPTY,
+	placedAsTimes,
+	rangesStart,
+	sameRanges,
+	span,
+	Window,
+	widest,
+	wireHeld,
+	wireRanges,
+	wireSpan,
+} from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	type AnnounceBroadcast,
@@ -181,6 +194,12 @@ interface Framing {
 	maxAge?: Duration | null;
 }
 
+/** The ranges a SUBSCRIBE asks for and the live joins placed among them; see `wireHeld`. */
+interface Asked {
+	ranges: readonly track.Range[];
+	placed: ReadonlyMap<number, bigint>;
+}
+
 interface SubscribeEntry {
 	datagrams?: DatagramEntry;
 	/** Release the stream demand held by readers of the legacy datagram track. */
@@ -230,8 +249,10 @@ interface SubscribeEntry {
 	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_FINISH waits a fresh
 	// grace for what one sent meanwhile asks for.
 	sent: number;
-	// The ranges the SUBSCRIBE asked for, as `wireRanges` gives them.
+	// The ranges the SUBSCRIBE asked for, as `wireRanges` gives them, and the group each live join
+	// among them was placed at, by index (see `wireHeld`).
 	asked: track.Range[];
+	askedPlaced: ReadonlyMap<number, bigint>;
 	// A recovery's own subscription, whose groups are cancelled once nobody wants them, as a FETCH's.
 	filling?: boolean;
 	// Lite-07: the copy's fills of more than one group, which ask through this subscription.
@@ -1338,8 +1359,8 @@ export class Subscriber {
 		state: SubscribeSetup,
 	) {
 		const { valid } = consumed;
-		const ranges = wireRanges(request.subscription.ranges ?? [{}]);
-		const msg = this.#subscribeMessage(id, broadcast, consumed, request.name, request.subscription, ranges);
+		const { ranges, placed } = wireHeld(request.subscription);
+		const msg = this.#subscribeMessage(id, broadcast, consumed, request.name, request.subscription, ranges, placed);
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
@@ -1351,7 +1372,7 @@ export class Subscriber {
 		valid?.addEventListener("abort", retire);
 		if (valid?.aborted) retire();
 		const deadline = new Deadline();
-		const setup = this.#openSubscribe(state, msg, ranges, request, id, deadline);
+		const setup = this.#openSubscribe(state, msg, { ranges, placed }, request, id, deadline);
 
 		// Subscribers and info lookups explicitly own setup, including the handoff from
 		// metadata acceptance to reader attachment. Release it when the last owner leaves.
@@ -1408,8 +1429,9 @@ export class Subscriber {
 		await this.#serveStream(id, broadcast, consumed, state, stream, entry, msg);
 	}
 
-	// The SUBSCRIBE for `subscription`, asking for `ranges`, its wire ranges in the model. Its own
-	// wire ranges wait for the track's timescale when they name a time (see `#withRanges`).
+	// The SUBSCRIBE for `subscription`, asking for `ranges`, its wire ranges in the model, each live
+	// join `placed` at a group by index starting there. Its own wire ranges wait for the track's
+	// timescale when they name a time (see `#withRanges`).
 	#subscribeMessage(
 		id: bigint,
 		broadcast: Path.Valid,
@@ -1417,8 +1439,9 @@ export class Subscriber {
 		name: string,
 		subscription: Readonly<track.Subscription>,
 		ranges: readonly track.Range[],
+		placed: ReadonlyMap<number, bigint> = new Map(),
 	): Subscribe {
-		const span = wireSpan(ranges);
+		const span = wireSpan(placedAsTimes(ranges, placed));
 		return new Subscribe({
 			id,
 			broadcast,
@@ -1558,7 +1581,7 @@ export class Subscriber {
 	async #openSubscribe(
 		state: SubscribeSetup,
 		msg: Subscribe,
-		ranges: readonly track.Range[],
+		asked: Asked,
 		request: track.Request,
 		id: bigint,
 		deadline: Deadline,
@@ -1569,7 +1592,7 @@ export class Subscriber {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
 			const framing = { compress: false, timescale: 0, scale: undefined };
 			// Nor a max age: no publisher limit, not the authored default.
-			const entry = this.#register(id, msg, ranges, request.accept({ maxAge: null }), framing, state);
+			const entry = this.#register(id, msg, asked, request.accept({ maxAge: null }), framing, state);
 			const stream = await this.#sendSubscribe(state, msg, deadline);
 			// The first response MUST be a SUBSCRIBE_OK (older drafts only).
 			const resp = await decodeSubscribeResponse(stream.reader, this.version);
@@ -1595,7 +1618,7 @@ export class Subscriber {
 				settle = resolve;
 			}),
 		);
-		const sending = this.#fitted(this.#withRanges(msg, ranges)).then((msg) =>
+		const sending = this.#fitted(this.#withRanges(msg, asked.ranges, asked.placed)).then((msg) =>
 			this.#sendSubscribe(state, msg, deadline),
 		);
 		try {
@@ -1612,7 +1635,7 @@ export class Subscriber {
 				timescale: answered.info.timescale ?? 0,
 				scale: model.timescale ?? undefined,
 			};
-			const entry = this.#register(id, msg, ranges, producer, framing, state);
+			const entry = this.#register(id, msg, asked, producer, framing, state);
 			entry.unanswered = { held: answered.stream, answered: new AbortController() };
 			settle(entry);
 			return { stream, entry };
@@ -1633,10 +1656,10 @@ export class Subscriber {
 		}
 	}
 
-	// `msg` asking for `ranges` on a wire that carries them, its time anchors counted in `scale`,
-	// the timescale the track declares: refused on an untimed one.
-	#withRanges(msg: Subscribe, ranges: readonly track.Range[]): Subscribe {
-		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges);
+	// `msg` asking for `ranges` on a wire that carries them, each live join `placed` at a group by
+	// index as a Joined start there.
+	#withRanges(msg: Subscribe, ranges: readonly track.Range[], placed?: ReadonlyMap<number, bigint>): Subscribe {
+		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges, placed);
 		return msg;
 	}
 
@@ -1672,12 +1695,12 @@ export class Subscriber {
 		}
 	}
 
-	// Register a subscription's accepted copy, asking for `ranges`, so incoming groups and
+	// Register a subscription's accepted copy, asking for what it `asked`, so incoming groups and
 	// datagrams find it.
 	#register(
 		id: bigint,
 		msg: Subscribe,
-		ranges: readonly track.Range[],
+		asked: Asked,
 		producer: track.Producer,
 		framing: { compress: boolean; timescale: number; scale: Time.Timescale | undefined },
 		state: SubscribeSetup,
@@ -1711,7 +1734,8 @@ export class Subscriber {
 			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
 			requested: msg.startGroup,
 			floor: msg.startGroup,
-			asked: [...ranges],
+			asked: [...asked.ranges],
+			askedPlaced: asked.placed,
 			live,
 			starts: new Map(),
 			joinTicks: new Map(),
@@ -2160,6 +2184,7 @@ export class Subscriber {
 			requested: msg.startGroup,
 			floor: msg.startGroup,
 			asked: ranges,
+			askedPlaced: new Map(),
 			live,
 			starts: new Map(),
 			joinTicks: new Map(),
@@ -2640,7 +2665,8 @@ export class Subscriber {
 	#covered(entry: SubscribeEntry): boolean {
 		// Without SUBSCRIBE_FINISH (older drafts) nothing says which groups are owed.
 		if (entry.end === undefined) return false;
-		const ranges = wireRanges(hooks.requested(entry.track).peek()?.ranges ?? [{}]);
+		const held = wireHeld(hooks.requested(entry.track).peek() ?? {});
+		const ranges = placedAsTimes(held.ranges, held.placed);
 		const end = min(entry.end, wireSpan(ranges).end ?? entry.end);
 		const floor = rangesStart(ranges);
 		// Lite-07 answers with SUBSCRIBE_OK once the track ends, unless nothing was asked below the
@@ -2699,6 +2725,7 @@ export class Subscriber {
 			order: msg.order,
 			ranges: entry.asked,
 		};
+		if (entry.askedPlaced.size > 0) lastSent.placed = entry.askedPlaced;
 
 		// The wanted group is subscription state: an update announces each new one past our
 		// largest, and every later update restates it. Requests asking for the same group
@@ -2752,15 +2779,18 @@ export class Subscriber {
 
 			// Demand collapsing to nothing is refused the same way an initial empty
 			// request is: the error closes the track, so every local subscriber sees it.
-			const ranges = wireRanges(current.ranges ?? [{}]);
+			const { ranges, placed } = wireHeld(current);
 			if (ranges.length === 0) throw new Error(EMPTY_RANGE);
-			const span = wireSpan(ranges);
+			// A wire before lite-07 narrows a placed join to a start at its group.
+			const times = placedAsTimes(ranges, placed);
+			const span = wireSpan(times);
 
 			// Changed ranges owe groups nobody asked for until now: below a lowered floor, or
 			// between ranges a widening joins while keeping the floor. Each gap they reach waits
 			// a fresh grace, which only delays giving up on one still owed.
-			const start = rangesStart(ranges);
-			if (!sameRanges(ranges, wireRanges(lastSent.ranges ?? [{}])))
+			const start = rangesStart(times);
+			const last = wireHeld(lastSent);
+			if (!sameRanges(ranges, last.ranges) || !samePlaced(placed, last.placed))
 				entry.tail.demand(start ?? entry.start ?? 0n, UNBOUNDED);
 
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
@@ -2769,7 +2799,7 @@ export class Subscriber {
 			if (hasRanges(this.version)) {
 				// The demand's ranges and the fills' groups, widened together until they fit. The fills
 				// keep their exact ask, so what they ask next is compared with that, not the wire.
-				const demanded = toWireRanges(ranges);
+				const demanded = toWireRanges(ranges, placed);
 				const fields = await this.#subscribeFields(msg, {
 					priority,
 					order: current.order,
@@ -2833,6 +2863,10 @@ export class Subscriber {
 				entry.floor = span.start;
 				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.
 				this.#declare(entry);
+			} else if (span.start !== wireSpan(placedAsTimes(last.ranges, last.placed)).start) {
+				// An update gets no fresh SUBSCRIBE_START, so the floor follows the requested start in
+				// both directions: one that moves back keeps the floor asked, not the stale START.
+				hooks.startTrack(entry.track, { start: null, requested: span.start });
 			}
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/delay/etc.
@@ -2892,7 +2926,7 @@ export class Subscriber {
 				}
 				continue;
 			}
-			const asked = range.start?.time ?? range.start?.absolute ?? 0n;
+			const asked = range.start?.time ?? range.start?.absolute ?? range.start?.joined?.absolute ?? 0n;
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if (at !== undefined || reaches(range.end, asked)) times.push([asked, at]);
 		}
@@ -2922,13 +2956,16 @@ export class Subscriber {
 	}
 
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
-		const ar = wireRanges(a.ranges ?? [{}]);
-		const br = wireRanges(b.ranges ?? [{}]);
+		const aw = wireHeld(a);
+		const bw = wireHeld(b);
+		const ar = aw.ranges;
+		const br = bw.ranges;
 		let rangesEqual: boolean;
-		if (hasRanges(this.version)) rangesEqual = sameRanges(ar, br);
+		if (hasRanges(this.version)) rangesEqual = sameRanges(ar, br) && samePlaced(aw.placed, bw.placed);
 		else {
-			const as = wireSpan(ar);
-			const bs = wireSpan(br);
+			// A placed join goes out as a start at its group.
+			const as = wireSpan(placedAsTimes(ar, aw.placed));
+			const bs = wireSpan(placedAsTimes(br, bw.placed));
 			// A lite-06 `Group Start` of 0 is no floor, so the two spell the same; a pre-06 wire tells
 			// them apart: omitted joins at the publisher's start, and 0 is group 0.
 			const start = resolvesStart(this.version)
@@ -3512,7 +3549,7 @@ function wireJoin(range: WireRange): string | undefined {
 function narrowest(live: LiveRanges): number {
 	let narrowest = NO_MAX_DELAY;
 	for (const range of live.ranges()) {
-		const max = range.start?.live?.max;
+		const max = range.start?.live?.max ?? range.start?.joined?.max;
 		if (max !== undefined) narrowest = Math.min(narrowest, wireBudget(max));
 	}
 	return narrowest;

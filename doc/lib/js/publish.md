@@ -73,7 +73,7 @@ with a warning, since every viewer would refuse it.
 ## Encoding
 
 Video encodes while enabled, so its recent groups wait in the track's cache for
-a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
+a late live join's `max`, a history range, or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
 that history a subscriber wants ahead of live audio when one arrives: from a live join's

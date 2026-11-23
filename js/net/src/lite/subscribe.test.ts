@@ -3,6 +3,7 @@ import { Duration } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
+import type { Range } from "../track.ts";
 import { rangesOf, wireSpan } from "../window.ts";
 import { MAX_MESSAGE_SIZE } from "./message.ts";
 import {
@@ -11,7 +12,9 @@ import {
 	inclusiveGroupEnd,
 	LiveRanges,
 	positionFrames,
+	rangeBounds,
 	rangeSize,
+	requestedPlaced,
 	requestedRanges,
 	Subscribe,
 	SubscribeDrop,
@@ -254,10 +257,63 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 	expect((await update([1, 3, 7, 0, 0])).ranges).toEqual([{ start: { live: { min: 7, max: null } } }]);
 	expect((await update([1, 3, 7, 5, 0])).ranges).toEqual([{ start: { live: { min: 7, max: 4 } } }]);
 	await expect(update([1, 0, 3, 7, 0])).rejects.toThrow(ProtocolViolation);
+	// Type 4 is a placed join's group, a frame that may be 0, then its max as type 3 carries it,
+	// which only a start may carry either.
+	expect((await update([1, 4, 9, 0, 5, 0])).ranges).toEqual([
+		{ start: { joined: { absolute: 9n, frame: 0, max: 4 } } },
+	]);
+	await expect(update([1, 0, 4, 9, 0, 0])).rejects.toThrow(ProtocolViolation);
 	// Any other type is a violation, and so is a Position at frame 0 or as an end.
 	await expect(update([1, 2, 0, 0, 0])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 1, 0, 2, 7, 4])).rejects.toThrow(ProtocolViolation);
-	await expect(update([1, 4, 0, 0])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, 5, 0, 0])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, 0, 5, 0])).rejects.toThrow(ProtocolViolation);
+});
+
+// A placed live join rides as type 4: its group, a frame that may be 0, then its max age as a live
+// start carries it. Only a start, and only lite-07: an older wire refuses it for the caller to carry
+// as a start first. Mirrors the Rust `a_joined_start_roundtrips_on_lite07`.
+test("a joined start round-trips on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const joined = (absolute: bigint, frame: number, max: number | null): WireRange => ({
+		start: { joined: { absolute, frame, max } },
+		end: { time: 9_000n },
+	});
+	const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3 };
+	for (const range of [joined(1_500n, 0, null), joined(1_500n, 3, 0), joined(0n, 7, 250)]) {
+		const subscribe = await encodeMessage(version, new Subscribe({ ...props, ranges: [range] }));
+		expect((await Subscribe.decode(new Reader(undefined, subscribe, version), version)).ranges).toEqual([range]);
+	}
+	// The model rounds its max up to whole milliseconds, as a live start's.
+	const join: Range = { start: { live: { min: Duration.millis(40), max: Duration.micros(1500) } } };
+	expect(toWireRanges([join, join], new Map([[1, 9n]]))).toEqual([
+		{ start: { live: { min: 40, max: 2 } } },
+		{ start: { joined: { absolute: 9n, frame: 0, max: 2 } } },
+	]);
+
+	// The count, the type, group, frame, and max age plus one, then the end's type and time, 251
+	// and 9000 each in two bytes.
+	const buf = await encodeMessage(version, new Subscribe({ ...props, ranges: [joined(5n, 0, 250)] }));
+	expect([...buf.slice(buf.length - 9)]).toEqual([1, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28]);
+
+	// An end can't be a join, placed or not.
+	await expect(
+		encodeMessage(version, new Subscribe({ ...props, ranges: [{ end: joined(5n, 0, null).start }] })),
+	).rejects.toThrow();
+});
+
+// A placed join decodes as a live join with no lag, placed at its group, its frame a Position's.
+// Mirrors the Rust `a_joined_start_is_a_placed_live_join`.
+test("a joined start is a placed live join", () => {
+	const joined = (frame: number): WireRange[] => [{ start: { joined: { absolute: 5n, frame, max: 1_000 } } }];
+	expect(requestedRanges({ startFrame: 0, ranges: joined(3) })).toEqual([
+		{ start: { live: { min: Duration.ZERO, max: Duration.secs(1) } } },
+	]);
+	expect(requestedPlaced(joined(3))).toEqual(new Map([[0, 5n]]));
+	expect(rangeBounds(joined(3)[0])).toEqual([5n, undefined]);
+	expect(positionFrames(joined(3))).toEqual(new Map([[5n, 3]]));
+	// Frame 0 is the whole group.
+	expect(positionFrames(joined(0))).toEqual(new Map());
 });
 
 test("a lite-07 range may start partway through a group, which the span keeps", async () => {
@@ -806,6 +862,29 @@ test("lite-07 retunes a live join in place", async () => {
 		]),
 	).toThrow(ProtocolViolation);
 	expect(retune(side, [[2n, null]]).retuned).toEqual([[2n, live(200, null)]]);
+});
+
+// A placed join retunes its max age in place like a live one, kept where it was placed; one placed
+// elsewhere is another range. Mirrors the Rust `lite07_retunes_a_placed_join_in_place`.
+test("lite-07 retunes a placed join in place", () => {
+	const version = Version.DRAFT_07;
+	const joined = (absolute: bigint, max: number | null): WireRange => ({
+		start: { joined: { absolute, frame: 2, max } },
+	});
+	const sent = new LiveRanges(version, [joined(5n, 500)]);
+	const side = new LiveRanges(version, [joined(5n, 500)]);
+	const edit = sent.edit([joined(5n, null)]);
+	expect(edit).toEqual({ remove: [], add: [], retune: [[0n, null]], fillIds: [], probeIds: [] });
+	side.apply(new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add, retune: edit.retune }));
+	expect(side.entries()).toEqual([[0n, joined(5n, null)]]);
+
+	expect(sent.edit([joined(6n, null)])).toEqual({
+		remove: [0n],
+		add: [joined(6n, null)],
+		retune: [],
+		fillIds: [],
+		probeIds: [],
+	});
 });
 
 // A live start's max rides beside its lag, in milliseconds plus one, rounded up, 0 for no limit.

@@ -1,5 +1,5 @@
-import { expect, spyOn, test } from "bun:test";
-import { Duration, yieldNow } from "@moq/clock";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { Duration, type Installed, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race, Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
@@ -36,6 +36,20 @@ const NEWER = Instance.parse("01900000-0000-7000-8000-000000000002");
 const path = Path.from("live");
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+
+// Each clock a test installs, closed after it even when it times out: a timed-out test never
+// reaches its own `finally`, and a clock left installed carries its timers into every later test.
+const installs: Installed[] = [];
+afterEach(() => {
+	for (const installed of installs.splice(0).reverse()) installed.close();
+});
+
+/** Install `clock` until the test ends, or until the returned handle closes. */
+function install(clock: Manual): Installed {
+	const installed = clock.install();
+	installs.push(installed);
+	return installed;
+}
 
 async function settle() {
 	await yieldNow();
@@ -75,6 +89,27 @@ function copy(source: BroadcastProducer) {
 				group.writeFrame({
 					payload: enc.encode(`${key}.${frame}`),
 					timestamp: Timestamp.unscaled(group.start),
+				});
+			if (close) group.finish();
+			return group;
+		},
+	};
+}
+
+/**
+ * {@link copy} on a track timed in milliseconds, each group stamped a second per key, so a live
+ * join's max judges it by presentation time, as the Rust tests' timed copies do.
+ */
+function timedCopy(source: BroadcastProducer) {
+	const producer = defined(source.createTrack("seq", { ...INFO, timescale: Timescale.MILLI }));
+	return {
+		producer,
+		write(key: bigint, frames = 1, close = true) {
+			const group = producer.createGroup(key);
+			for (let frame = 0; frame < frames; frame++)
+				group.writeFrame({
+					payload: enc.encode(`${key}.${frame}`),
+					timestamp: Timestamp.fromMillis(Number(key) * 1000),
 				});
 			if (close) group.finish();
 			return group;
@@ -145,7 +180,7 @@ async function setup() {
 
 test("returning to a route reuses its subscription and held group", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -189,7 +224,7 @@ test("returning to a route reuses its subscription and held group", async () => 
 // refresh outlives the copy it asked, and only the logical track closing rejects it.
 test("a pending refresh moves to the next copy when the one it asked closes", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -243,7 +278,7 @@ test("a pending refresh moves to the next copy when the one it asked closes", as
  */
 test("a returning route backfills below the reader's newest", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -286,7 +321,7 @@ test("a returning route backfills below the reader's newest", async () => {
  */
 test("a returning route keeps the reader's bounded end across its cap", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -330,7 +365,7 @@ test("a returning route keeps the reader's bounded end across its cap", async ()
  */
 test("a resumed reader's replaced ranges reach its serving copy", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -374,7 +409,7 @@ test("a resumed reader's replaced ranges reach its serving copy", async () => {
 
 test("a group the window dropped above the serving copy's resume point is backfilled once ranges widen to it", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -415,7 +450,7 @@ test("a group the window dropped above the serving copy's resume point is backfi
 
 test("a backfill places a time start its serving copy raised, at the group holding it", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -456,7 +491,7 @@ test("a backfill places a time start its serving copy raised, at the group holdi
  */
 test("a backfill places a raised start beside a waiting range", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -497,7 +532,7 @@ test("a backfill places a raised start beside a waiting range", async () => {
  */
 test("a backfill places a raised start under an end past the resume point", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -538,7 +573,7 @@ test("a backfill places a raised start under an end past the resume point", asyn
  */
 test("a raised start behind an inner front hands out nothing past its end", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const inner = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
@@ -583,7 +618,7 @@ test("a raised start behind an inner front hands out nothing past its end", asyn
  */
 test("a backfill group a placed range holds goes out beside a waiting range", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -625,7 +660,7 @@ test("a backfill group a placed range holds goes out beside a waiting range", as
  */
 test("a backfill waits for the group holding a time under its floor", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -674,7 +709,7 @@ test("a backfill waits for the group holding a time under its floor", async () =
  */
 test("route flaps keep one backfill per distinct route", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -716,7 +751,7 @@ test("route flaps keep one backfill per distinct route", async () => {
 
 test("a group below the replacement's resume point is backfilled", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -748,7 +783,7 @@ test("a group below the replacement's resume point is backfilled", async () => {
 
 test("a late group on a drained serving copy is read", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -788,7 +823,7 @@ test("a late group on a drained serving copy is read", async () => {
 // replaced copy may still deliver a group the reader lacks under its cap.
 test("a replacement ending before any group waits for the replaced copy's late group", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -823,7 +858,7 @@ test("a replacement ending before any group waits for the replaced copy's late g
 
 test("a late group under the resume point is backfilled again", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -864,7 +899,7 @@ test("a late group under the resume point is backfilled again", async () => {
 // than counting as drained while the fill is out.
 test("a backfill waits on a fill the finished route still owes", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -969,6 +1004,43 @@ test("a routed reader serves its live join as the serving copy resolves it", asy
 		sub.close();
 		front.consumer.close();
 		a.close();
+	}
+});
+
+// A switch asks the next copy for a live join the serving copy placed as that join, placed at the
+// boundary past what the reader holds, so its groups still go stale past its max there and nothing
+// below the boundary is asked again. Mirrors the Rust `a_switch_asks_a_placed_live_join_with_its_max`.
+test("a switch asks a placed live join with its max", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const first = copy(a);
+	const next = copy(b);
+	hooks.receiveTrack(first.producer);
+	hooks.receiveTrack(next.producer);
+	front.serve(a.consume());
+	const hour = Duration.secs(3600);
+	const live = front.consumer.track("seq").subscribe(joining(hour));
+	try {
+		first.write(64n);
+		await settle();
+		expect(drain(live)).toEqual([64n]);
+		first.write(66n);
+		await settle();
+		expect(drain(live)).toEqual([66n]);
+
+		front.serve(b.consume());
+		await settle();
+		// The copy's aggregate, where a placed join's lag places nothing.
+		const asked = hooks.requested(next.producer).peek();
+		expect(asked?.ranges).toEqual([{ start: { live: { min: Duration.ZERO, max: hour } } }]);
+		// At the group the reader was in, as Rust's: JS asks it whole, with no frame to resume at.
+		expect(asked?.placed).toEqual(new Map([[0, 66n]]));
+	} finally {
+		live.close();
+		front.consumer.close();
+		a.close();
+		b.close();
 	}
 });
 
@@ -1094,7 +1166,7 @@ test("a skip under the resume point the local floor keeps out ends the read", as
  */
 test("a skip starting a gap the local floor keeps out ends the read", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
 	const ta = copy(a);
@@ -1105,9 +1177,11 @@ test("a skip starting a gap the local floor keeps out ends the read", async () =
 	ta.write(3n);
 	const front = new Front();
 	front.serve(a.consume());
+	// A live join reaching back to the oldest group, so the reader's budget bounds how long a replaced
+	// copy is waited on.
 	const sub = front.consumer
 		.track("seq")
-		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 4n }] }));
+		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ end: 4n }] }));
 	try {
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([0n, 3n]);
@@ -1138,7 +1212,7 @@ test("a skip starting a gap the local floor keeps out ends the read", async () =
  */
 test("a skip split between a replaced and the serving copy ends the read", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
 	const ta = copy(a);
@@ -1150,9 +1224,11 @@ test("a skip split between a replaced and the serving copy ends the read", async
 	ta.write(4n);
 	const front = new Front();
 	front.serve(a.consume());
+	// A live join reaching back to the oldest group, so the reader's budget bounds how long a replaced
+	// copy is waited on.
 	const sub = front.consumer
 		.track("seq")
-		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 5n }] }));
+		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ end: 5n }] }));
 	try {
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([0n, 4n]);
@@ -1222,7 +1298,7 @@ test("a skip behind an inner front the local floor keeps out ends the read", asy
  */
 test("a skip behind an inner switch ends the read", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
 	const c = new BroadcastProducer();
@@ -1862,9 +1938,12 @@ for (const [name, end, held, newer, expires] of [
 ] as const) {
 	test(`a recovered group expires only within the reader's window (${name})`, async () => {
 		const { a, b, swap, active, close } = await setup();
-		const ta = copy(a);
-		const tb = copy(b);
-		const sub = active.track("seq").subscribe({ ranges: [{ start: 0n, end }] });
+		const ta = timedCopy(a);
+		const tb = timedCopy(b);
+		// A live join from the first group, whose groups go stale past its max.
+		const sub = active
+			.track("seq")
+			.subscribe(withMax({ delay: { max: Duration.millis(2_000) }, ranges: [{ end }] }));
 		ta.write(0n, 1, false);
 		const group = sub.tryRecvGroup();
 		if (!group) throw new Error("expected group 0");
@@ -1900,9 +1979,12 @@ for (const [name, end, held, newer, expires] of [
 ] as const) {
 	test(`a pending recovery expires within the reader's window (${name})`, async () => {
 		const { a, b, swap, active, close } = await setup();
-		const ta = copy(a);
-		const tb = copy(b);
-		const sub = active.track("seq").subscribe({ ranges: [{ start: 0n, end }] });
+		const ta = timedCopy(a);
+		const tb = timedCopy(b);
+		// A live join from the first group, whose groups go stale past its max.
+		const sub = active
+			.track("seq")
+			.subscribe(withMax({ delay: { max: Duration.millis(2_000) }, ranges: [{ end }] }));
 		ta.write(0n, 1, false);
 		const group = sub.tryRecvGroup();
 		if (!group) throw new Error("expected group 0");
@@ -3410,7 +3492,7 @@ test("a routed read right after an update picks its group under the new preferen
 // gap before the group, as a direct read of the same track does.
 test("a routed ordered read returns the gap its copy passed to take a group", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const ta = copy(a);
@@ -3440,7 +3522,7 @@ test("a routed ordered read returns the gap its copy passed to take a group", as
 for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {
 		const clock = new Manual();
-		const installed = clock.install();
+		const installed = install(clock);
 		const front = new Front();
 		const a = new BroadcastProducer();
 		const b = new BroadcastProducer();
@@ -3725,7 +3807,7 @@ test("a separately polled drop does not deliver its run", () => {
 
 test("a resumed reader reports a group its serving copy skipped past the budget", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	try {
 		const front = new Front();
 		const a = new BroadcastProducer();
@@ -3753,7 +3835,7 @@ test("a resumed reader reports a group its serving copy skipped past the budget"
 // `a_reader_takes_the_boundary_group_the_serving_copy_dropped`.
 test("a drop of the boundary group a replaced copy holds is no verdict", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	try {
 		const front = new Front();
 		const a = new BroadcastProducer();
@@ -3790,7 +3872,7 @@ test("a drop of the boundary group a replaced copy holds is no verdict", async (
 // supersedes it on the serving copy, so it is not reported.
 test("a held-back stale run a new subscription supersedes is not reported", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	try {
 		const front = new Front();
 		const a = new BroadcastProducer();
@@ -4123,7 +4205,7 @@ for (const ordered of [false, true]) {
 		const ta = copy(a);
 		const tb = copy(b);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe();
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
 		const keyOrder = ordered ? sub.ordered() : undefined;
 		const take = () => {
 			if (!keyOrder) return drain(sub);
@@ -4703,7 +4785,7 @@ test("the largest follows the serving copy across a swap without moving back, an
 /** A manual clock, installed until `installed` closes. */
 function manual() {
 	const clock = new Manual();
-	return { clock, installed: clock.install() };
+	return { clock, installed: install(clock) };
 }
 
 const SECOND = Duration.millis(1000);
@@ -5201,7 +5283,7 @@ test.each([
 	"a lowered floor asks the serving route for a released copy's groups (cached=%p, ordered=%p)",
 	async (cached, ordered) => {
 		const clock = new Manual();
-		const installed = clock.install();
+		const installed = install(clock);
 		const front = new Front();
 		const a = new BroadcastProducer();
 		const b = new BroadcastProducer();
@@ -5745,7 +5827,7 @@ test("a route whose IETF session closed before subscribing moves the track to th
 
 test("routed metadata receives a refusal without polling a group cursor", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const origin = new Producer();
 	try {
 		origin.route(Path.from("missing-track"));
@@ -6035,7 +6117,7 @@ test("an ordered read through a front returns the gap its copy gave up before en
 // inside the span.
 test("a routed reader reports its serving copy's whole group spans", async () => {
 	const clock = new Manual();
-	const installed = clock.install();
+	const installed = install(clock);
 	const front = new Front();
 	const source = new BroadcastProducer();
 	const handle = source.consume();

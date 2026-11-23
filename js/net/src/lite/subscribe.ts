@@ -133,12 +133,25 @@ interface Span {
  * join (`live`), as the Rust `lite::Anchor` holds. A group's start is its time, so `absolute` goes
  * out as a time, an end (exclusive) as the time just before it, and decodes as one. A start partway
  * through the group, at a nonzero `frame`, goes out as a Position; an end there can't. A live join
- * is a start only.
+ * is a start only, and so is one already placed (`joined`).
  */
 export type WireAnchor =
-	| { absolute: bigint; frame?: number; time?: never; live?: never }
-	| { time: bigint; absolute?: never; live?: never }
-	| { live: WireLive; absolute?: never; time?: never };
+	| { absolute: bigint; frame?: number; time?: never; live?: never; joined?: never }
+	| { time: bigint; absolute?: never; live?: never; joined?: never }
+	| { live: WireLive; absolute?: never; time?: never; joined?: never }
+	| { joined: WireJoined; absolute?: never; time?: never; live?: never };
+
+/**
+ * A live join already placed, on the wire: the group it starts at by its start, the frame there,
+ * 0 for the whole group, and the `max` its groups expire past, `null` for no limit beyond the
+ * publisher's, in whole milliseconds. A route switch asks a new upstream for a join an earlier one
+ * placed so. Lite-07 only. Mirrors the Rust `lite::Anchor::Joined`.
+ */
+export interface WireJoined {
+	absolute: bigint;
+	frame: number;
+	max: number | null;
+}
 
 /**
  * A live join on the wire: its lag `min` behind the live edge, and the `max` its groups expire
@@ -155,16 +168,21 @@ export interface WireRange {
 	end?: WireAnchor;
 }
 
-/** The wire form of model `ranges`: the same times, a time being a group start, and live joins by lag and max. */
-export function toWireRanges(ranges: readonly Range[]): WireRange[] {
-	return ranges.map((range) => {
+/**
+ * The wire form of model `ranges`: the same times, a time being a group start, and live joins by lag
+ * and max, or, `placed` already at a group by index, as `joined` there (see {@link WireJoined}).
+ */
+export function toWireRanges(ranges: readonly Range[], placed?: ReadonlyMap<number, bigint>): WireRange[] {
+	return ranges.map((range, index) => {
 		const out: WireRange = {};
 		const time = rangeTime(range);
 		const min = liveMillis(range);
+		const group = placed?.get(index);
 		if (time !== undefined) out.start = { time };
 		else if (min !== undefined) {
-			const max = rangeBudget(range);
-			out.start = { live: { min, max: max < NO_MAX_DELAY ? max : null } };
+			const budget = rangeBudget(range);
+			const max = budget < NO_MAX_DELAY ? budget : null;
+			out.start = group === undefined ? { live: { min, max } } : { joined: { absolute: group, frame: 0, max } };
 		}
 		if (range.end !== undefined) out.end = { time: range.end };
 		return out;
@@ -173,12 +191,20 @@ export function toWireRanges(ranges: readonly Range[]): WireRange[] {
 
 /**
  * The lite-07 Anchor Type and values of a range's start or `end`: None (0), Time (1), Position (2),
- * or Live (3). Both time ends are inclusive, so an absolute end, exclusive, goes out as the time
- * just before it; one at group 0 holds nothing a time can say. A start partway through a group is a
- * Position: its start, then the frame. A live join goes out as its lag then its max in
- * milliseconds plus one, 0 for no limit, and only as a start.
+ * Live (3), or Joined (4). Both time ends are inclusive, so an absolute end, exclusive, goes out as
+ * the time just before it; one at group 0 holds nothing a time can say. A start partway through a
+ * group is a Position: its start, then the frame. A live join goes out as its lag then its max in
+ * milliseconds plus one, 0 for no limit, and only as a start; one already placed as its group's
+ * start, the frame, which may be 0, then its max as a live join carries it.
  */
 function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, ...bigint[]] {
+	if (anchor?.joined !== undefined) {
+		if (end) throw new Error("a range ends only at a group");
+		const { absolute, frame, max } = anchor.joined;
+		if (max !== null && (!Number.isSafeInteger(max) || max < 0))
+			throw new RangeError("duration exceeds safe milliseconds");
+		return [4, absolute, BigInt(frame), max === null ? 0n : BigInt(max) + 1n];
+	}
 	if (anchor?.live !== undefined) {
 		if (end) throw new Error("a range ends only at a group");
 		const { min, max } = anchor.live;
@@ -279,6 +305,19 @@ export function legacyStart(version: Version, maxDelay: number | null): Start | 
 	return { live: { min: PAST_EVERY_GROUP, max: ClockDuration.millis(maxDelay) } };
 }
 
+/**
+ * The group each live join already placed among lite-07 `ranges` starts at, by its index: see
+ * {@link WireJoined} and `Subscription.placed`.
+ */
+export function requestedPlaced(ranges: readonly WireRange[]): Map<number, bigint> {
+	const placed = new Map<number, bigint>();
+	for (const [index, range] of ranges.entries()) {
+		const joined = range.start?.joined;
+		if (joined !== undefined) placed.set(index, joined.absolute);
+	}
+	return placed;
+}
+
 /** The model range one lite-07 range asks for; see {@link requestedRanges}. */
 export function requestedRange(range: WireRange): Range {
 	// Empty, as group bounds say it: keep its place, covering no group.
@@ -288,10 +327,13 @@ export function requestedRange(range: WireRange): Range {
 	if (end === 0n) return { ...EMPTY };
 	const out: Range = {};
 	const live = range.start?.live;
-	if (live !== undefined) {
-		const max = live.max === null || live.max >= NO_MAX_DELAY ? null : ClockDuration.millis(live.max);
-		out.start = { live: { min: ClockDuration.millis(live.min), max } };
-	} else if (range.start) out.start = start ?? range.start.time;
+	const joined = range.start?.joined;
+	const maxOf = (max: number | null) => (max === null || max >= NO_MAX_DELAY ? null : ClockDuration.millis(max));
+	if (live !== undefined) out.start = { live: { min: ClockDuration.millis(live.min), max: maxOf(live.max) } };
+	// Placed already, so its lag places nothing: it starts where it was placed (see
+	// {@link requestedPlaced}) and expires as a live join under its max.
+	else if (joined !== undefined) out.start = { live: { min: ClockDuration.ZERO, max: maxOf(joined.max) } };
+	else if (range.start) out.start = start ?? range.start.time;
 	// An absolute end is exclusive; every model end includes its group.
 	if (range.end) out.end = end === undefined ? range.end.time : end - 1n;
 	return out;
@@ -299,8 +341,9 @@ export function requestedRange(range: WireRange): Range {
 
 /**
  * Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, a start partway
- * through a group, never at frame 0, which a time says, or a live join's lag then max in
- * milliseconds, a start only. Any other Anchor Type is a protocol violation.
+ * through a group, never at frame 0, which a time says, a live join's lag then max in
+ * milliseconds, a start only, or one already placed, its group's start, a frame that may be 0, then
+ * its max, a start only too. Any other Anchor Type is a protocol violation.
  */
 async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undefined> {
 	const kind = await r.u53();
@@ -319,6 +362,12 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undef
 		case 3:
 			if (end) throw new ProtocolViolation("a range ends at a live join");
 			return { live: { min: await r.u53(), max: (await Duration.decodeOptional(r)) ?? null } };
+		case 4: {
+			if (end) throw new ProtocolViolation("a range ends at a live join");
+			const absolute = await r.u62();
+			const frame = await r.u53();
+			return { joined: { absolute, frame, max: (await Duration.decodeOptional(r)) ?? null } };
+		}
 		default:
 			throw new ProtocolViolation(`unknown range anchor: ${kind}`);
 	}
@@ -370,7 +419,7 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
  * when it has none: a time is the start of the group it names, inclusive as an end.
  */
 export function rangeBounds(range: WireRange): [bigint | undefined, bigint | undefined] {
-	const from = range.start?.absolute ?? range.start?.time;
+	const from = range.start?.absolute ?? range.start?.time ?? range.start?.joined?.absolute;
 	const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
 	return [from, to];
 }
@@ -404,7 +453,8 @@ export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number
 	const frames = new Map<bigint, number>();
 	const positions: [bigint, number][] = [];
 	for (const range of ranges) {
-		const start = range.start;
+		// A Position start, or a placed join's, partway through its group.
+		const start = range.start?.joined ?? range.start;
 		// One ending at or before the group it starts partway through covers nothing.
 		const [, to] = rangeBounds(range);
 		if (start?.absolute !== undefined && start.frame && (to === undefined || to > start.absolute))
@@ -418,9 +468,8 @@ export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number
 	const ends: bigint[] = [];
 	let count = 0;
 	for (const range of ranges) {
-		const from = range.start?.absolute ?? range.start?.time;
 		// No start, or no end, may cover it.
-		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+		const [from, to] = rangeBounds(range);
 		if (from !== undefined && to !== undefined && from >= to) continue;
 		count++;
 		if (from !== undefined) starts.push(from);
@@ -503,6 +552,8 @@ export function rangeKey(range: WireRange): string {
 		if (anchor?.absolute !== undefined) return `a${anchor.absolute}.${anchor.frame ?? 0}`;
 		if (anchor?.time !== undefined) return `t${anchor.time}`;
 		if (anchor?.live !== undefined) return `l${anchor.live.min}/${anchor.live.max ?? "-"}`;
+		if (anchor?.joined !== undefined)
+			return `j${anchor.joined.absolute}.${anchor.joined.frame}/${anchor.joined.max ?? "-"}`;
 		return "-";
 	};
 	return `${anchor(range.start)}:${anchor(range.end)}`;
@@ -623,8 +674,14 @@ export class LiveRanges {
 			if (retuned.some(([tuned]) => tuned === id)) throw new ProtocolViolation(`range id retuned twice: ${id}`);
 			const range = this.#live.get(id);
 			const live = range?.start?.live;
-			if (range === undefined || live === undefined) throw new ProtocolViolation(`no live join to retune: ${id}`);
-			const tuned: WireRange = { ...range, start: { live: { min: live.min, max } } };
+			const joined = range?.start?.joined;
+			if (range === undefined || (live === undefined && joined === undefined))
+				throw new ProtocolViolation(`no live join to retune: ${id}`);
+			// One already placed stays where it was placed.
+			const tuned: WireRange = {
+				...range,
+				start: joined ? { joined: { ...joined, max } } : { live: { min: live?.min ?? 0, max } },
+			};
 			this.#replace(id, tuned);
 			retuned.push([id, tuned]);
 		}
@@ -718,12 +775,20 @@ export class LiveRanges {
 		// is placed afresh.
 		const retuned: [bigint, WireRange][] = [];
 		const kept = remove.filter((id) => {
-			const live = this.#live.get(id)?.start?.live;
-			if (live === undefined || renew.has(id)) return true;
+			const start = this.#live.get(id)?.start;
+			const live = start?.live;
+			const joined = start?.joined;
+			if ((live === undefined && joined === undefined) || renew.has(id)) return true;
 			const end = rangeKey({ end: this.#live.get(id)?.end });
+			// The same join: one live by its lag, one placed by where it was placed.
+			const same = (wanted: WireAnchor | undefined) =>
+				live !== undefined
+					? wanted?.live?.min === live.min
+					: wanted?.joined !== undefined &&
+						wanted.joined.absolute === joined?.absolute &&
+						wanted.joined.frame === joined.frame;
 			const index = adding.findIndex(
-				([range, kind]) =>
-					kind === kindOf(id) && range.start?.live?.min === live.min && rangeKey({ end: range.end }) === end,
+				([range, kind]) => kind === kindOf(id) && same(range.start) && rangeKey({ end: range.end }) === end,
 			);
 			if (index < 0) return true;
 			retuned.push([id, adding[index][0]]);
@@ -748,7 +813,10 @@ export class LiveRanges {
 		for (const id of kept) this.#remove(id);
 		for (const [id, range] of retuned) this.#replace(id, range);
 		this.#add(add);
-		const retune = retuned.map(([id, range]): [bigint, number | null] => [id, range.start?.live?.max ?? null]);
+		const retune = retuned.map(([id, range]): [bigint, number | null] => [
+			id,
+			range.start?.live?.max ?? range.start?.joined?.max ?? null,
+		]);
 		return { remove: kept, add, retune, fillIds, probeIds };
 	}
 }

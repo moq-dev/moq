@@ -65,10 +65,13 @@ import {
 	type Found,
 	type Holdings,
 	type Join,
+	type Joining,
 	joinsLive,
+	placedAsTimes,
 	rangesOf,
 	UNHELD,
 	Window,
+	wireHeld,
 	wireSpan,
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
@@ -414,6 +417,15 @@ export interface Subscription {
 	 * fresh. Each subscriber's own publisher still serves it in its own order.
 	 */
 	order?: Order;
+	/**
+	 * The group each live join among {@link ranges} was already placed at, by its index there: a
+	 * route switch asks a new copy for a join an earlier copy placed, which starts at that group as a
+	 * time start would and still goes stale past its max. Its lag places nothing. moq-lite-07 carries
+	 * one as a `Joined` start; older wires as a time start under the one max age, which takes its
+	 * max. Mirrors the Rust `Subscription::placed`.
+	 * @internal
+	 */
+	placed?: ReadonlyMap<number, bigint>;
 }
 
 /**
@@ -454,11 +466,13 @@ function subscriptionDefaults(subscription: Subscription = Subscription.default(
 		throw new TypeError("Subscription delay, maxAge, and maxDelay are unsupported; use a live range's max");
 	}
 	if ("groups" in subscription) throw new TypeError("Subscription groups is unsupported; use ranges");
-	return {
+	const out: Subscription = {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
 		order: orderOf(subscription.order),
 		ranges: subscription.ranges === undefined ? [latest()] : rangesOf(subscription.ranges),
 	};
+	if (subscription.placed !== undefined && subscription.placed.size > 0) out.placed = subscription.placed;
+	return out;
 }
 
 // A plain JS caller can pass anything, and silently serving a typo as descending would hide it.
@@ -1138,6 +1152,15 @@ function reaches(received: bigint, drops: DropSet, end: End, refused: readonly R
  * above it. A reader whose budget varies by group is held to its widest. Mirrors the Rust
  * `settles`.
  */
+// The parts of `drops` within `[start, end)`, each clipped there.
+function intersectDrops(drops: readonly DropRun[], start: bigint, end: bigint): DropRun[] {
+	const out: DropRun[] = [];
+	for (let i = runsFrom(drops, start); i < drops.length && drops[i].start < end; i++) {
+		out.push({ ...drops[i], start: max(drops[i].start, start), end: min(drops[i].end, end) });
+	}
+	return out;
+}
+
 function settles(run: DropRun, budget: Budget, coverage: Coverage): boolean {
 	if (run.stale === undefined) return true;
 	if ((budget.isUniform() ? budget.at(run.start) : budget.widest()) > run.stale) return false;
@@ -2197,7 +2220,7 @@ export class Producer {
 	// publisher applies its own, as each reader's budget does, so the demand asked upstream is the
 	// same before and after the info lands.
 	#join(sink: TrackState): void {
-		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: [...sink.update.ranges()] }, true);
+		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: sink.update.held() }, true);
 		sink.update.watch = (change) => this.#moved(sink, change);
 		this.#subscribed();
 	}
@@ -2206,7 +2229,7 @@ export class Producer {
 	#leave(sink: TrackState): void {
 		sink.update.watch = undefined;
 		this.#countAsks(sink, [], []);
-		this.#moved(sink, { before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
+		this.#moved(sink, { before: sink.update.contribution(), gone: sink.update.held(), came: [] });
 		this.#counted.delete(sink);
 		this.#subscribed();
 	}
@@ -2236,7 +2259,7 @@ export class Producer {
 	// Take a sink that became a fetch out of the live aggregate, before anyone sees it there.
 	#unlive(sink: TrackState): void {
 		if (!this.#counted.delete(sink)) return;
-		this.#live.replace({ before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
+		this.#live.replace({ before: sink.update.contribution(), gone: sink.update.held(), came: [] });
 		this.#subscribed();
 	}
 
@@ -2878,10 +2901,18 @@ export class Producer {
 	// back restores the START. Without either, the first arrival stands in for it.
 	// Until the START arrives, the feed start is pending; the requested floor still bounds it.
 	// A local track has no feed, so what its subscribers ask bounds nothing, as in Rust.
+	// The floor the wire asks below which nothing is requested, a placed join from its group, as
+	// the subscriber sends it. Mirrors the Rust `Subscription::start`.
+	#requestedStart(): bigint | undefined {
+		const requested = this.#requested.peek();
+		if (requested === undefined) return undefined;
+		const { ranges, placed } = wireHeld(requested);
+		return wireSpan(placedAsTimes(ranges, placed)).start;
+	}
+
 	#feedStart(): bigint | "pending" | undefined {
 		if (!this.#wire) return undefined;
-		const ranges = this.#requested.peek()?.ranges;
-		const requested = ranges && wireSpan(ranges).start;
+		const requested = this.#requestedStart();
 		const served = this.#wire?.served;
 		if (!served || served.requested !== requested) return requested;
 		if (served.start === null) return requested;
@@ -2903,12 +2934,11 @@ export class Producer {
 		if (start === undefined || start === 0n) return undefined;
 		if (wire.starts.fillsFromStart) return start;
 		// The START applies only while the demand keeps the floor it answered, as `#feedStart`.
-		const ranges = this.#requested.peek()?.ranges;
 		const served = wire.served;
 		const resolved =
 			wire.starts.resolvesStart === true &&
 			typeof served?.start === "bigint" &&
-			served.requested === (ranges && wireSpan(ranges).start);
+			served.requested === this.#requestedStart();
 		if (resolved) return undefined;
 		return named === undefined || named >= start ? start : undefined;
 	}
@@ -3321,6 +3351,11 @@ export class Subscriber {
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
+	// The track's drops that settled a hole this reader judged, taken as its own verdicts, stale ones
+	// under the budget the upstream judged them by: the track forgets its drop set under pool pressure
+	// or once it expires, which must not reopen what this reader already gave up. Only a wider budget
+	// takes a stale one back, and the read passing it forgets it. Mirrors the Rust `Misses::adopt_drops`.
+	#adopted: DropRun[] = [];
 	// The heads this reader asked a fill for, each once: one met again with no fill bringing it
 	// is given up, as the Rust `Heads` gives up a head whose fetch ended without one. Clipped to
 	// what it still reads, so a widening back over one asks it afresh.
@@ -3724,10 +3759,11 @@ export class Subscriber {
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
 	// this track holds it or not: one landing there would be written off. A group skipped as
 	// stale is not forgotten, since a wider budget offers it again.
-	#forgetPastBudget(delivered: Delivered): void {
+	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget()): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
-		const drift = this.#drift();
+		const own = this.#drift();
+		const drift = { ...own, budget: budget.clamped(own.bound) };
 		// Found once a gap is stale, so a hand-out that forgets nothing never scans #skipped. A
 		// skip whose group left the cache can never be offered again, so it is forgotten here
 		// rather than holding the gaps above it forever.
@@ -3840,7 +3876,7 @@ export class Subscriber {
 			scalars ? update.entries() : [[0n, {}]],
 			this.#latestGroup(),
 			this.#holdings(),
-			(key) => update.since(key),
+			(key) => update.joining(key),
 		);
 		// Leaves the lookups the old ranges asked, which a settled window never reads again.
 		if (this.#lookups.length > 0) this.#lookUp();
@@ -4221,6 +4257,7 @@ export class Subscriber {
 			// A moving read floor retires only its prefix: what lies above it stays asked.
 			const read = max(this.#cursor.peek().start, this.#nextKey);
 			for (const runs of [this.#asked, this.#refilled, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
+			cutRun(this.#adopted, 0n, read);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
 			this.#reopen(producer, fills, budget, coverage);
@@ -4266,7 +4303,14 @@ export class Subscriber {
 					)) {
 						// Judged from where it meets the asked run, as the reader would read it.
 						const clipped = { ...dropped, start: max(dropped.start, run.start) };
-						if (settles(clipped, budget, coverage)) insertRun(gone, clipped.start, dropped.end);
+						if (!settles(clipped, budget, coverage)) continue;
+						insertRun(gone, clipped.start, dropped.end);
+						// The track's drop, kept as this reader's own verdict; its own fill's refusal is one already.
+						if (!dropped.own) this.#adopt(clipped.start, min(dropped.end, run.end), dropped);
+					}
+					// What this reader gave up before, though the track forgot the drop that settled it.
+					for (const verdict of intersectDrops(this.#adopted, run.start, run.end)) {
+						if (settles(verdict, budget, coverage)) insertRun(gone, verdict.start, verdict.end);
 					}
 					for (const open of runGaps(gone, run.start, run.end)) {
 						let next = open.start;
@@ -4706,13 +4750,18 @@ export class Subscriber {
 			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
+		hooks.restateSubscriber = (subscriber, subscription) => subscriber.#update(subscription, false);
 		hooks.stampSubscriber = (subscriber, since) => subscriber.#stamp(since);
 		hooks.preferences = (subscriber) => subscriber.#state.update;
 		hooks.resolveRanges = (subscriber, subscription) => {
 			// A preview never takes an answer recorded before it: the live edge has moved since.
 			const tick = joinTick();
 			const ranges = (subscription.ranges ?? [{}]).map((range, index) => [BigInt(index), range] as const);
-			return Window.keyed(ranges, subscriber.#latestGroup(), subscriber.#holdings(), () => tick).resolved();
+			const joining = (key: bigint): Joining => {
+				const at = subscription.placed?.get(Number(key));
+				return at === undefined ? { since: tick } : { at };
+			};
+			return Window.keyed(ranges, subscriber.#latestGroup(), subscriber.#holdings(), joining).resolved();
 		};
 		hooks.tryNextGroup = (subscriber, floor) => {
 			subscriber.#raiseNext(floor);
@@ -4722,7 +4771,10 @@ export class Subscriber {
 			if (ordered) subscriber.#raiseNext(floor);
 			return subscriber.#peekGroup(ordered);
 		};
-		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
+		hooks.forgetPastBudget = (subscriber, delivered, budget) => {
+			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, budget);
+			else subscriber.#forgetPastBudget(delivered, budget);
+		};
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
@@ -4747,7 +4799,11 @@ export class Subscriber {
 			let drift = fetched ? () => subscriber.#driftFetched() : () => subscriber.#drift();
 			let changed = subscriber.#expiryChanged();
 			if (within) {
-				drift = () => subscriber.#drift(within.contains, within.end());
+				// Judged under the logical reader's budget, as the Rust `Recover::poll_budget` gives it.
+				drift = () => {
+					const own = subscriber.#drift(within.contains, within.end());
+					return { ...own, budget: within.budget().clamped(own.bound) };
+				};
 				changed = [...changed, ...within.changed];
 			}
 			return {
@@ -4819,6 +4875,7 @@ export class Subscriber {
 			subscriber.#resume = source({
 				subscription: state.update,
 				since: () => Array.from(state.update.entries(), ([key]) => state.update.since(key)),
+				retuned: () => state.update.retuned,
 				cursor: subscriber.#cursor,
 				closed: state.closed,
 				info: () => state.info.peek(),
@@ -5819,6 +5876,16 @@ export class Subscriber {
 		}
 	}
 
+	// Hold `[start, end)` as given up by `drop`, its stale budget included, so it is never asked again
+	// unless a budget wider than that takes it back. Mirrors the Rust `Misses::hold_verdict`.
+	#adopt(start: bigint, end: bigint, drop: Hole): void {
+		if (start >= end) return;
+		const hole: Hole = { error: drop.error };
+		if (drop.skip) hole.skip = true;
+		if (drop.stale !== undefined) hole.stale = drop.stale;
+		this.#adopted = insertDrop(this.#adopted, start, end, hole);
+	}
+
 	// Keep a run the key cursor gave up, once the drop record started, so a read reports it.
 	#giveUp(run: Run, hole: Hole): void {
 		if (this.#dropsSeen) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
@@ -5839,6 +5906,9 @@ export class Subscriber {
 			if (run.start < end && start < run.end) insertRun(runs, run.start, run.end);
 		}
 		for (const run of intersect(this.#givenUp, start, end)) insertRun(runs, run.start, run.end);
+		for (const verdict of intersectDrops(this.#adopted, start, end)) {
+			if (settles(verdict, drift.budget, coverage)) insertRun(runs, verdict.start, verdict.end);
+		}
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, start); i < timeline.length && timeline[i].start < end; i++) {
 			const group = timeline[i];
@@ -6154,19 +6224,23 @@ export class Subscriber {
 	// Edit the ranges by key, as `hooks.editSubscriber` does: only the ranges it adds resolve, and
 	// every other stays where it resolved. Mirrors the Rust `Subscriber::edit`.
 	#edit(edit: Edit): void {
-		const { ranges: _, ...scalars } = subscriptionDefaults({
+		const {
+			ranges: _,
+			placed: __,
+			...scalars
+		} = subscriptionDefaults({
 			priority: edit.priority,
 			order: edit.order,
 			ranges: [],
 		}) as Required<Subscription>;
 		const add = edit.add.map(([key, range]) => [key, rangesOf([range])[0]] as const);
 		const reordered = scalars.order !== this.#state.update.scalars()?.order;
-		const moved = this.#state.update.edit({ retire: edit.retire, add, ...scalars });
+		const moved = this.#state.update.edit({ retire: edit.retire, add, placed: edit.placed, ...scalars });
 		// A refused time start resolves every range again, as the Rust `Filter::stale` has it.
 		if (moved && this.#refusal) this.#resolve();
 		else if (moved) {
 			this.#window.edit(edit.retire, add, this.#latestGroup(), this.#holdings(), (key) =>
-				this.#state.update.since(key),
+				this.#state.update.joining(key),
 			);
 			// Leaves the lookups the retired ranges asked, which a settled window never reads again.
 			if (this.#lookups.length > 0) this.#lookUp();
@@ -6185,14 +6259,21 @@ export class Subscriber {
 	 * Mirrors the Rust `Subscriber::update`.
 	 */
 	update(options: Subscription) {
+		this.#update(options, true);
+	}
+
+	// {@link update}, keeping a live join whose max alone changed where it joined only with `retune`;
+	// without, as a subscription restated whole, every range is placed afresh. Mirrors the Rust
+	// `Subscriber::replace`.
+	#update(options: Subscription, retune: boolean): void {
 		const subscription = subscriptionDefaults(options);
 		const reordered = subscription.order !== this.#state.update.scalars()?.order;
-		const replaced = this.#state.update.set(subscription);
+		const replaced = this.#state.update.set(subscription, retune);
 		if (replaced === "replaced" || (replaced && this.#refusal)) this.#resolve();
 		else if (replaced) {
 			// Only a live join's max changed: each keeps where it joined.
 			this.#window.edit([], replaced, this.#latestGroup(), this.#holdings(), (key) =>
-				this.#state.update.since(key),
+				this.#state.update.joining(key),
 			);
 			this.#moved();
 		} else this.#ask();
