@@ -39,6 +39,16 @@ test("cron workflows only alert on scheduled failures", async () => {
 	}
 });
 
+test("CodSpeed alerts on failed landings, not on bisect dispatches", () => {
+	for (const event of ["push", "workflow_dispatch", "pull_request"]) {
+		for (const conclusion of ["failure", "timed_out", "success", "cancelled"]) {
+			expect(condition({ name: "CodSpeed", event, conclusion })).toBe(
+				event === "push" && ["failure", "timed_out"].includes(conclusion),
+			);
+		}
+	}
+});
+
 test("ordinary CI never subscribes to Discord alerts", () => {
 	for (const name of ["Check", "OBS", "Platform", "Quest"]) {
 		expect(watched).not.toContain(name);
