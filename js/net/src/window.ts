@@ -11,7 +11,7 @@
 
 import { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
-import { NO_MAX_DELAY, PAST_EVERY_GROUP, runsFrom, wireMillis } from "./internal.ts";
+import { NO_MAX_DELAY, runsFrom, wireMillis } from "./internal.ts";
 import type { Range, Start } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import { Sorted } from "./util/sorted.ts";

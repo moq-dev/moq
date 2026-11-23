@@ -80,14 +80,17 @@ import {
 	type Budget,
 	EMPTY,
 	isEmpty,
+	type Joining,
 	liveMillis,
 	type Resolved,
 	rangeTime,
+	SINCE_ZERO,
 	sameRanges,
 	UNHELD,
 	Window,
 	widest,
 } from "./window.ts";
+import { samePlaced } from "./demand.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
@@ -345,6 +348,13 @@ class Route {
 	}
 }
 
+/** The reader's ranges, and the live joins placed among them, resolved where its copies placed them. */
+interface Resolution {
+	from: readonly track.Range[];
+	placed?: ReadonlyMap<number, bigint>;
+	window: Window;
+}
+
 /** A route's copy, as one reader reads it. */
 interface Copy {
 	generation: number;
@@ -462,7 +472,7 @@ class Reader implements ResumeSource {
 	 */
 	#copies: Copy[] = [];
 	/** The reader's ranges, and the {@link #window} they resolved to. */
-	#resolution?: { from: readonly track.Range[]; window: Window };
+	#resolution?: Resolution;
 	/** The reader's cursor the copies were last bounded at: a lower start asks for a backfill. */
 	#bounded: { start: bigint; end?: bigint };
 	/** The newest group handed out: where a new copy is asked to start. */
@@ -767,7 +777,11 @@ class Reader implements ResumeSource {
 			copy.from = ranges;
 			copy.resolved = this.#window().resolved();
 		}
-		return { ...preferences, ranges: asked(ranges, copy.floor, copyEnd(copy), copy.resolved ?? []) };
+		// A live join placed already, here or where the reader's own request came from, is asked
+		// placed, so the copy starts it there and still expires it under its max.
+		const wire = asked(ranges, copy.floor, copyEnd(copy), copy.resolved ?? [], preferences.placed);
+		const { placed: _, ...rest } = preferences;
+		return wire.placed.size > 0 ? { ...rest, ranges: wire.ranges, placed: wire.placed } : { ...rest, ranges: wire.ranges };
 	}
 
 	/**
@@ -780,9 +794,14 @@ class Reader implements ResumeSource {
 	 */
 	#window(): Window {
 		const ranges = this.#ranges();
+		const placed = this.#shell.subscription.peek()?.placed;
 		let resolution = this.#resolution;
-		if (!resolution || (resolution.from !== ranges && !sameRanges(resolution.from, ranges))) {
-			resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD) };
+		if (
+			!resolution ||
+			(resolution.from !== ranges && !sameRanges(resolution.from, ranges)) ||
+			!samePlaced(resolution.placed, placed)
+		) {
+			resolution = this.#fresh(ranges);
 			this.#resolution = resolution;
 		}
 		if (resolution.window.settled) return resolution.window;
@@ -810,6 +829,20 @@ class Reader implements ResumeSource {
 			this.#resolve(resolved);
 		}
 		return resolution.window;
+	}
+
+	/**
+	 * A resolution of the reader's `ranges` with nothing placed but a live join already placed where
+	 * its preferences say, as each copy is asked to place it. Mirrors the Rust `mirrored_window`.
+	 */
+	#fresh(ranges: readonly track.Range[]): Resolution {
+		const placed = this.#shell.subscription.peek()?.placed;
+		const joining = (key: bigint): Joining => {
+			const at = placed?.get(Number(key));
+			return at === undefined ? SINCE_ZERO : { at };
+		};
+		const keyed = ranges.map((range, index) => [BigInt(index), range] as const);
+		return { from: ranges, placed, window: Window.keyed(keyed, undefined, UNHELD, joining) };
 	}
 
 	/**
@@ -936,7 +969,7 @@ class Reader implements ResumeSource {
 			if (this.#resolution && !sameRanges(this.#resolution.from, ranges)) {
 				// The serving copy's resume point may cut off groups the new ranges cover.
 				this.#resumed = true;
-				this.#resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD) };
+				this.#resolution = this.#fresh(ranges);
 				for (let index = this.#copies.length - 1; index >= 0; index--) {
 					if (this.#resolution.window.settled) break;
 					const copy = this.#copies[index];

@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
-import { PAST_EVERY_GROUP } from "./internal.ts";
 import type { Live, Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
 import {
@@ -248,7 +247,7 @@ describe("Window", () => {
 		held.joins = () => ({ group: 33n });
 		for (const lag of [0, 40]) {
 			held.answered = 3;
-			const window = Window.keyed([[0n, live(lag)]], 99n, held, () => 3);
+			const window = Window.keyed([[0n, live(lag)]], 99n, held, () => ({ since: 3 }));
 			expect([window.settled, window.contains(99n)]).toEqual([false, false]);
 			expect(window.joins()).toEqual([[lag, undefined, 0, 3]]);
 
@@ -262,8 +261,8 @@ describe("Window", () => {
 		// An answer of nothing places a join with an end past it, and keeps one without waiting.
 		held.answered = 3;
 		held.joins = () => "empty";
-		const bounded = Window.keyed([[0n, live(40, 50n)]], 99n, held, () => 3);
-		const open = Window.keyed([[0n, live(40)]], 99n, held, () => 3);
+		const bounded = Window.keyed([[0n, live(40, 50n)]], 99n, held, () => ({ since: 3 }));
+		const open = Window.keyed([[0n, live(40)]], 99n, held, () => ({ since: 3 }));
 		held.answered = 4;
 		expect(bounded.settle(99n, held)).toBe(true);
 		expect(covered(bounded, held.held)).toEqual([]);

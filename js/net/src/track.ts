@@ -65,6 +65,7 @@ import {
 	type Found,
 	type Holdings,
 	type Join,
+	type Joining,
 	joinsLive,
 	rangesOf,
 	UNHELD,
@@ -414,6 +415,15 @@ export interface Subscription {
 	 * fresh. Each subscriber's own publisher still serves it in its own order.
 	 */
 	order?: Order;
+	/**
+	 * The group each live join among {@link ranges} was already placed at, by its index there: a
+	 * route switch asks a new copy for a join an earlier copy placed, which starts at that group as a
+	 * time start would and still goes stale past its max. Its lag places nothing. moq-lite-07 carries
+	 * one as a `Joined` start; older wires as a time start under the one max age, which takes its
+	 * max. Mirrors the Rust `Subscription::placed`.
+	 * @internal
+	 */
+	placed?: ReadonlyMap<number, bigint>;
 }
 
 /**
@@ -454,11 +464,13 @@ function subscriptionDefaults(subscription: Subscription = Subscription.default(
 		throw new TypeError("Subscription delay, maxAge, and maxDelay are unsupported; use a live range's max");
 	}
 	if ("groups" in subscription) throw new TypeError("Subscription groups is unsupported; use ranges");
-	return {
+	const out: Subscription = {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
 		order: orderOf(subscription.order),
 		ranges: subscription.ranges === undefined ? [latest()] : rangesOf(subscription.ranges),
 	};
+	if (subscription.placed !== undefined && subscription.placed.size > 0) out.placed = subscription.placed;
+	return out;
 }
 
 // A plain JS caller can pass anything, and silently serving a typo as descending would hide it.
@@ -2197,7 +2209,7 @@ export class Producer {
 	// publisher applies its own, as each reader's budget does, so the demand asked upstream is the
 	// same before and after the info lands.
 	#join(sink: TrackState): void {
-		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: [...sink.update.ranges()] }, true);
+		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: sink.update.held() }, true);
 		sink.update.watch = (change) => this.#moved(sink, change);
 		this.#subscribed();
 	}
@@ -2206,7 +2218,7 @@ export class Producer {
 	#leave(sink: TrackState): void {
 		sink.update.watch = undefined;
 		this.#countAsks(sink, [], []);
-		this.#moved(sink, { before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
+		this.#moved(sink, { before: sink.update.contribution(), gone: sink.update.held(), came: [] });
 		this.#counted.delete(sink);
 		this.#subscribed();
 	}
@@ -2236,7 +2248,7 @@ export class Producer {
 	// Take a sink that became a fetch out of the live aggregate, before anyone sees it there.
 	#unlive(sink: TrackState): void {
 		if (!this.#counted.delete(sink)) return;
-		this.#live.replace({ before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
+		this.#live.replace({ before: sink.update.contribution(), gone: sink.update.held(), came: [] });
 		this.#subscribed();
 	}
 
@@ -3841,7 +3853,7 @@ export class Subscriber {
 			scalars ? update.entries() : [[0n, {}]],
 			this.#latestGroup(),
 			this.#holdings(),
-			(key) => update.since(key),
+			(key) => update.joining(key),
 		);
 		// Leaves the lookups the old ranges asked, which a settled window never reads again.
 		if (this.#lookups.length > 0) this.#lookUp();
@@ -4713,7 +4725,11 @@ export class Subscriber {
 			// A preview never takes an answer recorded before it: the live edge has moved since.
 			const tick = joinTick();
 			const ranges = (subscription.ranges ?? [{}]).map((range, index) => [BigInt(index), range] as const);
-			return Window.keyed(ranges, subscriber.#latestGroup(), subscriber.#holdings(), () => tick).resolved();
+			const joining = (key: bigint): Joining => {
+				const at = subscription.placed?.get(Number(key));
+				return at === undefined ? { since: tick } : { at };
+			};
+			return Window.keyed(ranges, subscriber.#latestGroup(), subscriber.#holdings(), joining).resolved();
 		};
 		hooks.tryNextGroup = (subscriber, floor) => {
 			subscriber.#raiseNext(floor);
@@ -6162,19 +6178,19 @@ export class Subscriber {
 	// Edit the ranges by key, as `hooks.editSubscriber` does: only the ranges it adds resolve, and
 	// every other stays where it resolved. Mirrors the Rust `Subscriber::edit`.
 	#edit(edit: Edit): void {
-		const { ranges: _, ...scalars } = subscriptionDefaults({
+		const { ranges: _, placed: __, ...scalars } = subscriptionDefaults({
 			priority: edit.priority,
 			order: edit.order,
 			ranges: [],
 		}) as Required<Subscription>;
 		const add = edit.add.map(([key, range]) => [key, rangesOf([range])[0]] as const);
 		const reordered = scalars.order !== this.#state.update.scalars()?.order;
-		const moved = this.#state.update.edit({ retire: edit.retire, add, ...scalars });
+		const moved = this.#state.update.edit({ retire: edit.retire, add, placed: edit.placed, ...scalars });
 		// A refused time start resolves every range again, as the Rust `Filter::stale` has it.
 		if (moved && this.#refusal) this.#resolve();
 		else if (moved) {
 			this.#window.edit(edit.retire, add, this.#latestGroup(), this.#holdings(), (key) =>
-				this.#state.update.since(key),
+				this.#state.update.joining(key),
 			);
 			// Leaves the lookups the retired ranges asked, which a settled window never reads again.
 			if (this.#lookups.length > 0) this.#lookUp();
@@ -6200,7 +6216,7 @@ export class Subscriber {
 		else if (replaced) {
 			// Only a live join's max changed: each keeps where it joined.
 			this.#window.edit([], replaced, this.#latestGroup(), this.#holdings(), (key) =>
-				this.#state.update.since(key),
+				this.#state.update.joining(key),
 			);
 			this.#moved();
 		} else this.#ask();
