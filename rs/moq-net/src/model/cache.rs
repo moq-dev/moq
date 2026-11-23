@@ -812,9 +812,10 @@ impl Edges {
 		let Some(inner) = &self.0 else {
 			return;
 		};
+		let mut order = inner.order.lock().unwrap_or_else(PoisonError::into_inner);
+		// Read under the lock a move updates them under, so the two always match.
 		let moves = track.moves.load(Ordering::Relaxed);
 		let key = (track.rank(), track.seq.load(Ordering::Relaxed));
-		let mut order = inner.order.lock().unwrap_or_else(PoisonError::into_inner);
 		order.insert(key, (Arc::downgrade(track), moves));
 		// Each move or rank change leaves its track's earlier entry behind: drop those once
 		// they clearly outnumber the current ones, which costs a constant per change.
@@ -823,11 +824,21 @@ impl Edges {
 		}
 	}
 
-	/// Number the session's next live-edge move, newer than every earlier one.
-	fn next_move(&self) -> u64 {
-		self.0
-			.as_ref()
-			.map_or(0, |inner| inner.moves.fetch_add(1, Ordering::Relaxed))
+	/// Move `track`'s live edge to a newer group, queued as the session's newest.
+	fn moved(&self, track: &Arc<Track>) {
+		let Some(inner) = &self.0 else {
+			track.moves.fetch_add(1, Ordering::Relaxed);
+			return;
+		};
+		// Under the order's lock, so a concurrent queue never pairs this move with the last one's
+		// age, or overwrites this entry with the last move's.
+		let order = inner.order.lock().unwrap_or_else(PoisonError::into_inner);
+		track
+			.seq
+			.store(inner.moves.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+		track.moves.fetch_add(1, Ordering::Relaxed);
+		drop(order);
+		self.queue(track);
 	}
 }
 
@@ -1105,10 +1116,8 @@ impl Track {
 	/// The live edge moved to a newer group: queue it as its session's newest. Called under
 	/// the track lock, which orders the moves.
 	pub(super) fn edge_moved(self: &Arc<Self>) {
-		self.seq.store(self.edges.next_move(), Ordering::Relaxed);
-		self.moves.fetch_add(1, Ordering::Relaxed);
 		self.queued.store(true, Ordering::Relaxed);
-		self.edges.queue(self);
+		self.edges.moved(self);
 	}
 
 	/// The live edge billed more: queue it again, at the age it had, if a reclaim took its

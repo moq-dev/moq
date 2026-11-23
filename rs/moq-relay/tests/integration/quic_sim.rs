@@ -330,7 +330,7 @@ const LOSSLESS: usize = 12;
 
 /// Write `tracks` tracks of one group each, [`BULK`] bytes in `chunk`-byte frames, through
 /// one relay, and read the first `read` bytes of each slower than they are written. Track `i`
-/// has publisher priority `i`: the [`LOSSLESS`] highest must arrive whole, and a lower one may
+/// has publisher priority `i - 128`, ordered for up to 256 tracks: the [`LOSSLESS`] highest must arrive whole, and a lower one may
 /// end early with an error but never delivers a wrong frame.
 async fn bulk(tracks: usize, chunk: usize, read: usize) {
 	let network = Network::new(0);
@@ -348,7 +348,8 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 				.broadcast()
 				.create_track(
 					format!("data{index}"),
-					moq_net::track::Info::default().with_priority(i8::try_from(index).expect("a priority per track")),
+					moq_net::track::Info::default()
+						.with_priority(i8::try_from(index as i64 - 128).expect("at most 256 tracks")),
 				)
 				.expect("track")
 		})
