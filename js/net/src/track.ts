@@ -4807,6 +4807,7 @@ export class Subscriber {
 		// Starts never rewind, so a run whose newest group is stale is given up whole: unasked, or
 		// withdrawn from the fill still out for it, as `#askFills` gives up an owed run.
 		const giveUp = (run: Run) => {
+			kept.asked = removeRun(kept.asked, run.start, run.end);
 			insertStale(kept.stale, run.start, run.end, drift.budget);
 			fills.moved(kept.asker, run.start, run.end);
 		};
