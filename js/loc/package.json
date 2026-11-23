@@ -15,7 +15,8 @@
 	"sideEffects": false,
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
-		"check": "tsc --noEmit && bun test",
+		"check": "bun check --no-script",
+		"test": "bun test",
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {

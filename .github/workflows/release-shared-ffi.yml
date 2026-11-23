@@ -1,6 +1,6 @@
 name: Release FFI
 
-# Default-feature libraries are identical across Go, Kotlin and Swift: build
+# Default-feature libraries are identical across Go, Kotlin, Swift and Dart: build
 # each target once, then preserve each package's own artifacts and publishers.
 on:
   push:
@@ -54,6 +54,19 @@ jobs:
     with:
       reuse-native: true
     secrets: inherit
+
+  # Dart ships these targets plus two Apple ones it builds itself, and publishes
+  # to pub.dev from this tag run.
+  dart:
+    name: Release Dart FFI
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-dart-ffi.yml
+    with:
+      reuse-native: true
+    permissions:
+      contents: write
+      id-token: write
 
   # The wrapper publishes once its bindings are on Maven Central. Called rather
   # than chained by workflow_run, so it runs as this tag, which the `publish`

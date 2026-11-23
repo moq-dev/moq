@@ -349,7 +349,7 @@ class BridgeStream:
         self._tracks[config.rendition] = moq.media.TrackProducer.video(
             self._broadcast,
             moq.media.VideoInit(
-                format=moq.media.VideoFormat.H264,
+                format=moq.media.VideoFormat.h264(),
                 data=config.init,
                 hint=moq.media.VideoHint(
                     coded=moq.media.Dimensions(width=rendition.width, height=rendition.height),

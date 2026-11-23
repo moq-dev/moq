@@ -599,6 +599,15 @@ impl Permit {
 			.fold(scope, |scope, prefixes| scope.intersect(prefixes))
 	}
 
+	/// The paths `scope` holds that the limit allows too: what the peer may offer us there.
+	#[cfg(feature = "async")]
+	pub(crate) fn limiting(&self, scope: Prefixes) -> Prefixes {
+		match &self.limit {
+			Some(limit) => scope.intersect(limit),
+			None => scope,
+		}
+	}
+
 	/// Whether the peer's grant alone allows `path`.
 	pub(crate) fn granted(&self, path: &str) -> bool {
 		self.granted.as_ref().is_none_or(|granted| granted.matches(path))
@@ -1395,6 +1404,15 @@ impl Link {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn permit(&self, direction: Direction) -> Permit {
 		self.read(|link, _| link.permit(direction))
+	}
+
+	/// Whether the scope set for the peer leaves out no path in either direction, as when
+	/// none was set and only the origin handles bound it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn admits_whole(&self) -> bool {
+		[Direction::Publish, Direction::Subscribe]
+			.into_iter()
+			.all(|direction| self.within_limit(direction, ""))
 	}
 
 	/// The limit once it may have changed since `epoch` last saw it, advancing `epoch`.
@@ -2468,9 +2486,12 @@ impl Issued {
 
 	/// Wait for the peer to withdraw the token ([`Error::Cancel`]), the request it rode on
 	/// to end ([`Error::Cancel`]), or its stream or the session to end.
+	///
+	/// The future holds the issue, not the grant, so dropping the grant still ends it.
 	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| poll_closed(&self.issue, waiter)).await
+	pub fn closed(&self) -> impl Future<Output = Error> + Send + 'static {
+		let issue = self.issue.clone();
+		kio::wait(move |waiter| poll_closed(&issue, waiter))
 	}
 }
 
@@ -3224,6 +3245,26 @@ mod tests {
 		handle.handle().authorize(&Grant::all());
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(handle.allows(Direction::Subscribe, "other"));
+	}
+
+	/// A session admits the whole tree while no scope bounds the peer, or one covers
+	/// every path in both directions, and not once either leaves a path out.
+	#[test]
+	fn a_scope_admits_whole_only_when_it_leaves_nothing_out() {
+		let handle = Link::new(false);
+		assert!(handle.admits_whole());
+
+		handle.handle().authorize(&grant(&["tenant-a"], &["tenant-a"]));
+		assert!(!handle.admits_whole());
+		handle.handle().authorize(&grant(&[""], &["tenant-a"]));
+		assert!(!handle.admits_whole());
+		handle.handle().authorize(&grant(&["tenant-a"], &[""]));
+		assert!(!handle.admits_whole());
+		handle.handle().authorize(&Grant::default());
+		assert!(!handle.admits_whole());
+
+		handle.handle().authorize(&grant(&[""], &[""]));
+		assert!(handle.admits_whole());
 	}
 
 	/// Our own grant does not decide what the peer may offer us, only the limit does.

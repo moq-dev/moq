@@ -9,6 +9,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
+import type { JoinAsk } from "../demand.ts";
 import {
 	error,
 	NotFound,
@@ -31,7 +32,6 @@ import {
 	hiddenBelow,
 	hooks,
 	maxDelayOf,
-	minDelayOf,
 	NO_MAX_DELAY,
 	type Run,
 	removeRun,
@@ -85,6 +85,8 @@ import {
 	EMPTY_RANGE,
 	inclusiveGroupEnd,
 	LiveRanges,
+	type RangeKind,
+	rangeKey,
 	requestedRange,
 	Subscribe,
 	SubscribeUpdate,
@@ -104,7 +106,6 @@ import {
 	hasInstance,
 	hasLengthFirst,
 	hasMediaTime,
-	hasMinDelay,
 	hasOrder,
 	hasProbeRtt,
 	hasRanges,
@@ -210,9 +211,9 @@ interface SubscribeEntry {
 	// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range starts on lite-07, by Range
 	// ID, undefined for one with nothing to deliver.
 	starts: Map<bigint, bigint | undefined>;
-	// The latest group each range's start was counted back from, by Range ID: the publisher's when
-	// SUBSCRIBE_START answered, or the copy's when SUBSCRIBE_STARTED did.
-	edges: Map<bigint, bigint | undefined>;
+	// The tick the copy recorded each live join range's answer at, by Range ID (see
+	// `hooks.answerJoin`): one with none is still unanswered.
+	joinTicks: Map<bigint, number>;
 	// The first group the ranges last sent ask for, which a lite-07 declaration answers.
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
@@ -234,9 +235,18 @@ interface SubscribeEntry {
 	filling?: boolean;
 	// Lite-07: the copy's fills of more than one group, which ask through this subscription.
 	fills?: RangeFills;
-	// The Range IDs of the fills' live ranges; the rest are the demand's, which alone say where the
-	// live feed starts.
+	// The Range IDs of the fills' live ranges; with the probes', the rest are the demand's, which
+	// alone say where the live feed starts.
 	fillIds: Set<bigint>;
+	// The Range IDs of the probes' live ranges: a range of its own from each time start the copy's
+	// readers wait on, asking only where the publisher starts it, and one for each live join they
+	// wait on that no unanswered range asks. Like a fill's, it says nothing of where the live feed is.
+	probeIds: Set<bigint>;
+	// The narrowest max delay in milliseconds each live range was asked under, by Range ID, from when
+	// it was added until its start was answered: the wire does not say which update the publisher
+	// resolved it under. An answer with no group at or before its time holds only for a reader
+	// within it.
+	budgets: Map<bigint, number>;
 	// The groups the fills' ranges ask for, as last sent: widened with the demand's ranges until
 	// they fit, so a run may cover more than the fills ask.
 	fillGroups: readonly Run[];
@@ -1421,7 +1431,6 @@ export class Subscriber {
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
 			maxDelay: wireMaxDelay(subscription),
-			minDelay: minDelayOf(subscription),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
 		});
@@ -1649,14 +1658,13 @@ export class Subscriber {
 	// `subscribe_fields`.
 	async #subscribeFields(
 		msg: Subscribe,
-		terms: { priority: number; order?: track.Order; maxDelay: number | null; minDelay?: number },
+		terms: { priority: number; order?: track.Order; maxDelay: number | null },
 	): Promise<number> {
 		const widest = new Subscribe({
 			...msg,
 			priority: terms.priority,
 			order: terms.order,
 			maxDelay: terms.maxDelay,
-			minDelay: terms.minDelay,
 			id: (1n << 64n) - 1n,
 			ranges: [{}],
 		});
@@ -1684,6 +1692,9 @@ export class Subscriber {
 		});
 		// A new upstream subscription: stale runs an earlier one reported were judged under other terms.
 		hooks.supersedeStale(producer);
+		// A wire whose ranges carry each live join answers where each starts, which alone places a
+		// reader's.
+		if (hasRanges(this.version)) hooks.answersJoins(producer);
 		if (!hasRanges(this.version)) {
 			hooks.dropAnchors(producer);
 			// A wire without ranges starts a time anchor at the first group at or after it, so its
@@ -1706,13 +1717,16 @@ export class Subscriber {
 			asked: [...ranges],
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
-			edges: new Map(),
+			joinTicks: new Map(),
 			sent: 0,
 			stream: { kind: "setup" },
 			fillIds: new Set(),
+			probeIds: new Set(),
+			budgets: new Map(),
 			fillGroups: [],
 			fillsChanged: new Signal(0),
 		};
+		for (const id of entry.live.ids()) entry.budgets.set(id, entry.staleBudget);
 		if (hasDatagrams(this.version) && !hasDatagramTracks(this.version) && state.consumer && state.legacyKey) {
 			const info = { priority: producer.priority, timescale: framing.scale };
 			const pending = this.#legacyRequests.get(state.legacyKey);
@@ -2177,15 +2191,18 @@ export class Subscriber {
 			asked: ranges,
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
-			edges: new Map(),
+			joinTicks: new Map(),
 			sent: 0,
 			// Its responses are read here, which owns this stream's end.
 			stream: { kind: "setup" },
 			filling: true,
 			fillIds: new Set(),
+			probeIds: new Set(),
+			budgets: new Map(),
 			fillGroups: [],
 			fillsChanged: new Signal(0),
 		};
+		for (const id of entry.live.ids()) entry.budgets.set(id, entry.staleBudget);
 		const left = new AbortController();
 		const signal = consumed.valid ? AbortSignal.any([consumed.valid, left.signal]) : left.signal;
 		const leaving = new Promise<void>((resolve) =>
@@ -2524,11 +2541,8 @@ export class Subscriber {
 							`SUBSCRIBE_OK resolves ${resp.start.starts.length} ranges, not ${entry.live.initial}`,
 						);
 					// An update may have retired some already, whose starts say nothing now.
-					const edge = resp.start.largest?.position.group;
 					resp.start.starts.forEach((start, index) => {
-						if (!entry.live.get(BigInt(index))) return;
-						entry.starts.set(BigInt(index), start);
-						entry.edges.set(BigInt(index), edge);
+						if (entry.live.get(BigInt(index))) entry.starts.set(BigInt(index), start);
 					});
 				}
 				// The lowest range start is the first group served; none leaves nothing owed.
@@ -2584,7 +2598,6 @@ export class Subscriber {
 				const range = entry.live.get(id);
 				if (range) {
 					entry.starts.set(id, start);
-					entry.edges.set(id, hooks.producerLargest(entry.track).peek()?.group);
 					// A fill's range starting past where it asked skips groups it will not deliver.
 					const asked = entry.fillIds.has(id) ? fillRun(range) : undefined;
 					if (asked) {
@@ -2614,15 +2627,15 @@ export class Subscriber {
 				entry.fills?.refuse(start, end, error);
 			} else if ("skip" in resp) {
 				const { start, end } = resp.skip;
-				this.#skipped(entry, start, end, "SUBSCRIBE_SKIP");
+				this.#skipped(entry, start, end);
 			}
 		}
 	}
 
-	// The publisher never produced `[start, end)`, as `by` (a SUBSCRIBE_SKIP, or a GROUP's Previous
-	// Start) says, so nothing is waited for and no reader ends. A skip replaces any drop of the same
-	// groups; a reader a drop already ended stays ended.
-	#skipped(entry: SubscribeEntry, start: bigint, end: bigint, by: string): void {
+	// The publisher never produced `[start, end)`, as a SUBSCRIBE_SKIP says, so nothing is waited
+	// for and no reader ends. A skip replaces any drop of the same groups; a reader a drop already
+	// ended stays ended.
+	#skipped(entry: SubscribeEntry, start: bigint, end: bigint): void {
 		entry.tail.account(start, end);
 		// A fill owing them is answered: the source never had them.
 		entry.fills?.refuse(start, end, new NotFound(`group ${start}`));
@@ -2631,7 +2644,7 @@ export class Subscriber {
 		const [cached] = hooks.skipTrackGroups(entry.track, start, end);
 		if (cached) {
 			console.warn(
-				`protocol error: ${by} skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
+				`protocol error: SUBSCRIBE_SKIP skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
 			);
 		}
 	}
@@ -2677,7 +2690,7 @@ export class Subscriber {
 		const floor = rangesStart(ranges);
 		// Lite-07 answers with SUBSCRIBE_OK once the track ends, unless nothing was asked below the
 		// end. Each range the publisher holds is then owed from the start SUBSCRIBE_OK or
-		// SUBSCRIBE_STARTED named, which accounts for a skipped prefix and resolves a relative or
+		// SUBSCRIBE_STARTED named, which accounts for a skipped prefix and resolves a live join or a
 		// time start; one whose SUBSCRIBE_STARTED is still on its way owes what nothing says yet.
 		if (hasRanges(this.version)) {
 			if (entry.start === undefined) return !(end > (floor ?? 0n));
@@ -2687,7 +2700,7 @@ export class Subscriber {
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
 				const model = requestedRange(range);
-				owed.push({ ...model, start: { time: at } });
+				owed.push({ ...model, start: at });
 			}
 			// Each starts at the group its publisher reported starting it at.
 			const window = new Window(owed, entry.track.largest()?.group, AT_KEYS);
@@ -2729,10 +2742,7 @@ export class Subscriber {
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			order: msg.order,
-			delay: {
-				max: msg.maxDelay === null ? null : Duration.millis(msg.maxDelay),
-				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
-			},
+			delay: { max: msg.maxDelay === null ? null : Duration.millis(msg.maxDelay) },
 			ranges: entry.asked,
 		};
 
@@ -2743,6 +2753,9 @@ export class Subscriber {
 		// What the fills asked with the last update, and the priority it carried.
 		let sentFills: Run[] = [];
 		let sentPriority = msg.priority;
+		// The time starts and live joins the readers waited on as the last update went out.
+		let sentAsks: (readonly [bigint, number])[] = [];
+		let sentJoins: JoinAsk[] = [];
 		const asked = hooks.demandAsked(track.demand());
 		const edge = hooks.producerLargest(track);
 		for (;;) {
@@ -2757,6 +2770,9 @@ export class Subscriber {
 					? wanted
 					: undefined;
 			const current = hooks.requested(track).peek();
+			// Lite-07 asks upstream to place each time start and live join the readers wait on.
+			const asks = hasRanges(this.version) ? hooks.requested(track).asks() : [];
+			const joins = hasRanges(this.version) ? hooks.requested(track).joins() : [];
 			// Lite-07 asks the held fills' groups through the same subscription, under the demand's
 			// terms but the more urgent priority.
 			const fills = entry.fills?.ask;
@@ -2767,6 +2783,8 @@ export class Subscriber {
 				(refresh === undefined &&
 					priority === sentPriority &&
 					sameRuns(fillGroups, sentFills) &&
+					sameAsks(asks, sentAsks) &&
+					sameJoins(joins, sentJoins) &&
 					this.#sameSubscription(current, lastSent))
 			) {
 				// Each wake releases the quiet signals too, including when termination wins.
@@ -2802,9 +2820,12 @@ export class Subscriber {
 					priority,
 					order: current.order,
 					maxDelay: wireMaxDelay(current),
-					minDelay: minDelayOf(current),
 				});
-				const budget = Fit.budget(fields, entry.live.next(), demanded.length + fillGroups.length);
+				const budget = Fit.budget(
+					fields,
+					entry.live.next(),
+					demanded.length + asks.length + joins.length + fillGroups.length,
+				);
 				const fitted = Fit.fit(demanded, fillGroups, entry.fills?.avoid() ?? [], budget);
 				// A fill's range starting past its run speaks only while that run is asked whole.
 				entry.fills?.retireSkipped(fitted.fills);
@@ -2812,18 +2833,44 @@ export class Subscriber {
 					start: { absolute: run.start },
 					end: { absolute: run.end },
 				}));
-				// The demand's ranges, then the fills'.
-				const edited = entry.live.edit([...fitted.ranges, ...fillRanges], fillRanges.length, (id) =>
-					entry.fillIds.has(id),
+				// The probes the readers' asks and joins need, as many as fit beside the rest: those left
+				// out go once an answer lets the readers waiting on others go.
+				const asked = maxDelayOf(current);
+				const wanted = probes(entry, asks, fitted.ranges, asked);
+				const joined = joinProbes(entry, joins, fitted.ranges, asked);
+				const probed = Fit.fitAfter(
+					budget,
+					[...fitted.ranges, ...fillRanges],
+					[...wanted.probes, ...joined.probes],
+				);
+				const kept = new Set(probed.map(rangeKey));
+				// A live probe asked afresh is retired and added again, which the publisher answers anew.
+				const renew = new Set<bigint>();
+				for (const id of [...wanted.reasked, ...joined.reasked]) {
+					const range = entry.live.get(id);
+					if (range && kept.has(rangeKey(range))) renew.add(id);
+				}
+				const first = entry.live.next();
+				// The demand's ranges, then the probes, then the fills'.
+				const kindOf = (id: bigint): RangeKind =>
+					entry.fillIds.has(id) ? "fill" : entry.probeIds.has(id) ? "probe" : "demand";
+				const edited = entry.live.edit(
+					[...fitted.ranges, ...probed, ...fillRanges],
+					{ probes: probed.length, fills: fillRanges.length, kindOf },
+					renew,
 				);
 				edit = edited;
-				for (const id of entry.starts.keys())
-					if (!entry.live.get(id)) {
-						entry.starts.delete(id);
-						entry.edges.delete(id);
-					}
+				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
+				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
+				for (const id of entry.budgets.keys()) if (!entry.live.get(id)) entry.budgets.delete(id);
+				// A range still unanswered may be resolved under this budget as well.
+				for (const [id, held] of entry.budgets)
+					if (!entry.starts.has(id)) entry.budgets.set(id, Math.min(held, asked));
+				for (let id = first; id < entry.live.next(); id++) entry.budgets.set(id, asked);
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
+				for (const id of entry.probeIds) if (!entry.live.get(id)) entry.probeIds.delete(id);
+				for (const id of edited.probeIds) entry.probeIds.add(id);
 				// The groups a fill newly asks for wait a fresh grace too.
 				for (const run of fitted.fills)
 					for (const gap of runGaps(entry.fillGroups, run.start, run.end))
@@ -2840,7 +2887,6 @@ export class Subscriber {
 				priority,
 				order: current.order,
 				maxDelay: wireMaxDelay(current),
-				minDelay: minDelayOf(current),
 				startGroup: span.start,
 				endGroup: inclusiveGroupEnd(span.end),
 				ranges: edit?.add,
@@ -2863,6 +2909,8 @@ export class Subscriber {
 			lastSent = { ...current };
 			sentFills = fillGroups;
 			sentPriority = priority;
+			sentAsks = asks;
+			sentJoins = joins;
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
 	}
@@ -2871,38 +2919,43 @@ export class Subscriber {
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
-		// Where the publisher started each live range asked from a group's start or the oldest group
-		// (time 0), with the last time it reaches, which a reader's time start there or folded into it
-		// resolves to when the copy holds no group at it. Mirrors the Rust `SubStream::report_starts`.
-		const times: [bigint, bigint | undefined, bigint | undefined][] = [];
-		// And each one counting back, which the copy, holding only part of the track, can't count,
-		// with the latest group it counted back from.
-		const relative: [bigint, bigint, bigint | undefined][] = [];
+		// Where the publisher started each live range asked from a group's start, or from the oldest
+		// group as time 0, with the budget it was answered under, which a reader's time start there
+		// resolves to when the copy can't place it among its groups; and one asked as a live join,
+		// whose answer alone places that join for the copy's readers. Mirrors the Rust
+		// `SubStream::report_starts`.
+		const times: [bigint, bigint | undefined, number][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
-			const time = range?.start?.time ?? range?.start?.absolute;
-			const back = range?.start?.relative;
-			if (!entry.starts.has(id)) continue;
+			if (range === undefined || !entry.starts.has(id)) continue;
 			// Undefined for a range with no group to deliver.
 			const at = entry.starts.get(id);
-			if (back !== undefined) {
-				if (at !== undefined) relative.push([back, at, entry.edges.get(id)]);
-			} else if (time !== undefined || range?.start === undefined) {
-				const asked = time ?? 0n;
-				if (at !== undefined || reaches(range?.end, asked)) times.push([asked, at, through(range?.end, asked)]);
+			const budget = entry.budgets.get(id) ?? 0;
+			if (range.start?.live !== undefined) {
+				// Recorded once, as it arrives: a reader that began waiting since takes only a newer answer.
+				if (!entry.joinTicks.has(id))
+					entry.joinTicks.set(
+						id,
+						hooks.answerJoin(entry.track, range.start.live, through(range.end), at, budget),
+					);
+				continue;
 			}
+			const asked = range.start?.time ?? range.start?.absolute ?? 0n;
+			// One with no group to deliver says nothing of its time unless it reaches it.
+			if (at !== undefined || reaches(range.end, asked)) times.push([asked, at, budget]);
 		}
-		// The wire does not say which budget a range resolved under, so an empty one holds only for the
-		// narrowest asked.
-		hooks.timeStarts(entry.track, times, entry.staleBudget);
-		hooks.relativeStarts(entry.track, relative);
+		hooks.timeStarts(entry.track, times);
+		const live = entry.live.ranges();
+		hooks.retainJoins(entry.track, (min, end) =>
+			live.some((range) => range.start?.live === min && through(range.end) === end),
+		);
 
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;
 
 		for (const id of entry.live.ids()) {
-			// Only the demand's ranges say where the live feed starts.
-			if (entry.fillIds.has(id)) continue;
+			// Only the demand's ranges say where the live feed starts, not a fill's or a probe.
+			if (entry.fillIds.has(id) || entry.probeIds.has(id)) continue;
 			if (!entry.starts.has(id)) {
 				pending = true;
 				break;
@@ -2935,14 +2988,7 @@ export class Subscriber {
 		}
 		// A wire without `Group Order` cannot carry a change to it.
 		const sameOrder = !hasOrder(this.version) || (a.order ?? "descending") === (b.order ?? "descending");
-		return (
-			(a.priority ?? 0) === (b.priority ?? 0) &&
-			sameOrder &&
-			maxDelayOf(a) === maxDelayOf(b) &&
-			// A wire without `Subscriber Min Age` cannot carry a change to it.
-			(!hasMinDelay(this.version) || minDelayOf(a) === minDelayOf(b)) &&
-			rangesEqual
-		);
+		return (a.priority ?? 0) === (b.priority ?? 0) && sameOrder && maxDelayOf(a) === maxDelayOf(b) && rangesEqual;
 	}
 
 	/**
@@ -2965,16 +3011,6 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
-		// The group before it must start below it, or the header contradicts itself: only this
-		// stream ends, as a malformed FRAME does.
-		if (group.previous !== undefined && group.previous >= group.key) {
-			stream.stop(
-				new StreamError(StreamCode.MalformedTrack, {
-					message: `group ${group.key} names group ${group.previous} as the one before it`,
-				}),
-			);
-			return;
-		}
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.key, group.key + 1n);
 		// A drop that overtook this stream, rather than a gap the grace gave up on.
@@ -3023,11 +3059,6 @@ export class Subscriber {
 				offset: group.frameStart,
 				fill: entry.filling,
 			});
-			// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP
-			// would say. Recorded once the group is, so a relay serving the copy sees the group the
-			// skip runs up to, whose own GROUP passes over it again.
-			const passed = group.passedOver();
-			if (passed.start < passed.end) this.#skipped(entry, passed.start, passed.end, `GROUP ${group.key}`);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
 			// A drop that overtook the header already accounts for the group; a copy served again is
@@ -3040,7 +3071,15 @@ export class Subscriber {
 
 			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
 			if (end === undefined) producer.finish();
-			else producer.finishAt(end);
+			else {
+				producer.finishAt(end);
+				// No other group starts inside the span, which the tail counts as it counts the
+				// group, and the track records skipped, as its own publisher's append did.
+				if (end > group.key + 1n) {
+					tail.account(group.key + 1n, end);
+					hooks.skipTrackGroups(track, group.key + 1n, end);
+				}
+			}
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything
@@ -3435,12 +3474,125 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	}
 }
 
-// The last time a lite-07 range ending at `end` reaches, undefined while it follows the live edge:
-// an exclusive group end stops at the time before it, and a relative end, unknown here, at the
-// range's own time `asked`. Mirrors the Rust `SubStream::report_starts`.
+// The probes to ask for `asks`, each a time start the copy's readers wait on with the widest budget
+// one waits under in milliseconds, beside the demand's `ranges` going out under `budget`, and the
+// live probes to ask afresh: one answered under a narrower budget than its readers'. A demand range
+// from the same time, asked under a budget as wide, answers it already. Mirrors the Rust `probes`.
+function probes(
+	entry: SubscribeEntry,
+	asks: readonly (readonly [bigint, number])[],
+	ranges: readonly WireRange[],
+	budget: number,
+): { probes: WireRange[]; reasked: bigint[] } {
+	// The live ranges of a kind equal to `range`, each with the budget it was asked under.
+	const live = (range: WireRange, probe: boolean): [bigint, number][] => {
+		const key = rangeKey(range);
+		const found: [bigint, number][] = [];
+		for (const [id, held] of entry.live.entries()) {
+			if (entry.fillIds.has(id) || entry.probeIds.has(id) !== probe || rangeKey(held) !== key) continue;
+			found.push([id, entry.budgets.get(id) ?? 0]);
+		}
+		return found;
+	};
+	const out: WireRange[] = [];
+	const reasked: bigint[] = [];
+	for (const [time, wanted] of asks) {
+		const from = (range: WireRange) => {
+			const start = range.start;
+			return (
+				(start?.time ?? (start?.absolute !== undefined && !start.frame ? start.absolute : undefined)) === time
+			);
+		};
+		// Asked under this budget unless live already, under the one it was recorded with.
+		const answers = (range: WireRange) => {
+			const held = live(range, false);
+			return (held.length > 0 ? Math.max(...held.map(([, asked]) => asked)) : budget) >= wanted;
+		};
+		if (ranges.some((range) => from(range) && answers(range))) continue;
+		const range = probe(time);
+		for (const [id, asked] of live(range, true)) if (asked < wanted) reasked.push(id);
+		out.push(range);
+	}
+	return { probes: out, reasked };
+}
+
+// The probes to ask for `joins`, each a live join the copy's readers wait on, beside the demand's
+// `ranges` going out under `budget`, and the live probes to ask afresh: one answered before a reader
+// began waiting, or under a narrower budget than its readers'.
+//
+// A live range asking the join answers it when it is still unanswered, or was answered after every
+// waiting reader began, under a budget as wide as theirs. So does a demand range asking it that this
+// edit adds, which its answer comes after. A probe answering it stays until its readers stop
+// waiting, so its answer outlives their placing. Mirrors the Rust `join_probes`.
+function joinProbes(
+	entry: SubscribeEntry,
+	joins: readonly JoinAsk[],
+	ranges: readonly WireRange[],
+	budget: number,
+): { probes: WireRange[]; reasked: bigint[] } {
+	const out: WireRange[] = [];
+	const reasked: bigint[] = [];
+	for (const join of joins) {
+		const range = joinProbe(join.min, join.end);
+		const key = rangeKey(range);
+		const answers = (id: bigint) => {
+			const tick = entry.joinTicks.get(id);
+			const fresh = tick === undefined ? !entry.starts.has(id) : tick > join.since;
+			return fresh && (entry.budgets.get(id) ?? 0) >= join.budget;
+		};
+		// Each live range asking the join, with whether it is a probe.
+		const live: [bigint, boolean][] = [];
+		for (const [id, held] of entry.live.entries())
+			if (!entry.fillIds.has(id) && rangeKey(held) === key) live.push([id, entry.probeIds.has(id)]);
+		// A demand range answers only while this edit keeps it: one the going-out ranges no longer
+		// ask, hidden by a wider range or collapsed into another, is retired with its answer.
+		const kept = ranges.some((held) => rangeKey(held) === key);
+		const demandAnswers = kept && live.some(([id, probe]) => !probe && answers(id));
+		const added = kept && !live.some(([, probe]) => !probe) && budget >= join.budget;
+		if (demandAnswers || added) continue;
+		const probing = live.filter(([, probe]) => probe).map(([id]) => id);
+		if (!probing.some(answers)) reasked.push(...probing);
+		out.push(range);
+	}
+	return { probes: out, reasked };
+}
+
+// The range a copy asks its upstream to place the live join `min` milliseconds behind the live edge
+// through the time `end` with: the join itself, so readers waiting on it share it, as a demand range
+// asking it goes out (see `toWireRanges`). Mirrors the Rust `join_probe`.
+function joinProbe(min: number, end: bigint | undefined): WireRange {
+	return end === undefined ? { start: { live: min } } : { start: { live: min }, end: { time: end } };
+}
+
+// Whether two lists of live joins asked are the same.
+function sameJoins(a: readonly JoinAsk[], b: readonly JoinAsk[]): boolean {
+	return (
+		a.length === b.length &&
+		a.every(
+			(join, i) =>
+				join.min === b[i].min &&
+				join.end === b[i].end &&
+				join.budget === b[i].budget &&
+				join.since === b[i].since,
+		)
+	);
+}
+
+// The range a copy asks its upstream to place time start `time` with: the group containing it
+// alone, so it delivers nothing another range does not, and readers starting there share it.
+// Mirrors the Rust `probe`.
+function probe(time: bigint): WireRange {
+	return { start: { time }, end: { time } };
+}
+
+// Whether two lists of asks, each a time with its budget, are the same.
+function sameAsks(a: readonly (readonly [bigint, number])[], b: readonly (readonly [bigint, number])[]): boolean {
+	return a.length === b.length && a.every(([time, budget], i) => time === b[i][0] && budget === b[i][1]);
+}
+
 // Whether a lite-07 range with no group to deliver says its publisher held none at or before its
 // reach: only one whose end takes in the group containing its time, which a range that ends before
-// its time, or by a count back, may not. Mirrors the Rust `SubStream::report_starts`.
+// its time may not. Mirrors the Rust `SubStream::report_starts`.
 function reaches(end: WireAnchor | undefined, asked: bigint): boolean {
 	if (end === undefined) return false;
 	if (end.time !== undefined) return end.time >= asked;
@@ -3448,9 +3600,12 @@ function reaches(end: WireAnchor | undefined, asked: bigint): boolean {
 	return false;
 }
 
-function through(end: WireAnchor | undefined, asked: bigint): bigint | undefined {
-	if (end === undefined) return undefined;
-	if (end.time !== undefined) return end.time;
-	if (end.absolute !== undefined) return end.absolute > asked ? end.absolute - 1n : asked;
-	return asked;
+// The last time a lite-07 range ending at `end` reaches, as its own inclusive time, undefined while
+// it follows the live edge: an exclusive group end stops at the time before it. Mirrors the Rust
+// `through`.
+function through(end: WireAnchor | undefined): bigint | undefined {
+	if (end?.time !== undefined) return end.time;
+	if (end?.absolute === undefined) return undefined;
+	if (end.frame) return end.absolute;
+	return end.absolute > 0n ? end.absolute - 1n : undefined;
 }

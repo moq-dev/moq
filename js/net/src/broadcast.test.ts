@@ -327,20 +327,20 @@ test("a request exposes the aggregate subscription options", async () => {
 	consumer.track("video").subscribe({
 		priority: 3,
 		delay: { max: Duration.millis(100) },
-		ranges: [{ start: { time: 10n }, end: { time: 19n } }],
+		ranges: [{ start: 10n, end: 19n }],
 	});
 	consumer.track("video").subscribe({
 		priority: 7,
 		delay: { max: Duration.millis(250) },
-		ranges: [{ start: { time: 0n }, end: { time: 29n } }],
+		ranges: [{ start: 0n, end: 29n }],
 	});
 
 	const request = await pendingRequest(consumer);
 	expect(request?.subscription).toEqual({
 		priority: 7,
-		delay: { min: Duration.ZERO, max: Duration.millis(250) },
+		delay: { max: Duration.millis(250) },
 		order: "descending",
-		ranges: [{ start: { time: 0n }, end: { time: 29n } }],
+		ranges: [{ start: 0n, end: 29n }],
 	});
 	expect(request?.priority).toBe(7);
 });

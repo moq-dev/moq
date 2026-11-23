@@ -11,6 +11,8 @@
 //!   grant shows.
 //! - A claim that leaves while its publisher still announces it ends as lost, never as
 //!   withdrawn.
+//! - A claim is shown only where its publisher's grant covers every path beneath it, so a
+//!   request there never fails Unroutable for want of a route.
 //!
 //! `MOQ_ANSWER_SEED` and `MOQ_ANSWER_CASES` pick the cases.
 
@@ -291,15 +293,19 @@ struct Edit {
 	at: usize,
 }
 
-/// A claim the origin holds: its route, instance, and the step that announced it.
+/// A claim the origin holds: its route, instance, the scope it was announced through, and
+/// the step that announced it.
 struct Claimed {
 	route: crate::model::AnnounceProducer,
 	instance: Instance,
+	scope: usize,
 	at: usize,
 }
 
 struct Sim {
 	origin: origin::Producer,
+	/// The handle's mount: its point and target.
+	mount: Option<(Path, Path)>,
 	consumer: origin::Consumer,
 	auth: crate::auth::Link,
 	answer: Answer,
@@ -336,6 +342,7 @@ impl Sim {
 		let (writer, peer) = stream();
 		Self {
 			origin,
+			mount: MOUNTS[case.mount].map(|(at, target)| (path(at), path(target))),
 			consumer,
 			auth,
 			answer,
@@ -395,7 +402,16 @@ impl Sim {
 				let info = origin::RouteInfo::new().with_instance(instance.clone(), 0);
 				if let Ok(route) = producer.announce(PATHS[*index], info) {
 					let at = self.step;
-					self.claims.insert(*index, Claimed { route, instance, at });
+					let scope = *scope;
+					self.claims.insert(
+						*index,
+						Claimed {
+							route,
+							instance,
+							scope,
+							at,
+						},
+					);
 				}
 			}
 			Op::Withdraw(index) => {
@@ -505,7 +521,22 @@ impl Sim {
 		for msg in self.peer.take() {
 			match msg {
 				AnnounceBroadcast::Start { suffix, instance, .. } => {
-					self.peer.start(&suffix, &instance);
+					let (shown, _) = self.peer.start(&suffix, &instance);
+					// Where the origin holds it: past the mount it is shown beneath, if any.
+					let held = match &self.mount {
+						Some((at, target)) => match shown.strip_prefix(at) {
+							Some(rest) => target.join(&rest).unwrap(),
+							None => shown.clone(),
+						},
+						None => shown.clone(),
+					};
+					if let Some(claimed) = self.claims.values().find(|held| held.instance == instance) {
+						prop_assert!(
+							prefixes(SCOPES[claimed.scope]).matches(held.as_str()),
+							"{shown} ({instance}) is shown beyond its grant {:?}",
+							SCOPES[claimed.scope],
+						);
+					}
 				}
 				AnnounceBroadcast::Change { id, .. } => {
 					prop_assert!(self.peer.live.contains_key(&id), "a change to {id}, which is not live");
@@ -771,4 +802,78 @@ fn a_grant_change_shows_what_it_keeps_before_synced() {
 		["a/u/z/new", "SYNCED 0"],
 		"{regranted:?}"
 	);
+}
+
+/// What a fresh answer on `consumer` starts for a peer asking for `prefix`: each claim's path
+/// and Above, by path.
+fn presented(consumer: origin::Consumer, prefix: &str) -> Vec<(String, u64)> {
+	let mut answer = Answer::alone(consumer);
+	let (mut writer, mut peer) = stream();
+	answer.request(false, Vec::new(), vec![(path(prefix), false)]).unwrap();
+	let mut shown = Vec::new();
+	for msg in sent(&mut answer, &mut writer, &mut peer) {
+		if let AnnounceBroadcast::Start {
+			suffix,
+			instance,
+			claim,
+		} = msg
+		{
+			let (path, _) = peer.start(&suffix, &instance);
+			shown.push((path.to_string(), claim.item.above));
+		}
+	}
+	shown.sort();
+	shown
+}
+
+/// A producer granted `a/b` that claims `a` is shown at `a/b`, one segment above it, and only
+/// within `a/b`: a peer asking beside it is shown nothing a request would fail Unroutable on.
+#[test]
+fn a_claim_is_shown_no_broader_than_its_grant() {
+	let origin = Hop::new(1).unwrap().produce();
+	let granted = origin.scope("", &prefixes(&["a/b"])).unwrap();
+	let _claim = granted.announce("a", origin::RouteInfo::new()).unwrap();
+	origin.route_node();
+	assert_eq!(presented(origin.consume(), "a"), [("a/b".to_string(), 1)]);
+	assert_eq!(presented(origin.consume(), ""), [("a/b".to_string(), 1)]);
+	assert!(presented(origin.consume(), "a/q").is_empty());
+	assert_eq!(presented(origin.consume(), "a/b/c"), [("a/b/c".to_string(), 2)]);
+}
+
+/// A mount names the claim beneath its point: filed at its grant beneath the target, it is
+/// shown at the same place beneath the mount point.
+#[test]
+fn a_mount_names_the_claim_at_its_grant() {
+	let origin = Hop::new(1).unwrap().produce();
+	let granted = origin.scope("", &prefixes(&["t/b"])).unwrap();
+	let _claim = granted.announce("t", origin::RouteInfo::new()).unwrap();
+	origin.route_node();
+	let mounted = || {
+		(origin.mount("m", "t").unwrap())
+			.scope("", &Prefixes::all())
+			.unwrap()
+			.consume()
+	};
+	assert_eq!(presented(mounted(), "m"), [("m/b".to_string(), 1)]);
+	assert!(presented(mounted(), "m/q").is_empty());
+	assert_eq!(presented(mounted(), "m/b/c"), [("m/b/c".to_string(), 2)]);
+}
+
+/// A relay keeps publishers out of its stats prefix, whose broadcasts it publishes itself: a
+/// publisher's claim of the root is still shown at the prefix, and the relay's own more
+/// specific claims win their paths.
+#[kio::test]
+async fn the_relays_own_claims_win_its_excluded_prefix() {
+	let origin = Hop::new(1).unwrap().produce();
+	let publisher = origin.exclude(".stats").unwrap();
+	let _claim = publisher.announce("", origin::RouteInfo::new()).unwrap();
+	assert!(publisher.route(".stats/evil", origin::RouteOptions::default()).is_err());
+	let _stats = origin.route(".stats/node", origin::RouteOptions::default()).unwrap();
+	origin.route_node();
+	assert_eq!(
+		presented(origin.consume(), ".stats"),
+		[(".stats".to_string(), 1), (".stats/node".to_string(), 0)]
+	);
+	// The publisher's claim serves nothing, so only the relay's own broadcast answers.
+	origin.consume().request(".stats/node", None).await.unwrap();
 }

@@ -833,9 +833,9 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 		uni: 10_000,
 		params: {
 			initialMaxData: 4_194_304n,
-			initialMaxStreamDataBidiLocal: 1_048_576n,
-			initialMaxStreamDataBidiRemote: 1_048_576n,
-			initialMaxStreamDataUni: 1_048_576n,
+			initialMaxStreamDataBidiLocal: 4_194_304n,
+			initialMaxStreamDataBidiRemote: 4_194_304n,
+			initialMaxStreamDataUni: 4_194_304n,
 		},
 	});
 	expect(

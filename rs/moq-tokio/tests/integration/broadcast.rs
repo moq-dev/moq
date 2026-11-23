@@ -625,7 +625,7 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 }
 
 /// Lite05 can't declare an untimed track, so a track that sets no timescale goes out
-/// in milliseconds, its frames stamped with their send time. The subscriber receives
+/// in milliseconds, its frames stamped with their group's start. The subscriber receives
 /// `Some(ts)` at that scale.
 #[tokio::test]
 async fn broadcast_moq_lite_05_untimed_track() {
@@ -1125,10 +1125,7 @@ async fn broadcast_route_migration() {
 
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
-		.with_ranges([moq_net::track::Range {
-			start: moq_net::track::Anchor::Time(1),
-			end: None,
-		}])
+		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(1))])
 		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 	let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await

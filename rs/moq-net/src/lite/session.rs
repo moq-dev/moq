@@ -266,9 +266,11 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.map(Hop::from);
 	}
 	// Lite-07 declares a Node ID instead, and only when this session exchanges routes:
-	// both halves share one forwarding origin and neither confines the peer.
+	// both halves share one forwarding origin and neither they nor the grant the
+	// application admitted the peer under confine it. A server may widen its handles so
+	// in-band AUTH can regrant, which leaves the grant as the only record of a scoped peer.
 	our_setup.node = match (version.has_routes(), &publish, &subscribe) {
-		(true, Some(publish), Some(subscribe)) => publish.node_id(subscribe),
+		(true, Some(publish), Some(subscribe)) => publish.node_id(subscribe).filter(|_| auth.admits_whole()),
 		_ => None,
 	};
 	let routing = our_setup.node.is_some();
@@ -289,6 +291,8 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
+	// Budgets of its own, so what the peer publishes crowds out no other session.
+	let subscribe = subscribe.with_own_budgets(limits.live_edges);
 	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);

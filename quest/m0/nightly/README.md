@@ -133,7 +133,7 @@ Decided 2026-11-20 (maintainer, /quest-plan), from the triage of runs
 [44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952): two
 more children (resume and relay route mutants, drill leak sensitivity), and
 the Firefox `replacement` stall went to
-[interop green](/quest/m0/interop-green/replacement-join-delay.md). Fixed on
+[interop green](/quest/m0/interop-green/README.md). Fixed on
 `main`: the ingest fuzz bound
 ([moq-dev/moq#9216](https://github.com/moq-dev/moq/pull/9216)), Miri's
 boottime clock ([moq-dev/moq#9212](https://github.com/moq-dev/moq/pull/9212)),
@@ -156,3 +156,14 @@ a strand counted again at every later event; both fixed in
 rows (a relay still showing a broadcast after its source ended) appeared only
 in those starved runs and did not reproduce locally. A failed replay job now
 uploads its relay and reader logs, so read those if `shown` recurs.
+
+Accepted 2026-11-22, from run
+[45035580806](https://github.com/moq-dev/moq/actions/runs/45035580806): the
+lazy CMAF chunk of `js/watch` and `js/watch-ui` grew from 5,783 to 6,249 bytes
+raw (2,491 to 2,627 gzip, 2,281 to 2,403 Brotli), all in
+`js/hang/src/cmaf/decode.ts`. The cause is
+[moq-dev/moq#9344](https://github.com/moq-dev/moq/pull/9344)'s esds parser, which
+now skips the ES_Descriptor's optional fields and refuses truncated
+descriptors, so AAC with those flags set gets its decoder config. The
+thresholds are unchanged: the failed report became the next daily baseline,
+and 6,249 is 8% over the 5,783 that will be the 30-day anchor, inside its 10%.

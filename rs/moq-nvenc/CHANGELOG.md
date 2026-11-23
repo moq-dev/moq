@@ -9,8 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Buffer`, `Bitstream`, and `RegisteredResource` are no longer `Send`: they share their session's driver handle, which is not thread-safe. Create the session on the thread that uses it.
+- `Session::register_cuda_resource` is `unsafe`: the caller vouches that the buffer holds `pitch` bytes per row for the session's height.
+- `Session::encode_picture` and `Session::end_of_stream` take `&mut self`. `encode_picture` returns `Rejected`, which hands back both buffers (for example to retry after `ErrorKind::EncoderBusy`). Both refuse once end-of-stream is accepted, with `ErrorKind::InvalidCall`.
 - `Session::register_generic_resource` and `Session::register_cuda_resource` only register the allocation; call `RegisteredResource::map` for each encode and pass the returned `MappedResource` to `Session::encode_picture`. Registration is the expensive call, so a reused input registers once.
 - `RegisteredResource::map` refuses with `ErrorKind::InvalidCall` once an earlier mapping never unmapped (it failed to unmap, or its submission was abandoned or forgotten), and such a registration never releases its allocation.
+
+### Fixed
+
+- `Bitstream::lock` no longer builds a slice from a null address (an empty output reads as empty; a non-empty one at null is `ErrorKind::InvalidPtr`), and an error with no driver message no longer dereferences a null string.
 
 ## [0.1.2](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.1.1...moq-nvenc-v0.1.2) - 2026-09-26
 

@@ -399,7 +399,7 @@ impl Pad {
 			// avoids cloning every rendition. Drop it before finalize takes the catalog lock again.
 			let mut catalog = catalog.clone();
 			let resolved = {
-				let current = catalog.modify()?;
+				let current = catalog.modify(catalog.next_timestamp())?;
 				let name = media.track.name();
 				if media.audio {
 					current.audio.renditions.contains_key(&name)

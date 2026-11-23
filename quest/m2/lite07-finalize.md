@@ -67,7 +67,9 @@ The cut:
   final peer refuse each other by ALPN rather than misparse; no
   compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
-  passes.
+  passes. Fix `drafts/draft-lcurley-moq-lite.md:2380` (the lite-07 changelog
+  says `0 is malformed` instead of `0 is GROUP_END`, contradicting lines 2218,
+  2245, and 2376; found in the 2026-11-21 full-codebase audit).
 - SETUP keeps its stronger rule: #4820 put it under the general Message
   Length cap, which only permits rejection (MAY), while "a receiver MUST
   treat a longer SETUP as a protocol violation" stays. The lite-07 changelog
@@ -184,8 +186,8 @@ route key lane's early signal above ended when
 [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) landed.
 That epic finished 2026-11-20 with its last child
 ([moq-dev/moq#9231](https://github.com/moq-dev/moq/pull/9231)), and the cut's
-routing wait moved to [claim reach](/quest/m2/lite07-claim-reach-routes.md)
-(maintainer, 2026-11-20).
+routing wait moved to claim reach (maintainer, 2026-11-20), which
+[moq-dev/moq#9290](https://github.com/moq-dev/moq/pull/9290) finished.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which also
 audited the lite-07 draft for what it could lose):
@@ -220,26 +222,34 @@ the version that ships them.
 Decided 2026-11-20 (maintainer, /quest-plan auditing the cache, timestamp,
 and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
-- ✅ The cut waits for [groups never overlap](/quest/m2/groups-never-overlap.md)
-  (rejected: after the cut). [Group times](/quest/m2/time-addressing/group-times.md)
-  puts the strong rule in the draft as a publisher MUST: a group's span, from
-  its lowest frame to its End, never overlaps another's. Expiry relies on it,
-  and first-party producers break it today.
-- ✅ [The frame cap](/quest/m1/switch-frame-cap.md) is not Required, like the
-  warmth port: if it has landed when the cut is made, its Position end is in
-  lite-07, and otherwise it moves to the next wip version.
+- ✅ The cut waits for groups never overlap, [moq-dev/moq#9264](https://github.com/moq-dev/moq/pull/9264)
+  (rejected: after the cut). Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263))
+  puts the strong rule in the draft as a publisher MUST: a group's span,
+  [Group Start, End) since 2026-11-21, never overlaps another's. Expiry relies on it,
+  and first-party producers keep it ([moq-dev/moq#9317](https://github.com/moq-dev/moq/pull/9317)).
+- ✅ The frame cap is not Required, like the warmth port. It landed on
+  lite-07-wip in [moq-dev/moq#9402](https://github.com/moq-dev/moq/pull/9402):
+  a Range may end at a Position.
 - The audit's other gaps change no wire and don't gate the cut: a relay
   asking upstream for a missing group head, the switch's group cap, a
   replaced copy's short group, and expiry by a higher group's lowest
   timestamp. A Min Age join that asks upstream is
-  [no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md)'s.
+  [moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)'s.
+
+Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
+full-codebase audit): ✅ the cut waits on deleting the temporary `raw_parts` /
+`base.split("/")` `Path Keep` migration in Rust and JS
+([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)) so lite-07 does
+not freeze with a wire-divergent migration hack, and this quest fixes the
+changelog typo at `drafts/draft-lcurley-moq-lite.md:2380` during the cut
+(rejected: leaving the temporary migration in place).
 
 ## Required
 
-- [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - SUBSCRIBE's anchors lose Relative, and Min Age places a live join
-- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - GROUP loses Previous Start, FRAME's first delta counts from the start, and GROUP_END carries an end
-- [Groups never overlap](/quest/m2/groups-never-overlap.md) - first-party producers and importers keep the no-overlap MUST the cut publishes
-- [A lite-07 claim is shown no broader than the grants it crossed](/quest/m2/lite07-claim-reach-routes.md) - a peer is never shown a claim at a path no route of it can serve, through any number of relays (maintainer, 2026-11-20)
+- [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
+- [Count lite-07 Path Keep by Path::parts](/quest/m2/lite07-path-keep-parts.md) - removes the temporary `raw_parts` / `base.split("/")` migration before lite-07 freezes
+- [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - bridged routes keep drain and priority, and the draft's rank text matches the code
+- [NodeId drops Start](/quest/m2/node-id-drop-start.md) - NodeId's wire shape
 
 ## Related
 

@@ -37,7 +37,7 @@ Share `media.Timebase(broadcast: ...)` through `ContainerInit` when several impo
 one source timeline; omitting it keeps an independent offset. A timebase belongs to its
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
-`ContainerFormat.fmp4` splits each fragment into one frame per sample.
+`ContainerFormat.fmp4()` splits each fragment into one frame per sample.
 `media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
 construct the read side from a broadcast; the last two take a catalog `media.Rendition` and
 follow its broadcast and track themselves. For arrival-order reads, decode each group from
@@ -91,7 +91,7 @@ final encoder = video.Producer(
   catalog: media.CatalogProducer(broadcast: camera.broadcast()),
   options: video.ProducerOptions(
     input: video.EncoderInput(
-      format: video.PixelFormat.rgba,
+      format: video.PixelFormat.rgba(),
       width: 1280,
       height: 720,
       framerate: video.FrameRate(numerator: 30000, denominator: 1001),
@@ -124,7 +124,7 @@ final decoder = await video.Consumer.subscribe(
 // A read is a frame, a gap where media was lost, or an end where the publisher stopped its encoder.
 final read = await decoder.next();
 if (read is video.ReadFrame) {
-  print(read.frame.pixels(format: video.PixelFormat.rgba).length);
+  print(read.frame.pixels(format: video.PixelFormat.rgba()).length);
   read.frame.dispose();
 }
 ```

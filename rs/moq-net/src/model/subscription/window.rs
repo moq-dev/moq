@@ -10,8 +10,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Anchor, Cover, Range};
-use crate::{Error, Result};
+use super::{Cover, Delay, Range, Start};
 
 /// One range resolved to groups: from `start` up to the exclusive `end`, `None` while it
 /// stays open.
@@ -20,7 +19,7 @@ pub(crate) struct Resolved {
 	pub start: u64,
 	pub end: Option<u64>,
 	/// Whether the start names a group, rather than reaching back to the oldest one (a
-	/// time start older than every group held, or the oldest start).
+	/// time start older than every group held, or no start reaching back).
 	pub floored: bool,
 }
 
@@ -43,19 +42,18 @@ impl<V: Clone + Eq> Accounted for rangemap::RangeMap<u64, V> {
 	}
 }
 
-/// The groups a serving hop holds, by start, for resolving relative and time anchors.
+/// The groups a serving hop holds, by start, for resolving range starts.
 pub(in crate::model) trait Holdings {
-	/// Whether the groups are a copy received over a wire that can't resolve relative or
-	/// time anchors as the publisher would, so only what [`Range::is_wire`] covers reads.
-	fn drops_anchors(&self) -> bool {
-		false
-	}
-
-	/// Whether this hop resolves ranges against groups of its own, so it refuses an
-	/// [`Anchor::Oldest`] end, which names no group. A hop whose copies resolve them leaves
-	/// the refusal to them.
+	/// Whether this hop resolves ranges against groups of its own, so a live join is placed
+	/// here. A hop whose copies resolve them leaves that to them.
 	fn resolves(&self) -> bool {
 		true
+	}
+
+	/// Whether this hop's copies resolve its ranges, so a live join waits on them, reading
+	/// everything meanwhile.
+	fn defers(&self) -> bool {
+		false
 	}
 
 	/// Whether a [`Requests`](crate::track::Requests) handler serving the track's history
@@ -65,8 +63,12 @@ pub(in crate::model) trait Holdings {
 		false
 	}
 
-	/// Where `time` falls among the groups held.
-	fn containing(&self, time: u64) -> Containing;
+	/// Where `time` falls among the groups held, for a reader whose [`Delay::max`] is `budget`:
+	/// a received copy proves some placements only for a reader within the budget its upstream
+	/// answered under.
+	///
+	/// [`Delay::max`]: crate::track::Delay::max
+	fn containing(&self, time: u64, budget: Duration) -> Containing;
 
 	/// Runs of times that [`Self::containing`] can't place, so a window skips its time starts
 	/// in them rather than try each again whenever the groups held change. `None` when it
@@ -78,29 +80,31 @@ pub(in crate::model) trait Holdings {
 	/// The lowest group held starting at or after `from`.
 	fn next_start(&self, from: u64) -> Option<u64>;
 
-	/// The group `back` groups before `latest`, which counts as the first, among the groups
-	/// held: `None` once fewer are held than that.
-	fn back(&self, latest: u64, back: u64) -> Option<u64>;
-
-	/// Where the publisher reported starting a range counting `back` groups before `latest`,
-	/// which a relative start, but never an end, takes over [`Self::back`]: a delivery start
-	/// may sit past the group counted, such as above groups too stale for the budget.
-	fn reported_start(&self, latest: u64, back: u64) -> Option<u64> {
-		let _ = (latest, back);
-		None
-	}
-
 	/// Whether nothing more can arrive here, so a time start nothing contains reaches back
 	/// to the oldest group rather than wait.
 	fn complete(&self) -> bool;
 
-	/// Where a live join holding `min` behind the live edge starts, `latest` being the latest
-	/// group: a group held, the newest one starting at or before the newest frame held less
-	/// `min`, or the oldest one held when none does, never a raw time a copy would ask its
-	/// upstream to fill. `None` while nothing held can measure it, so the join waits for a
-	/// group as a relative start does.
-	fn reach_back(&self, latest: u64, min: Duration) -> Option<Anchor> {
-		let _ = (latest, min);
+	/// Where a live join holding a nonzero `min` behind the live edge, ending at `end`, starts
+	/// for a reader within `budget`; see [`Join`]. Only an upstream's answer recorded after join
+	/// tick `since`, when the join's range was added, counts.
+	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
+		let _ = (min, end, budget, since);
+		Join::Unknown
+	}
+
+	/// Whether this hop places a live join only where its upstream's answer to that join
+	/// does, never from the groups it holds: a copy holding only part of the track.
+	fn answers_joins(&self) -> bool {
+		false
+	}
+
+	/// The upstream's answer to the live join `min` through `end`, for a reader within `budget`
+	/// whose range was added at join tick `since`: the group it starts at, or `None` for nothing
+	/// to deliver. It stands once the end is declared too, when [`Self::answers_joins`] no
+	/// longer holds: a copy holds only the groups from where its feed started, so they can't
+	/// measure a join behind them.
+	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+		let _ = (min, end, budget, since);
 		None
 	}
 
@@ -109,6 +113,21 @@ pub(in crate::model) trait Holdings {
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
 		keys.is_empty()
 	}
+}
+
+/// Where a live join starts, as [`Holdings::join`] finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::model) enum Join {
+	/// The group containing this time, the live edge less the lag, resolved as a range
+	/// starting there is, history lookup included.
+	Time(u64),
+	/// The group starting here, which this hop measured by arrival, or its upstream answered.
+	Group(u64),
+	/// Nothing to deliver, as the upstream answered a bounded join.
+	Empty,
+	/// Nothing measures it yet: a copy waits for its upstream to answer, and any hop for a
+	/// group to measure the live edge by.
+	Unknown,
 }
 
 /// Where a time falls among the groups a hop holds.
@@ -147,22 +166,6 @@ pub(in crate::model) struct Unplaced {
 impl Unplaced {
 	/// An empty run, for a hop that places every time on one side.
 	pub const NONE: ops::RangeInclusive<u64> = ops::RangeInclusive::new(1, 0);
-
-	/// `run` less what of it `cut` covers: the part below it, then the part above it.
-	pub fn without(run: ops::RangeInclusive<u64>, cut: &ops::RangeInclusive<u64>) -> [ops::RangeInclusive<u64>; 2] {
-		if run.is_empty() || cut.is_empty() {
-			return [run, Self::NONE];
-		}
-		let below = match cut.start().checked_sub(1) {
-			Some(end) => *run.start()..=(*run.end()).min(end),
-			None => Self::NONE,
-		};
-		let above = match cut.end().checked_add(1) {
-			Some(start) => start.max(*run.start())..=*run.end(),
-			None => Self::NONE,
-		};
-		[below, above]
-	}
 }
 
 /// A hop that holds no groups of its own, such as a reader following route copies that
@@ -174,16 +177,16 @@ impl Holdings for Unheld {
 		false
 	}
 
-	fn containing(&self, _: u64) -> Containing {
+	fn defers(&self) -> bool {
+		true
+	}
+
+	fn containing(&self, _: u64, _: Duration) -> Containing {
 		Containing::Unknown
 	}
 
 	fn next_start(&self, _: u64) -> Option<u64> {
 		None
-	}
-
-	fn back(&self, latest: u64, back: u64) -> Option<u64> {
-		(back == 0).then_some(latest)
 	}
 
 	fn complete(&self) -> bool {
@@ -198,12 +201,13 @@ impl Holdings for Unheld {
 pub(in crate::model) struct Window {
 	/// What these were resolved from, by key, in the order given.
 	ranges: BTreeMap<u64, Range>,
-	/// The subscriber's Min Age, which reaches a live join back from the live edge.
-	min: Option<Duration>,
+	/// The subscriber's [`Delay::max`](crate::track::Delay::max) as a budget, which a received
+	/// copy places some time starts only within.
+	budget: Duration,
 	/// Each non-empty range placed, by key.
 	spans: BTreeMap<u64, Span>,
-	/// The ranges waiting on a first group, by key: a relative anchor, or a live join with
-	/// nothing to reach back from. Everything is in range meanwhile.
+	/// The ranges waiting on a first group, by key: a live join with nothing to reach back
+	/// from. Everything is in range meanwhile.
 	pending: BTreeSet<u64>,
 	/// The spans still looking up their time start (see [`Self::found`]), which read nothing
 	/// meanwhile: by the time looked up, then key, so a probe finds them without visiting
@@ -215,9 +219,13 @@ pub(in crate::model) struct Window {
 	waiting: BTreeSet<(u64, u64)>,
 	/// The [`Unplaced::mark`] every waiting span was last tried under.
 	waited: Option<u64>,
-	/// The ranges of a live join whose reach back waits on the groups held to measure the
-	/// live edge, which read nothing meanwhile: a group held is no reason to start at it.
+	/// The ranges of a live join whose start waits on the groups held to measure the live
+	/// edge, or on an upstream's answer, which read nothing meanwhile: a group held is no
+	/// reason to start at it.
 	reaching: BTreeSet<u64>,
+	/// The join tick each live join's range was added at: only an answer recorded since
+	/// places it, the live edge having moved since any earlier one. See [`Holdings::join`].
+	since: BTreeMap<u64, u64>,
 	/// The groups the spans cover, shared with what reads them.
 	groups: Cover,
 	/// The part of `groups` a miss may ask for: see [`Self::missable`].
@@ -235,8 +243,12 @@ pub(in crate::model) struct Window {
 /// One non-empty range, resolved.
 #[derive(Clone, Debug)]
 struct Span {
-	/// Where it starts: its range's start, or where a live join's Min Age reached it back to.
-	anchor: Anchor,
+	/// The time it starts from: its range's start, or where a live join's lag reached it back
+	/// to. `None` reaches back to the oldest group.
+	anchor: Option<u64>,
+	/// Whether the start is a time the track's history may be asked to place, rather than a
+	/// group this hop already measured.
+	asks: bool,
 	start: u64,
 	/// The exclusive end, `None` past every group.
 	end: Option<u64>,
@@ -263,67 +275,92 @@ struct Looking {
 }
 
 impl Window {
-	/// Resolve `ranges`, keyed by position, counting relative anchors back from `latest`, and
-	/// reaching a live join back by `min` (see [`joins`]).
-	///
-	/// Refuses an [`Anchor::Oldest`] end with [`Error::InvalidRange`] where the hop
-	/// [resolves](Holdings::resolves) ranges itself, and an anchor a received copy's wire
-	/// drops with [`Error::Unsupported`].
-	pub fn new(ranges: &[Range], min: Option<Duration>, latest: Option<u64>, holdings: &impl Holdings) -> Result<Self> {
-		Self::keyed((0..).zip(ranges.iter().copied()), min, latest, holdings)
+	/// Resolve `ranges`, keyed by position, for a subscriber with `delay`, `latest` being the
+	/// latest group: a live join reaches back by its lag from the live edge.
+	#[cfg(test)]
+	pub fn new(ranges: &[Range], delay: Delay, latest: Option<u64>, holdings: &impl Holdings) -> Self {
+		Self::keyed((0..).zip(ranges.iter().copied()), delay, latest, holdings)
 	}
 
 	/// [`Self::new`] for ranges the caller keys itself, in key order.
 	pub fn keyed(
 		ranges: impl IntoIterator<Item = (u64, Range)>,
-		min: Option<Duration>,
+		delay: Delay,
 		latest: Option<u64>,
 		holdings: &impl Holdings,
-	) -> Result<Self> {
+	) -> Self {
+		Self::keyed_since(ranges, |_| 0, delay, latest, holdings)
+	}
+
+	/// [`Self::keyed`], each live join's range added at join tick `since` of its key.
+	pub fn keyed_since(
+		ranges: impl IntoIterator<Item = (u64, Range)>,
+		since: impl Fn(u64) -> u64,
+		delay: Delay,
+		latest: Option<u64>,
+		holdings: &impl Holdings,
+	) -> Self {
+		let ranges: BTreeMap<u64, Range> = ranges.into_iter().collect();
+		let since = (ranges.iter())
+			.filter(|(_, range)| matches!(range.start, Start::Live(_)))
+			.map(|(key, _)| (*key, since(*key)))
+			.collect();
 		let mut window = Self {
-			ranges: ranges.into_iter().collect(),
-			min,
+			ranges,
+			budget: delay.budget(),
 			spans: BTreeMap::new(),
 			pending: BTreeSet::new(),
 			looking: BTreeSet::new(),
 			waiting: BTreeSet::new(),
 			waited: None,
 			reaching: BTreeSet::new(),
+			since,
 			groups: Cover::default(),
 			missable: Cover::default(),
 			covered: None,
 			named: BTreeMap::new(),
 			unnamed: 0,
 		};
-		window.place(latest, holdings)?;
-		Ok(window)
+		window.place(latest, holdings);
+		window
 	}
 
 	/// Retire the ranges keyed `retired`, then resolve `added`, leaving every other range
 	/// where it resolved. A key added again replaces its range. Costs the ranges edited, never
 	/// the rest.
-	///
-	/// Refuses what [`Self::new`] does, changing nothing.
 	pub fn edit(
 		&mut self,
 		retired: impl IntoIterator<Item = u64>,
 		added: &[(u64, Range)],
 		latest: Option<u64>,
 		holdings: &impl Holdings,
-	) -> Result<()> {
-		check(added.iter().map(|(_, range)| range), holdings)?;
+	) {
+		self.edit_since(retired, added, |_| 0, latest, holdings);
+	}
+
+	/// [`Self::edit`], each live join's range added at join tick `since` of its key.
+	pub fn edit_since(
+		&mut self,
+		retired: impl IntoIterator<Item = u64>,
+		added: &[(u64, Range)],
+		since: impl Fn(u64) -> u64,
+		latest: Option<u64>,
+		holdings: &impl Holdings,
+	) {
 		for key in retired {
 			self.retire(key);
 		}
 		for &(key, range) in added {
 			self.retire(key);
 			self.ranges.insert(key, range);
+			if let Start::Live(_) = range.start {
+				self.since.insert(key, since(key));
+			}
 			if !range.is_empty() {
 				self.place_range(key, latest, holdings);
 			}
 		}
 		self.covered = None;
-		Ok(())
 	}
 
 	/// Take out the range keyed `key`, if any.
@@ -333,6 +370,7 @@ impl Window {
 		}
 		self.pending.remove(&key);
 		self.reaching.remove(&key);
+		self.since.remove(&key);
 		if let Some(span) = self.spans.remove(&key) {
 			self.uncount(key, &span);
 		}
@@ -343,15 +381,50 @@ impl Window {
 		self.pending.is_empty() && self.looking.is_empty() && !self.unplaced()
 	}
 
-	/// Whether a relative anchor still waits on a first group.
+	/// Whether a live join still waits on a first group.
 	pub fn is_pending(&self) -> bool {
 		!self.pending.is_empty()
 	}
 
-	/// Take the subscriber's current Min Age. Only a pending window reads it, when it places
-	/// its ranges, so a join already started stays where it started.
-	pub fn set_min(&mut self, min: Option<Duration>) {
-		self.min = min;
+	/// Take the subscriber's current [`Delay`]. Only a range still to place reads it, so one
+	/// already started stays where it started.
+	pub fn set_delay(&mut self, delay: Delay) {
+		let budget = delay.budget();
+		// An answer may place a waiting time start under the new budget with no change to the
+		// groups held, so each is tried again.
+		if budget != self.budget {
+			self.waited = None;
+		}
+		self.budget = budget;
+	}
+
+	/// The time starts still waiting on the groups held, with the budget they wait under: what
+	/// a received copy asks its upstream to place.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn asks(&self) -> impl Iterator<Item = u64> + '_ {
+		let mut last = None;
+		self.waiting
+			.iter()
+			.filter_map(move |&(time, _)| (last.replace(time) != Some(time)).then_some(time))
+	}
+
+	/// The live joins still waiting on an answer, with their lag, end, and the join tick each
+	/// was added at: what a received copy asks its upstream to place.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn joins(&self) -> impl Iterator<Item = (Duration, Option<u64>, u64)> + '_ {
+		self.reaching.iter().filter_map(|key| {
+			let range = self.ranges.get(key)?;
+			let since = self.since.get(key).copied().unwrap_or(0);
+			match range.start {
+				Start::Live(min) => Some((min, join_end(range.end), since)),
+				Start::Oldest | Start::Time(_) => None,
+			}
+		})
+	}
+
+	/// The budget [`Self::asks`] and [`Self::joins`] wait under.
+	pub fn budget(&self) -> Duration {
+		self.budget
 	}
 
 	/// Whether a live join's reach back waits on a group held starting, to measure the live
@@ -383,16 +456,17 @@ impl Window {
 			.take_while(move |time| times.contains(time))
 	}
 
-	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
-	/// time starts once a group arrives. Returns whether the groups in range moved.
+	/// Resolve what the groups now held settle: live joins once `latest` exists or an
+	/// upstream answers, and time starts once a group arrives. Returns whether the groups in
+	/// range moved.
 	pub fn settle(&mut self, latest: Option<u64>, holdings: &impl Holdings) -> bool {
 		if self.is_pending() {
 			if latest.is_none() {
 				return false;
 			}
-			// Checked when the ranges were first resolved, against the same track. Every range
-			// places again, as when first resolved: the first group arrives once per track.
-			let _ = self.place(latest, holdings);
+			// Every range places again, as when first resolved: the first group arrives once per
+			// track.
+			self.place(latest, holdings);
 			self.covered = None;
 			return !self.is_pending();
 		}
@@ -430,7 +504,7 @@ impl Window {
 		};
 		let mut started = false;
 		for (time, key) in tried {
-			let (start, floored) = match holdings.containing(time) {
+			let (start, floored) = match holdings.containing(time, self.budget) {
 				Containing::Group(group) => (group, true),
 				// The group holding it is older than any held, or nothing can arrive.
 				Containing::Before => (0, false),
@@ -447,19 +521,24 @@ impl Window {
 	/// where the groups held can't place it, as when first resolved, and otherwise reading
 	/// its groups.
 	fn start_span(&mut self, key: u64, time: u64, start: u64, floored: bool, holdings: &impl Holdings) {
-		let asked = matches!(self.ranges[&key].start, Anchor::Time(_));
 		let mut span = self.spans.remove(&key).expect("a waiting span");
 		self.uncount(key, &span);
 		(span.start, span.floored, span.waiting) = (start, floored, false);
-		if let Some(floor) = unresolved(time, start, floored, holdings).filter(|_| asked) {
+		if let Some(floor) = unresolved(time, start, floored, holdings).filter(|_| span.asks) {
 			span.looking = Some(Looking { time, floor });
 		}
-		self.count(key, span, holdings);
+		self.count(key, span);
 	}
 
-	/// Whether group `key` is in range. Everything is while a relative anchor waits.
+	/// Whether group `key` is in range. Everything is while a live join waits on a first group.
 	pub fn contains(&self, key: u64) -> bool {
 		self.is_pending() || self.groups.contains(key)
+	}
+
+	/// Whether a range placed so far holds group `key`: unlike [`Self::contains`], not every
+	/// group while a live join waits on a first group.
+	pub fn holds(&self, key: u64) -> bool {
+		self.groups.contains(key)
 	}
 
 	/// The lowest group in range, `None` while an anchor waits. Nothing in range floors
@@ -497,7 +576,7 @@ impl Window {
 	/// looking up its start, or that isn't held. One empty as given ends at or below its start.
 	pub fn resolved_key(&self, key: u64) -> Option<Resolved> {
 		let range = self.ranges.get(&key)?;
-		if let (Anchor::Time(start), Some(Anchor::Time(_))) = (range.start, range.end)
+		if let (Start::Time(start), Some(_)) = (range.start, range.end)
 			&& range.is_empty()
 		{
 			return Some(Resolved {
@@ -600,8 +679,7 @@ impl Window {
 	}
 
 	/// The groups in range from `from` on that a miss may ask for, lowest first: all of
-	/// them but those starting before a time start that fell before every group held, or
-	/// below the oldest group held when a relative start counted back past them all.
+	/// them but those starting before a time start that fell before every group held.
 	pub fn missable(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
 		self.from(&self.missable, from)
 	}
@@ -612,7 +690,7 @@ impl Window {
 		all.into_iter().chain(runs.into_iter().flatten())
 	}
 
-	/// The groups in range, `None` while a relative anchor waits and every group is.
+	/// The groups in range, `None` while a live join waits on a first group and every group is.
 	pub fn groups(&self) -> Option<&Cover> {
 		(!self.is_pending()).then_some(&self.groups)
 	}
@@ -670,7 +748,7 @@ impl Window {
 				// A floor is one past the group held below the time, which then holds it; from 0,
 				// no group starts at or before it, so the span reads from the time on.
 				Found::Dropped { floor } => (floor.checked_sub(1).unwrap_or(time), true),
-				Found::Unanswered => match holdings.containing(time) {
+				Found::Unanswered => match holdings.containing(time, self.budget) {
 					Containing::Group(group) => (group, true),
 					_ => (0, false),
 				},
@@ -686,20 +764,20 @@ impl Window {
 					.filter(|floor| asked.is_some_and(|asked| *floor < asked))
 					.map(|floor| Looking { time, floor });
 			}
-			self.count(key, span, holdings);
+			self.count(key, span);
 		}
 		self.covered = None;
 		true
 	}
 
 	/// Resolve every range again from scratch.
-	fn place(&mut self, latest: Option<u64>, holdings: &impl Holdings) -> Result<()> {
-		check(self.ranges.values(), holdings)?;
+	fn place(&mut self, latest: Option<u64>, holdings: &impl Holdings) {
+		// A live join still waiting keeps the answers it may take.
+		self.reaching.clear();
 		self.spans.clear();
 		self.pending.clear();
 		self.looking.clear();
 		self.waiting.clear();
-		self.reaching.clear();
 		self.groups = Cover::default();
 		self.missable = Cover::default();
 		self.named.clear();
@@ -715,55 +793,98 @@ impl Window {
 		}
 		// Each span waiting was just tried against these holdings.
 		self.waited = holdings.unplaced().map(|unplaced| unplaced.mark);
-		Ok(())
 	}
 
 	/// Resolve the non-empty range keyed `key` into a span, or note what it waits on.
 	fn place_range(&mut self, key: u64, latest: Option<u64>, holdings: &impl Holdings) {
 		let range = self.ranges[&key];
-		let Some(end) = end(range.end, latest, holdings) else {
-			self.pending.insert(key);
-			return;
-		};
-		let anchor = match joins(&range, self.min, holdings) {
-			None => range.start,
-			Some(min) => match latest.map(|latest| holdings.reach_back(latest, min)) {
-				Some(Some(anchor)) => anchor,
-				// Nothing to measure the live edge by yet: with groups held, read none of them
-				// until one measures it; with none, wait as a relative start does.
-				Some(None) => {
-					self.reaching.insert(key);
-					return;
+		// Every end includes its group.
+		let end = range.end.and_then(|end| end.checked_add(1));
+		let (anchor, asks) = match range.start {
+			Start::Time(time) => (Some(time), true),
+			// It reaches back as far as the budget allows.
+			Start::Oldest => (None, false),
+			// A hop whose copies place the join waits on them, as one with no group yet does.
+			Start::Live(_) if holdings.defers() => {
+				self.pending.insert(key);
+				return;
+			}
+			// Placed already, where a copy resolved it: one left with no start reached back.
+			Start::Live(_) if !holdings.resolves() => (None, false),
+			// Only its upstream's answer places it, whatever this hop holds: read none of the
+			// groups held until it does.
+			Start::Live(min) if holdings.answers_joins() => {
+				let since = self.since.get(&key).copied().unwrap_or(0);
+				// Nothing to deliver: a start past its end holds nothing.
+				let past = range.end.and_then(|last| last.checked_add(1));
+				match (holdings.join(min, join_end(range.end), self.budget, since), past) {
+					(Join::Group(group) | Join::Time(group), _) | (Join::Empty, Some(group)) => (Some(group), false),
+					(Join::Empty | Join::Unknown, _) => {
+						self.reaching.insert(key);
+						return;
+					}
 				}
-				None => {
-					self.pending.insert(key);
-					return;
+			}
+			Start::Live(min) => {
+				let since = self.since.get(&key).copied().unwrap_or(0);
+				let until = join_end(range.end);
+				// Its upstream's answer places it, whatever the groups held measure: nothing to
+				// deliver starts it past its end, while an unbounded one measures.
+				let answered = match holdings.answered_join(min, until, self.budget, since) {
+					Some(Some(group)) => Some(group),
+					Some(None) => range.end.and_then(|last| last.checked_add(1)),
+					None => None,
+				};
+				match (answered, latest) {
+					(Some(group), _) => (Some(group), false),
+					// Nothing to measure the live edge by yet: wait for the first group, reading
+					// everything meanwhile.
+					(None, None) => {
+						self.pending.insert(key);
+						return;
+					}
+					// The latest group holds the live edge. One made before any group then starts at
+					// the first, which was the latest when it was placed.
+					(None, Some(latest)) if min.is_zero() => (Some(latest), false),
+					(None, Some(_)) => match holdings.join(min, until, self.budget, since) {
+						Join::Time(time) => (Some(time), true),
+						Join::Group(group) => (Some(group), false),
+						// Nothing to measure the live edge by yet: read none of the groups held until
+						// it resolves.
+						Join::Empty | Join::Unknown => {
+							self.reaching.insert(key);
+							return;
+						}
+					},
 				}
-			},
+			}
 		};
-		let (start, floored) = match start(anchor, latest, holdings) {
-			Start::At(start, floored) => (start, floored),
-			Start::Pending => {
+		// A group a join measured starts there; a time is placed among the groups held.
+		let placed = match (anchor, asks) {
+			(Some(group), false) => Placed::At(group, true),
+			_ => start(anchor, latest, self.budget, holdings),
+		};
+		let (start, floored) = match placed {
+			Placed::At(start, floored) => (start, floored),
+			Placed::Pending => {
 				self.pending.insert(key);
 				return;
 			}
 			// Reads only the groups from its time until the groups held place it; see
 			// [`Self::start_waiting`].
-			Start::Waiting => {
-				let span = Span::new(anchor, 0, end, false, None);
-				self.count(key, Span { waiting: true, ..span }, holdings);
+			Placed::Waiting => {
+				let span = Span::new(anchor, asks, 0, end, false, None);
+				self.count(key, Span { waiting: true, ..span });
 				return;
 			}
 		};
 		// A time start the groups held can't place reads nothing until its lookup answers. A
-		// join's reach back never looks one up: it starts from what this hop holds.
-		let looking = match (range.start, anchor) {
-			(Anchor::Time(_), Anchor::Time(time)) => {
-				unresolved(time, start, floored, holdings).map(|floor| Looking { time, floor })
-			}
-			_ => None,
+		// group a join measured is held, or an upstream reported it, so it looks nothing up.
+		let looking = match anchor.filter(|_| asks) {
+			Some(time) => unresolved(time, start, floored, holdings).map(|floor| Looking { time, floor }),
+			None => None,
 		};
-		self.count(key, Span::new(anchor, start, end, floored, looking), holdings);
+		self.count(key, Span::new(anchor, asks, start, end, floored, looking));
 	}
 
 	/// Whether a time start or a join's reach back waits on the groups held to place it.
@@ -772,8 +893,8 @@ impl Window {
 	}
 
 	/// Hold `span` under `key`, counting the groups it reads and where it starts.
-	fn count(&mut self, key: u64, mut span: Span, holdings: &impl Holdings) {
-		(span.groups, span.missable) = span.reads(holdings);
+	fn count(&mut self, key: u64, mut span: Span) {
+		(span.groups, span.missable) = span.reads();
 		if let Some(run) = &span.groups {
 			self.groups.add(run.clone(), 1);
 		}
@@ -823,15 +944,20 @@ impl Window {
 impl Span {
 	/// The time start it waits on the groups held to place, if any.
 	fn waits_on(&self) -> Option<u64> {
-		match (self.waiting, self.anchor) {
-			(true, Anchor::Time(time)) => Some(time),
-			_ => None,
-		}
+		self.anchor.filter(|_| self.waiting)
 	}
 
-	fn new(anchor: Anchor, start: u64, end: Option<u64>, floored: bool, looking: Option<Looking>) -> Self {
+	fn new(
+		anchor: Option<u64>,
+		asks: bool,
+		start: u64,
+		end: Option<u64>,
+		floored: bool,
+		looking: Option<Looking>,
+	) -> Self {
 		Self {
 			anchor,
+			asks,
 			start,
 			end,
 			floored,
@@ -845,7 +971,7 @@ impl Span {
 	/// The groups it reads, and those of them a miss may ask for: from its start through its
 	/// end once it knows where it starts, from its time while it waits on its time start, and
 	/// none while it looks its start up.
-	fn reads(&self, holdings: &impl Holdings) -> (Option<ops::RangeInclusive<u64>>, Option<ops::RangeInclusive<u64>>) {
+	fn reads(&self) -> (Option<ops::RangeInclusive<u64>>, Option<ops::RangeInclusive<u64>>) {
 		if self.looking.is_some() {
 			return (None, None);
 		}
@@ -857,7 +983,7 @@ impl Span {
 		// it starts at or before it, so every group from there on is in range.
 		if self.waiting {
 			return match self.anchor {
-				Anchor::Time(time) if time <= last => (Some(time..=last), Some(time..=last)),
+				Some(time) if time <= last => (Some(time..=last), Some(time..=last)),
 				_ => (None, None),
 			};
 		}
@@ -867,28 +993,13 @@ impl Span {
 		// A time start before every group held reaches back to the group containing it,
 		// which is unknown here, so it asks no miss below its time: every key from there
 		// on is in range, the key at the time itself being the containing group if it
-		// exists. A relative one counting back past every group held asks none below the
-		// oldest held when it was placed, since which of them it reaches is unknown.
+		// exists.
 		let reach = match (self.anchor, self.floored) {
-			(Anchor::Time(time), false) => time,
-			(Anchor::Relative(_), false) => holdings.next_start(0).unwrap_or(self.start),
+			(Some(time), false) => time,
 			_ => self.start,
 		};
 		(Some(self.start..=last), (reach <= last).then_some(reach..=last))
 	}
-}
-
-/// Refuse an [`Anchor::Oldest`] end with [`Error::InvalidRange`] where the hop
-/// [resolves](Holdings::resolves) ranges itself, and an anchor a received copy's wire drops
-/// with [`Error::Unsupported`].
-fn check<'a>(mut ranges: impl Iterator<Item = &'a Range> + Clone, holdings: &impl Holdings) -> Result<()> {
-	if holdings.resolves() && ranges.clone().any(|range| range.end == Some(Anchor::Oldest)) {
-		return Err(Error::InvalidRange);
-	}
-	if holdings.drops_anchors() && !ranges.all(Range::is_wire) {
-		return Err(Error::Unsupported);
-	}
-	Ok(())
 }
 
 /// The times outside `runs`, lowest first, as runs.
@@ -910,15 +1021,8 @@ fn outside(runs: &[ops::RangeInclusive<u64>]) -> impl Iterator<Item = ops::Range
 	})
 }
 
-/// The Min Age a live join reaches back by: `min`, for [`Range::live`], where this hop resolves
-/// its own ranges. Any other start names where it starts, the oldest one included, which asks for
-/// everything the budget keeps. A zero minimum starts at the latest group anyway.
-fn joins(range: &Range, min: Option<Duration>, holdings: &impl Holdings) -> Option<Duration> {
-	min.filter(|min| *range == Range::live() && !min.is_zero() && holdings.resolves())
-}
-
 /// Where a range starts.
-enum Start {
+enum Placed {
 	/// At this group, and whether it names that group rather than reaching back to the
 	/// oldest one.
 	At(u64, bool),
@@ -929,36 +1033,25 @@ enum Start {
 	Pending,
 }
 
-fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start {
+fn start(anchor: Option<u64>, latest: Option<u64>, budget: Duration, holdings: &impl Holdings) -> Placed {
 	match anchor {
 		// Nothing sits below group 0, so the oldest start needs no latest group.
-		Anchor::Oldest => Start::At(0, false),
-		Anchor::Relative(back) => match latest {
-			None => Start::Pending,
-			Some(latest) => match holdings
-				.reported_start(latest, back)
-				.or_else(|| holdings.back(latest, back))
-			{
-				Some(group) => Start::At(group, true),
-				// Fewer groups are held than it counts back, so reach back to the oldest.
-				None => Start::At(0, false),
-			},
-		},
+		None => Placed::At(0, false),
 		// No group starts before 0, so time 0 names group 0 whatever is held.
-		Anchor::Time(0) => Start::At(0, true),
-		Anchor::Time(time) => match holdings.containing(time) {
-			Containing::Group(group) => Start::At(group, true),
+		Some(0) => Placed::At(0, true),
+		Some(time) => match holdings.containing(time, budget) {
+			Containing::Group(group) => Placed::At(group, true),
 			// The group holding it is older than any held, so reach back to the oldest.
-			Containing::Before => Start::At(0, false),
-			// Before any group, as for a relative anchor, which a hop that holds none (such as
-			// a reader following route copies) leaves to the copies to resolve.
-			Containing::Unknown if latest.is_none() && !holdings.resolves() => Start::Pending,
+			Containing::Before => Placed::At(0, false),
+			// Before any group, which a hop that holds none (such as a reader following route
+			// copies) leaves to the copies to resolve.
+			Containing::Unknown if latest.is_none() && !holdings.resolves() => Placed::Pending,
 			// Nothing can arrive any more, so nothing held reaches past it.
-			Containing::Unknown if holdings.complete() => Start::At(0, false),
+			Containing::Unknown if holdings.complete() => Placed::At(0, false),
 			// The groups held can't place it, so wait for one that can rather than guess from the
 			// latest: a copy can see the live edge before the groups its publisher resolved the
 			// time to.
-			Containing::Unknown => Start::Waiting,
+			Containing::Unknown => Placed::Waiting,
 		},
 	}
 }
@@ -981,22 +1074,10 @@ fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) ->
 	(!holdings.never_produced(gap)).then_some(next)
 }
 
-/// Where a range stops, exclusive, or `None` while it waits on a latest group. `Some(None)`
-/// is past every group.
-fn end(anchor: Option<Anchor>, latest: Option<u64>, holdings: &impl Holdings) -> Option<Option<u64>> {
-	Some(match anchor {
-		None => None,
-		// Every end includes its group.
-		Some(Anchor::Time(time)) => time.checked_add(1),
-		Some(Anchor::Relative(back)) => match holdings.back(latest?, back) {
-			Some(group) => group.checked_add(1),
-			// It counts back past every group held, so it ends before them all.
-			None => Some(0),
-		},
-		// Refused where groups are held; a hop that holds none lets its copies refuse it, and
-		// delivers nothing meanwhile.
-		Some(Anchor::Oldest) => Some(0),
-	})
+/// The end a live join is asked and answered under. One through the reserved group
+/// `u64::MAX` reaches every group, so the wire carries it unbounded and its answer comes back so.
+fn join_end(end: Option<u64>) -> Option<u64> {
+	end.filter(|end| end.checked_add(1).is_some())
 }
 
 #[cfg(test)]
@@ -1004,6 +1085,11 @@ mod tests {
 	use super::*;
 
 	use std::collections::BTreeSet;
+
+	/// A subscriber's delay with no budget.
+	fn delay() -> Delay {
+		Delay::default().with_max(None)
+	}
 
 	/// The group starts a hop holds, the key runs its producer skipped, and whether a
 	/// handler serves its history.
@@ -1016,6 +1102,11 @@ mod tests {
 		/// Every key below this was dropped, so a time below it is placed before every
 		/// group even while none is held.
 		dropped: u64,
+		/// Where a live join with a nonzero lag starts, `None` for nowhere yet.
+		join: Option<Join>,
+		/// The tick of the newest join answer, on a copy that places a live join only from
+		/// its upstream's answer: `join` counts only for a join waiting since before it.
+		answered: Option<u64>,
 	}
 
 	impl Keys {
@@ -1032,7 +1123,7 @@ mod tests {
 			self.looks_up
 		}
 
-		fn containing(&self, time: u64) -> Containing {
+		fn containing(&self, time: u64, _: Duration) -> Containing {
 			match self.held.range(..=time).next_back() {
 				Some(key) => Containing::Group(*key),
 				None if self.held.is_empty() && time >= self.dropped => Containing::Unknown,
@@ -1055,11 +1146,15 @@ mod tests {
 			self.held.range(from..).next().copied()
 		}
 
-		fn back(&self, latest: u64, back: u64) -> Option<u64> {
-			let Some(back) = back.checked_sub(1) else {
-				return Some(latest);
-			};
-			self.held.range(..latest).rev().nth(back as usize).copied()
+		fn join(&self, _: Duration, _: Option<u64>, _: Duration, since: u64) -> Join {
+			match self.answered {
+				Some(tick) if tick <= since => Join::Unknown,
+				_ => self.join.unwrap_or(Join::Unknown),
+			}
+		}
+
+		fn answers_joins(&self) -> bool {
+			self.answered.is_some()
 		}
 
 		fn complete(&self) -> bool {
@@ -1084,16 +1179,24 @@ mod tests {
 			self.0.looks_up()
 		}
 
-		fn containing(&self, time: u64) -> Containing {
-			self.0.containing(time)
+		fn containing(&self, time: u64, budget: Duration) -> Containing {
+			self.0.containing(time, budget)
 		}
 
 		fn next_start(&self, from: u64) -> Option<u64> {
 			self.0.next_start(from)
 		}
 
-		fn back(&self, latest: u64, back: u64) -> Option<u64> {
-			self.0.back(latest, back)
+		fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
+			self.0.join(min, end, budget, since)
+		}
+
+		fn answers_joins(&self) -> bool {
+			self.0.answers_joins()
+		}
+
+		fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+			self.0.answered_join(min, end, budget, since)
 		}
 
 		fn complete(&self) -> bool {
@@ -1127,25 +1230,26 @@ mod tests {
 		/// and the track completing.
 		#[test]
 		fn settling_by_steps_matches_trying_every_start(
-			ranges in proptest::collection::vec((proptest::bool::weighted(0.2), 0u64..40, proptest::option::of(0u64..48)), 1..12),
+			ranges in proptest::collection::vec((0u8..10, 0u64..40, proptest::option::of(0u64..48)), 1..12),
 			ops in proptest::collection::vec((0u8..6, 0u64..48), 0..24),
 			looks_up: bool,
+			join in proptest::option::of(0u64..48),
 		) {
-			let to_range = |(relative, start, end): (bool, u64, Option<u64>)| {
-				let start = match relative {
-					true => Anchor::Relative(start % 6),
-					false => time(start),
-				};
-				range(start, end.map(time))
+			// Mostly time starts, with some reaching back and some live joins of a small lag.
+			let to_range = |(kind, start, end): (u8, u64, Option<u64>)| match kind {
+				0 => range(None, end),
+				1 => live(Duration::from_millis(start % 3), end),
+				_ => range(time(start), end),
 			};
 			let ranges: Vec<Range> = ranges.into_iter().map(to_range).collect();
 			let mut next_key = ranges.len() as u64;
 			let mut keys = Keys {
 				looks_up,
+				join: join.map(Join::Time),
 				..Keys::default()
 			};
-			let mut fast = Window::new(&ranges, None, None, &keys).unwrap();
-			let mut full = Window::new(&ranges, None, None, &Blind(&keys)).unwrap();
+			let mut fast = Window::new(&ranges, delay(), None, &keys);
+			let mut full = Window::new(&ranges, delay(), None, &Blind(&keys));
 			for (op, value) in ops {
 				let latest = keys.held.last().copied();
 				match op {
@@ -1169,8 +1273,8 @@ mod tests {
 						let added = [(next_key, range(time(value), None))];
 						next_key += 1;
 						let retired = [value % next_key];
-						fast.edit(retired, &added, latest, &keys).unwrap();
-						full.edit(retired, &added, latest, &Blind(&keys)).unwrap();
+						fast.edit(retired, &added, latest, &keys);
+						full.edit(retired, &added, latest, &Blind(&keys));
 					}
 					// The oldest group held is evicted.
 					_ => drop(keys.held.pop_first()),
@@ -1183,12 +1287,25 @@ mod tests {
 		}
 	}
 
-	fn range(start: Anchor, end: impl Into<Option<Anchor>>) -> Range {
+	/// A range from time `start`, or reaching back to the oldest group with none.
+	fn range(start: Option<u64>, end: impl Into<Option<u64>>) -> Range {
+		let start = match start {
+			Some(time) => Start::Time(time),
+			None => Start::Oldest,
+		};
 		Range { start, end: end.into() }
 	}
 
-	fn time(start: u64) -> Anchor {
-		Anchor::Time(start)
+	/// A live join `min` behind the live edge.
+	fn live(min: Duration, end: impl Into<Option<u64>>) -> Range {
+		Range {
+			start: Start::Live(min),
+			end: end.into(),
+		}
+	}
+
+	fn time(start: u64) -> Option<u64> {
+		Some(start)
 	}
 
 	fn covered(window: &Window, keys: impl IntoIterator<Item = u64>) -> Vec<u64> {
@@ -1200,7 +1317,7 @@ mod tests {
 	fn ranges_cover_only_their_groups() {
 		let keys = Keys::new(0..10);
 		let ranges = [range(time(2), time(3)), range(time(7), None)];
-		let window = Window::new(&ranges, None, Some(9), &keys).unwrap();
+		let window = Window::new(&ranges, delay(), Some(9), &keys);
 		assert_eq!(covered(&window, 0..10), vec![2, 3, 7, 8, 9]);
 		assert_eq!(window.floor(), Some(2));
 		assert_eq!(window.end(), None);
@@ -1225,7 +1342,7 @@ mod tests {
 		);
 
 		// Nothing asked for is nothing in range, floored nowhere.
-		let window = Window::new(&[], None, None, &keys).unwrap();
+		let window = Window::new(&[], delay(), None, &keys);
 		assert_eq!(covered(&window, 0..4), Vec::<u64>::new());
 		assert_eq!((window.floor(), window.end()), (Some(0), Some(0)));
 	}
@@ -1235,7 +1352,7 @@ mod tests {
 	#[test]
 	fn time_anchors_name_groups_by_their_starts() {
 		let keys = Keys::new([0, 33, 66, 99]);
-		let window = Window::new(&[range(time(50), time(70))], None, Some(99), &keys).unwrap();
+		let window = Window::new(&[range(time(50), time(70))], delay(), Some(99), &keys);
 		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![33, 66]);
 		assert!(window.is_settled());
 		assert_eq!(
@@ -1248,75 +1365,135 @@ mod tests {
 		);
 
 		// A start exactly on a group names that group, and an end on one includes it.
-		let window = Window::new(&[range(time(33), time(66))], None, Some(99), &keys).unwrap();
+		let window = Window::new(&[range(time(33), time(66))], delay(), Some(99), &keys);
 		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![33, 66]);
 
 		// An end before its start is empty, and so is one ending before every group.
-		let window = Window::new(&[range(time(66), time(33))], None, Some(99), &keys).unwrap();
+		let window = Window::new(&[range(time(66), time(33))], delay(), Some(99), &keys);
 		assert_eq!(covered(&window, [0, 33, 66, 99]), Vec::<u64>::new());
 
 		// Before every start held: reach back to the group containing it, naming no floor.
 		let keys = Keys::new([10, 20]);
-		let window = Window::new(&[range(time(5), None)], None, Some(20), &keys).unwrap();
+		let window = Window::new(&[range(time(5), None)], delay(), Some(20), &keys);
 		assert_eq!(covered(&window, [10, 20]), vec![10, 20]);
 		assert_eq!((window.floor(), window.start(), window.named()), (Some(0), None, None));
 		assert_eq!(window.missable(0).next(), Some(5..=u64::MAX), "nothing below its time");
 	}
 
-	/// Relative anchors count back through the groups held, however sparse their starts,
-	/// and wait for a first group when there is none.
+	/// A range with no start reaches back to the oldest group, and a live join with no lag
+	/// starts at the latest group, waiting for a first group when there is none.
 	#[test]
-	fn relative_anchors_count_groups_back_from_the_latest() {
+	fn a_live_join_with_no_lag_starts_at_the_latest_group() {
 		let keys = Keys::new([0, 33, 66, 99]);
-		let window = Window::new(
-			&[range(Anchor::Relative(2), Anchor::Relative(1))],
-			None,
-			Some(99),
-			&keys,
-		)
-		.unwrap();
-		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![33, 66]);
-		assert_eq!(window.start(), Some(33));
+		let oldest = Window::new(&[Range::default()], delay(), Some(99), &keys);
+		assert_eq!(covered(&oldest, [0, 33, 66, 99]), vec![0, 33, 66, 99]);
+		assert_eq!((oldest.floor(), oldest.start()), (Some(0), None));
 
-		// Counting back past every group held reaches back to the oldest as a start, and ends
-		// before them all as an end.
-		let window = Window::new(&[range(Anchor::Relative(10), None)], None, Some(99), &keys).unwrap();
-		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![0, 33, 66, 99]);
-		assert_eq!(window.start(), None);
-		let window = Window::new(&[range(Anchor::Oldest, Anchor::Relative(10))], None, Some(99), &keys).unwrap();
-		assert_eq!(covered(&window, [0, 33, 66, 99]), Vec::<u64>::new());
+		let joined = Window::new(&[live(Duration::ZERO, None)], delay(), Some(99), &keys);
+		assert_eq!(covered(&joined, [0, 33, 66, 99]), vec![99]);
+		assert_eq!(joined.start(), Some(99));
+		// An end before where it joins holds nothing.
+		let short = Window::new(&[live(Duration::ZERO, time(50))], delay(), Some(99), &keys);
+		assert_eq!(covered(&short, [0, 33, 66, 99]), Vec::<u64>::new());
 
-		let mut window = Window::new(&[Range::live()], None, None, &Keys::default()).unwrap();
+		let mut window = Window::new(&[live(Duration::ZERO, None)], delay(), None, &Keys::default());
 		assert!(window.is_pending() && window.contains(3) && window.floor().is_none());
 		assert!(!window.settle(None, &Keys::default()));
 		let keys = Keys::new([5]);
 		assert!(window.settle(Some(5), &keys));
 		assert_eq!(covered(&window, 0..8), vec![5, 6, 7]);
 		assert!(window.is_settled());
-
-		// The oldest start needs no latest group, and names no floor.
-		let window = Window::new(&[Range::oldest()], None, None, &keys).unwrap();
-		assert_eq!((window.floor(), window.start()), (Some(0), None));
-
-		// Any count back, however far, waits on a latest group.
-		for back in [u64::MAX, u64::MAX - 1] {
-			let open = range(Anchor::Relative(back), None);
-			assert!(!open.is_wire());
-			assert!(Window::new(&[open], None, None, &keys).unwrap().is_pending());
-			assert_eq!(Window::new(&[open], None, Some(5), &keys).unwrap().start(), None);
-		}
 	}
 
-	/// No hop can place the oldest group as an end, so it is refused.
+	/// A live join with a lag starts where the holdings measure it: a time resolves as a
+	/// time start, history lookup included, and a group starts there. Until they measure it
+	/// the join reads nothing.
 	#[test]
-	fn an_oldest_end_is_refused() {
-		let ranges = [range(time(0), Anchor::Oldest)];
-		assert!(matches!(
-			Window::new(&ranges, None, Some(3), &Keys::new(0..4)),
-			Err(Error::InvalidRange)
-		));
-		// A hop holding no groups leaves the refusal to the copies that do.
-		assert!(Window::new(&ranges, None, Some(3), &Unheld).is_ok());
+	fn a_live_join_starts_where_the_holdings_place_it() {
+		let join = [live(Duration::from_millis(40), None)];
+		let mut keys = Keys::new([0, 33, 66, 99]);
+		keys.join = Some(Join::Time(59));
+		let window = Window::new(&join, delay(), Some(99), &keys);
+		assert_eq!(
+			window.resolved(),
+			[Some(Resolved {
+				start: 33,
+				end: None,
+				floored: true
+			})]
+		);
+		keys.join = Some(Join::Group(66));
+		let window = Window::new(&join, delay(), Some(99), &keys);
+		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![66, 99]);
+
+		// A time the groups held can't place is looked up, as a time start is.
+		keys.looks_up = true;
+		keys.join = Some(Join::Time(20));
+		keys.held.remove(&0);
+		let window = Window::new(&join, delay(), Some(99), &keys);
+		assert_eq!(window.lookups().collect::<Vec<_>>(), [(20, 0)]);
+
+		keys.looks_up = false;
+		keys.join = None;
+		let mut window = Window::new(&join, delay(), Some(99), &keys);
+		assert!(window.is_reaching() && !window.contains(99) && window.resolved() == [None]);
+		assert!(!window.settle(Some(99), &keys), "still nothing to measure it by");
+		keys.join = Some(Join::Group(66));
+		assert!(window.settle(Some(99), &keys));
+		assert!(!window.is_reaching());
+		assert_eq!(window.start(), Some(66));
+	}
+
+	/// On a copy that places a live join only from its upstream's answer, a join reads none
+	/// of the groups held, whatever its lag, and takes only an answer recorded after it began
+	/// waiting: an answer for an earlier reader proves nothing about the live edge now.
+	#[test]
+	fn a_copy_places_a_live_join_only_from_a_fresh_answer() {
+		let mut keys = Keys::new([0, 33, 66, 99]);
+		keys.join = Some(Join::Group(33));
+		for min in [Duration::ZERO, Duration::from_millis(40)] {
+			keys.answered = Some(3);
+			let mut window = Window::keyed_since([(0, live(min, None))], |_| 3, delay(), Some(99), &keys);
+			assert!(
+				window.is_reaching() && !window.contains(99),
+				"an answer from before it waited"
+			);
+			assert_eq!(window.joins().collect::<Vec<_>>(), [(min, None, 3)]);
+			// One through the reserved last group asks and waits as an unbounded one, as the wire
+			// carries it.
+			let through = Window::keyed_since([(0, live(min, time(u64::MAX)))], |_| 3, delay(), Some(99), &keys);
+			assert_eq!(through.joins().collect::<Vec<_>>(), [(min, None, 3)]);
+
+			// A newer answer places it, at exactly the group upstream answered.
+			keys.answered = Some(4);
+			assert!(window.settle(Some(99), &keys));
+			assert_eq!(covered(&window, [0, 33, 66, 99]), vec![33, 66, 99]);
+			assert_eq!(window.joins().count(), 0);
+		}
+
+		// An answer of nothing places a join with an end past it, and keeps one without waiting.
+		keys.answered = Some(3);
+		keys.join = Some(Join::Empty);
+		let join = |end| [(0, live(Duration::from_millis(40), end))];
+		let mut bounded = Window::keyed_since(join(time(50)), |_| 3, delay(), Some(99), &keys);
+		let mut open = Window::keyed_since(join(None), |_| 3, delay(), Some(99), &keys);
+		keys.answered = Some(4);
+		assert!(bounded.settle(Some(99), &keys));
+		assert_eq!(covered(&bounded, [0, 33, 66, 99]), Vec::<u64>::new());
+		assert!(bounded.is_settled());
+		assert!(!open.settle(Some(99), &keys));
+		assert!(open.is_reaching());
+	}
+
+	/// A hop whose copies place its ranges leaves a live join to them, reading everything
+	/// meanwhile, and a range with no start reaches back as it would anywhere.
+	#[test]
+	fn a_hop_holding_nothing_defers_a_join_to_its_copies() {
+		let window = Window::new(&[live(Duration::ZERO, None)], delay(), Some(9), &Unheld);
+		assert!(window.is_pending() && window.contains(3));
+		let window = Window::new(&[Range::default()], delay(), Some(9), &Unheld);
+		assert!(!window.is_pending() && window.contains(3));
+		assert_eq!(window.start(), None);
 	}
 
 	/// The named floor is the lowest start, unless a range reaches back to the oldest
@@ -1324,12 +1501,13 @@ mod tests {
 	#[test]
 	fn the_named_start_is_the_lowest_unless_one_reaches_back() {
 		let keys = Keys::new(0..10);
-		let start = |ranges: &[Range], latest| Window::new(ranges, None, latest, &keys).unwrap().start();
-		assert_eq!(start(&[range(time(4), None), Range::live()], Some(9)), Some(4));
-		assert_eq!(start(&[range(time(4), None), Range::live()], Some(2)), Some(2));
+		let joins = live(Duration::ZERO, None);
+		let start = |ranges: &[Range], latest| Window::new(ranges, delay(), latest, &keys).start();
+		assert_eq!(start(&[range(time(4), None), joins], Some(9)), Some(4));
+		assert_eq!(start(&[range(time(4), None), joins], Some(2)), Some(2));
 		assert_eq!(start(&[range(time(0), None)], None), Some(0));
-		assert_eq!(start(&[range(time(4), None), Range::live()], None), None);
-		assert_eq!(start(&[range(time(4), None), Range::oldest()], Some(9)), None);
+		assert_eq!(start(&[range(time(4), None), joins], None), None);
+		assert_eq!(start(&[range(time(4), None), Range::default()], Some(9)), None);
 	}
 
 	/// A time start with no group held yet reads only the groups from its time, rather than
@@ -1338,8 +1516,9 @@ mod tests {
 	#[test]
 	fn a_time_start_waits_for_a_group() {
 		let mut keys = Keys::default();
-		let ranges = [range(time(2500), None), range(Anchor::Relative(0), Anchor::Relative(0))];
-		let mut window = Window::new(&ranges, None, Some(9), &keys).unwrap();
+		// The other joins at the latest group, 9, and ends there.
+		let ranges = [range(time(2500), None), live(Duration::ZERO, time(9))];
+		let mut window = Window::new(&ranges, delay(), Some(9), &keys);
 		assert!(!window.is_pending() && !window.is_settled());
 		assert_eq!(covered(&window, 0..22), vec![9], "only the other range reads below it");
 		assert_eq!(
@@ -1373,7 +1552,7 @@ mod tests {
 			"3000 starts past it"
 		);
 		keys.held.insert(2000);
-		let window = Window::new(&ranges, None, Some(3000), &keys).unwrap();
+		let window = Window::new(&ranges, delay(), Some(3000), &keys);
 		assert_eq!(
 			window.resolved()[0],
 			Some(Resolved {
@@ -1388,7 +1567,7 @@ mod tests {
 			complete: true,
 			..Keys::default()
 		};
-		let window = Window::new(&ranges, None, Some(9), &keys).unwrap();
+		let window = Window::new(&ranges, delay(), Some(9), &keys);
 		assert_eq!(
 			window.resolved()[0],
 			Some(Resolved {
@@ -1399,34 +1578,13 @@ mod tests {
 		);
 	}
 
-	/// A relative end counts back from the latest group it was asked against, however many
-	/// arrive while its time start waits.
-	#[test]
-	fn a_waiting_time_start_keeps_its_relative_end() {
-		for latest in [None, Some(9)] {
-			let mut keys = Keys::default();
-			let ranges = [range(time(2500), Anchor::Relative(0))];
-			let mut window = Window::new(&ranges, None, latest, &keys).unwrap();
-			assert_eq!(window.is_pending(), latest.is_none());
-			keys.held.extend([2000, 3000]);
-			assert!(window.settle(Some(3000), &keys));
-			assert!(!window.is_pending());
-			keys.held.insert(4000);
-			assert!(!window.settle(Some(4000), &keys), "resolved already");
-			assert_eq!(
-				window.resolved()[0].map(|resolved| (resolved.start, resolved.end)),
-				Some((2000, Some(latest.map_or(3001, |latest| latest + 1))))
-			);
-		}
-	}
-
 	/// A coverage check resumes where the last stopped, but not below its floor or past its
 	/// cap: a lower floor or a wider cap reaches groups no check has seen.
 	#[test]
 	fn coverage_resumes_within_what_was_checked() {
 		let keys = Keys::new(0..6);
 		let ranges = [range(time(0), time(1)), range(time(4), time(5))];
-		let mut window = Window::new(&ranges, None, None, &keys).unwrap();
+		let mut window = Window::new(&ranges, delay(), None, &keys);
 		let accounted = rangemap::RangeSet::from_iter([0..1, 4..6]);
 		assert!(window.covered_by(4, None, &accounted));
 		assert!(
@@ -1447,7 +1605,7 @@ mod tests {
 	/// behind where it stopped.
 	#[test]
 	fn coverage_resumes_within_a_range() {
-		let mut window = Window::new(&[range(time(0), time(7))], None, None, &Keys::new(0..8)).unwrap();
+		let mut window = Window::new(&[range(time(0), time(7))], delay(), None, &Keys::new(0..8));
 		let mut accounted = rangemap::RangeSet::from_iter(std::iter::once(0..3));
 		assert!(!window.covered_by(0, None, &accounted));
 		assert_eq!(window.covered, Some((0, 3)), "stops at the first missing group");
@@ -1463,7 +1621,7 @@ mod tests {
 	#[test]
 	fn coverage_reads_a_map_of_the_groups_accounted_for() {
 		let ranges = [range(time(0), time(1)), range(time(4), time(5))];
-		let mut window = Window::new(&ranges, None, None, &Keys::new(0..6)).unwrap();
+		let mut window = Window::new(&ranges, delay(), None, &Keys::new(0..6));
 		let mut accounted = rangemap::RangeMap::new();
 		accounted.insert(0..2, 'a');
 		accounted.insert(4..5, 'b');
@@ -1481,7 +1639,7 @@ mod tests {
 	fn a_time_start_the_groups_cant_place_is_looked_up() {
 		let mut keys = Keys::new([4000, 9000]);
 		keys.looks_up = true;
-		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(8500), None)], delay(), Some(9000), &keys);
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
 		assert!(!window.is_settled() && !window.contains(9000) && window.resolved() == [None]);
 		keys.held.insert(8000);
@@ -1496,12 +1654,12 @@ mod tests {
 		);
 		assert!(window.is_settled());
 
-		let window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		let window = Window::new(&[range(time(8500), None)], delay(), Some(9000), &keys);
 		assert_eq!(window.lookups().count(), 1, "something may start between 8000 and 8500");
-		let window = Window::new(&[range(time(8000), None)], None, Some(9000), &keys).unwrap();
+		let window = Window::new(&[range(time(8000), None)], delay(), Some(9000), &keys);
 		assert_eq!(window.lookups().count(), 0, "8000 starts exactly there");
 
-		let mut window = Window::new(&[range(time(500), None)], None, Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(500), None)], delay(), Some(9000), &keys);
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 0)]);
 		assert!(window.found(500, Found::Dropped { floor: 0 }, &keys));
 		assert_eq!(
@@ -1529,8 +1687,7 @@ mod tests {
 		// 4000 evicted while the lookup was out, or 8000 arrived between, as another reader's
 		// fill brings it.
 		for held in [&[9000][..], &[4000, 8000, 9000]] {
-			let mut window =
-				Window::new(&[range(time(8500), None)], None, Some(9000), &history(&[4000, 9000])).unwrap();
+			let mut window = Window::new(&[range(time(8500), None)], delay(), Some(9000), &history(&[4000, 9000]));
 			assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
 			assert!(window.found(8500, Found::Dropped { floor: 4001 }, &history(held)));
 			assert_eq!(window.lookups().count(), 0, "answered, not looked up again");
@@ -1552,7 +1709,7 @@ mod tests {
 	fn an_eviction_during_a_lookup_looks_it_up_again() {
 		let mut keys = Keys::new([4000, 9000]);
 		keys.looks_up = true;
-		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(8500), None)], delay(), Some(9000), &keys);
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
 		keys.held.remove(&4000);
 		assert!(window.found(8500, Found::Unanswered, &keys));
@@ -1567,7 +1724,7 @@ mod tests {
 		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(4000));
 
 		// Even with the cache emptied.
-		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(8500), None)], delay(), Some(9000), &keys);
 		let all = std::mem::take(&mut keys.held);
 		assert!(window.found(8500, Found::Unanswered, &keys));
 		assert_eq!(
@@ -1578,7 +1735,7 @@ mod tests {
 		keys.held = all;
 
 		// With nothing evicted, it starts where the groups held say.
-		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(8500), None)], delay(), Some(9000), &keys);
 		assert!(window.found(8500, Found::Unanswered, &keys));
 		assert_eq!(window.lookups().count(), 0);
 		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(4000));
@@ -1591,7 +1748,7 @@ mod tests {
 		let mut keys = Keys::new([0, 33, 66]);
 		keys.looks_up = true;
 		keys.skipped = vec![1..33, 34..66];
-		let window = Window::new(&[range(time(50), None)], None, Some(66), &keys).unwrap();
+		let window = Window::new(&[range(time(50), None)], delay(), Some(66), &keys);
 		assert_eq!(window.lookups().count(), 0);
 		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(33));
 	}
@@ -1602,7 +1759,7 @@ mod tests {
 	fn an_unanswered_lookup_settles_with_its_time_end() {
 		let mut keys = Keys::new([4000, 9000]);
 		keys.looks_up = true;
-		let mut window = Window::new(&[range(time(500), time(3000))], None, Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(500), time(3000))], delay(), Some(9000), &keys);
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 0)]);
 		assert!(window.found(500, Found::Unanswered, &keys));
 		assert!(window.is_settled());
@@ -1622,11 +1779,10 @@ mod tests {
 		let keys = Keys::new([4000, 9000]);
 		let window = Window::new(
 			&[range(time(8500), None), range(time(500), None)],
-			None,
+			delay(),
 			Some(9000),
 			&keys,
-		)
-		.unwrap();
+		);
 		assert_eq!(window.lookups().count(), 0);
 		assert_eq!(
 			window.resolved(),

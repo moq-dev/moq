@@ -117,6 +117,9 @@ export type SymmetricKey = Extract<Key, { kty: "oct" }>;
 /** An asymmetric key without its private parameters. */
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 
+// An asymmetric JWK's private parameters.
+const PRIVATE_FIELDS = ["d", "p", "q", "dp", "dq", "qi"] as const;
+
 /** Derive a verify-only copy of this key, dropping the private material and sharing nothing with it. */
 function toPublic(key: Key): PublicKey {
 	if (key.kty === "oct") throw new Error("Cannot derive public key from oct (symmetric) key");
@@ -124,7 +127,7 @@ function toPublic(key: Key): PublicKey {
 
 	// A deep copy, since the signer enforces its scope and an alias would let the copy edit it.
 	const copy: Record<string, unknown> = structuredClone(key);
-	for (const field of ["d", "p", "q", "dp", "dq", "qi"]) delete copy[field];
+	for (const field of PRIVATE_FIELDS) delete copy[field];
 	copy.key_ops = ["verify"];
 	// TEMPORARY MIGRATION (see `wire.ts`): a scope typed by hand is spelled as a parsed one is, so
 	// a published key reads as the same subtrees as the tokens it verifies.
@@ -191,7 +194,7 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 	Path.signable(parsed.root);
 	ensureClaimsWithinScope(key, parsed);
 
-	const joseKey = await importJoseKey(key);
+	const joseKey = await importJoseKey(key, "sign");
 	const jwt = await new jose.SignJWT(encodeClaims(parsed))
 		.setProtectedHeader({
 			alg: key.alg,
@@ -206,15 +209,16 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 /** Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope. */
 async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
 	ensureOperationSupported(key, "verify");
-	const joseKey = await importJoseKey(key);
+	const joseKey = await importJoseKey(key, "verify");
 	const { payload, protectedHeader } = await jose.compactVerify(token, joseKey, {
 		algorithms: [key.alg],
 	});
 	if (protectedHeader.kid !== key.kid) throw new Error("Token kid does not match key");
-	const decoded = JSON.parse(new TextDecoder().decode(payload));
 	let claims: Claims;
 	try {
-		claims = ClaimsSchema.parse(decoded);
+		// Strict as serde_json is in `moq-auth`: invalid UTF-8 or a repeated claim is refused.
+		const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(payload);
+		claims = ClaimsSchema.parse(Json.parse(text));
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
@@ -478,10 +482,12 @@ function isEcAlgorithm(alg: Algorithm): alg is "ES256" | "ES384" {
 	return alg === "ES256" || alg === "ES384";
 }
 
-async function importJoseKey(key: Key | PublicKey): Promise<CryptoKey | Uint8Array> {
-	const jwk = { ...key } as jose.JWK;
+async function importJoseKey(key: Key | PublicKey, operation: Operation): Promise<CryptoKey | Uint8Array> {
+	const jwk: Record<string, unknown> = { ...key };
 	delete jwk.key_ops;
-	return jose.importJWK(jwk, key.alg);
+	// WebCrypto verifies only with a public key, so a private one verifies as its public half.
+	if (operation === "verify" && key.kty !== "oct") for (const field of PRIVATE_FIELDS) delete jwk[field];
+	return jose.importJWK(jwk as jose.JWK, key.alg);
 }
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";

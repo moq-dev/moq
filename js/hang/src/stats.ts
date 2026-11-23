@@ -5,8 +5,7 @@
  */
 import * as z from "zod/mini";
 import { u53Schema } from "./catalog/integers.ts";
-import { renditions } from "./catalog/section.ts";
-import { measurementSchema } from "./snapshot.ts";
+import { measurementSchema, renditionsSchema } from "./snapshot.ts";
 /** Transport gauges and cumulative loss counters known to the observer. */
 export const TransportSchema = z.object({
 	// Latest round-trip time in milliseconds.
@@ -44,7 +43,7 @@ export const SnapshotSchema = z.looseObject({
 	// Connection measurements; unavailable fields remain absent.
 	transport: z.optional(TransportSchema),
 	// Empty entries retain a rendition ID whose counters are all zero.
-	renditions: z.optional(renditions(RenditionSchema)),
+	renditions: z.optional(renditionsSchema(RenditionSchema)),
 });
 /** One publisher report, with application or container sections flattened beside it. */
 export type Snapshot = z.infer<typeof SnapshotSchema>;

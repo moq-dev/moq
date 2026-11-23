@@ -43,7 +43,7 @@ const DEFAULT_MAX_STREAMS = 10_000;
 
 // Match moq-tokio so WebSocket readers have the same bandwidth-delay budget.
 const DEFAULT_RECEIVE_WINDOW = 4 << 20;
-const DEFAULT_STREAM_RECEIVE_WINDOW = 1 << 20;
+const DEFAULT_STREAM_RECEIVE_WINDOW = 4 << 20;
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
@@ -75,7 +75,7 @@ export interface WebSocketProps {
 	/** Connection receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	receiveWindow?: number;
 
-	/** Per-stream receive window in bytes (default: 1 MiB). Must be a positive safe integer. */
+	/** Per-stream receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	streamReceiveWindow?: number;
 }
 

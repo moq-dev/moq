@@ -9,7 +9,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use super::StreamId;
 use super::recv::{Error, Reader, Stream};
-use super::{StreamsState, state::get_or_insert_recv};
+use super::{StreamsState, state::Holder, state::get_or_insert_recv};
 use crate::connection::assembler::Assembler;
 use crate::connection::waits::Wait;
 
@@ -31,7 +31,7 @@ pub(super) struct Leased {
 	lent: u64,
 	/// Bytes whose connection credit is withheld: `len`, plus bytes taken or advanced past but
 	/// not yet released.
-	held: u64,
+	pub(super) held: u64,
 	/// How the stream ended, once the last byte is leased.
 	end: Option<End>,
 	priority: i64,
@@ -222,12 +222,24 @@ pub struct Lease {
 	/// Bytes in `chunks`.
 	len: usize,
 	fin: bool,
+	/// The window to set as the lease is handed back, in the same hold of the connection's
+	/// lock as its credit returns.
+	window: Option<u64>,
 }
 
 impl Lease {
 	/// Whether the peer finished the stream right after the leased bytes.
 	pub fn is_fin(&self) -> bool {
 		self.fin
+	}
+
+	/// Set the stream's window, as [`Stream::set_window()`] does, when the lease is handed back.
+	///
+	/// A reader shrinking its window for the bytes it just read does so here rather than
+	/// after the hand back: the driver may build a grant from the old window in between, and
+	/// credit granted cannot be taken back.
+	pub fn set_window(&mut self, window: u64) {
+		self.window = Some(window);
 	}
 
 	/// The bytes not yet read, in order, one contiguous chunk at a time.
@@ -369,6 +381,7 @@ impl Stream<'_> {
 				chunks: std::mem::take(&mut lease.chunks),
 				len: std::mem::take(&mut lease.len) as usize,
 				fin: lease.is_fin(),
+				window: None,
 			};
 			// Its reader may be about to free the window.
 			self.state.unlooked.insert(self.id);
@@ -494,8 +507,36 @@ impl Stream<'_> {
 		state.chunks = lease.chunks;
 		state.len = lease.len as u64;
 		state.lent = 0;
+		// Before the grant the bytes taken queue, which the driver builds from this window.
+		if let Some(window) = lease.window {
+			recv.set_window(window);
+		}
 		// What the reader took returns its stream credit.
 		self.queue_max_stream_data()
+	}
+
+	/// Let the peer send at most `window` bytes past what the reader took, rather than the
+	/// connection's stream receive window, returning the connection credit the stream may hold
+	/// from now on: what arrived and was not released, and what the peer may still send.
+	///
+	/// A reader about to stop taking shrinks its window first, so the stream holds little
+	/// while it waits. Credit already granted stays granted, so a smaller window holds only
+	/// once the reader takes what was granted before it. A larger window, up to the
+	/// connection's, grants the added credit once it is an eighth of the window, as a read
+	/// would, or at once when a reader waits for it. A reader waiting on a larger unit still
+	/// gets room for it.
+	pub fn set_window(&mut self, window: u64) -> u64 {
+		let stream_receive_window = self.state.stream_receive_window;
+		let Some(slot) = self.state.recv.get_mut(&self.id) else {
+			return 0;
+		};
+		// A stream this side opened has no receive state until something arrives or reads it.
+		let recv = get_or_insert_recv(slot, self.state.initial_stream_receive_window);
+		recv.set_window(window);
+		let credit = recv.credit(stream_receive_window);
+		let transmit = self.queue_max_stream_data();
+		self.transmit(transmit);
+		credit
 	}
 
 	/// Rank this stream for eviction: when the connection window is stuck, the stream with the
@@ -648,6 +689,7 @@ impl StreamsState {
 	/// freed; each evicted stream's reader wakes.
 	pub(super) fn evict_if_stuck(&mut self) -> Option<bool> {
 		self.stuck_waiting = false;
+		self.holds.by = None;
 		// The window, not the credit a rate cap paces, says whether memory is stuck: a capped
 		// peer out of credit is waiting on time, not on a reader.
 		if self.window_max_data > self.data_recvd {
@@ -655,10 +697,12 @@ impl StreamsState {
 		}
 		// An evicted reader has yet to stop its stream, which returns the credit of what it took.
 		if self.evicted_held > 0 {
+			self.holds.by = Some(Holder::Evicted);
 			return None;
 		}
 		// Checked before any eviction, so a reader about to free the window is waited for.
 		if self.trim_unlooked() {
+			self.holds.by = Some(Holder::Readers);
 			return None;
 		}
 
@@ -686,6 +730,10 @@ impl StreamsState {
 				"{id} has data its reader has not looked at"
 			);
 			transmit = Some(self.evict(id));
+		}
+		// A victim's reader took bytes whose credit returns only at its stop.
+		if self.window_max_data <= self.data_recvd && self.evicted_held > 0 {
+			self.holds.by = Some(Holder::Evicted);
 		}
 		transmit
 	}

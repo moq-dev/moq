@@ -198,6 +198,49 @@ test("Legacy Producer accepts open-GOP leading pictures above the previous group
 	producer.finish();
 });
 
+test("Legacy Producer continues a group at a keyframe overlapping it, and drops a leading picture before it with those after it", async () => {
+	const track = micro("test");
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	for (const [timestamp, keyframe] of [
+		[100_000, true],
+		[166_000, false],
+		[133_000, false],
+		// A splice dipping below the newest frame continues the group.
+		[150_000, true],
+		[183_000, false],
+		// Past the newest frame: a new group, whose leading picture at 183_000 presents with the last,
+		// and whose later leading picture at 190_000 may reference it. 233_000 never does.
+		[200_000, true],
+		[183_000, false],
+		[190_000, false],
+		[233_000, false],
+	] as const) {
+		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), keyframe);
+	}
+	producer.finish();
+	const groups = (await readGroups(subscriber, 200_000n)).map(([, frames]) =>
+		frames.filter(([, size]) => size > 0).map(([timestamp]) => timestamp),
+	);
+	expect(groups).toEqual([
+		[100_000, 166_000, 133_000, 150_000, 183_000],
+		[200_000, 233_000],
+	]);
+});
+
+test("Legacy Producer drops a keyframe overlapping a closed group", () => {
+	const track = micro("test");
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), Duration.micros(100_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(166_000), false);
+	producer.discontinuity(Duration.micros(200_000));
+	const largest = track.largest()?.group;
+	producer.encode(new Uint8Array([1]), Duration.micros(150_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(183_000), false);
+	expect(track.largest()?.group).toBe(largest);
+	producer.finish();
+});
+
 test("Legacy Producer writes a duration marker at the next keyframe", async () => {
 	const track = micro("test");
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
@@ -363,8 +406,9 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 	producer.discontinuity(Duration.micros(33_000));
 	producer.finish();
 
-	// The marker starts one microsecond before the edge, so media resuming right at it follows.
-	expect(await readGroups(subscriber, 32_999n)).toEqual([
+	// The marker never starts below a frame of the group it ends, here its end marker, so it starts
+	// at the caller's end, where that group ends whole.
+	expect(await readGroups(subscriber, 33_000n)).toEqual([
 		[
 			0n,
 			[
@@ -372,7 +416,7 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 				[33_000, 0],
 			],
 		],
-		[32_999n, [[32_999, 0]]],
+		[33_000n, [[33_000, 0]]],
 	]);
 });
 

@@ -10,6 +10,7 @@ import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
 	closeError,
+	closeReason,
 	error,
 	NotFound,
 	ProtocolViolation,
@@ -147,6 +148,20 @@ function sees(filter: Filter, path: Path.Valid): boolean {
 		(filter.covering ? scopeOverlaps(filter.scope, path) : filter.scope.matches(path)) &&
 		(filter.hidden || !hiddenBelow(filter.prefix, path))
 	);
+}
+
+/**
+ * The group a SUBSCRIBE asks from, undefined for a live join. A range from the oldest group whose
+ * budget reaches back asks from group 0, so the publisher delivers the backlog it holds: a wire
+ * without ranges can't name the oldest any other way. A zero budget keeps only the latest group,
+ * which a live join already delivers. Mirrors the Rust `wire_start`.
+ */
+function wireStart(ranges: readonly track.Range[], delay: track.Delay | undefined): bigint | undefined {
+	const max = delay?.max;
+	const reaches = max === null || (max !== undefined && !max.isZero());
+	// Only a time start can be empty, so every range from the oldest group delivers something.
+	if (reaches && ranges.some((range) => range.start === undefined)) return 0n;
+	return wireSpan(ranges).start;
 }
 
 /**
@@ -500,7 +515,7 @@ export class Subscriber {
 	// the connection does for its own violations.
 	#fail(code: SessionCode, reason: string) {
 		try {
-			this.#quic?.close({ closeCode: code, reason });
+			this.#quic?.close({ closeCode: code, reason: closeReason(reason) });
 		} catch {
 			// Already closed.
 		}
@@ -1034,10 +1049,8 @@ export class Subscriber {
 		if (hooks.trackFinished(producer) || !hooks.subscribing(producer).peek()) return false;
 		const ranges = hooks.requested(producer).peek()?.ranges ?? [];
 		if (!bounded(ranges)) return true;
-		const end = wireSpan(ranges).end;
-		// A relative end resolves against Largest, or against the first group when none exists yet,
-		// which only the live feed delivers.
-		return end === undefined ? edge === 0n : end > edge;
+		// Every range ends, at a time, so the end is known.
+		return (wireSpan(ranges).end ?? 0n) > edge;
 	}
 
 	async #historyOnly(producer: track.Producer, edge: bigint): Promise<void> {
@@ -1590,7 +1603,9 @@ export class Subscriber {
 		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
 		this.#aliases.resubscribe({ broadcast, name: request.name });
-		const bounds = wireSpan(request.subscription.ranges ?? [{}]);
+		const ranges = request.subscription.ranges ?? [{}];
+		const bounds = wireSpan(ranges);
+		const start = wireStart(ranges, request.subscription.delay);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
@@ -1602,7 +1617,7 @@ export class Subscriber {
 			// A known start is absolute, except group 0, which joins live with no filter. A Next
 			// Object join recovers its head through a fetch stream (see {@link Join}). Fixed for
 			// the subscription's life.
-			...joinFilter(version, bounds.start),
+			...joinFilter(version, start),
 		});
 		if (msg.fill) {
 			// The fill names this request and can overtake SUBSCRIBE_OK, so it waits on it here.
@@ -1685,10 +1700,14 @@ export class Subscriber {
 			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
 		// Absolute subscriptions keep their prefix even when the answer follows its first data. A
-		// live join's earlier start is left to the copy's fills, one range FETCH per run.
+		// live join's earlier start is left to the copy's fills, one range FETCH per run. The
+		// publisher placed that start at its edge, so the groups below stay fillable for whatever
+		// each reader's budget reaches, even one from the oldest group, which names none of them,
+		// and one that joins after this SUBSCRIBE, which no update re-asks.
 		hooks.startTrack(producer, {
-			start: live ? (ok.largest?.groupId ?? 0n) : (bounds.start ?? 0n),
+			start: live ? (ok.largest?.groupId ?? 0n) : (start ?? 0n),
 			requested: bounds.start,
+			resolved: live && ok.largest !== undefined,
 		});
 		const source = this.#streamSources.get(request);
 		if (source)
@@ -1923,7 +1942,8 @@ export class Subscriber {
 						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
 					);
 				}
-				producer = track.createGroup(group.groupId);
+				// A group the copy already holds arrived twice, which the received path refuses.
+				producer = hooks.receiveGroup(track, { start: group.groupId, offset: 0 });
 			}
 			return producer;
 		};
@@ -2195,7 +2215,7 @@ export class Subscriber {
 
 				const timestamp = objectTime(timescale, join.key);
 				if (first) {
-					producer = join.open(() => track.createGroup(join.key));
+					producer = join.open(() => hooks.receiveGroup(track, { start: join.key, offset: 0 }));
 					if (!producer) {
 						discarding = true;
 						if (!object.payload) await skipPayload(stream, object.size);

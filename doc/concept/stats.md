@@ -158,6 +158,28 @@ An aggregating reader pins each node's subscription to its instance.
 Every bucket shares the node's broadcast, so a token scoped to the stats prefix
 reads every bucket's tracks; scope by bucket with an aggregating reader instead.
 
+### Root broadcasts
+
+A relay with [`roots`](/bin/relay/config#stats) on also gives each root its own
+stats, readable with a grant on that root alone. A session scoped to a root reads
+them at the same `<prefix>/node/<node>` paths, relative to its root, carrying the
+same tracks:
+
+- traffic on the broadcast paths at or under the root, named relative to it, and
+- the sessions and HTTP requests scoped to the root or to a root beneath it.
+
+Nothing of another root's sessions or paths appears, and reading them counts as
+no root's traffic. Traffic another root's session causes on the root's paths,
+such as reading them through a grant's mount, counts on those paths; what the
+root's own sessions read through a mount counts on the mount's target instead.
+Each node announces a root's broadcast while it serves a session scoped to
+exactly that root, plus the linger, so a returning root is a new instance.
+
+The relay publishes each root's broadcast at
+`<prefix>/root/<root>/node/<node>`, with the root escaped into one segment, and
+mounts `<prefix>/root/<root>` read-only at `<root>/<prefix>`: no session can
+publish there, and the top-level node broadcast is the empty root's.
+
 ## Tracks
 
 Traffic is split by **tier**, an arbitrary label (a billing class, a region)
@@ -366,7 +388,9 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
-    "wire_tx": 2048, "wire_rx": 1024, "routes_refused": 0,
+    "wire_tx": 2048, "wire_rx": 1024, "credit_stalls": 2, "credit_stalled_us": 350000,
+    "credit_held_readers_us": 120000,
+    "routes_refused": 0,
     "routes": {
       "changed": 4, "rewritten": 120,
       "sent": { "dead": 1, "drain": 0 }, "received": { "dead": 0, "drain": 1 },
@@ -400,11 +424,44 @@ flushes the old tier and label first; closing a session records its final delta.
 An embedder creates a `transport::Wire`, registers it with `stats::Session::wire`,
 records its connection's cumulative totals on it, and holds the returned guard.
 Dropping the guard records the final reading.
+`moq-srt` fills one per connection through the `wire` field of its `Import` and
+`Export`: SRT packet bytes, headers and retransmits included, without IP and
+UDP, refreshed every 250 ms, so a connection's last quarter second goes uncounted.
 
-Unsupported transports, including browsers and the current WebSocket/qmux
-adapter, contribute zero. WebSocket wire accounting requires the separate
-qmux counter source; unavailable counters are never estimated from payload.
-Readers default missing wire fields to zero for older relays.
+A qmux session over TCP, which is every WebSocket session, counts the kernel's
+`TCP_INFO` bytes for its socket. `wire_tx` includes TLS, WebSocket, and qmux
+framing and TCP retransmits, and excludes TCP and IP headers. `wire_rx` is the
+bytes TCP delivered, so a peer's duplicate retransmissions are not counted. The
+session copies them at most four times a second, and once more when it ends.
+Only Linux (4.19 or later) reports them: a session on another platform, or on a
+socket the relay holds no handle for, contributes zero.
+
+Other unsupported transports, including browsers, contribute zero. Unavailable
+counters are never estimated from payload. Readers default missing wire fields
+to zero for older relays.
+
+`credit_stalls` and `credit_stalled_us` count how often, and for how many
+microseconds, a connection had a write blocked with all of the peer's
+connection-level flow-control credit (QUIC `MAX_DATA`) spent. An episode starts
+when a write blocks with every credited byte sent and ends when the peer grants
+more, the writer gives up, or the connection closes; a write held only by this
+node's own send buffer is not one. A rising count means the peer is not reading
+or not granting credit, as opposed to loss or congestion. Native QUIC,
+WebTransport, and Rust qmux sessions report them through the same wire counters
+as `wire_tx`; other transports contribute zero. A wait in progress counts up to
+the transport's latest step, at most a keep-alive behind.
+
+`credit_held_readers_us` and `credit_held_evicted_us` are the receiving side of
+the same wait: the microseconds a peer had a connection's whole receive window
+spent while this node evicted nothing to free it. `readers` counts while a
+reader had data it had not looked at yet, or waited behind a gap, so a reader
+running behind holds the window. `evicted` counts while an evicted reader had
+yet to stop its stream, keeping the credit of the bytes it took. A window held
+by a rate cap rather than by readers counts in neither. The same transports
+report them, at the same lag.
+
+The four credit fields are omitted while zero, as they are on most labels, and
+readers default a missing one to zero.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
 They never start a session. `expired` counts a verified credential that expired

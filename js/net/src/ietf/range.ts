@@ -12,6 +12,10 @@ import { isDraft20 } from "./filter.ts";
 import { decodeFetchObject, EndOfRange, hasGroupEnd, objectDeltaBias, objectTime } from "./object.ts";
 import type { IetfVersion } from "./version.ts";
 
+// The first Object ID past the safe range: no fetched object can carry it, so an End of Range
+// reaching it leaves nothing to follow in its group.
+const OBJECT_LIMIT = 1n << 53n;
+
 /** The groups one standalone FETCH writes, sharing the joining FETCH's object and payload decoder. @internal */
 export class RangeFetch {
 	readonly fill: FillGroups;
@@ -135,15 +139,14 @@ export class RangeFetch {
 					// prior entry (section 11.4.2.1); within its group the Object ID steps past it.
 					const delta = hasGroupEnd(version) && prior !== undefined;
 					const group = delta && prior !== undefined ? prior + object.group : object.group;
-					const at = delta && object.group === 0n ? next + object.object : object.object;
+					const at = delta && object.group === 0n ? BigInt(next) + object.object : object.object;
 					if (ended && delta && object.group === 0n)
 						throw new ProtocolViolation("an End of Range continues a group past its End of Group");
 					ended = false;
 					if (
 						group < (prior ?? this.first) ||
 						group > this.last ||
-						!Number.isSafeInteger(at) ||
-						(this.bound !== undefined && group === this.last && at >= this.bound)
+						(this.bound !== undefined && group === this.last && at >= BigInt(this.bound))
 					)
 						throw new ProtocolViolation("End of Range is outside FETCH_OK's range");
 					if (this.#current?.key === group) {
@@ -159,7 +162,7 @@ export class RangeFetch {
 						this.#next = group + 1n;
 					}
 					prior = group;
-					next = at + 1;
+					next = Number(at < OBJECT_LIMIT ? at + 1n : OBJECT_LIMIT);
 					first = true;
 					continue;
 				}

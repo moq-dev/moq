@@ -254,7 +254,7 @@ function groupsOf(rows: unknown[][]): unknown[] {
 		.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: { time: 0n } }] };
+const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: 0n }] };
 
 // Groups 1 to 4 after group 0 at 0s: 1 and 2 end 3s and 4s behind the 6s edge, and 3 starts 3s
 // behind it, so a 1.5s budget gives up 1 and 2 and still takes 3.
@@ -515,7 +515,7 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 			// reader takes the stale history: no hop still holds a newer group to judge it by.
 			const narrow = chained.remote.track("video").subscribe({
 				delay: { max: Duration.millis(1500) },
-				ranges: [{ start: { time: 1n } }],
+				ranges: [{ start: 1n }],
 			});
 			expect(groupsOf(await drain(clock, narrow))).toEqual([1n, 2n, 3n, 4n, 5n]);
 			narrow.close();
@@ -572,9 +572,12 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 			["group", 1n + 2n * BILLIONS],
 		]);
 	}
-	// The skip rides the GROUP above it, whose Previous Start passes over the run.
+	// Each run goes out as it was learned, as one message.
 	for (const hop of ["up", "down"] as const)
-		expect(wire.on(hop)).toEqual([["drop", 1n, 1n + BILLIONS, StreamCode.Cancel]]);
+		expect(wire.on(hop)).toEqual([
+			["drop", 1n, 1n + BILLIONS, StreamCode.Cancel],
+			["skip", 1n + BILLIONS, 1n + 2n * BILLIONS, undefined],
+		]);
 	expect(chained.fetches()).toEqual(before);
 
 	for (const reader of [narrow, wide]) reader.close();

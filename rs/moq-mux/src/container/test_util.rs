@@ -34,7 +34,13 @@ impl Live {
 			)
 			.unwrap();
 		insert(&mut catalog, track.name().to_string());
-		let kind = if catalog.modify().unwrap().video.renditions.contains_key(track.name()) {
+		let kind = if catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.contains_key(track.name())
+		{
 			crate::container::Kind::Video
 		} else {
 			crate::container::Kind::Audio
@@ -83,14 +89,24 @@ impl Live {
 		config.coded_height = Some(240);
 		config.framerate = Some(30.0);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	}
 
 	/// One Legacy audio rendition.
 	pub(crate) fn audio(mut config: AudioConfig) -> Self {
 		config.container = Container::Legacy;
 		Self::new(".audio", |catalog, name| {
-			catalog.modify().unwrap().audio.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.audio
+				.renditions
+				.insert(name, config);
 		})
 	}
 
@@ -203,7 +219,7 @@ impl Moving {
 	/// Point the rendition at `track` in `broadcast` (`live` when `None`), described by `sps`.
 	pub(crate) fn point(&mut self, track: &str, broadcast: Option<&str>, sps: &'static [u8]) {
 		let config = Self::config(track, broadcast, sps);
-		let mut catalog = self.catalog.modify().unwrap();
+		let mut catalog = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		catalog.video.renditions.insert(Self::RENDITION.to_string(), config);
 	}
 
@@ -365,9 +381,11 @@ pub(crate) fn common_offset(
 	offset.expect("frames were published")
 }
 
-/// An origin at `hop`, its driver spawned.
+/// An origin at `hop`, its driver spawned. It may be a middle hop, so it forwards what
+/// it learned as well as its own.
 pub(crate) fn origin(hop: u64) -> moq_net::origin::Producer {
-	let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
 	producer
@@ -404,10 +422,9 @@ impl Link {
 			gate: gate.clone(),
 			answers: true,
 		};
-		// `from` may be a middle hop, so it forwards what it learned as well as its own.
 		let client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_publisher(from.clone().with_proxy(true).consume());
+			.with_publisher(from.consume());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_subscriber(to.clone());
@@ -459,7 +476,7 @@ impl Link {
 			.with_subscriber(to.clone());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_publisher(from.clone().with_proxy(true).consume());
+			.with_publisher(from.consume());
 		let sessions = tokio::join!(
 			async {
 				let (session, driver) = client

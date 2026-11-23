@@ -17,7 +17,7 @@ import (
 type Codec = *ffi.MoqVideoCodec
 
 // PixelFormat is a CPU pixel layout (I420 or RGBA).
-type PixelFormat = ffi.MoqVideoPixelFormat
+type PixelFormat = *ffi.MoqVideoPixelFormat
 
 // EncoderKind selects the encoder backend; build one with moq.AutoEncoder and friends.
 type EncoderKind = ffi.MoqVideoEncoderKind
@@ -41,7 +41,8 @@ type Packet = ffi.MoqVideoPacket
 type DecoderOutput struct {
 	Resize *media.Dimensions
 	// Delay.Min is the playout delay, where a cold join starts; Delay.Max is how far a stalled
-	// group may fall behind before it is skipped. The zero Delay is zero for both.
+	// group may fall behind before it is skipped. The zero Delay leaves Min unstated, which the
+	// decoder starts as zero, and Max zero.
 	Delay   moq.Delay
 	Surface bool
 	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.

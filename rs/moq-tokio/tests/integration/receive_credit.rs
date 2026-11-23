@@ -9,6 +9,9 @@
 //!
 //! Some runs go through a bufferbloated path instead of loopback, so a sender held back by
 //! a slow link and a deep queue is shown not to look like a stuck window.
+//!
+//! The benchmarks measure what the windows cost: memory and throughput, and how far behind
+//! live a viewer joining over a warm cross-region peer link lands.
 
 use std::{process::Stdio, sync::Arc, time::Duration};
 
@@ -75,6 +78,16 @@ async fn setup_through(
 	transport: driver::transport::Config,
 	profile: Option<moq_shaper::Profile>,
 ) -> Setup {
+	setup_served(version, transport, profile, Default::default()).await
+}
+
+/// [`setup_through`], with the server's QUIC settings.
+async fn setup_served(
+	version: &str,
+	transport: driver::transport::Config,
+	profile: Option<moq_shaper::Profile>,
+	quic: moq_tokio::quic::Config,
+) -> Setup {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 
@@ -87,12 +100,7 @@ async fn setup_through(
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
 	config.version = vec![version];
-	let mut server = config
-		.init(Default::default())
-		.expect("init server")
-		.listen()
-		.await
-		.expect("listen");
+	let mut server = config.init(quic).expect("init server").listen().await.expect("listen");
 	let server_addr: std::net::SocketAddr = ([127, 0, 0, 1], server.local_addr().expect("addr").port()).into();
 	let shaper = match profile {
 		Some(profile) => Some(
@@ -626,8 +634,6 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	let mut header = Vec::new();
 	varint(&mut header, subscribe);
 	varint(&mut header, sequence);
-	// No previous start: 0 says unknown, since the field carries it plus one.
-	varint(&mut header, 0);
 	// Frame Start: the stream carries the group from its first frame.
 	varint(&mut header, 0);
 
@@ -636,9 +642,9 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	varint(&mut bytes, header.len() as u64);
 	bytes.extend_from_slice(&header);
 	// The frame's size plus one, the zigzag timestamp delta, then the payload. The first
-	// frame's delta is absolute, and it starts its group, so it is the group's key.
+	// frame's delta counts from the group's start, and it starts its group, so it is 0.
 	varint(&mut bytes, size as u64 + 1);
-	varint(&mut bytes, sequence * 2);
+	varint(&mut bytes, 0);
 	bytes.resize(bytes.len() + size, 5);
 	bytes
 }
@@ -670,10 +676,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	let mut requests = setup.broadcast.broadcast().requests();
 	let every = Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
-		.with_ranges([moq_net::track::Range {
-			start: moq_net::track::Anchor::Time(0),
-			end: None,
-		}])
+		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))])
 		.with_delay(Delay::default().with_max(Duration::from_secs(60)));
 	let waiting = tokio::spawn({
 		let remote = setup.remote.clone();
@@ -1332,5 +1335,187 @@ impl rustls::client::danger::ServerCertVerifier for AnyCert {
 			.unwrap()
 			.signature_verification_algorithms
 			.supported_schemes()
+	}
+}
+
+/// The connection windows a relay gives a peer link (`[limits.peer.quic]`).
+const PEER_WINDOW: u64 = 64 << 20;
+/// The one-way delay of a cross-region peer link.
+const PEER_DELAY: Duration = Duration::from_millis(125);
+/// A live track's frame interval, about 30 fps.
+const LIVE_PERIOD: Duration = Duration::from_millis(33);
+/// A live track's frame size: 16 Mbps at [`LIVE_PERIOD`].
+const LIVE_FRAME: usize = 66_666;
+/// How much of the live track's one group the publisher holds when the viewer joins.
+const LIVE_BACKLOG: Duration = Duration::from_secs(2);
+/// How long a join is watched: past BBR.MinRTTFilterLen (10 s) from the warm-up, so a
+/// ProbeRTT the warm-up's congestion makes due lands inside it.
+const LIVE_WATCH: Duration = Duration::from_secs(12);
+/// What crosses the link before the join, as on a peer link already carrying traffic.
+const WARM_BYTES: usize = 32 << 20;
+
+/// What one join onto a warm peer link measured.
+struct Joined {
+	/// From the subscribe to the first frame within two frames of the path's one-way delay.
+	caught_up: Duration,
+	/// Each later frame's lag behind its write, sorted.
+	lag: Vec<Duration>,
+	/// Datagrams the bottleneck's full queue dropped, the warm-up's included.
+	overflowed: u64,
+}
+
+/// Join a 16 Mbps live track mid-group over a warm peer link with a `bits_per_second`
+/// bottleneck behind a 250 ms drop-tail queue, the receiver granting each stream
+/// `stream_window`, and watch it for [`LIVE_WATCH`].
+async fn join(bits_per_second: u64, stream_window: u64) -> Joined {
+	let mut transport = transport(PEER_WINDOW);
+	transport.limits.max_streams = std::num::NonZeroU64::new(moq_tokio::quic::DEFAULT_MAX_STREAMS);
+	transport.limits.stream_receive_window = std::num::NonZeroU64::new(stream_window);
+	transport.limits.send_window = std::num::NonZeroU64::new(PEER_WINDOW);
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.receive_window = Some(PEER_WINDOW);
+	quic.send_window = Some(PEER_WINDOW);
+	let profile = moq_shaper::Profile {
+		delay: PEER_DELAY,
+		rate: Some(moq_shaper::Rate {
+			bits_per_second,
+			burst: 1500,
+			queue: Duration::from_millis(250),
+		}),
+		..Default::default()
+	};
+	let setup = setup_served("moq-lite-06", transport, Some(profile), quic).await;
+	// Groups in flight fall behind the live edge, so a zero budget would skip them.
+	let subscription = || Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60)));
+
+	// Warm the link with 1 MiB groups, which overflow a slower bottleneck's queue as a
+	// sender's startup does.
+	let warm = setup
+		.broadcast
+		.broadcast()
+		.create_track("warm", timed().with_max_age(None))
+		.unwrap();
+	let mut sub = setup
+		.remote
+		.track("warm")
+		.unwrap()
+		.subscribe(subscription())
+		.await
+		.unwrap();
+	let chunk = Bytes::from(vec![1u8; SEGMENT]);
+	for index in 0..(WARM_BYTES / SEGMENT) as u64 {
+		let start = Timestamp::from_millis(index).unwrap();
+		let mut group = warm.append_group(start).unwrap();
+		group.write_frame(start, chunk.clone()).unwrap();
+		group.finish().unwrap();
+	}
+	for _ in 0..WARM_BYTES / SEGMENT {
+		let mut group = next_group(&mut sub).await;
+		kio::clock::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("warm frame timed out")
+			.unwrap()
+			.expect("warm frame");
+	}
+
+	let live = setup
+		.broadcast
+		.broadcast()
+		.create_track("live", timed().with_max_age(None))
+		.unwrap();
+	let frames = ((LIVE_BACKLOG + LIVE_WATCH).as_millis() / LIVE_PERIOD.as_millis()) as u64;
+	let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+	let writer = tokio::spawn({
+		let sent = sent.clone();
+		async move {
+			let payload = Bytes::from(vec![7u8; LIVE_FRAME]);
+			let mut group = live.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+			let start = kio::clock::now();
+			for index in 0..frames {
+				kio::clock::sleep_until(start.saturating_add(LIVE_PERIOD * index as u32)).await;
+				sent.lock().unwrap().push(kio::clock::now());
+				let timestamp = Timestamp::from_millis(index * LIVE_PERIOD.as_millis() as u64).unwrap();
+				group.write_frame(timestamp, payload.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			live
+		}
+	});
+
+	kio::clock::sleep(LIVE_BACKLOG).await;
+	let subscribed = kio::clock::now();
+	let mut sub = setup
+		.remote
+		.track("live")
+		.unwrap()
+		.subscribe(subscription())
+		.await
+		.unwrap();
+	let mut group = next_group(&mut sub).await;
+	let mut caught_up = None;
+	let mut lag = Vec::new();
+	while let Some(frame) = kio::clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("live frame timed out")
+		.expect("live frame")
+	{
+		let now = kio::clock::now();
+		let index = (frame.timestamp.as_millis().unwrap() / LIVE_PERIOD.as_millis()) as usize;
+		let behind = now - sent.lock().unwrap()[index];
+		if caught_up.is_none() && behind < PEER_DELAY + LIVE_PERIOD * 2 {
+			caught_up = Some(now - subscribed);
+		}
+		if caught_up.is_some() {
+			lag.push(behind);
+		}
+	}
+	drop(writer.await.unwrap());
+	lag.sort();
+	Joined {
+		caught_up: caught_up.expect("never caught up to live"),
+		lag,
+		overflowed: setup
+			.verify()
+			.map_or(0, |stats| stats.down.overflowed + stats.up.overflowed),
+	}
+}
+
+/// How far behind live a viewer joining mid-group over a warm cross-region peer link lands,
+/// and stays.
+///
+/// The link is a relay's peer link: 64 MiB connection windows, 125 ms each way, and a
+/// bottleneck behind a 250 ms drop-tail queue, warmed with 32 MiB first. The viewer joins a
+/// 16 Mbps track 2 s into its group, so the backlog crosses first. Each axis varies the
+/// bottleneck and the stream window: the default, and one as large as the connection window.
+/// Reports when the join caught up to live, the lag of every frame after that (median and
+/// worst), and the warm-up's queue drops, each the median of the runs. The 200 Mbps link
+/// overflows during the warm-up, which once made BBR3 run ProbeRTT inside the watch and hold
+/// the track about 240 ms further behind live for seconds. Run by nightly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "release benchmark, run by nightly"]
+async fn benchmark_join_lag() {
+	const RUNS: usize = 3;
+	println!("rate_mbps,stream_window_mib,caught_up_ms,lag_p50_ms,lag_max_ms,overflowed_packets");
+	for bits_per_second in [1_000_000_000, 200_000_000] {
+		for stream_window in [moq_tokio::quic::DEFAULT_STREAM_RECEIVE_WINDOW, PEER_WINDOW] {
+			let mut runs = Vec::with_capacity(RUNS);
+			for _ in 0..RUNS {
+				runs.push(join(bits_per_second, stream_window).await);
+			}
+			let median = |mut values: Vec<f64>| {
+				values.sort_by(f64::total_cmp);
+				values[values.len() / 2]
+			};
+			let ms = |duration: Duration| duration.as_secs_f64() * 1e3;
+			let caught_up = median(runs.iter().map(|run| ms(run.caught_up)).collect());
+			let p50 = median(runs.iter().map(|run| ms(run.lag[run.lag.len() / 2])).collect());
+			let max = median(runs.iter().map(|run| ms(*run.lag.last().unwrap())).collect());
+			let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
+			println!(
+				"{},{},{caught_up:.0},{p50:.0},{max:.0},{overflowed}",
+				bits_per_second / 1_000_000,
+				stream_window >> 20,
+			);
+		}
 	}
 }
