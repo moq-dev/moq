@@ -680,9 +680,9 @@ impl Connection {
 		// Set when the send rate cap held a send back: a local policy, not the path, so the
 		// controller hears it as application-limited.
 		let mut rate_blocked = false;
-		// Set when the pacer held back data ready to send; a held bandwidth probe resends data
-		// already in flight, so it is not one.
-		let mut pacing_blocked = false;
+		// When the pacer releases data ready to send it held back; a held bandwidth probe
+		// resends data already in flight, so it is not one.
+		let mut pacing_until = None;
 
 		// Iterate over all spaces and find data to send
 		let mut space_idx = 0;
@@ -810,7 +810,7 @@ impl Connection {
 					if let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
 						self.timers.set(Timer::Pacing, delay);
 						send_blocked = true;
-						pacing_blocked = true;
+						pacing_until = Some(delay);
 						// Loss probes should be subject to pacing, even though
 						// they are not congestion controlled.
 						trace!("blocked by pacing");
@@ -1169,10 +1169,10 @@ impl Connection {
 			self.path.congestion.on_cwnd_limited();
 		}
 		// A full window outranks the pacer: the pacer only matters once the window opens.
-		let limit = match (cwnd_blocked, pacing_blocked) {
+		let limit = match (cwnd_blocked, pacing_until) {
 			(true, _) => Some(CongestionLimit::Window),
-			(false, true) => Some(CongestionLimit::Pacing),
-			(false, false) => None,
+			(false, Some(until)) => Some(CongestionLimit::Pacing { until }),
+			(false, None) => None,
 		};
 		self.congestion_wait = limit.map(|limit| (now, limit));
 
@@ -1493,13 +1493,22 @@ impl Connection {
 		let closed = self.state.is_closed();
 		self.streams.observe_credit(now, closed);
 		if let Some((since, limit)) = self.congestion_wait {
+			// A wait ends once its limit clears, whether or not a transmit follows at once, as
+			// one may not while a driver's send buffers are full. A closed connection sends
+			// nothing more, so its wait ends here.
+			let (end, cleared) = match limit {
+				CongestionLimit::Window => {
+					let room = self.path.congestion.window().saturating_sub(self.path.in_flight.bytes);
+					(now, closed || room >= u64::from(self.path.current_mtu()))
+				}
+				CongestionLimit::Pacing { until } => (now.min(until), closed || now >= until),
+			};
 			let total = match limit {
 				CongestionLimit::Window => &mut self.stats.path.cwnd_blocked,
-				CongestionLimit::Pacing => &mut self.stats.path.pacing_blocked,
+				CongestionLimit::Pacing { .. } => &mut self.stats.path.pacing_blocked,
 			};
-			*total += now.saturating_duration_since(since);
-			// A closed connection sends nothing more, so its wait ends here.
-			self.congestion_wait = (!closed).then_some((now, limit));
+			*total += end.saturating_duration_since(since);
+			self.congestion_wait = (!cleared).then_some((end, limit));
 		}
 	}
 
@@ -4297,10 +4306,10 @@ impl fmt::Debug for Connection {
 /// What the congestion controller held data back on
 #[derive(Debug, Clone, Copy)]
 enum CongestionLimit {
-	/// The congestion window was full
+	/// The congestion window had no room for another datagram
 	Window,
-	/// The pacer had not released the next send yet
-	Pacing,
+	/// The pacer holds the next send until then
+	Pacing { until: Instant },
 }
 
 /// Fields of `Connection` specific to it being client-side or server-side

@@ -465,6 +465,17 @@ impl TestEndpoint {
 		}
 	}
 
+	/// Hand the connections what arrived by `now` without letting them transmit, as a driver
+	/// whose send buffers are full would
+	pub(super) fn receive_only(&mut self, now: Instant, remote: SocketAddr) {
+		self.drive_incoming(now, remote);
+		for (ch, conn) in self.connections.iter_mut() {
+			for event in self.conn_events.remove(ch).into_iter().flatten() {
+				conn.handle_event(event);
+			}
+		}
+	}
+
 	pub(super) fn drive_outgoing(&mut self, now: Instant) {
 		let buffer_size = self.endpoint.max_udp_payload_size() as usize;
 		let mut buf = Vec::with_capacity(buffer_size);

@@ -7114,6 +7114,56 @@ fn congestion_waits_time_the_pacer() {
 	assert_eq!((window, pacing), (Duration::ZERO, span));
 }
 
+/// A wait ends when its limit clears, though the driver holds transmits back past it, as while
+/// its send buffers are full: an ACK that opens the window, or the pacer's deadline passing.
+#[test]
+fn congestion_waits_end_when_the_limit_clears() {
+	let backlog = |factory| {
+		let _guard = subscribe();
+		let (mut pair, ch, _log) = recorded_pair(factory);
+		pair.latency = Duration::from_millis(20);
+		pair.time = pair.time.saturating_add(Duration::from_millis(100));
+		pair.drive();
+		let start = pair.client_conn_mut(ch).stats().path;
+		let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+		pair.client_send(ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+		pair.drive_client();
+		(pair, ch, start)
+	};
+	let held = Duration::from_millis(100);
+
+	// A full window clears when the server's ACK arrives, a round trip after the client blocked.
+	let (mut pair, ch, start) = backlog(PacketRecorderFactory {
+		window: Some(12_000),
+		..Default::default()
+	});
+	let blocked = pair.time;
+	pair.time = pair.time.saturating_add(Duration::from_millis(20));
+	pair.drive_server();
+	pair.time = pair.time.saturating_add(Duration::from_millis(20));
+	let acked = pair.time;
+	pair.client.receive_only(acked, pair.server.addr);
+	pair.time = pair.time.saturating_add(held);
+	let now = pair.time;
+	pair.client_conn_mut(ch).handle_timeout(now);
+	let stats = pair.client_conn_mut(ch).stats().path;
+	assert_eq!(stats.cwnd_blocked - start.cwnd_blocked, acked - blocked);
+
+	// The pacer clears at its deadline, the connection's next timer.
+	let (mut pair, ch, start) = backlog(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	let blocked = pair.time;
+	let until = pair.client_conn_mut(ch).poll_timeout().unwrap();
+	assert!(until > blocked);
+	pair.time = until.saturating_add(held);
+	let now = pair.time;
+	pair.client_conn_mut(ch).handle_timeout(now);
+	let stats = pair.client_conn_mut(ch).stats().path;
+	assert_eq!(stats.pacing_blocked - start.pacing_blocked, until - blocked);
+}
+
 /// The last packet in a poll can drain the application while bytes remain in flight.
 #[test]
 fn partial_poll_reports_starvation() {

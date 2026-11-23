@@ -172,8 +172,9 @@ pub struct PathStats {
 	pub black_holes_detected: u64,
 	/// Time data ready to send waited on a full congestion window
 	///
-	/// Time accrues as the connection is driven (receiving, timers, transmitting), so a wait in
-	/// progress counts up to the latest of those.
+	/// A wait ends once the window has room or the pacer's deadline passes, even if no transmit
+	/// follows. Time accrues as the connection is driven (receiving, timers, transmitting), so a
+	/// wait in progress counts up to the latest of those.
 	pub cwnd_blocked: Duration,
 	/// Time data ready to send waited on the pacer, which spreads sends at the congestion
 	/// controller's rate; accrues like `cwnd_blocked`
