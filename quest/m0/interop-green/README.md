@@ -16,7 +16,7 @@ so it only needs to stay green.
   the datagram assertion ([moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)),
   and the range table's `relay-warm` marker
   ([moq-dev/moq#9408](https://github.com/moq-dev/moq/pull/9408)) have landed. The
-  Chromium `reattach reaches live` failure of 2026-11-22 has its own child quest. Check
+  Chromium `reattach reaches live` failure of 2026-11-22 passed on 2026-11-23 (see Plan). Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
@@ -89,8 +89,19 @@ steps, as its own triage on 2026-11-23 found:
   that case known for `relay-warm`, and
   [moq-dev/moq#9444](https://github.com/moq-dev/moq/pull/9444) fixed it.
 - `Media output and lifecycle`: Chromium's `reattach reaches live` on `moq-lite-06`, not
-  `replacement`: the relay aborted the reattached player's live groups `Old`, so it got no
-  audio and 14 video frames. A child quest owns it.
+  `replacement`. The relay did not abort the reattached player's groups: the six
+  `unknown uni stream err=old` were the fixture resetting streams before their first byte,
+  and the seven `group error err=old` its one lite-06 SUBSCRIBE_DROP (read as `Old` before
+  lite-07) of replayed history it gave up as stale. What failed the check was the player
+  page: its own clock shows its main thread stopped about 1.05 s on every resume of that
+  run, each time just before it skipped a gap of hundreds of thousands of audio keys, and
+  on the reattach the stop outlasted the 2 s window, so the harness compared the last
+  sample before it with the live fixture. The 2026-11-23 run
+  [45253796046](https://github.com/moq-dev/moq/actions/runs/45253796046), after
+  [moq-dev/moq#9377](https://github.com/moq-dev/moq/pull/9377) stopped lite-06 copies
+  (JS included) from filling such a gap one FETCH per key, shows neither the stops nor the
+  skips and passed the check. A recurrence now prints the pages' long animation frames,
+  the host's busiest processes, and how old the player's last sample was.
 
 The Nightly's `Media (firefox player)` failed the `replacement` case on 11-20, 11-21, and
 11-22, after [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) and

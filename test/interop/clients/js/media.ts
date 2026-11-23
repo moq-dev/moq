@@ -325,9 +325,16 @@ async function waitForLive(
 	assertion: string,
 	resumed = false,
 ): Promise<{ first: number; lag: number; after: number }> {
-	let since = Date.now();
+	const entered = Date.now();
+	let since = entered;
 	let started = !resumed;
 	const startup = since + timeoutMs;
+	// Watched from the catch-up window's start, so a failure can tell a starved host from a stuck page.
+	// `top` exits on its own after a window, so a throw from a check below leaves nothing running long.
+	let host = started ? watchHost(assertion) : undefined;
+	// When the player's latest sample arrived: a page whose main thread stopped stops sampling, and its
+	// last sample then reads as a player stuck behind live.
+	let sampled: { seq: number; at: number } | undefined;
 	let first: number | undefined;
 	let lag: number | undefined;
 	let frame: number | undefined;
@@ -340,6 +347,7 @@ async function waitForLive(
 		const [fixture, state] = await Promise.all([readFixtureState(publisher), readPlayerState(player)]).catch(
 			() => [],
 		);
+		if (state && state.seq !== sampled?.seq) sampled = { seq: state.seq, at: Date.now() };
 		if (fixture && state?.frameId !== undefined) {
 			if (resumed) {
 				const skew = resumeSkew(state, frame);
@@ -359,6 +367,7 @@ async function waitForLive(
 			if (moved && !started) {
 				started = true;
 				since = Date.now();
+				host = watchHost(assertion);
 			}
 			const live = reachesLive({
 				previous: frame,
@@ -367,17 +376,23 @@ async function waitForLive(
 				bound: LIVE_LAG_FRAMES,
 			});
 			frame = state.frameId;
-			if (live) return { first, lag, after: Date.now() - since };
+			if (live) {
+				host?.process.kill();
+				return { first, lag, after: Date.now() - since };
+			}
 		}
 		await sleep(POLL_INTERVAL_MS);
 	}
 	throwPageErrors(publisherErrors);
 	throwPageErrors(playerErrors);
-	throw new Failure(
+	const failure = new Failure(
 		assertion,
 		`${moved ? "still" : "held a frame"} ${lag === undefined ? "?" : framesToMs(lag)}ms behind the fixture ` +
-			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback; audio ${audio}`,
+			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback; audio ${audio}; ` +
+			`the player's latest sample arrived ${sampled ? Date.now() - sampled.at : "?"}ms ago`,
 	);
+	await explainStalls(player, { start: entered, end: Date.now() }, assertion, host);
+	throw failure;
 }
 
 /**
