@@ -44,7 +44,7 @@ This directory's own Nix flake carries the client toolchains, separate from moq'
 ```bash
 cd test/smoke
 nix develop
-cargo install moq-relay moq-cli   # or brew / apt
+cargo install moq-relay moq-cli   # or brew / apt install moq-relay moq
 just full
 just relays
 just cloudflare

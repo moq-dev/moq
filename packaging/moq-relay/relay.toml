@@ -2,7 +2,7 @@
 # Edit this file in place; your changes survive package upgrades because
 # /etc/moq-relay/relay.toml is registered as a conffile.
 #
-# See https://moq.dev/docs/auth and the example configs at
+# See https://doc.moq.dev/bin/relay/auth and the example configs at
 # https://github.com/moq-dev/moq/tree/main/demo/relay for more.
 
 [listen]
@@ -35,7 +35,7 @@ key = "/var/lib/moq-relay/key.pem"
 #     --public-subscribe 'anon' --public-subscribe 'demo' \
 #     --public-publish 'anon' --public-publish 'demo/viewer'
 #
-# Generate the key with `moq auth generate`. See https://moq.dev/docs/auth.
+# Generate the key with `moq auth generate`. See https://doc.moq.dev/bin/relay/auth.
 [auth]
 url = "http://127.0.0.1:4440/"
 

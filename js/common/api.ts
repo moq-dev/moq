@@ -27,7 +27,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import {
 	Application,
@@ -71,6 +71,7 @@ export async function checkReports(dir: string): Promise<string[]> {
 
 interface Manifest {
 	name: string;
+	private?: boolean;
 	exports?: Record<string, string | { types?: string }>;
 	scripts?: Record<string, string>;
 	dependencies?: Record<string, string>;
@@ -933,12 +934,34 @@ function declare(dir: string, out: string, manifest: Manifest) {
 	writeFileSync(join(out, "package.json"), JSON.stringify({ ...manifest, exports }));
 }
 
+async function checkAll(dirs: string[]): Promise<string[]> {
+	if (dirs.length <= 1) return dirs.length === 1 ? checkReports(dirs[0]) : [];
+	const limit = Math.min(dirs.length, Math.max(1, availableParallelism()));
+	const results: string[][] = new Array(dirs.length);
+	let next = 0;
+	const worker = async () => {
+		while (next < dirs.length) {
+			const i = next++;
+			const proc = Bun.spawn([process.execPath, import.meta.path, "check-one", dirs[i]], {
+				stdout: "pipe",
+				stderr: "inherit",
+			});
+			const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			if (code !== 0) throw new Error(`api report check failed for ${dirs[i]} (exit ${code})`);
+			results[i] = JSON.parse(out) as string[];
+		}
+	};
+	await Promise.all(Array.from({ length: limit }, worker));
+	return results.flat();
+}
+
 if (import.meta.main) {
 	const [command, ...args] = process.argv.slice(2);
 	const [checkout, out] = args;
-	if (command === "check" && args.length > 0) {
-		const stale: string[] = [];
-		for (const dir of args) stale.push(...(await checkReports(dir)));
+	if (command === "check-one" && args.length === 1) {
+		process.stdout.write(JSON.stringify(await checkReports(args[0])));
+	} else if (command === "check" && args.length > 0) {
+		const stale = await checkAll(args);
 		if (stale.length > 0) {
 			console.error("The public API no longer matches its committed report; run `just fix` and review the diff:");
 			for (const file of stale) console.error(`  ${file}`);
@@ -958,7 +981,7 @@ async function baseline(checkout: string, out: string) {
 		const dir = resolve(checkout, "js", entry.name);
 		if (!entry.isDirectory() || !existsSync(join(dir, "package.json"))) continue;
 		const manifest: Manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-		if (!manifest.scripts?.release) continue;
+		if (!manifest.scripts?.release || manifest.private) continue;
 		const work = mkdtempSync(join(tmpdir(), "moq-api-baseline-"));
 		try {
 			declare(dir, join(work, "dist"), manifest);

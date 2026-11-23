@@ -10,7 +10,6 @@ import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
-import { z } from "zod/mini";
 import type { GameStatus } from "./schemas.ts";
 import { GameStatusSchema } from "./schemas.ts";
 
@@ -284,22 +283,19 @@ export class Game {
 		effect.cleanup(() => consumer.close());
 
 		// Closing the consumer on cleanup unblocks a pending latest() (it returns undefined), so the loop
-		// ends without racing the teardown.
+		// ends without racing the teardown. A rejection, whether a status that fails the schema or a
+		// track closed with an error, ends the loop.
 		effect.spawn(async () => {
-			for (;;) {
-				let status: GameStatus | undefined;
-				try {
-					status = (await consumer.latest())?.value;
-				} catch (err) {
-					// The value was decoded and only failed the schema, so the next frame still applies.
-					// Anything else, such as a track closed with an error, throws on every call: end the loop.
-					if (!(err instanceof z.core.$ZodError)) throw err;
-					console.warn("Invalid status:", err);
-					continue;
-				}
-				if (!status) break;
+			// A failed read ends the loop, so release the subscription instead of downloading what nothing reads.
+			try {
+				for (;;) {
+					const status = (await consumer.latest())?.value;
+					if (!status) break;
 
-				this.status.set(status);
+					this.status.set(status);
+				}
+			} finally {
+				consumer.close();
 			}
 		});
 	}

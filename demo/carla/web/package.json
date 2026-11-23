@@ -14,7 +14,7 @@
 	"scripts": {
 		"dev": "vite --open",
 		"build": "vite build",
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test"
 	},
 	"dependencies": {
@@ -28,6 +28,6 @@
 		"@moq/common": "workspace:*",
 		"@types/bun": "^1.4.4",
 		"typescript": "7.0.2",
-		"vite": "^8.3.6"
+		"vite": "^8.3.8"
 	}
 }
