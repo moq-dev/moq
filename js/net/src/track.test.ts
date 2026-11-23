@@ -6588,6 +6588,115 @@ test("a kept-out fill is withdrawn when the range moves", async () => {
 	}
 });
 
+// A fill asked for a kept-out key is withdrawn once the feed ends the read: nothing reads it, and a
+// read polled again asks anew. Mirrors the Rust `a_kept_out_fill_is_withdrawn_when_the_feed_ends`.
+test("a kept-out fill is withdrawn when the feed ends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	try {
+		for (const key of [0n, 6n]) {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		const sub = producer.subscribe({ ranges: [{ start: 0n, end: 6n }] });
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });
+		const ended = sub.recvGroup();
+		producer.skipGroups(3n, 6n);
+		await clock.advance(Duration.millis(60_000));
+		producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills[0].isWanted(3n)).toBe(true);
+
+		producer.finishAt({ group: 7n, frame: 0 });
+		expect(await ended).toBeUndefined();
+		expect(fills[0].isWanted(3n)).toBe(false);
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
+// A forgotten kept-out run spanning a history range and a live join is judged per budget: the live
+// part gone stale is given up, while the history part, which never goes stale, stays asked.
+test("a forgotten kept-out run is judged by each range's budget", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	const write = (key: bigint) => {
+		const group = producer.createGroup(key);
+		group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+		group.finish();
+	};
+	try {
+		write(0n);
+		write(6n);
+		const sub = producer.subscribe({
+			ranges: [
+				{ start: 0n, end: 2n },
+				{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(1_000) } }, end: 7n },
+			],
+		});
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 8n } });
+		const next = sub.recvGroup();
+		producer.skipGroups(1n, 6n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(next)).toBe(true);
+
+		// Past the pool's idle window the track forgot the skip, so the read asks for it all once 7
+		// would otherwise end it, a run per budget.
+		await clock.advance(Duration.millis(60_000));
+		write(7n);
+		expect((await next)?.start).toBe(7n);
+		const ended = sub.recvGroup();
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([
+			[1n, 3n],
+			[3n, 6n],
+		]);
+
+		// 3 to 5 go stale behind 7, but 1 and 2 never do.
+		await clock.advance(Duration.millis(2_000));
+		expect(await isPending(ended)).toBe(true);
+		expect(fills[0].isWanted(1n)).toBe(true);
+		expect(fills[1].isWanted(3n)).toBe(false);
+		producer.skipGroups(1n, 3n);
+		expect(await ended).toBeUndefined();
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
 // A bounded read owes the keys its local floor keeps out until a skip accounts for them. One its
 // track forgot once the pool's idle window passed is unknown again, so the read asks a fill for it
 // rather than wait for good, and ends on the upstream's answer. Mirrors the Rust

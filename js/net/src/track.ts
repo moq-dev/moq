@@ -4888,7 +4888,9 @@ export class Subscriber {
 		const drift = this.#drift();
 		// A wider budget asks again what a narrower one gave up as stale.
 		const stale = kept.stale.length;
-		kept.stale = kept.stale.filter((run) => drift.budget.at(run.end - 1n) <= run.budget);
+		kept.stale = kept.stale.filter((run) =>
+			drift.budget.runs(run.start, run.end).every(([, budget]) => budget <= run.budget),
+		);
 		// What was proved since leaves what was asked, so a key forgotten again asks afresh.
 		const moved =
 			stale !== kept.stale.length ||
@@ -4898,31 +4900,43 @@ export class Subscriber {
 		kept.unproven = unproven;
 		// A fill nobody wants any more is withdrawn.
 		if (moved) fills.moved(kept.asker);
-		// Starts never rewind, so a run whose newest group is stale is given up whole: unasked, or
-		// withdrawn from the fill still out for it, as `#askFills` gives up an owed run.
-		const giveUp = (run: Run) => {
+		// Starts never rewind, so a stretch under one budget whose newest group is stale under it is
+		// given up whole: unasked, or withdrawn from the fill still out for it, as `#askFills` gives up
+		// an owed run.
+		const giveUp = (run: Run, budget: number) => {
 			kept.asked = removeRun(kept.asked, run.start, run.end);
-			insertStale(kept.stale, run.start, run.end, drift.budget.at(run.end - 1n));
+			insertStale(kept.stale, run.start, run.end, budget);
 			fills.moved(kept.asker, run.start, run.end);
 		};
 		for (const run of unproven) {
 			for (const gap of runGaps(keptDone(kept), run.start, run.end)) {
-				if (this.#staleAt(gap.end - 1n, drift, true)) {
-					giveUp(gap);
-					continue;
+				for (const [part, budget] of drift.budget.runs(gap.start, gap.end)) {
+					if (this.#staleAt(part.end - 1n, drift, true)) {
+						giveUp(part, budget);
+						continue;
+					}
+					for (const asked of fills.ask(part.start, part.end, kept.asker))
+						insertRun(kept.asked, asked.start, asked.end);
 				}
-				for (const asked of fills.ask(gap.start, gap.end, kept.asker))
-					insertRun(kept.asked, asked.start, asked.end);
 			}
 		}
 		let out = false;
 		for (const run of unproven) {
 			for (const covered of [...fills.covered(run.start, run.end, kept.asker)]) {
-				if (this.#staleAt(covered.end - 1n, drift, true)) giveUp(covered);
-				else out = true;
+				for (const [part, budget] of drift.budget.runs(covered.start, covered.end)) {
+					if (this.#staleAt(part.end - 1n, drift, true)) giveUp(part, budget);
+					else out = true;
+				}
 			}
 		}
 		return !out;
+	}
+
+	// The end of this read: nothing reads the kept-out keys now, so their fills are withdrawn, and a
+	// read polled again asks anew. Mirrors the Rust cursor dropping `kept_out` as its feed ends.
+	#done(): Recv {
+		this.#withdraw(this.#keptOut);
+		return { kind: "done" };
 	}
 
 	// Let go of the kept-out keys asked about, withdrawing the fills nobody else waits on, once what
@@ -4930,14 +4944,18 @@ export class Subscriber {
 	// otherwise end, and a window no longer bounded owes none. Mirrors the Rust
 	// `Cursor::let_go_kept_out`.
 	#letGoKeptOut(): void {
+		this.#withdraw(this.#keptOut);
+		this.#withdraw(this.#routedOut);
+	}
+
+	// Forget what `kept` asked about, withdrawing the fills nobody else waits on.
+	#withdraw(kept: KeptOut | undefined): void {
 		const producer = this.#state.producer;
-		for (const kept of [this.#keptOut, this.#routedOut]) {
-			if (!kept || !producer) continue;
-			kept.unproven = [];
-			kept.asked = [];
-			kept.stale = [];
-			fillsOf(producer).moved(kept.asker);
-		}
+		if (!kept || !producer) return;
+		kept.unproven = [];
+		kept.asked = [];
+		kept.stale = [];
+		fillsOf(producer).moved(kept.asker);
 	}
 
 	// The parts of `runs` the cache holds nothing for and the feed no longer waits for, waking this
@@ -5712,16 +5730,16 @@ export class Subscriber {
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		// A clean close completes this range, retaining groups a later cap raise can read.
-		if (closed !== undefined) return { kind: "done" };
+		if (closed !== undefined) return this.#done();
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
 		if (this.#askFills(start, end ?? UNBOUNDED, drift) !== undefined) return { kind: "idle" };
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
 		// A bounded window ends once nothing in it is left to deliver, as in Rust.
-		if (this.#exhausted()) return { kind: "done" };
+		if (this.#exhausted()) return this.#done();
 		if (!this.#complete() || this.#starting(groups)) return { kind: "idle" };
 		// An open track can still raise the cap. Keep the groups beyond it.
-		return this.#parked(groups) ? { kind: "boundary" } : { kind: "done" };
+		return this.#parked(groups) ? { kind: "boundary" } : this.#done();
 	}
 
 	// The first part of `[from, to)` this cursor has not reported yet within its window, now
@@ -6471,7 +6489,7 @@ export class Subscriber {
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		// A clean close completes this range, retaining groups a later cap raise can read.
-		if (closed !== undefined) return { kind: "done" };
+		if (closed !== undefined) return this.#done();
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
 		if (this.#askFills(start, cursor.end ?? UNBOUNDED, drift) !== undefined) {
 			// Its staleness deadline wakes the cursor, as for any owed hole.
@@ -6483,14 +6501,14 @@ export class Subscriber {
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
 		if (this.#exhausted()) {
 			this.#passEnd();
-			return { kind: "done" };
+			return this.#done();
 		}
 		if (
 			!this.#parked(groups) &&
 			!this.#starting(groups, start) &&
 			(this.#complete() || (end !== undefined && start >= finalKey(end)))
 		) {
-			return { kind: "done" };
+			return this.#done();
 		}
 		return { kind: "idle" };
 	}
