@@ -164,10 +164,11 @@ test("REQUEST_ERROR's Error Details are read and dropped at draft-23", async () 
 	const many = [...body, ...Array.from({ length: 65 }, () => [0x00, 0x00]).flat()];
 	expect((await RequestError.decode(reader(framed(many, NEW), NEW), NEW)).errorCode).toBe(0x10);
 
-	// The summed type may reach 2^64 - 1 and stay there, but not pass it.
-	const step = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]; // a delta of 2^62 - 1
-	// From type 2: four steps reach 2^64 - 2, a delta of 1 reaches 2^64 - 1, and a delta of 0 stays.
-	const top = [...body, ...step, 0x00, ...step, 0x00, ...step, 0x00, ...step, 0x00, 0x01, 0x00, 0x00, 0x00];
+	// The summed type may reach 2^64 - 1 and stay there, but not pass it. From type 2, a
+	// delta of 2^64 - 3 (a 9-byte leading-ones varint) reaches 2^64 - 1, an odd type whose
+	// value is zero bytes long; a delta of 0 stays there; a delta of 1 overflows.
+	const step = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd];
+	const top = [...body, ...step, 0x00, 0x00, 0x00];
 	expect((await RequestError.decode(reader(framed(top, NEW), NEW), NEW)).errorCode).toBe(0x10);
 	await expect(RequestError.decode(reader(framed([...top, 0x01, 0x00], NEW), NEW), NEW)).rejects.toThrow();
 
@@ -227,7 +228,7 @@ test("fetch stream indicators are draft-23 only", async () => {
 
 	expect(decode(endOfGroup, NEW)).toEqual({ kind: "endOfGroup", track: false });
 	expect(decode(endOfTrack, NEW)).toEqual({ kind: "endOfGroup", track: true });
-	expect(decode(gone, NEW)).toEqual({ kind: "endOfRange", reason: EndOfRange.Gone, group: 1n, object: 2 });
+	expect(decode(gone, NEW)).toEqual({ kind: "endOfRange", reason: EndOfRange.Gone, group: 1n, object: 2n });
 	for (const version of OLD) {
 		for (const bytes of [endOfGroup, endOfTrack, gone]) expect(() => decode(bytes, version)).toThrow();
 		await expect(

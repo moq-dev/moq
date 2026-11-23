@@ -15179,25 +15179,36 @@ mod serve_tests {
 				.collect()
 		};
 
-		// The whole answer, read with credit to spare, ends with the two-byte End of Group.
+		// The whole answer, read with credit to spare, ends with End of Group. It can finish on
+		// the very poll that sends the FIN, so a ready answer ends the wait too.
 		let h = answer(ScriptedSession::per_stream(vec![Vec::new()]));
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 			.await
 			.unwrap();
 		let mut fetching = std::pin::pin!(h.publisher.clone().run_fetch_stream(stream, fetch()));
-		serve_until(fetching.as_mut(), "the answer went out whole", || {
+		let finished = |h: &Serve| {
 			data_streams(&h.log)
 				.values()
 				.flatten()
 				.any(|sent| *sent == Sent::Finish)
+		};
+		kio::clock::timeout(Duration::from_secs(10), async {
+			while !finished(&h) && futures::poll!(fetching.as_mut()).is_pending() {
+				kio::clock::sleep(Duration::from_millis(1)).await;
+			}
 		})
-		.await;
+		.await
+		.expect("the answer went out whole");
+		assert!(finished(&h), "the answer was finished");
 		let whole = written(&h);
-		assert_eq!(
-			whole[whole.len() - 2],
-			0x40,
-			"the answer ends with End of Group: {whole:?}"
-		);
+		let mut marker = Vec::new();
+		crate::coding::Encode::encode(
+			&ietf::FetchObject::EndOfGroup { track: false },
+			&mut crate::coding::Encoder::new(&mut marker, version.into()),
+			version,
+		)
+		.unwrap();
+		assert!(whole.ends_with(&marker), "the answer ends with End of Group: {whole:?}");
 
 		// One byte short, so every object goes out and only End of Group's last byte parks.
 		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_uni_send_window(whole.len() - 1);

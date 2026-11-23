@@ -2162,6 +2162,8 @@ export class Subscriber {
 		// A whole group took the key first, or the join gave up: read the rest away.
 		let discarding = false;
 		let next = 0;
+		// The prior entry was an End of Group, so the head's group takes no more objects.
+		let ended = false;
 		try {
 			const decode = (c: Cursor) => decodeFetchObject(c);
 			for (let first = true; ; first = false) {
@@ -2185,8 +2187,13 @@ export class Subscriber {
 				// A fill ends where its subscription starts, which then says where the group ends.
 				if (object.kind === "endOfGroup") {
 					if (first) throw new ProtocolViolation("a fetch stream starts with an End of Group");
+					ended = true;
 					continue;
 				}
+				// Past an End of Group only an object that names another group can follow, which a
+				// head of one group then refuses below.
+				if (ended && object.group === undefined)
+					throw new ProtocolViolation("a fetch object continues a group past its End of Group");
 				const inherits =
 					object.group === undefined ||
 					object.object === undefined ||

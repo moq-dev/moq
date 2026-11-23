@@ -425,7 +425,9 @@ for (const version of VERSIONS) {
 			await frame("1a").encode(writer, { group: 1n, object: 0, first: true }, version);
 			// The rest of group 1, through the largest Object ID, does not exist.
 			const object = (1n << 62n) - 1n;
-			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, group: 1n, object }).encode(writer, version);
+			// Draft-23 encodes it against object 0: the same group, and object 0 + delta + 1.
+			const at = version === Version.DRAFT_23 ? { group: 0n, object: object - 1n } : { group: 1n, object };
+			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, ...at }).encode(writer, version);
 			for (const [object, payload] of ["2a", "2b", "2c"].entries())
 				await frame(payload).encode(
 					writer,

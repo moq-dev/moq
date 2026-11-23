@@ -6861,6 +6861,8 @@ struct RunFill {
 	skipped: Option<(u64, u64)>,
 	budget: kio::coop::Budget,
 	first: bool,
+	/// The prior entry was an End of Group, so the current group takes no more objects.
+	ended: bool,
 	step: FillStep,
 }
 
@@ -6892,6 +6894,7 @@ impl RunFill {
 			skipped: None,
 			budget: kio::coop::Budget::new(32),
 			first: true,
+			ended: false,
 			step: FillStep::Header,
 		}
 	}
@@ -6936,11 +6939,17 @@ impl RunFill {
 						// A fill ends where its subscription starts, which then says where
 						// the group ends.
 						Some(Fetched::End { .. }) => {
+							self.ended = true;
 							self.step = FillStep::Pace;
 							continue;
 						}
 						Some(Fetched::Object(object)) => object,
 					};
+					// Past an End of Group only an object that names another group can follow.
+					if std::mem::take(&mut self.ended) && object.group.is_none() {
+						tracing::warn!("a fill object continues a group past its End of Group");
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
 					self.first = false;
 					self.step = FillStep::Yield(object);
 				}
