@@ -13,7 +13,7 @@ Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId
 drops Start ([node-id-drop-start](/quest/m2/node-id-drop-start.md)),
 whether an origin forwards moves into its config, and moq-relay's
-cluster peers lose `egress` ([relay-peer-egress](/quest/m2/relay-peer-egress.md)).
+cluster peers lose `egress`.
 [lite07-finalize](/quest/m2/lite07-finalize.md) also requires three m1 fixes
 from [lite07-routing](/quest/m1/lite07-routing/README.md), whose Plan
 records each decision.
@@ -25,12 +25,7 @@ native crates, and public APIs:
 
 - **Wire and drafts.** Delete the temporary `raw_parts` / `base.split("/")`
   `Path Keep` migration before lite-07 finalizes
-  ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)), and bring
-  `draft-lcurley-qmux-websocket` up to `qmux-VV.<alpn>`
-  ([qmux-websocket-draft](/quest/m2/qmux-websocket-draft.md)).
-- **Vendored native crate soundness.** Fix the unsound public API in
-  [moq-v4l](/quest/m2/v4l-arena-soundness.md) before `0.22.0` publishes it
-  (moq-nvenc's and moq-vaapi's are fixed).
+  ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)).
 - **Public API freezes.** Fence `moq-net` event/item types with
   `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)).
 

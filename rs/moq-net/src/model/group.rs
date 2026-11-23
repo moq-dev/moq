@@ -450,6 +450,9 @@ struct Relay {
 	wire: Option<Wire>,
 	// The terminal object, learned at the stream tail.
 	end_object: Option<Arc<super::object::Fields>>,
+	// The newest object ID before the terminal object, which a publisher's Largest names
+	// instead of the terminal object it sends past it.
+	last_before_end: Option<u64>,
 	// Heap charged for this box, its frames' fields, and the terminal object.
 	bytes: u64,
 }
@@ -2625,6 +2628,7 @@ impl Handle {
 		let relay = state.relay();
 		relay.bytes += bytes;
 		if let Some(wire) = &mut relay.wire {
+			relay.last_before_end = wire.last;
 			wire.last = Some(fields.id);
 		}
 		relay.end_object = Some(Arc::new(fields));
@@ -2905,10 +2909,16 @@ impl Handle {
 			(timeline, _) => timeline,
 		};
 		state.adopted = Some(head.first_object);
-		if let Some(wire) = state.wire_mut() {
+		if let Some(relay) = state.relay.as_mut()
+			&& let Some(wire) = &mut relay.wire
+		{
 			wire.first_object = head.first_object;
 			wire.first_id = head.start as u64;
 			wire.last = wire.last.or(Some(offset as u64 - 1));
+			// A terminal object held before any frame leaves the head's last as the newest data.
+			if relay.end_object.is_some() {
+				relay.last_before_end = relay.last_before_end.or(Some(offset as u64 - 1));
+			}
 		}
 		let extra = metadata + growth + if state.content.is_none() { payload } else { 0 };
 		Some(Adopted {
@@ -2944,11 +2954,15 @@ impl Handle {
 	}
 
 	/// The newest object's ID, by its moq-transport object ID when the group carries one,
-	/// else its frame index; `None` before the first frame.
-	pub(crate) fn last_object(&self) -> Option<u64> {
+	/// else its frame index; `None` before the first frame. A terminal object does not
+	/// count: a publisher's Largest never names the END_OF_GROUP it sends past the last.
+	pub(crate) fn last_data_object(&self) -> Option<u64> {
 		let state = self.state.read();
 		match state.wire() {
-			Some(wire) => wire.last,
+			Some(wire) => match state.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
+				Some(relay) => relay.last_before_end,
+				None => wire.last,
+			},
 			None => (state.next_index as u64).checked_sub(1),
 		}
 	}
@@ -6280,6 +6294,46 @@ mod test {
 				"a reader keeps its place"
 			);
 		}
+	}
+
+	/// A head adopted into a copy that already holds its terminal object, and no frame,
+	/// leaves the head's last object as the newest data object, not the terminal one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_adopted_head_below_a_terminal_object_is_the_last_data() {
+		let head = Head {
+			content: None,
+			start: 0,
+			first_object: true,
+			entries: vec![
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"a")).into(), 0),
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"b")).into(), 0),
+			],
+			compressed: false,
+		};
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
+		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		tail.start_at(2).unwrap();
+		tail.set_wire(Wire {
+			sparse: false,
+			first_object: false,
+			first_id: 2,
+			extensions: false,
+			has_end: true,
+			fetchable: true,
+			last: None,
+		})
+		.unwrap();
+		tail.set_end_object(super::super::object::Fields {
+			id: 2,
+			properties: Default::default(),
+		})
+		.unwrap();
+		assert_eq!(tail.handle.last_data_object(), None, "no data object yet");
+		tail.handle.adopt_head(&head);
+		assert_eq!(tail.handle.state.read().offset, 0, "the head is adopted");
+		assert_eq!(tail.handle.last_data_object(), Some(1));
 	}
 
 	#[test]
