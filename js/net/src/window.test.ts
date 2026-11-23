@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
+import { PAST_EVERY_GROUP } from "./internal.ts";
 import type { Live, Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
-import { PAST_EVERY_GROUP } from "./internal.ts";
 import {
 	AT_KEYS,
 	asked,
@@ -552,6 +552,18 @@ describe("ranges", () => {
 		expect(union([live(2), groups(4n), live(2), live(2, 3n)])).toEqual([groups(4n), live(2), live(2, 3n)]);
 		// A range from the oldest group with an end is kept as it is, beside the time ranges.
 		expect(union([groups(4n), range(undefined, time(3n))])).toEqual([range(undefined, time(3n)), groups(4n)]);
+
+		// Joins of one lag land on the same group whatever their max, so they merge under the widest,
+		// and no limit is the widest of all. Mirrors the Rust `combined_ranges_are_the_union`.
+		const join = (max: Duration | null, end?: bigint): Range => {
+			const out: Range = { start: { live: { min: Duration.millis(2), max } } };
+			if (end !== undefined) out.end = end;
+			return out;
+		};
+		expect(union([join(Duration.millis(5)), live(2)])).toEqual([join(Duration.millis(5))]);
+		expect(union([join(Duration.millis(5)), join(null)])).toEqual([join(null)]);
+		// A join's end keeps it apart from an open one of the same lag.
+		expect(union([join(Duration.millis(5), 9n), live(2)])).toEqual([live(2), join(Duration.millis(5), 9n)]);
 
 		// Empty ranges ask for nothing.
 		expect(union([groups(5n, 5n)])).toEqual([]);
