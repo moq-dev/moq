@@ -6973,7 +6973,9 @@ impl GroupServe {
 		// A higher-priority open waiting for credit can reset this stream: the reader fell too
 		// far behind the publisher's streams, and the control stream drops the group.
 		let preempt = self.ctx.version.encode_stream_code(&StreamError::TooFarBehind);
-		let stream = match ready!(session.poll_open_group(&mut self.open, waiter, options, preempt)) {
+		let opened = session.poll_open_group(&mut self.open, waiter, options, preempt);
+		tracing::warn!(key = self.key, version = ?self.ctx.version, ready = opened.is_ready(), "SCRATCH group open");
+		let stream = match ready!(opened) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.settle_open(false);
@@ -7321,7 +7323,18 @@ impl kio::Task for GroupServe {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if let Err(err) = ready!(self.poll_serve(waiter)) {
+		let res = self.poll_serve(waiter);
+		let state = match &self.state {
+			GroupState::Open => "open",
+			GroupState::Serve { frame, chunk, batch, batch_pos, ending, .. } => {
+				tracing::warn!(key = self.key, version = ?self.ctx.version, frame = frame.is_some(), chunk = chunk.is_some(), batch = batch.len(), batch_pos, ?ending, index = self.group.index(), "SCRATCH group serve detail");
+				"serve"
+			}
+			GroupState::Closed { .. } => "closed",
+			GroupState::Done => "done",
+		};
+		tracing::warn!(key = self.key, version = ?self.ctx.version, state, ready = ?res.as_ref().map(|r| r.as_ref().err().map(|e| e.to_string())), "SCRATCH group poll");
+		if let Err(err) = ready!(res) {
 			self.settle_failed(&err);
 		}
 		Poll::Ready(())
