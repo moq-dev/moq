@@ -298,6 +298,11 @@ impl Pool {
 		self.pinned().saturating_add(self.held()) <= self.inner.capacity.load(Ordering::Relaxed)
 	}
 
+	/// Whether the live edges leave any of the capacity to the rest of the pool.
+	pub(super) fn edges_leave_room(&self) -> bool {
+		self.pinned() < self.inner.capacity.load(Ordering::Relaxed)
+	}
+
 	/// Whether a fill could hold one more group: the capacity leaves room beside the pins and
 	/// every hold.
 	pub(super) fn hold_room(&self) -> bool {
@@ -2074,14 +2079,17 @@ impl Reader {
 	/// least its readers' average, so a reader holding little never ends for one holding much.
 	///
 	/// A debt only ever stands for what records and tails, beside the pins and the holds that
-	/// fit, are past the capacity, or past the pins when they are more: so a reader ends only
-	/// when records and holds, never cached groups or live edges, are what is over.
+	/// fit, are past the capacity, or past the pins when they are more, and a reader ends only
+	/// while the pins leave room: so records and holds, never cached groups or live edges, are
+	/// what ends one. In a pool the pins alone fill, records still fold, and stay bounded since
+	/// no hold fits there, so each miss is given up rather than asked again.
 	pub(super) fn ends(&self) -> bool {
 		let readers = &self.track.readers;
 		let count = readers.count.load(Ordering::Relaxed);
 		self.record
 			&& self.bytes > ENTRY_OVERHEAD
 			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
+			&& self.track.pool.edges_leave_room()
 	}
 }
 

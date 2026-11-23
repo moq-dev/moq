@@ -639,11 +639,11 @@ mod test {
 		assert!(!record.told(2), "the run given up is still owed");
 	}
 
-	/// A pool held past its capacity by its live edges alone owes its readers nothing, so it
-	/// ends none. Once a record is what is over, its reader ends, however far past the
-	/// capacity the live edges sit: a record never grows without bound beside them.
+	/// A pool held past its capacity by its live edges alone owes its readers nothing. A
+	/// record beside them is over, but the live edges are what fill the pool, so it ends no
+	/// reader; once the capacity leaves room beside them, a record over it ends its reader.
 	#[test]
-	fn a_record_past_a_pinned_pool_ends_its_reader() {
+	fn a_record_ends_its_reader_only_once_the_pins_leave_room() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(0));
 		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut edge = track.charge();
@@ -654,8 +654,14 @@ mod test {
 
 		let mut record = record_with_promise();
 		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
-		let excess = pool.excess().expect("the record is what is over");
+		let excess = pool.excess().expect("the record is over");
 		assert_eq!(excess, pool.used() - pool.pinned(), "the live edge owes nothing");
+		owe(&track, excess);
+		record
+			.settle(|| track.clone(), &mut (), Standing::default())
+			.expect("the live edges fill the pool");
+
+		pool.resize(pool.pinned() + 1);
 		owe(&track, excess);
 		assert!(record.settle(|| track.clone(), &mut (), Standing::default()).is_err());
 		assert_eq!(pool.excess(), None, "ending it brought the pool back to its pins");
