@@ -1271,12 +1271,15 @@ impl Holdings for TrackState {
 			let aged = self.walked(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
 			return match aged {
 				Some((&key, _)) => Join::Group(key),
-				// This copy's arrivals don't reach back that far, but its upstream's may, until it
-				// ends: one past every group then starts as a time start from 0 does, as on a timed
-				// track, asking upstream for any lower group this copy lacks.
-				None if wire && !(ended && min >= subscription::PAST_EVERY_GROUP) => Join::Unknown,
+				// This copy's arrivals don't reach back that far yet, but its upstream's may. One past
+				// every group no arrival ever reaches waits only on an upstream that answers joins,
+				// whose answer may still land until the read ends.
+				None if wire && (min < subscription::PAST_EVERY_GROUP || (self.answers_joins && !ended)) => {
+					Join::Unknown
+				}
 				// It reaches back past every arrival, so it starts where a time start from 0
-				// does, taking a lower group that arrives late as the oldest group would.
+				// does, taking a lower group that arrives late as the oldest group would. On a copy
+				// that asks upstream for any lower group the copy lacks, as on a timed track.
 				None => Join::Time(0),
 			};
 		};
@@ -17738,6 +17741,23 @@ mod test {
 		producer.finish_at(Position::group(1)).unwrap();
 		assert_eq!(drain_groups(&mut reader), vec![0]);
 		group.finish().unwrap();
+	}
+
+	/// An untimed copy whose upstream answers no join, such as a moq-transport one, places a
+	/// join past every group as a time start from 0 while its feed runs: no group it holds
+	/// ever arrived that long ago, and no answer comes to wait for.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unanswered_copy_places_a_join_past_every_group_at_once() {
+		let past = Subscription::default().with_ranges([Range::from(Start::within(Duration::from_secs(1)))]);
+		let mut producer = track_producer("test", Info::default());
+		producer.received();
+		producer.anchored();
+		let mut reader = producer.subscribe(past);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(Timestamp::unscaled(0), &b"x"[..]).unwrap();
+		group.finish().unwrap();
+		assert_eq!(drain_groups(&mut reader), vec![0]);
 	}
 
 	/// The same on a timed copy, for a join whose target no group held proves: once every

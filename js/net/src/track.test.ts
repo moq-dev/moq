@@ -4596,6 +4596,18 @@ function drainGroups(subscriber: ReturnType<TrackProducer["subscribe"]>): bigint
 	return keys;
 }
 
+// An untimed copy whose upstream answers no join, such as a moq-transport one, places a join past
+// every group as a time start from 0 while its feed runs: no group it holds ever arrived that long
+// ago, and no answer comes to wait for. Mirrors the Rust
+// `an_unanswered_copy_places_a_join_past_every_group_at_once`.
+test("an unanswered copy places a join past every group at once", () => {
+	const producer = receivedTrack();
+	const subscriber = producer.subscribe(withMax({ delay: { max: Duration.secs(1) } }));
+	putGroup(producer, 0n);
+	putGroup(producer, 1n);
+	expect(drainGroups(subscriber)).toEqual([0n, 1n]);
+});
+
 test("a re-created group is handed out once", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(30_000) });
 	const subscriber = producer.subscribe(withMax({ delay: { max: Duration.millis(30_000) } }));

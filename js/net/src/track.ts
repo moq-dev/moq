@@ -4054,10 +4054,12 @@ export class Subscriber {
 			const at = now();
 			const group = newest((group) => at.since(hooks.groupArrived(group)).ge(min));
 			if (group) return { group: group.start };
-			// This copy's arrivals don't reach back that far, but its upstream's may.
-			if (wire) return undefined;
+			// This copy's arrivals don't reach back that far yet, but its upstream's may.
+			if (wire && !min.ge(PAST_EVERY_GROUP)) return undefined;
 			// It reaches back past every arrival, so it starts where a time start from 0 does, taking a
-			// lower group that arrives late as the oldest group would.
+			// lower group that arrives late as the oldest group would. One past every group never
+			// waits: no arrival reaches back that far, and on a copy it asks upstream for any lower
+			// group the copy lacks, as on a timed track.
 			return { time: 0n };
 		}
 		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);

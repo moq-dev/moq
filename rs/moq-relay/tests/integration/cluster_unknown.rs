@@ -178,7 +178,7 @@ async fn read_first_frame(relay: &cluster::Cluster, auth: &auth::Auth) -> Result
 	// selected group's frame is still crossing the redundant mesh.
 	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
-			min: Duration::from_secs(1),
+			min: Duration::ZERO,
 			max: Some(Duration::from_secs(1)),
 		},
 	)]);
