@@ -13,13 +13,13 @@ import type { Range } from "../track.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
 import {
+	type Edge,
 	encodeSubscribeResponse,
 	Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
 	type SubscribeResponse,
 	SubscribeStart,
-	type Edge,
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";

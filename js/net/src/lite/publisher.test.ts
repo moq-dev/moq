@@ -209,11 +209,7 @@ test.each([Version.DRAFT_06])("a republish restarts the advertisement (version %
 
 // Delivers `sequences` in the given order, finishes the track (with `error`, if given), and
 // returns the SUBSCRIBE_END the publisher put on the wire.
-async function subscribeEnd(
-	keys: number[],
-	version: Version = Version.DRAFT_05,
-	error?: Error,
-): Promise<SubscribeEnd> {
+async function subscribeEnd(keys: number[], version: Version = Version.DRAFT_05, error?: Error): Promise<SubscribeEnd> {
 	using clock = manual();
 	const pair = createMockTransportPair(version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_05);
 	const origin = new OriginProducer();

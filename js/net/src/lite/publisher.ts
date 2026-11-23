@@ -61,6 +61,7 @@ import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
 	type Applied,
+	type Edge,
 	encodeSubscribeResponse,
 	LiveRanges,
 	positionFrames,
@@ -70,7 +71,6 @@ import {
 	requestedRange,
 	requestedRanges,
 	type Subscribe,
-	type Edge,
 	SubscribeDrop,
 	SubscribeEnd,
 	SubscribeOk,
@@ -1646,10 +1646,11 @@ export class Publisher {
 		// SUBSCRIBE's ranges resolved there. Before lite-07 the one start answers the subscription.
 		// A lite-07 range still waiting, or one following the live edge before this hop knows where
 		// it is, is answered later by `reportStarted`. Mirrors the Rust `TrackRun::resolve`.
-		const resolve = async (from: bigint, position: track.Position | undefined): Promise<boolean> => {
+		const resolveStart = async (from: bigint, position: track.Position | undefined): Promise<boolean> => {
 			startSent = true;
 			startKey = from;
-			if (!hasRanges(this.version)) return sendStart(new SubscribeStart({ id: 0n, start: from, largest: "unknown" }));
+			if (!hasRanges(this.version))
+				return sendStart(new SubscribeStart({ id: 0n, start: from, largest: "unknown" }));
 			const largest = edge(position);
 			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, ids);
@@ -1666,7 +1667,7 @@ export class Publisher {
 
 		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
 		// once nothing can resolve it (`finished`). One following the live edge also waits until this
-		// hop knows where it is. The first answers go out with `resolve`. Mirrors the Rust
+		// hop knows where it is. The first answers go out with `resolveStart`. Mirrors the Rust
 		// `TrackRun::report_started`.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
 			if (startKey === undefined || unstarted.size === 0) return true;
@@ -1713,7 +1714,7 @@ export class Publisher {
 			if (!hasRanges(this.version) || ![...unstarted.values()].some((ask) => ask.oldest)) return undefined;
 			if (newest() !== undefined || !hooks.knowsEdge(track) || hooks.subscriberEnd(track) !== undefined)
 				return undefined;
-			if (!(await resolve(0n, undefined))) return false;
+			if (!(await resolveStart(0n, undefined))) return false;
 			for (const [id, ask] of [...unstarted]) {
 				if (!ask.oldest || !controls.holds(id)) continue;
 				unstarted.delete(id);
@@ -1981,7 +1982,7 @@ export class Publisher {
 						if (emitRange && !startSent && hasRanges(this.version)) {
 							const end = hooks.servingEnd(track);
 							if (end !== undefined && hooks.servingRuns(track, 0n, end).length === 0) {
-								if (!(await resolve(end, largest))) return false;
+								if (!(await resolveStart(end, largest))) return false;
 								continue;
 							}
 						}
@@ -2002,7 +2003,7 @@ export class Publisher {
 								runs.length > 0 &&
 								runs.every((run) => runGaps(given, run.start, run.end).length === 0)
 							) {
-								if (!(await resolve(runs[0].start, largest))) return false;
+								if (!(await resolveStart(runs[0].start, largest))) return false;
 								continue;
 							}
 						}
@@ -2035,7 +2036,7 @@ export class Publisher {
 						// names what it held back, and the drops below account for the rest.
 						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
 							const from = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
-							if (!(await resolve(from, largest))) return false;
+							if (!(await resolveStart(from, largest))) return false;
 							continue;
 						}
 						// Nothing arrives to resolve a range still waiting on the live feed.
@@ -2107,7 +2108,7 @@ export class Publisher {
 					// Group Start is the latest group, and this key becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
 					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startKey);
-					if (!(await resolve(startKey, largest))) return false;
+					if (!(await resolveStart(startKey, largest))) return false;
 				}
 				record?.tell(group.start, group.start + 1n, { kind: "settled" });
 				streaming.add(group.start);

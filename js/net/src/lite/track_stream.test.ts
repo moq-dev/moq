@@ -50,7 +50,11 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const fin = track.reader.done();
 		expect(await settlesWithin(fin, clock, Duration.millis(50))).toBe(false);
 
-		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart({ id: 0n, start: 0n, largest: hasRanges(version) ? "empty" : "unknown" }) }, version);
+		await encodeSubscribeResponse(
+			sub.writer,
+			{ start: new SubscribeStart({ id: 0n, start: 0n, largest: hasRanges(version) ? "empty" : "unknown" }) },
+			version,
+		);
 		expect(await fin).toBe(true);
 
 		reader.close();

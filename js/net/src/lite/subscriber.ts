@@ -2545,7 +2545,8 @@ export class Subscriber {
 					hooks.answerEdge(entry.track);
 					// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 					// demand asks later. One that still arrives is delivered.
-					if (entry.requested !== undefined && start !== undefined) entry.tail.account(entry.requested, start);
+					if (entry.requested !== undefined && start !== undefined)
+						entry.tail.account(entry.requested, start);
 				}
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");

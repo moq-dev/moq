@@ -158,9 +158,9 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 				RangeError,
 			);
 		if (version === Lite.DRAFT_07)
-			await expect(SubscribeStart.decode(await framed(fields(version, 0, 1, 2, 0, UNSAFE)), version)).rejects.toThrow(
-				RangeError,
-			);
+			await expect(
+				SubscribeStart.decode(await framed(fields(version, 0, 1, 2, 0, UNSAFE)), version),
+			).rejects.toThrow(RangeError);
 		for (const index of [0, 1]) {
 			const body = await Writer.collect(version, async (w) => {
 				await w.string("room");

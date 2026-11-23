@@ -432,15 +432,17 @@ test("SubscribeStart answers one range with its start and the largest on draft-0
 	const answered = new SubscribeStart({ id: 1n, start: 4n, largest: { position, ended: true } });
 	expect(await encode(Version.DRAFT_07, { start: answered })).toEqual(new Uint8Array([4, 6, 1, 5, 2, 3, 2, 1]));
 	// Unknown and Empty carry no fields; a start of 0 is a range with no group there.
-	expect(
-		await encode(Version.DRAFT_07, { start: new SubscribeStart({ id: 4n, largest: "unknown" }) }),
-	).toEqual(new Uint8Array([4, 3, 4, 0, 0]));
+	expect(await encode(Version.DRAFT_07, { start: new SubscribeStart({ id: 4n, largest: "unknown" }) })).toEqual(
+		new Uint8Array([4, 3, 4, 0, 0]),
+	);
 	expect(
 		await encode(Version.DRAFT_07, { start: new SubscribeStart({ id: 0n, start: 0n, largest: "empty" }) }),
 	).toEqual(new Uint8Array([4, 3, 0, 1, 1]));
 	for (const largest of ["unknown", "empty", { position, ended: false }, { position, ended: true }] as const) {
 		for (const start of [undefined, 0n, 7n]) {
-			const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart({ id: 2n, start, largest }) });
+			const got = await responseRoundtrip(Version.DRAFT_07, {
+				start: new SubscribeStart({ id: 2n, start, largest }),
+			});
 			if (!("start" in got)) throw new Error("expected start");
 			expect([got.start.id, got.start.start, got.start.largest]).toEqual([2n, start, largest]);
 		}
@@ -468,9 +470,7 @@ test("SubscribeEnd round-trips on draft-05", async () => {
 test("SubscribeEnd carries its error on draft-07", async () => {
 	// Type, length, exclusive final group, then the error code + 1, 0 for a clean end.
 	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7n) })).toEqual(new Uint8Array([1, 2, 7, 0]));
-	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7n, 71) })).toEqual(
-		new Uint8Array([1, 2, 7, 72]),
-	);
+	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7n, 71) })).toEqual(new Uint8Array([1, 2, 7, 72]));
 	const got = await responseRoundtrip(Version.DRAFT_07, { end: new SubscribeEnd(7n, 71) });
 	if (!("end" in got)) throw new Error("expected end");
 	expect([got.end.group, got.end.error]).toEqual([7n, 71]);
@@ -827,4 +827,3 @@ test("lite-07 a refused edit leaves the ranges as sent", () => {
 	expect(live.next()).toBe(1n);
 	expect(live.edit(wide.slice(0, 2))).toEqual({ remove: [0n], add: wide.slice(0, 2), fillIds: [], probeIds: [] });
 });
-

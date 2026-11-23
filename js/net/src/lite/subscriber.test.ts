@@ -49,6 +49,7 @@ import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import {
+	type Edge,
 	encodeSubscribeResponse,
 	Subscribe,
 	SubscribeDrop,
@@ -57,13 +58,11 @@ import {
 	type SubscribeResponse,
 	SubscribeSkip,
 	SubscribeStart,
-	type Edge,
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, hasRanges, Version, versionName } from "./version.ts";
-
 
 /**
  * The SUBSCRIBE_START answering range `id` at `start`: on lite-07 with `largest`, by default that
@@ -2415,12 +2414,7 @@ test.each([
 			await pool.withdraw();
 			await drainReactions();
 			expect(track.closed.peek()).toBeUndefined();
-			await respond(
-				subscribe,
-				version,
-				[{ start: answer(version, 0n) }, { end: new SubscribeEnd(0n) }],
-				true,
-			);
+			await respond(subscribe, version, [{ start: answer(version, 0n) }, { end: new SubscribeEnd(0n) }], true);
 			expect(await track.closed).toBeNull();
 		} else {
 			await pool.replace();
@@ -3000,7 +2994,13 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 // ID never assigned, a second one for the range, or one not knowing where the edge is, is malformed.
 test.each([
 	["an unassigned range", [{ id: 1n, start: 0n, largest: "empty" }]],
-	["a range twice", [{ id: 0n, start: 0n, largest: "empty" }, { id: 0n, start: 0n, largest: "empty" }]],
+	[
+		"a range twice",
+		[
+			{ id: 0n, start: 0n, largest: "empty" },
+			{ id: 0n, start: 0n, largest: "empty" },
+		],
+	],
 	["no edge for a live range", [{ id: 0n, start: 0n, largest: "unknown" }]],
 ] as const)("a lite-07 SUBSCRIBE_START for %s violates the protocol", async (_, starts) => {
 	const { quic, streams, opened, closes } = fakeSession();
@@ -3127,7 +3127,10 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 		await answerTrackInfo(streams[0], version);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: answer(version, undefined, 0n) }, { start: answer(version, undefined, 1n) }]);
+		await respond(request, version, [
+			{ start: answer(version, undefined, 0n) },
+			{ start: answer(version, undefined, 1n) },
+		]);
 		await drainReactions();
 		// Under the budget the range was asked with, here none.
 		expect(reported.at(-1)).toEqual([[10n, undefined, NO_MAX_DELAY]]);
