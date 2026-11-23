@@ -525,6 +525,8 @@ export class Window {
 	// The budgets of the live joins among the ranges, counted: a group no history range covers goes
 	// stale past the widest.
 	#budgets = new Counts<number>();
+	// The non-empty history ranges among the ranges, placed or not.
+	#histories = 0;
 	// The groups the history ranges' spans read, which never go stale.
 	#history = new Cover();
 	// {@link budget} as last read, until the budgets or the history move.
@@ -567,14 +569,39 @@ export class Window {
 	 * value until the budgets or the groups history covers move. Mirrors the Rust `Window::budget`.
 	 */
 	budget(): Budget {
-		this.#budget ??= new Budget(this.#budgets.last() ?? 0, NO_MAX_DELAY, this.#history.runs());
+		this.#budget ??= new Budget(this.#budgets.last() ?? 0, NO_MAX_DELAY, this.#history.runs(), this.#histories > 0);
 		return this.#budget;
 	}
 
-	// Count a live join's budget among {@link #budgets} once more, or once less for a `delta` of -1.
+	/**
+	 * {@link budget} with each range's staleness taken from `ranges`, by key, rather than from the
+	 * range it was placed as: a front's reader places a live join where a copy resolved it, as a time
+	 * start, and the join's groups still go stale past its max. Mirrors the Rust `Window::budget_of`.
+	 */
+	budgetOf(ranges: ReadonlyMap<bigint, Range>): Budget {
+		const covered = new Cover();
+		for (const [key, span] of this.#spans) {
+			const range = ranges.get(key);
+			if (span.reads && range !== undefined && liveMillis(range) === undefined)
+				covered.add(span.reads.start, span.reads.end, 1);
+		}
+		let live = 0;
+		let asked = false;
+		for (const range of ranges.values()) {
+			if (isEmpty(range)) continue;
+			if (liveMillis(range) === undefined) asked = true;
+			else live = Math.max(live, rangeBudget(range));
+		}
+		return new Budget(live, NO_MAX_DELAY, covered.runs(), asked);
+	}
+
+	// Count a live join's budget among {@link #budgets}, or a history range among {@link #histories},
+	// once more, or once less for a `delta` of -1.
 	#countBudget(range: Range, delta: 1 | -1): void {
-		if (liveMillis(range) === undefined) return;
-		if (delta > 0) this.#budgets.add(rangeBudget(range));
+		if (liveMillis(range) === undefined) {
+			if (isEmpty(range)) return;
+			this.#histories += delta;
+		} else if (delta > 0) this.#budgets.add(rangeBudget(range));
 		else this.#budgets.remove(rangeBudget(range));
 		this.#budget = undefined;
 	}
@@ -1110,11 +1137,14 @@ export class Budget {
 	readonly history: number;
 	/** The groups history ranges cover, sorted and disjoint. */
 	readonly covered: readonly Run[];
+	/** Whether a history range is asked for, placed or not: wherever it lands, its groups get the history budget. */
+	readonly asked: boolean;
 
-	constructor(live: number, history: number, covered: readonly Run[]) {
+	constructor(live: number, history: number, covered: readonly Run[], asked = false) {
 		this.live = live;
 		this.history = history;
 		this.covered = covered;
+		this.asked = asked;
 	}
 
 	/** The same budget for every group. */
@@ -1125,7 +1155,7 @@ export class Budget {
 	/** This budget, each group's no wider than `bound`, undefined for none. */
 	clamped(bound: number | undefined): Budget {
 		if (bound === undefined || (this.live <= bound && this.history <= bound)) return this;
-		return new Budget(Math.min(this.live, bound), Math.min(this.history, bound), this.covered);
+		return new Budget(Math.min(this.live, bound), Math.min(this.history, bound), this.covered, this.asked);
 	}
 
 	/** How long group `key` stays worth delivering once superseded. */
@@ -1136,9 +1166,9 @@ export class Budget {
 		return run !== undefined && run.start <= key ? this.history : this.live;
 	}
 
-	/** The widest budget any group gets. */
+	/** The widest budget any group gets, counting a history range not yet placed. */
 	widest(): number {
-		return this.covered.length === 0 ? this.live : Math.max(this.live, this.history);
+		return this.asked ? Math.max(this.live, this.history) : this.live;
 	}
 
 	/** Whether every group gets the same budget. */
@@ -1152,7 +1182,8 @@ export class Budget {
 			other !== undefined &&
 			this.live === other.live &&
 			this.history === other.history &&
-			this.covered === other.covered
+			this.covered === other.covered &&
+			this.asked === other.asked
 		);
 	}
 

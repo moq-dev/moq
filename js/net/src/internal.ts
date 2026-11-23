@@ -34,7 +34,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Holdings, Resolved } from "./window.ts";
+import type { Budget, Holdings, Resolved } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
@@ -427,6 +427,8 @@ export interface ReadGroupFrame {
 export interface Within {
 	contains: (key: bigint) => boolean;
 	end: () => bigint | undefined;
+	/** How long each group stays worth delivering, as the logical reader's own ranges set it. */
+	budget: () => Budget;
 	/** What can change either. */
 	changed: readonly Getter<unknown>[];
 }
@@ -565,6 +567,11 @@ export interface ResumeSource {
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
 	forgetPastBudget(delivered: Delivered): void;
+	/**
+	 * Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
+	 * `delivered` this is, judged on the newest copy. Mirrors the Rust `Subscriber::forget_past`.
+	 */
+	forgetPast(delivered: Delivered, budget: Budget): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -1012,8 +1019,12 @@ export const hooks: {
 	reportedRuns: (subscriber: Subscriber) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
-	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
-	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
+	/**
+	 * Forget the gaps in another reader's `delivered` below each group past `budget`, the budget of
+	 * the reader whose `delivered` this is, which a front's copy, its ranges raised to a resume point,
+	 * cannot judge by its own. Mirrors the Rust `Subscriber::forget_past_budget`.
+	 */
+	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget) => void;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/**

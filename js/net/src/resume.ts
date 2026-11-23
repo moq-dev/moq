@@ -76,6 +76,7 @@ import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import {
 	AT_KEYS,
+	type Budget,
 	clamped,
 	EMPTY,
 	isEmpty,
@@ -533,6 +534,7 @@ class Reader implements ResumeSource {
 		this.#shell = shell;
 		this.within = {
 			contains: (key) => this.#inWindow(key),
+			budget: () => this.#readerBudget(),
 			end: () => shell.cursor.peek().end,
 			changed: [shell.cursor, shell.subscription],
 		};
@@ -1839,10 +1841,22 @@ class Reader implements ResumeSource {
 
 	/**
 	 * The reader's widest budget in milliseconds, how far behind any group may fall before it is
-	 * skipped: a copy is let go as a whole, so it waits out the widest.
+	 * skipped, as its own ranges set it: a copy is let go as a whole, so it waits out the widest.
+	 * Mirrors the Rust `Mirrored::widest`.
 	 */
 	#budget(): number {
-		return this.#window().budget().widest();
+		return widest(this.#ranges());
+	}
+
+	/**
+	 * How long each group stays worth delivering, as the reader's own ranges set it, placed where its
+	 * copies resolved them: the window places a live join as a time start, whose groups still go
+	 * stale past its max. Mirrors the Rust `Reader::budget`.
+	 */
+	#readerBudget(): Budget {
+		const window = this.#window();
+		const ranges = new Map(this.#ranges().map((range, index) => [BigInt(index), range] as const));
+		return window.budgetOf(ranges);
 	}
 
 	/**
@@ -1937,8 +1951,12 @@ class Reader implements ResumeSource {
 	}
 
 	forgetPastBudget(delivered: Delivered): void {
+		this.forgetPast(delivered, this.#readerBudget());
+	}
+
+	forgetPast(delivered: Delivered, budget: Budget): void {
 		const newest = this.#copies.at(-1);
-		if (newest) hooks.forgetPastBudget(newest.sub, delivered);
+		if (newest) hooks.forgetPastBudget(newest.sub, delivered, budget);
 	}
 
 	latest(): bigint | undefined {

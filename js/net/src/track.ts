@@ -3724,10 +3724,11 @@ export class Subscriber {
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
 	// this track holds it or not: one landing there would be written off. A group skipped as
 	// stale is not forgotten, since a wider budget offers it again.
-	#forgetPastBudget(delivered: Delivered): void {
+	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget()): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
-		const drift = this.#drift();
+		const own = this.#drift();
+		const drift = { ...own, budget: budget.clamped(own.bound) };
 		// Found once a gap is stale, so a hand-out that forgets nothing never scans #skipped. A
 		// skip whose group left the cache can never be offered again, so it is forgotten here
 		// rather than holding the gaps above it forever.
@@ -4722,7 +4723,10 @@ export class Subscriber {
 			if (ordered) subscriber.#raiseNext(floor);
 			return subscriber.#peekGroup(ordered);
 		};
-		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
+		hooks.forgetPastBudget = (subscriber, delivered, budget) => {
+			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, budget);
+			else subscriber.#forgetPastBudget(delivered, budget);
+		};
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
@@ -4747,7 +4751,11 @@ export class Subscriber {
 			let drift = fetched ? () => subscriber.#driftFetched() : () => subscriber.#drift();
 			let changed = subscriber.#expiryChanged();
 			if (within) {
-				drift = () => subscriber.#drift(within.contains, within.end());
+				// Judged under the logical reader's budget, as the Rust `Recover::poll_budget` gives it.
+				drift = () => {
+					const own = subscriber.#drift(within.contains, within.end());
+					return { ...own, budget: within.budget().clamped(own.bound) };
+				};
 				changed = [...changed, ...within.changed];
 			}
 			return {
