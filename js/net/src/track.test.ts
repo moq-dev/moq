@@ -314,6 +314,32 @@ test("an ordered owed hole follows media time and a lower successor", async () =
 	}
 });
 
+// A pre-07 update gets no fresh START: its publisher places a startless join afresh and re-offers
+// what lies below the old START, so an ordered reader reaching below it waits for that re-offer
+// rather than passing it. Groups reaching far past the max go stale once a successor lands.
+test("an ordered reader owes the groups below a restated START", async () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.startTrack(producer, { start: 5n });
+	for (let key = 5n; key < 10n; key++) putGroup(producer, key, Number(key) * 1000);
+	await clock.advance(10);
+	const reader = producer
+		.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(6500) } } }] })
+		.ordered();
+	hooks.restateTrack(producer);
+	try {
+		expect(drainOrdered(reader)).toEqual([]);
+		for (const key of [2n, 3n, 4n]) putGroup(producer, key, Number(key) * 1000);
+		await settle();
+		expect(drainOrdered(reader)).toEqual([2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n]);
+	} finally {
+		reader.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
 test("an ordered owed hole wakes when its ledger gap folds", async () => {
 	const clock = manualTime(0);
 	const producer = receivedTrack();

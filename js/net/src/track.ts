@@ -1004,8 +1004,6 @@ let wireFed: (producer: Producer) => boolean;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { key: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
-// Whether the wire's start was placed afresh since it was declared; see `hooks.restateTrack`.
-let restated: (producer: Producer) => boolean;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The keys of the groups the producer caches, sorted: what time starts and live joins resolve
@@ -1619,7 +1617,6 @@ export class Producer {
 				(key) => producer.#cached.get(key)?.group.closed.peek() === undefined,
 			);
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
-		restated = (producer) => producer.#wire?.served?.restated === true;
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		keysOf = (producer) => producer.#keys;
 		wholeAt = (producer, key) => {
@@ -1723,6 +1720,8 @@ export class Producer {
 		hooks.restateTrack = (producer) => {
 			const served = producer.#wire?.served;
 			if (!served || served.restated) return;
+			// The feed now reaches below the old START, so its gaps there are waited for afresh.
+			if (typeof served.start === "bigint") producer.#arrivals.demand(0n, served.start, now());
 			hooks.startTrack(producer, { ...served, restated: true });
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
@@ -2924,6 +2923,8 @@ export class Producer {
 		const requested = this.#requestedStart();
 		const served = this.#wire?.served;
 		if (!served || served.requested !== requested) return requested;
+		// Placed afresh by an update, which gets no new START, so the feed may reach any group.
+		if (served.restated) return 0n;
 		if (served.start === null) return requested;
 		if (served.start !== undefined) return served.start;
 		// A closed track never gets its START.
@@ -2938,7 +2939,10 @@ export class Producer {
 	#fillFloor(named: bigint | undefined): bigint | undefined {
 		const wire = this.#wire;
 		if (!wire) return undefined;
-		const feed = this.#feedStart();
+		// A restated feed reaches below the START, whose publisher re-offers what lies there: a fill
+		// still asks nothing below the START.
+		const restated = wire.served?.restated ? wire.served : undefined;
+		const feed = restated ? (typeof restated.start === "bigint" ? restated.start : restated.requested) : this.#feedStart();
 		const start = feed === "pending" ? wire.served?.requested : feed;
 		if (start === undefined || start === 0n) return undefined;
 		if (wire.starts.fillsFromStart) return start;
@@ -3543,7 +3547,7 @@ export class Subscriber {
 		const whole = this.#drift(WHOLE);
 		const drift = { ...whole, budget: Budget.uniform(budget).clamped(whole.bound) };
 		const received = receivedCopy(producer);
-		const feed = received && !restated(producer) ? sourceStart(producer) : undefined;
+		const feed = received ? sourceStart(producer) : undefined;
 		let from = typeof feed === "bigint" ? max(placed, feed) : placed;
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, from); i < timeline.length; i++) {
