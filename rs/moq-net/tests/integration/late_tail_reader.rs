@@ -315,3 +315,56 @@ async fn a_latest_reader_reads_a_finished_untimed_group() {
 		drop((finished, broadcast, upstream, publisher, relay));
 	}
 }
+
+/// Readers asking a lite-06 relay for every group still within their max of a finished
+/// track, as a reader with no start does there, get its last group whatever order the relay's
+/// copy learns the group and the end in: untimed, as a health track, and timed, as media.
+#[kio::test]
+async fn late_readers_read_a_finished_track_in_any_order() {
+	use crate::WithMax as _;
+	for round in 0..32u64 {
+		for timed in [false, true] {
+			for version in ["moq-lite-07-wip", "moq-lite-06"] {
+				let publisher = produce_origin(1);
+				let broadcast = publisher
+					.route("bcast", moq_net::origin::RouteOptions::hidden())
+					.unwrap();
+				let info = match timed {
+					true => moq_net::track::Info::default()
+						.with_timescale(moq_net::Timescale::MICRO)
+						.with_max_age(Duration::from_secs(30)),
+					false => moq_net::track::Info::default(),
+				};
+				let track = broadcast.broadcast().create_track("video", info).unwrap();
+				let frames = if timed { FRAMES } else { 1 };
+				let at = |frame: u64| match timed {
+					true => moq_net::Timestamp::from_micros(START + frame * 33_000).unwrap(),
+					false => moq_net::Timestamp::unscaled(0),
+				};
+				let mut group = track.append_group(at(0)).unwrap();
+				for frame in 0..frames {
+					group.write_frame(at(if timed { frame } else { 0 }), &b"frame"[..]).unwrap();
+				}
+				group.finish().unwrap();
+				let finished = track.finish().unwrap();
+				broadcast.announce().unwrap();
+
+				let relay = produce_origin(2);
+				let mut options = MockConnectOptions::new("moq-lite-07-wip".parse().unwrap());
+				options.server_publish = Some(publisher.consume());
+				options.client_subscribe = Some(relay.clone());
+				let upstream = connect_mock(options).await;
+				kio::clock::sleep(Duration::from_millis(round % 4)).await;
+
+				let subscription = match timed {
+					true => Subscription::default().with_max(Duration::from_secs(20)),
+					false => Subscription::default(),
+				};
+				let (got, end) = read(&relay, version.parse().unwrap(), subscription).await;
+				let want = if timed { vec![START; FRAMES as usize] } else { vec![0] };
+				assert_eq!((got, end.is_ok()), (want, true), "{version}, timed {timed}, round {round}");
+				drop((finished, broadcast, upstream, publisher, relay));
+			}
+		}
+	}
+}
