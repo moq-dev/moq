@@ -1270,6 +1270,9 @@ impl Holdings for TrackState {
 			let aged = self.walked(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
 			return match aged {
 				Some((&key, _)) => Join::Group(key),
+				// One past every group needs no arrival to measure it by, nor an upstream's
+				// answer, which a copy whose end is declared no longer takes.
+				None if min >= subscription::PAST_EVERY_GROUP => Join::Oldest,
 				// This copy's arrivals don't reach back that far, but its upstream's may.
 				None if wire => Join::Unknown,
 				// It reaches back past every arrival, so it starts where a time start from 0
