@@ -545,18 +545,19 @@ impl<W: Write> Drop for BitWriter<W> {
 	}
 }
 
+/// `code` as an exponential Golomb code, left-aligned and padded with zeros.
+#[cfg(test)]
+pub(crate) fn exp_golomb(code: u32) -> Vec<u8> {
+	let value = u128::from(code) + 1;
+	let bits = 128 - value.leading_zeros() as usize;
+	let len = 2 * bits - 1;
+	let aligned = value << (128 - len);
+	aligned.to_be_bytes()[..len.div_ceil(8)].to_vec()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// `code` as an exponential Golomb code, left-aligned and padded with zeros.
-	fn exp_golomb(code: u32) -> Vec<u8> {
-		let value = u128::from(code) + 1;
-		let bits = 128 - value.leading_zeros() as usize;
-		let len = 2 * bits - 1;
-		let aligned = value << (128 - len);
-		aligned.to_be_bytes()[..len.div_ceil(8)].to_vec()
-	}
 
 	/// 9.1.1: every code number up to the largest maps to its signed value,
 	/// those from 2^31 up included.

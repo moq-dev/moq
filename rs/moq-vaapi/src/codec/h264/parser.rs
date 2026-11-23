@@ -1810,7 +1810,8 @@ impl Parser {
 
 		for j in 0..scaling_list.as_mut().len() {
 			if next_scale != 0 {
-				let delta_scale = r.read_se::<i32>()?;
+				// 7.4.2.1.1.1 bounds it, which keeps the sum below from overflowing.
+				let delta_scale = r.read_se_bounded::<i32>(-128, 127)?;
 				next_scale = ((last_scale as i32 + delta_scale + 256) % 256) as u8;
 				*use_default = j == 0 && next_scale == 0;
 				if *use_default {
@@ -2685,6 +2686,24 @@ mod tests {
 		Synthesizer::<Sps, _>::synthesize(3, sps, &mut bytes, true).map_err(|e| e.to_string())?;
 		let nalu = Nalu::next(&mut Cursor::new(&bytes[..]))?;
 		Parser::default().parse_sps(&nalu).cloned()
+	}
+
+	/// 7.4.2.1.1.1: a scaling list delta outside its range fails the SPS.
+	#[test]
+	fn a_scaling_delta_out_of_range_fails() {
+		let parse = |code| {
+			let mut list = [0u8; 1];
+			let bits = crate::bitstream_utils::exp_golomb(code);
+			Parser::parse_scaling_list(&mut BitReader::new(&bits, false), &mut list, &mut false).map(|()| list[0])
+		};
+		// Deltas of 127 and -128 from the initial 8.
+		assert_eq!(parse(253), Ok(135));
+		assert_eq!(parse(256), Ok(136));
+		// i32::MAX, which once overflowed the sum.
+		assert!(parse(u32::MAX - 2).is_err());
+		// 128 and -129.
+		assert!(parse(255).is_err());
+		assert!(parse(258).is_err());
 	}
 
 	/// (7-12): the cycle's sum is kept whole, whatever range its prefixes or it
