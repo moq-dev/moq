@@ -838,9 +838,9 @@ export const hooks: {
 	 * undefined for one with no group to deliver at or before its time, answered under at most
 	 * `budget`, the max delay in milliseconds, replacing the last set. A reader's time start the
 	 * copy cannot place among its own groups resolves to the range asked from it: a start at or
-	 * before the time names the group containing it, and anything else says no group there is
-	 * left within the budget. Mirrors the Rust `track::Producer::time_starts`; assigned by
-	 * `track.ts`.
+	 * before the time names the group containing it, one past the time starts the range there
+	 * within the budget, and no start says no group at or before the time is left within it.
+	 * Mirrors the Rust `track::Producer::time_starts`; assigned by `track.ts`.
 	 */
 	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined, number]>) => void;
 	/**

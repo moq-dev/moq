@@ -5305,7 +5305,8 @@ impl Producer {
 	/// `None` for one with no group to deliver at or before its time, answered under at most
 	/// `budget`, replacing the last set. A reader's time start this copy cannot place among its
 	/// own groups resolves to the range asked from it: a start at or before the time names the
-	/// group containing it, and anything else says no group there is left within the budget.
+	/// group containing it, one past the time starts the range there within the budget, and no
+	/// start says no group at or before the time is left within it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn time_starts(&self, starts: impl IntoIterator<Item = (u64, Option<u64>, Duration)>) {
 		let mut merged: BTreeMap<u64, TimeStart> = BTreeMap::new();
