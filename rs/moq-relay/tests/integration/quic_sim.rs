@@ -322,10 +322,11 @@ const SESSIONS: usize = 12;
 /// fills the connection window whatever the paused streams hold.
 const MANY: usize = 100;
 
-/// How many of the highest-priority tracks [`bulk`] reads whole: each holds at most a stream
-/// window (4 MiB) ahead of its reader plus what the reader took, so this many stay well
-/// inside a session's default 256 MiB live-edge budget, which sheds lower priorities first.
-const LOSSLESS: usize = 40;
+/// How many of the highest-priority tracks [`bulk`] reads whole. A session past its 256 MiB
+/// live-edge budget sheds every frame readers took first, and each group's ingest runs at most
+/// half the 32 MiB live tail ahead of its reader, so this many fit with room to spare however
+/// the rest are shed. Measured, a group holds about 8 MiB ahead, so about 30 survive.
+const LOSSLESS: usize = 12;
 
 /// Write `tracks` tracks of one group each, [`BULK`] bytes in `chunk`-byte frames, through
 /// one relay, and read the first `read` bytes of each slower than they are written. Track `i`
