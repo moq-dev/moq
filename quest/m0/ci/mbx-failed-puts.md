@@ -95,6 +95,26 @@ first night after #8631 and the first under the 7-day expiry, over the same
   [its own quest](/quest/m0/ci/mbx-prefetch-cap.md); raising the budget past
   20 GiB first was not tried, since no job records its free disk.
 
+The later scheduled nights held the drop. PutObject per UTC day, from the
+same GraphQL dataset (whole days, so not the 12-hour window above):
+
+| Day        | 412     | 200    |
+| ---------- | ------- | ------ |
+| 2026-11-15 | 76,069  | 70,075 |
+| 2026-11-16 | 91,825  | 26,470 |
+| 2026-11-17 | 83,077  | 31,658 |
+| 2026-11-18 | 88,356  | 16,495 |
+| 2026-11-19 | 87,328  | 16,131 |
+| 2026-11-20 | 55,141  | 28,466 |
+| 2026-11-21 | 52,759  | 26,585 |
+| 2026-11-22 | 111,416 | 21,766 |
+| 2026-11-23 | 95,886  | 67,922 |
+| 2026-11-24 | 95,579  | 23,122 |
+
+412s ran 53k to 111k a day against 151k on 2026-11-12, so the budget lift
+removed roughly 40% of them and the rest stay. mbx 1.31.0
+(2026-11-24) is the first release with #951.
+
 Decided 2026-11-14 (maintainer, on #8763): ✅ keep the hosted budget at
 20 GiB until #951 ships (rejected: raise it now). ✅ Keep
 [mbx-prefetch-cap](/quest/m0/ci/mbx-prefetch-cap.md) in m0 (rejected: move it
@@ -107,13 +127,9 @@ the mbx bump that adopts an upstream fix as its own quest.
 
 Public API: none. Wire: none.
 
-## Waiting
+## Required
 
-- GitHub Actions: the 2026-11-15 scheduled Nightly, the second after #8631,
-  confirms the 2026-11-14 numbers above.
-- jdx/mr-boxington: a release containing #951, which
-  [mbx-prefetch-cap](/quest/m0/ci/mbx-prefetch-cap.md) adopts before the
-  remaining 412s are judged.
+- [mbx-prefetch-cap](/quest/m0/ci/mbx-prefetch-cap.md) - runs mbx 1.31.0, whose prefetch cap the remaining 412s are judged after
 
 ## Related
 

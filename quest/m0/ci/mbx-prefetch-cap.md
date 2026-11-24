@@ -2,7 +2,7 @@
 
 ## Goal
 
-The Rust cache runs the first mbx release containing
+The Rust cache runs mbx 1.31.0, the first release containing
 [jdx/mr-boxington#951](https://github.com/jdx/mr-boxington/pull/951), so
 prefetch no longer spends the download budget a job's own restores need. On
 the first scheduled Nightly after the bump, no hosted Rust-cache job logs
@@ -24,10 +24,6 @@ does and post the PutObject and 412 counts on
 as upstream asked, after re-reading its CONTRIBUTING.md and AI policy.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- jdx/mr-boxington: a release containing #951 (`gh release list -R jdx/mr-boxington`).
 
 ## Related
 
