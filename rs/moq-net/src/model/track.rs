@@ -20686,6 +20686,41 @@ mod test {
 		assert!(!pending.is_finished(), "group 0 is within the budget of its run");
 	}
 
+	/// A history read whose ranges passed over a group outside every range offers it once a
+	/// range covers it again, as any lowered start does.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_widened_history_read_offers_a_group_it_passed_over() {
+		let producer = track_producer("test", Info::timed());
+		let _everything = producer.subscribe(Subscription::default().with_ranges([Range::ALL]));
+		let mut sub = producer.subscribe(Subscription::default().with_ranges([Range::groups(1..3)]));
+		for key in 0..5 {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(key).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let mut read = Vec::new();
+		let oldest = Range {
+			start: Start::Oldest,
+			end: Some(4),
+		};
+		for (range, count) in [(None, 2), (Some(Range::groups(3..4)), 1), (Some(oldest), 2)] {
+			if let Some(range) = range {
+				sub.update(Subscription::default().with_ranges([range])).unwrap();
+			}
+			for _ in 0..count {
+				read.push(sub.recv_group().await.unwrap().expect("a group").start);
+			}
+			// Each window ends once read.
+			assert!(sub.recv_group().await.unwrap().is_none(), "{read:?}");
+		}
+		// The widening owes both; which goes first is the Group Order, not what this pins.
+		read[3..].sort_unstable();
+		assert_eq!(read, [1, 2, 3, 0, 4]);
+	}
+
 	/// A drift snapshot taken while the window waits on its first group is taken again once
 	/// that group settles it. Groups 0 and 1 land between the snapshot and the arrival: the
 	/// settled `0..=0` judges group 0 against itself, not group 1, which it never reads.

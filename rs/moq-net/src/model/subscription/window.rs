@@ -10,7 +10,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Cover, Range, Start};
+use super::{Cover, Range, Start, widest};
 
 /// One range resolved to groups: from `start` up to the exclusive `end`, `None` while it
 /// stays open.
@@ -209,7 +209,8 @@ impl Holdings for Unheld {
 /// the widest budget among the ranges covering it, a live join's being its `max`, and a
 /// history range's forever, or for as long as the publisher keeps it. A range not yet placed
 /// may cover any group up to its end. A group none covers, such as one handed out before the
-/// ranges moved, gets the widest `max`.
+/// ranges moved, gets the widest budget any range asks: it was reached through one of them, so
+/// a history range keeps it from going stale.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::model) struct Budget {
 	/// The groups the placed ranges cover, by the budget they give, widest first.
@@ -217,9 +218,7 @@ pub(in crate::model) struct Budget {
 	/// The ranges not yet placed, each as the last group it may cover and its budget: by last
 	/// group ascending, budget descending, leaving out any another covers at least as widely.
 	unplaced: Vec<(u64, Duration)>,
-	/// A group no range covers: the widest live join's `max`.
-	rest: Duration,
-	/// The widest budget any range asks, placed or not.
+	/// The widest budget any range asks, placed or not, which a group no range covers gets.
 	widest: Duration,
 }
 
@@ -229,7 +228,6 @@ impl Budget {
 		Self {
 			layers: Vec::new(),
 			unplaced: Vec::new(),
-			rest: budget,
 			widest: budget,
 		}
 	}
@@ -250,7 +248,6 @@ impl Budget {
 		Self {
 			layers,
 			unplaced: kept,
-			rest: Duration::ZERO,
 			widest: Duration::ZERO,
 		}
 	}
@@ -264,7 +261,6 @@ impl Budget {
 			for (_, budget) in &mut self.unplaced {
 				*budget = (*budget).min(bound);
 			}
-			self.rest = self.rest.min(bound);
 			self.widest = self.widest.min(bound);
 		}
 		self
@@ -278,7 +274,7 @@ impl Budget {
 		let unplaced = (self.unplaced)
 			.get(self.unplaced.partition_point(|(last, _)| *last < key))
 			.map(|(_, budget)| *budget);
-		placed.max(unplaced).unwrap_or(self.rest)
+		placed.max(unplaced).unwrap_or(self.widest)
 	}
 
 	/// The widest budget any group gets, counting a range not yet placed.
@@ -290,7 +286,7 @@ impl Budget {
 	pub fn is_uniform(&self) -> bool {
 		(self.layers.iter().map(|(budget, _)| budget))
 			.chain(self.unplaced.iter().map(|(_, budget)| budget))
-			.all(|budget| *budget == self.rest)
+			.all(|budget| *budget == self.widest)
 	}
 
 	/// `keys` cut where the budget changes, each stretch with its budget, lowest first.
@@ -341,17 +337,11 @@ impl Budget {
 	/// The lowest key a cache whose drift reaches back only to `live_floor` judges: every key
 	/// below it with a finite budget is past judging.
 	pub fn floor(&self, live_floor: Option<u64>) -> u64 {
-		let Some(floor) = live_floor else {
-			return 0;
-		};
-		// An unplaced range may cover every group from the first.
-		if self.rest == Duration::MAX || self.unplaced.iter().any(|(_, budget)| *budget == Duration::MAX) {
-			return 0;
+		// An unlimited budget anywhere also reaches a group none covers, which may be any.
+		match live_floor {
+			Some(floor) if self.widest != Duration::MAX => floor,
+			_ => 0,
 		}
-		(self.layers.iter())
-			.filter(|(budget, _)| *budget == Duration::MAX)
-			.filter_map(|(_, cover)| cover.lowest())
-			.fold(floor, u64::min)
 	}
 }
 
@@ -612,14 +602,13 @@ impl Window {
 
 	/// How long each group stays worth delivering once superseded, as these ranges set it.
 	pub fn budget(&self) -> Budget {
-		let rest = self
-			.budgets
-			.last_key_value()
-			.map_or(Duration::ZERO, |(budget, _)| *budget);
+		let widest = match self.histories {
+			0 => (self.budgets.last_key_value()).map_or(Duration::ZERO, |(budget, _)| *budget),
+			_ => Duration::MAX,
+		};
 		let layers = self.layers.iter().map(|(budget, cover)| (*budget, cover.clone()));
 		Budget {
-			rest,
-			widest: if self.histories > 0 { Duration::MAX } else { rest },
+			widest,
 			..Budget::new(layers.collect(), self.unplaced_budgets(|key| self.ranges.get(&key)))
 		}
 	}
@@ -645,13 +634,8 @@ impl Window {
 				layers.entry(range.budget()).or_default().add(run.clone(), 1);
 			}
 		}
-		let asked = || ranges.values().filter(|range| !range.is_empty());
-		let rest = (asked().filter(|range| range.join().is_some()).map(Range::budget))
-			.max()
-			.unwrap_or(Duration::ZERO);
 		Budget {
-			rest,
-			widest: asked().map(Range::budget).fold(rest, Duration::max),
+			widest: widest(ranges.values()),
 			..Budget::new(
 				layers.into_iter().collect(),
 				self.unplaced_budgets(|key| ranges.get(&key)),
@@ -1887,11 +1871,38 @@ mod tests {
 			);
 			assert_eq!(budget.stretch(30), (narrow, Some(50)));
 			assert_eq!((budget.widest(), budget.is_uniform()), (Duration::MAX, false));
-			// A group none covers would get the widest `max`, which is unlimited, so all are judged.
+			// A group none covers gets the widest budget, which is unlimited, so all are judged.
 			assert_eq!(budget.floor(Some(70)), 0);
 			let clamped = budget.clamped(Some(Duration::from_millis(200)));
 			assert_eq!(clamped.at(55), Duration::from_millis(200));
 			assert_eq!(clamped.at(30), narrow);
+		}
+	}
+
+	/// A group no range covers, such as one handed out before the ranges moved off it, takes the
+	/// widest budget any range asks: none beside a history range, and the widest `max` beside
+	/// live joins alone.
+	#[test]
+	fn a_group_none_covers_takes_the_widest_budget() {
+		let keys = Keys::new(0..10);
+		let max = Duration::from_millis(30);
+		// Placed at the latest group, 9.
+		let join = Range::from(Start::Live {
+			min: Some(Duration::ZERO),
+			max: Some(max),
+		});
+		let history = range(time(3), time(3));
+		for (ranges, rest) in [
+			(vec![history], Duration::MAX),
+			(vec![history, join], Duration::MAX),
+			(vec![join], max),
+		] {
+			let window = Window::new(&ranges, Some(9), &keys);
+			let keyed: BTreeMap<u64, Range> = (0..).zip(ranges.iter().copied()).collect();
+			for budget in [window.budget(), window.budget_of(&keyed)] {
+				assert!(window.is_settled() && !window.contains(1), "{window:?}");
+				assert_eq!((budget.at(1), budget.widest()), (rest, rest), "{ranges:?}");
+			}
 		}
 	}
 
