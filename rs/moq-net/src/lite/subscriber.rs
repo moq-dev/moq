@@ -22,7 +22,7 @@ use crate::tail::{self, Reading, Settle, Tail};
 use kio::Lock;
 
 mod fills;
-use fills::{FillAsk, RangeFills};
+use fills::{FillAsk, RangeFills, Recovery};
 mod fit;
 pub(super) mod route_stream;
 mod routed;
@@ -6606,6 +6606,10 @@ mod tests {
 			dynamic: serve_loop.dynamic,
 			fetches: serve_loop.fetches,
 			range_fills: RangeFills::per_run(),
+			asks: Vec::new(),
+			priority: 0,
+			probes: Default::default(),
+			placed: Default::default(),
 			closed: serve_loop.closed,
 		};
 		// A reader holds the finished copy.
@@ -12629,10 +12633,92 @@ struct FinishedServe {
 	fetches: kio::Tasks<FillServeRun>,
 	/// Fills spanning groups, each run on a subscription of its own.
 	range_fills: RangeFills,
+	/// Lite-07: the time starts readers wait on, which the copy can't place, and the
+	/// priority they ask with, as its demand last said.
+	asks: Vec<u64>,
+	priority: i8,
+	/// Each of those asked on a subscription of its own from that time, as a live copy probes
+	/// them on its subscription, by time.
+	probes: BTreeMap<u64, Recovery>,
+	/// Where each settled probe's publisher started, by time, which places the readers
+	/// waiting on it, while they still do.
+	placed: BTreeMap<u64, Option<u64>>,
 	closed: Transport,
 }
 
 impl FinishedServe {
+	/// Ask upstream for each time start readers wait on that no probe asks yet, and place
+	/// the readers once a probe settles. Ends the copy with the error a probe failed with
+	/// before saying where its range starts: nothing else can place its readers.
+	fn probe(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Result<(), Error> {
+		let Some(serving) = &mut self.serving else {
+			return Ok(());
+		};
+		while let Poll::Ready(Ok(demand)) = serving.poll_subscription_changed(waiter) {
+			(self.asks, self.priority) = demand.map_or((Vec::new(), 0), |demand| (demand.asks, demand.priority));
+		}
+		let asks = &self.asks;
+		// A reader placed, or gone, is owed nothing more.
+		let before = self.placed.len();
+		self.placed.retain(|time, _| asks.contains(time));
+		let mut moved = self.placed.len() != before;
+		self.probes.retain(|time, probe| {
+			let keep = asks.contains(time);
+			if !keep {
+				probe.end(crate::StreamError::Cancel);
+			}
+			keep
+		});
+		for &time in asks {
+			if self.placed.contains_key(&time) || self.probes.contains_key(&time) {
+				continue;
+			}
+			// No group starts at the last key, so no range from it holds one.
+			let Some(end) = time.checked_add(1) else {
+				continue;
+			};
+			let groups = time..end;
+			self.probes
+				.insert(time, Recovery::new(serve, serving, groups, self.priority));
+		}
+		// Placed only once its group is read, so the readers it places find it held rather
+		// than FETCH it again.
+		let mut failed = None;
+		for (&time, probe) in &mut self.probes {
+			let Poll::Ready(refused) = probe.poll(waiter) else {
+				continue;
+			};
+			let refused = refused?;
+			match probe.start() {
+				Some(start) => {
+					self.placed.insert(time, start);
+					moved = true;
+				}
+				None => {
+					let err = refused.get(&time).map_or(Error::Cancel, |refusal| refusal.error());
+					failed.get_or_insert(err);
+				}
+			}
+		}
+		self.probes.retain(|time, _| !self.placed.contains_key(time));
+		if let Some(err) = failed {
+			for probe in self.probes.values_mut() {
+				probe.end(crate::StreamError::Cancel);
+			}
+			self.probes.clear();
+			if let Some(serving) = self.serving.take() {
+				serve.close_if_ending();
+				let _ = serving.abort(err);
+			}
+			return Ok(());
+		}
+		// Replacing what the subscription last reported, whose ranges are over.
+		if moved {
+			serving.time_starts(self.placed.iter().map(|(&time, &start)| (time, start)));
+		}
+		Ok(())
+	}
+
 	/// A fill spanning groups goes on a subscription of its own, which any version carries,
 	/// and a group, or a slice of one, by FETCH.
 	fn take_fill(&mut self, serve: &TrackServe, fill: track::FillGroups) {
@@ -12672,6 +12758,12 @@ impl FinishedServe {
 				// A recovery's publisher broke the protocol, which closes the session.
 				lite::error::control(&mut serve.subscriber.session.clone(), err);
 			}
+			if let Err(err) = self.probe(serve, waiter) {
+				lite::error::control(&mut serve.subscriber.session.clone(), err);
+			}
+			let Some(serving) = &self.serving else {
+				return Poll::Ready(());
+			};
 			ServeLoop::walk_fills(serve, &mut self.range_fills, &mut self.fetches, serving);
 			// The groups it already holds stay readable, its clean end too once settled.
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
@@ -12681,7 +12773,7 @@ impl FinishedServe {
 				}
 				return Poll::Ready(());
 			}
-			if !self.fetches.is_empty() || !self.range_fills.is_empty() || read {
+			if !self.fetches.is_empty() || !self.range_fills.is_empty() || !self.probes.is_empty() || read {
 				return Poll::Pending;
 			}
 			// No linger: a new reader asks upstream afresh rather than reading this cache, which
@@ -13106,8 +13198,15 @@ impl TrackServeRun {
 								// outlives this one, so its recoveries carry on as they are.
 								let per_run = !self.serve.subscriber.version.has_ranges();
 								let mut range_fills = serve_loop.range_fills;
+								// The time starts readers waited on already, which the live loop saw.
+								let (asks, priority) = (serve_loop.serving.subscription())
+									.map_or((Vec::new(), 0), |demand| (demand.asks, demand.priority));
 								let mut finished = FinishedServe {
 									serving: Some(serve_loop.serving),
+									asks,
+									priority,
+									probes: Default::default(),
+									placed: Default::default(),
 									demand: serve_loop.demand,
 									dynamic: serve_loop.dynamic,
 									fetches: serve_loop.fetches,

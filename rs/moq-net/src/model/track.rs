@@ -1291,7 +1291,9 @@ impl Holdings for TrackState {
 	}
 
 	fn complete(&self) -> bool {
-		self.outcome.is_final()
+		// A finished lite-07 copy still served takes what it can't place from its upstream,
+		// which its session asks (see [`Subscriber::asks`]).
+		self.outcome.is_final() && !(self.anchors == Anchors::Wire && self.fills.read().has_handlers())
 	}
 
 	/// In media time, from the newest frame held, or the newest group still served when it

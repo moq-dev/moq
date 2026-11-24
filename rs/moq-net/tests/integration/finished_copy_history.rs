@@ -197,3 +197,124 @@ async fn read_back(version: Version, during_tail: bool) {
 	);
 	drop((broadcast, upstream, publisher, relay, written, first, datagrams));
 }
+
+/// A lite-07 copy whose publisher finished the track asks upstream for a reader's time start
+/// it cannot place among the groups it holds, as a live copy does, rather than settle it as
+/// though nothing could arrive: here the group containing the time was received and then
+/// evicted.
+#[kio::test]
+async fn a_finished_copy_asks_for_a_time_it_cannot_place() {
+	for during_tail in [true, false] {
+		place_time(during_tail).await;
+	}
+}
+
+/// The copy receives groups 0 to 20 s, five seconds apart, and expires all but the newest.
+/// The publisher then finishes the track after one more, and a reader asks for time 18 s:
+/// while the copy's tail still waits for the last group (`during_tail`), or once the copy
+/// finished.
+async fn place_time(during_tail: bool) {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
+	config.proxy = true;
+	config.pool = moq_net::cache::Pool::unbounded();
+	let (publisher, driver) = origin::Producer::new(config);
+	support::harness::spawn(driver);
+	let broadcast = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"video",
+			track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	// Each group starts at its own media time, and appending skips the keys between.
+	let write = |seconds: u64| {
+		let start = Timestamp::from_millis(seconds * 1000).unwrap();
+		let mut group = track.append_group(start).unwrap();
+		group.write_frame(start, &b"x"[..]).unwrap();
+		group.finish().unwrap()
+	};
+
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
+	config.proxy = true;
+	let (relay, driver) = origin::Producer::new(config);
+	support::harness::spawn(driver);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(relay.clone());
+	let upstream = connect_mock(options).await;
+	let remote = relay
+		.consume()
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	let history = |ranges: track::Range| {
+		let track = remote.track("video").unwrap();
+		async move {
+			track
+				.subscribe(Subscription::default().with_ranges([ranges]))
+				.await
+				.unwrap()
+		}
+	};
+
+	// A live reader keeps the copy up without asking for history, which would fill the evicted
+	// groups back in. The copy expires all but the newest group.
+	let mut first = history(track::Range::from(track::Start::Live {
+		min: Duration::ZERO,
+		max: None,
+	}))
+	.await;
+	support::harness::subscribed(&track).await;
+	let mut written: Vec<_> = (0..5).map(|n| write(n * 5)).collect();
+	for _ in 0..5 {
+		kio::clock::timeout(TIMEOUT, first.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("a group");
+	}
+	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+	// During the tail, the last group's stream is held, so the reader asks before the copy finished.
+	if during_tail {
+		upstream.server_transport.hold_unis();
+	}
+	written.push(write(25));
+	let _ended = track.finish().unwrap();
+	let mut second = None;
+	if during_tail {
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		second = Some(history(support::keys(18_000..=18_000)).await);
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		upstream.server_transport.release_unis();
+	}
+	let last = kio::clock::timeout(TIMEOUT, first.recv_group())
+		.await
+		.expect("group timeout")
+		.unwrap()
+		.expect("the last group");
+	assert_eq!(last.start, 25_000);
+	let end = kio::clock::timeout(TIMEOUT, first.recv_group())
+		.await
+		.expect("end timeout");
+	assert!(matches!(end, Ok(None)), "the copy finished");
+
+	let mut second = match second {
+		Some(second) => second,
+		None => history(support::keys(18_000..=18_000)).await,
+	};
+	let group = kio::clock::timeout(TIMEOUT, second.recv_group())
+		.await
+		.unwrap_or_else(|_| panic!("during tail {during_tail}: the copy asks upstream for time 18 s"))
+		.unwrap()
+		.expect("the group containing it");
+	assert_eq!(group.start, 15_000, "during tail {during_tail}");
+	drop((broadcast, upstream, publisher, relay, written, first));
+}
