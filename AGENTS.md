@@ -35,7 +35,7 @@ The API is the most important thing to get right: a bad shape costs a breaking c
 # Cross-Package Sync
 
 - `moq-ffi` powers every SDK except Rust and JS; when a binding user needs a feature, update every language and wrapper together.
-- Rust changes with a JS counterpart update both in the same PR (`moq-net`/`js/net`, `hang`/`js/hang`, `moq-auth`/`js/auth`). Wire changes update their matching draft in the same PR.
+- Wire or API changes with a counterpart across Rust and JS (`moq-net`/`js/net`, `hang`/`js/hang`, `moq-auth`/`js/auth`) update both sides in the same PR, whichever side starts the change. Wire changes update their matching draft in the same PR.
 - Wire, `moq-ffi`, or gateway changes also run `just test interop --all` (plain `interop` is Rust-only).
 
 Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.

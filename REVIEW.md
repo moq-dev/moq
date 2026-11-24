@@ -22,7 +22,7 @@ Flag unit tests waiting on the real clock in any language, even via `kio::clock`
 
 # Models
 
-When a PR changes a file in a `verify-*` skill's Coverage table, run that skill on the head. Flag covered changes the model doesn't mirror, configs whose result changed without updating `\* Open finding:`, and stale sync commits not moved to the PR's base. Apply the same check to `js/*/verify/` flow models.
+When a PR changes a file in a `verify-*` skill's Coverage table, run that skill on the head. Flag covered changes the model doesn't mirror, configs whose result changed without updating `\* Open finding:`, and stale sync commits not moved to the PR's base. The flow models under `js/*/verify/` have no skill: when a PR changes code their README names, apply the same check and run the affected configs as the README shows.
 
 # Not findings
 
