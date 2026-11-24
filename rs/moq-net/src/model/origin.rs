@@ -11505,6 +11505,7 @@ mod tests {
 		serving
 	}
 
+	#[cfg(feature = "async")]
 	fn claim_route(instance: &crate::Instance, node: u64, above: u8, cost: u64) -> RouteInfo {
 		RouteInfo::new()
 			.with_instance(instance.clone(), 0)
