@@ -3511,11 +3511,10 @@ export class Subscriber {
 	// out earlier can outlive this subscriber, as one a resumed reader still writes from a copy
 	// it let go of, and its budget still runs from its successor's arrival.
 	#arrivals?: { key: bigint; arrived: Instant }[];
-	// The misses this reader asked a fill for, each judged once, and those asked again after the
-	// answer was evicted before this reader took it, which is never repeated: a slow reader's
-	// refills cannot evict each other without bound. Mirrors the Rust `Misses`.
+	// The misses this reader asked a fill for, each judged once, and asked again however often
+	// the answer is evicted before this reader takes it: a key a reader is owed is never lost
+	// to the cache. Mirrors the Rust `Misses`.
 	#asked: Run[] = [];
-	#refilled: Run[] = [];
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
@@ -3876,7 +3875,6 @@ export class Subscriber {
 		this.#reclip(this.#givenUp, start, end, (run) => this.#reads(run.start, run.end));
 		this.#reclip(this.#heads, start, end, (run) => this.#reads(run.start, run.end));
 		this.#reclip(this.#asked, start, end, (run) => this.#wants(run.start, run.end));
-		this.#reclip(this.#refilled, start, end, (run) => this.#wants(run.start, run.end));
 		fillsOf(producer).moved(asker, start, end);
 		this.#fillMoves.update((moves) => moves + 1);
 	}
@@ -3901,7 +3899,7 @@ export class Subscriber {
 			for (const run of given) fills.moved(this.#state.asker, run.start, run.end);
 		} else {
 			// At once, before the fills withdraw what it no longer reads: a widening back asks those
-			// groups afresh, never through the one refill an evicted answer is allowed.
+			// groups afresh.
 			this.#clipAsked();
 			fills.moved(this.#state.asker);
 		}
@@ -3915,9 +3913,6 @@ export class Subscriber {
 		if (this.#givenUp.length > 0) this.#givenUp = this.#givenUp.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#heads.length > 0) this.#heads = this.#heads.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
-		if (this.#refilled.length > 0) {
-			this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
-		}
 	}
 
 	// Raise the key cursor to `floor`: what lies below it is passed for good.
@@ -4493,7 +4488,7 @@ export class Subscriber {
 			const asker = this.#askerOf();
 			// A moving read floor retires only its prefix: what lies above it stays asked.
 			const read = max(this.#cursor.peek().start, this.#nextKey);
-			for (const runs of [this.#asked, this.#refilled, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
+			for (const runs of [this.#asked, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
 			cutRun(this.#adopted, 0n, read);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
@@ -4712,42 +4707,42 @@ export class Subscriber {
 	}
 
 	// Ask a fill for the missed run `[start, end)`, but for each stretch under one budget whose
-	// newest group is stale: what was never asked, and once more what was asked but is missed again.
+	// newest group is stale: what was never asked, and again what was asked but is missed again.
 	#askMiss(start: bigint, end: bigint, drift: Drift, asker: Asker): void {
 		for (const [run] of drift.budget.runs(start, end)) {
 			if (!this.#staleAt(run.end - 1n, drift)) this.#askRun(run.start, run.end, asker);
 		}
 	}
 
-	// Ask a fill for the missed run `[start, end)`: what was never asked, and once more what was
-	// asked but is missed again.
+	// Ask a fill for the missed run `[start, end)`: what was never asked, and again what was asked
+	// but is missed again.
 	#askRun(start: bigint, end: bigint, asker: Asker): void {
-		const fills = fillsOf(this.#state.producer as Producer);
-		// Asked before and missed again, unless a fill still brings it: its answer was evicted
-		// before this reader took it.
+		const producer = this.#state.producer as Producer;
+		const fills = fillsOf(producer);
+		// Asked before and missed again, unless a fill still brings it.
 		const again = intersect(this.#asked, start, end).flatMap((run) =>
-			runGaps(this.#refilled, run.start, run.end).flatMap((refill) =>
-				runGaps([...fills.covered(refill.start, refill.end, asker)], refill.start, refill.end),
-			),
+			runGaps([...fills.covered(run.start, run.end, asker)], run.start, run.end),
 		);
 		// Only what a fill took counts as asked: with no handler open, a miss no fill covers is
 		// left to ask once one opens.
 		for (const gap of runGaps(this.#asked, start, end)) {
 			for (const run of fills.ask(gap.start, gap.end, asker)) insertRun(this.#asked, run.start, run.end);
 		}
-		// Refilled and missed again, unless a fill still brings it: given up and named, never
-		// asked a third time, as the Rust `Misses` gives up a refill evicted again.
-		const lost = intersect(this.#refilled, start, end).flatMap((run) =>
-			runGaps([...fills.covered(run.start, run.end, asker)], run.start, run.end),
-		);
-		for (const refill of again) {
-			for (const run of fills.ask(refill.start, refill.end, asker)) insertRun(this.#refilled, run.start, run.end);
+		// An answer that failed is still cached, failed, and given up: asking again would repeat a
+		// source's failure without end. One evicted before this reader took it is asked again however
+		// often. Mirrors the Rust `Misses::next_filled`.
+		const failed: Run[] = [];
+		for (const run of again) {
+			for (const key of cachedIn(producer, run.start, run.end)) {
+				if (!cachedHolds(producer, key)) insertRun(failed, key, key + 1n);
+			}
+			for (const lost of runGaps(failed, run.start, run.end)) fills.ask(lost.start, lost.end, asker);
 		}
-		for (const run of lost) {
+		for (const run of failed) {
 			insertRun(this.#givenUp, run.start, run.end);
-			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "group evicted again" }));
+			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "fill answer failed" }));
 		}
-		if (lost.length > 0) this.#fillsMoved(lost);
+		if (failed.length > 0) this.#fillsMoved(failed);
 	}
 
 	// Whether `group` is one this reader hands out only from its first frame, which it lacks: the
