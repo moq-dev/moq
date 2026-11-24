@@ -40,7 +40,7 @@ function wire(group: number, frame: number): Group.Frame {
 }
 
 function open(track: Track.Producer, delay: Signal<Delay>): Player {
-	const subscriber = track.subscribe({ delay: { max: HOLD } });
+	const subscriber = track.subscribe({ ranges: [{}] });
 	const received: Group.Consumer[] = [];
 	// The consumer reads through the subscriber's ordered read, so that is where groups arrive.
 	const ordered = subscriber.ordered.bind(subscriber);

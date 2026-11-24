@@ -90,7 +90,7 @@ test("AnnounceBroadcast skips an unknown type on draft-06", async () => {
 	expect(await decodeAnnounceBroadcast(reader, Version.DRAFT_06)).toEqual({ status: "skipped" });
 });
 
-test("AnnounceBroadcast skips an unknown type on draft-07", async () => {
+test("AnnounceBroadcast rejects an unknown type on draft-07", async () => {
 	const encoded = await bytes(async (w) => {
 		await w.u53(11);
 		await w.u53(2);
@@ -98,7 +98,7 @@ test("AnnounceBroadcast skips an unknown type on draft-07", async () => {
 		await w.u8(0);
 	}, Version.DRAFT_07);
 	const reader = new Reader(undefined, encoded, Version.DRAFT_07);
-	expect(await decodeAnnounceBroadcast(reader, Version.DRAFT_07)).toEqual({ status: "skipped" });
+	await expect(decodeAnnounceBroadcast(reader, Version.DRAFT_07)).rejects.toThrow(ProtocolViolation);
 });
 
 test("AnnounceBroadcast drops the route cost before draft-06", async () => {

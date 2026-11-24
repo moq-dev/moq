@@ -67,7 +67,7 @@ try {
 								server,
 							);
 							try {
-								// Lite-07 keeps the Subscribe Stream open past SUBSCRIBE_FINISH, so stop once every
+								// Lite-07 keeps the Subscribe Stream open past SUBSCRIBE_END, so stop once every
 								// group is accounted for rather than waiting for its end.
 								let dropped = 0;
 								while (dropped < groups) {

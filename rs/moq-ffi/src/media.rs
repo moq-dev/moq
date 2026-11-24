@@ -1790,9 +1790,11 @@ mod read_tests {
 		let subscription = track.subscription().unwrap();
 		assert_eq!(
 			subscription.ranges,
-			[moq_net::track::Range::from(moq_net::track::Start::Live(DELAY + WARMUP))]
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(DELAY + WARMUP),
+				max: Some(DELAY + WARMUP),
+			})]
 		);
-		assert_eq!(subscription.delay.max, Some(DELAY + WARMUP));
 	}
 
 	/// The warmup starts the reader that much further back than the min delay.
@@ -2088,7 +2090,10 @@ impl MoqMediaTrackConsumer {
 			.await?;
 		let (subscription, delay) = match subscription {
 			Some(subscription) => subscription.resolve()?,
-			None => Default::default(),
+			None => (
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
+				Default::default(),
+			),
 		};
 		let playout = moq_mux::container::Playout::new(delay, warmup);
 		let subscription = playout.subscription(subscription);
@@ -2343,8 +2348,12 @@ mod timebase_tests {
 					.track(&name)
 					.unwrap()
 					.subscribe(
-						moq_net::track::Subscription::default()
-							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(Duration::from_secs(30)),
+								max: Some(Duration::from_secs(30)),
+							},
+						)]),
 					)
 					.await
 					.unwrap();

@@ -134,9 +134,6 @@ kinds!(
 		/// The peer's stream fell out of step: a claim outside what was asked, or under a
 		/// route it never offered.
 		Unasked => unasked,
-		/// The peer's relay restarted with an older start than a session of it already
-		/// closed: its clock went back, or two relays share an id.
-		Regressed => regressed,
 		/// Any other reason, such as the peer announcing past the session's cap.
 		Other => other,
 	}

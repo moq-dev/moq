@@ -267,20 +267,35 @@ function bySpan(a: Span, b: Span): number {
 /**
  * One range per kind of start covering every range of that kind, from the earliest start to the
  * latest end. A time or absolute start is a span, so only ranges with no start and live joins are
- * left: those with no start all start at the same group, and the join reaching furthest back
- * delivers what each of the others does. Mirrors the Rust `collapse`.
+ * left: those with no start all start at the same group, and the join reaching furthest back,
+ * under the widest max, delivers what each of the others does. Mirrors the Rust `collapse`.
  */
 function collapse(ranges: readonly WireRange[]): WireRange[] {
 	const kinds: WireRange[] = [];
+	const kind = (range: WireRange) => (range.start?.live ? 1 : range.start?.joined ? 2 : 0);
+	const widest = (a: number | null, b: number | null) => (a === null || b === null ? null : Math.max(a, b));
 	for (const range of ranges) {
 		const live = range.start?.live;
-		const cover = kinds.find((cover) => (cover.start?.live === undefined) === (live === undefined));
+		const joined = range.start?.joined;
+		const cover = kinds.find((cover) => kind(cover) === kind(range));
 		if (!cover) {
 			kinds.push({ ...range });
 			continue;
 		}
-		if (cover.start?.live !== undefined && live !== undefined)
-			cover.start = { live: Math.max(cover.start.live, live) };
+		// The join reaching furthest back, none past one with no lag limit, under the widest max,
+		// delivers what each of the others does.
+		const held = cover.start?.live;
+		if (held !== undefined && live !== undefined)
+			cover.start = { live: { min: widest(held.min, live.min), max: widest(held.max, live.max) } };
+		// The join placed earliest, under the widest max.
+		const placed = cover.start?.joined;
+		if (placed !== undefined && joined !== undefined) {
+			const earlier =
+				joined.absolute < placed.absolute ||
+				(joined.absolute === placed.absolute && joined.frame < placed.frame);
+			const at = earlier ? joined : placed;
+			cover.start = { joined: { absolute: at.absolute, frame: at.frame, max: widest(placed.max, joined.max) } };
+		}
 		const [a, b] = [cover.end, range.end];
 		if (a?.absolute !== undefined && b?.absolute !== undefined)
 			cover.end = { absolute: max(a.absolute, b.absolute) };

@@ -13,6 +13,7 @@ export namespace Audio {
 	}
 	export type DecoderInput = {
 		enabled: Signals.Getter<boolean>;
+		priority: Signals.Getter<number>;
 	};
 	export type DecoderOutput = {
 		buffered: Signals.Signal<BufferedRanges>;
@@ -142,6 +143,7 @@ export class Player {
 export type PlayerInput = {
 	audio: {
 		muted: Signals.Getter<boolean>;
+		priority: Signals.Getter<number>;
 		target: Signals.Getter<Audio.Target | undefined>;
 		volume: Signals.Getter<number>;
 	};
@@ -162,6 +164,7 @@ export type PlayerInput = {
 	video: {
 		backend: Signals.Getter<Video.Backend>;
 		canvas: Signals.Getter<HTMLCanvasElement | undefined>;
+		priority: Signals.Getter<number>;
 		target: Signals.Getter<Video.Target | undefined>;
 		visible: Signals.Getter<Video.Visible>;
 	};
@@ -245,6 +248,7 @@ export namespace Video {
 	}
 	export type DecoderInput = {
 		enabled: Signals.Getter<boolean>;
+		priority: Signals.Getter<number>;
 	};
 	export type DecoderOutput = {
 		buffered: Signals.Signal<BufferedRanges>;

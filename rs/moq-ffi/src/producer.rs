@@ -601,12 +601,6 @@ impl MoqFill {
 		self.inner.priority()
 	}
 
-	/// The most tolerant age budget among the readers waiting on it, or null for the
-	/// publisher's max age alone.
-	pub fn max_delay(&self) -> Option<std::time::Duration> {
-		self.inner.max_delay().map(crate::ffi::duration)
-	}
-
 	/// Which end to fill first.
 	pub fn order(&self) -> MoqOrder {
 		self.inner.order().into()

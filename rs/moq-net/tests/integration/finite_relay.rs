@@ -8,8 +8,8 @@
 //! last until those groups drain: a relay cancels its upstream subscription once nobody
 //! subscribes, and the publisher then resets every group still on the wire.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 use support::AppendNext;
 use support::AtStart;
 
@@ -19,7 +19,7 @@ use futures::channel::mpsc::TryRecvError;
 use futures::{SinkExt, StreamExt};
 
 use moq_net::Version;
-use moq_net::track::Subscription;
+use moq_net::track::{Range, Subscription};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -94,9 +94,9 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 
 	let (mut heads, mut opened) = futures::channel::mpsc::unbounded();
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(MAX_DELAY))
-			.with_ranges([support::keys(0..)]);
+		// Every group still within the max age, as a subscription-wide max delay once asked:
+		// a time start would be history, which lite-03 never ends, declaring no end.
+		let subscription = Subscription::default().with_ranges([Range::ALL]).with_max(MAX_DELAY);
 		let mut sub = remote
 			.track("tail")
 			.unwrap()

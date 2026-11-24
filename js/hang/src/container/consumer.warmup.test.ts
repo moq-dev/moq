@@ -2,6 +2,7 @@ import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track } from "@moq/net";
+import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
@@ -15,10 +16,10 @@ function setup(delay = BUDGET, warmup = 0, min = delay, max: number | null = del
 	const installed = clock.install();
 	// Drain the in-memory readers and their continuations without moving time.
 	const flush = () => clock.advance(Duration.ZERO);
-	const track = new Track.Producer("video");
+	const track = new Track.Producer("video").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	if (owed !== undefined) track.requests();
 	// A null max delay sets no subscriber limit; an omitted one is zero.
-	const subscriber = track.subscribe({ delay: { max: max === null ? null : Duration.millis(max + warmup) } });
+	const subscriber = track.subscribe(within(max === null ? null : Duration.millis(max + warmup)));
 	if (owed !== undefined) subscriber.withRange({ start: { included: owed } });
 	const consumer = new Consumer(subscriber, {
 		format: new Format("video"),

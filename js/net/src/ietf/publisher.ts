@@ -53,7 +53,6 @@ import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { GivenUp } from "../util/given_up.ts";
 import { max, saturatingSub } from "../util/key.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
-import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
@@ -87,7 +86,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, type TrackStatusRequest } from "./track.ts";
-import type { IetfVersion } from "./version.ts";
+import { type IetfVersion, isDraft23 } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
 const RETRY_BASE = 100;
@@ -703,9 +702,7 @@ export class Publisher {
 		const unsupported =
 			[...params.bytes.keys()].some((key) => key !== 0x21n && key !== 0x23n) ||
 			params.rangeFilters ||
-			[...params.vars.keys()].some(
-				(key) => key !== 0x02n && key !== 0x06n && key !== 0x10n && key !== 0x20n && key !== 0x22n,
-			);
+			[...params.vars.keys()].some((key) => key !== 0x02n && key !== 0x06n && key !== 0x20n && key !== 0x22n);
 		if (unsupported) throw await refused("not_supported", "REQUEST_UPDATE parameters not supported");
 		return { params, requestId };
 	}
@@ -783,7 +780,7 @@ export class Publisher {
 			// subscription's cursor. Forked from this subscriber rather than resolved through
 			// the broadcast again: a dynamic serve is one request per peer subscription, so
 			// asking the broadcast would mint a second producer nobody has accepted.
-			cache = fill && fill.kind !== "empty" ? track.fork({ priority, order, delay: { max: NO_MAX } }) : undefined;
+			cache = fill && fill.kind !== "empty" ? track.fork({ priority, order, ranges: [{}] }) : undefined;
 
 			const ranked = new Priority(track, info.priority);
 			ranking = ranked;
@@ -985,7 +982,7 @@ export class Publisher {
 								? track.fork({
 										priority: fromWire(msg.subscriberPriority),
 										order: msg.groupOrder,
-										delay: { max: NO_MAX },
+										ranges: [{}],
 									})
 								: undefined;
 						try {
@@ -1094,8 +1091,10 @@ export class Publisher {
 			}
 
 			// A revocation bridged from upstream, such as a moq-lite UNAUTHORIZED reset, is one here too.
-			// PUBLISH_DONE's EXPIRED means the subscription's own lifetime ran out, so an expired
-			// token is reported as no longer granted.
+			// Before draft-23 PUBLISH_DONE's EXPIRED means the subscription's own lifetime ran out,
+			// so an expired token is reported as no longer granted. Draft-23 registers
+			// EXPIRED_AUTH_TOKEN for it (section 12.4).
+			const tokenExpired = publishError instanceof SessionError && publishError.code === SessionCode.Expired;
 			if (
 				(publishError instanceof StreamError && publishError.code === StreamCode.Unauthorized) ||
 				(publishError instanceof SessionError &&
@@ -1112,7 +1111,9 @@ export class Publisher {
 			try {
 				const done = new PublishDone({
 					statusCode: unauthorized
-						? PublishDoneStatus.UNAUTHORIZED
+						? tokenExpired && isDraft23(version)
+							? PublishDoneStatus.EXPIRED_AUTH_TOKEN
+							: PublishDoneStatus.UNAUTHORIZED
 						: updateFailed
 							? PublishDoneStatus.UPDATE_FAILED
 							: malformed
@@ -1122,7 +1123,9 @@ export class Publisher {
 									: PublishDoneStatus.TRACK_ENDED,
 					streamCount: BigInt(streams.opened),
 					reasonPhrase: unauthorized
-						? "not granted"
+						? tokenExpired
+							? "token expired"
+							: "not granted"
 						: updateFailed
 							? "update failed"
 							: malformed
@@ -2502,17 +2505,14 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 	}
 }
 
-// moq-transport carries no budget, so everything the producer retains is served.
-const NO_MAX = Duration.millis(Varint.MAX_U53);
-
 /**
  * A live join with no lag, as a SUBSCRIBE without an absolute start asks: a range from the oldest
  * group would have a relay's route replay everything it retains, and SUBSCRIBE_OK then name the
- * oldest group replayed so far as Largest. Mirrors the Rust `live_join`.
+ * oldest group replayed so far as Largest. No group of it expires short of the publisher's max
+ * age, since moq-transport's SUBSCRIBE carries none. Mirrors the Rust `live_join`.
  */
-const LIVE_JOIN: Pick<Subscription, "delay" | "ranges"> = {
-	delay: { max: NO_MAX },
-	ranges: [{ start: { live: Duration.ZERO } }],
+const LIVE_JOIN: Pick<Subscription, "ranges"> = {
+	ranges: [{ start: { live: { min: Duration.ZERO, max: null } } }],
 };
 
 /**
@@ -2523,11 +2523,7 @@ const LIVE_JOIN: Pick<Subscription, "delay" | "ranges"> = {
  * retained, and a live join would start at whichever group lands first. Mirrors the Rust
  * `ServeRange::request`.
  */
-function serveRequest(
-	range: ServeRange,
-	filter?: Filter.Filter,
-	edge?: LiveEdge,
-): Pick<Subscription, "delay" | "ranges"> {
+function serveRequest(range: ServeRange, filter?: Filter.Filter, edge?: LiveEdge): Pick<Subscription, "ranges"> {
 	const latest = edge?.latest;
 	const live =
 		filter !== undefined &&
@@ -2540,7 +2536,7 @@ function serveRequest(
 	// would leave it where it already resolved.
 	const out: Range = { start: range.start?.group ?? 0n };
 	if (range.end) out.end = range.end.group;
-	return { delay: { max: NO_MAX }, ranges: [out] };
+	return { ranges: [out] };
 }
 
 function rangeGroups(range: ServeRange): Groups {

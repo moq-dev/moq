@@ -8,15 +8,10 @@ import { Subscribe as IetfSubscribe, SubscribeOk } from "../../js/net/src/ietf/s
 import { Subscriber as IetfSubscriber } from "../../js/net/src/ietf/subscriber.ts";
 import { Version as IetfVersion } from "../../js/net/src/ietf/version.ts";
 import { StreamId } from "../../js/net/src/lite/stream.ts";
-import {
-	encodeSubscribeResponse,
-	Subscribe,
-	SubscribeFinish,
-	SubscribeStart,
-} from "../../js/net/src/lite/subscribe.ts";
+import { encodeSubscribeResponse, Subscribe, SubscribeEnd, SubscribeStart } from "../../js/net/src/lite/subscribe.ts";
 import { Subscriber as LiteSubscriber } from "../../js/net/src/lite/subscriber.ts";
 import { Track, TrackInfo } from "../../js/net/src/lite/track.ts";
-import { Version as LiteVersion } from "../../js/net/src/lite/version.ts";
+import { hasRanges, Version as LiteVersion } from "../../js/net/src/lite/version.ts";
 import { createMockTransportPair } from "../../js/net/src/mock.ts";
 import * as Path from "../../js/net/src/path.ts";
 import { Stream, Writer } from "../../js/net/src/stream.ts";
@@ -63,10 +58,12 @@ if (version !== undefined) {
 	assert(peer);
 	assert.equal(await peer.reader.u53(), StreamId.Subscribe);
 	await Subscribe.decode(peer.reader, version);
+	// Lite-07 answers the live range with where the track is: nothing yet.
+	const largest = hasRanges(version) ? "empty" : "unknown";
 	if (input.started || input.owed)
-		await encodeSubscribeResponse(output, { start: new SubscribeStart([0n]) }, version);
+		await encodeSubscribeResponse(output, { start: new SubscribeStart({ id: 0n, start: 0n, largest }) }, version);
 	if (input.clean || input.owed) {
-		await encodeSubscribeResponse(output, { finish: new SubscribeFinish(input.owed ? 1n : 0n) }, version);
+		await encodeSubscribeResponse(output, { end: new SubscribeEnd(input.owed ? 1n : 0n) }, version);
 	}
 } else {
 	assert.equal(input.version, "moqt-18");

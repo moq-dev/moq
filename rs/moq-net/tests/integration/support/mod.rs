@@ -52,8 +52,7 @@ impl AtStart for group::Producer {
 /// The groups from the one containing `keys`' start through the one containing its end, as
 /// times: on a track whose groups start at consecutive keys, the groups with those keys.
 ///
-/// An omitted start is no start, which [`track::Delay::min`] places. `..0` holds nothing, so it
-/// panics.
+/// An omitted start is the oldest group held. `..0` holds nothing, so it panics.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub fn keys(keys: impl RangeBounds<u64>) -> track::Range {
 	let start = match keys.start_bound() {
@@ -104,6 +103,7 @@ pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
 				announce,
+				..
 			} if announce.prefix.as_str() == path => {
 				return announce.route;
 			}
@@ -146,23 +146,29 @@ pub fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, 
 				origin::RouteEvent {
 					kind: origin::RouteKind::Start,
 					announce,
+					..
 				} => (Kind::Start, announce),
 				origin::RouteEvent {
 					kind: origin::RouteKind::Update,
 					announce,
+					..
 				} => (Kind::Update, announce),
 				origin::RouteEvent {
 					kind: origin::RouteKind::Restart,
 					announce,
+					..
 				} => (Kind::Restart, announce),
 				origin::RouteEvent {
 					kind: origin::RouteKind::End,
 					announce,
+					..
 				} => (Kind::End, announce),
 				origin::RouteEvent {
 					kind: origin::RouteKind::Offline,
 					announce,
+					..
 				} => (Kind::Offline, announce),
+				other => panic!("unexpected route event {other:?}"),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;

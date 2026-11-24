@@ -1,8 +1,9 @@
 // A received copy asks its publisher for the groups its readers miss, over lite FETCH, as the Rust
-// lite subscriber's `FillServeRun` does, or on lite-07 for more than one group, through its
-// subscription's ranges, as its `RangeFills` does, and on a SUBSCRIBE of its own for what that
-// subscription already delivered, as its `Recovery` does: below where the copy's feed started, by
-// the copy's start rule, and inside the copy, once it evicted what it received.
+// lite subscriber's `FillServeRun` does, or for more than one group, as its `RangeFills` does:
+// on lite-07 through its subscription's ranges, and on a SUBSCRIBE of its own for what that
+// subscription already delivered, as its `Recovery` does, and before lite-07 on a SUBSCRIBE of its
+// own per run: below where the copy's feed started, by the copy's start rule, and inside the copy,
+// once it evicted what it received.
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
@@ -19,6 +20,7 @@ import { createMockTransportPair } from "../mock.ts";
 import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { FillGroups, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
@@ -32,7 +34,8 @@ const url = new URL("https://localhost:4443/test");
 
 // A JS publisher's track and a JS subscriber's session to it. The publisher's archive serves
 // every group its cache no longer holds, except group 1, which it never had, or with `timed`, none.
-async function peers(alpn: string, timed = false) {
+// `answered`, when given, holds the publisher's archive until it settles.
+async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 	const pair = createMockTransportPair(alpn);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -45,6 +48,7 @@ async function peers(alpn: string, timed = false) {
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			await answered;
 			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
 				if (key === 1n) {
 					fill.dropGroups(1n, 2n);
@@ -68,6 +72,8 @@ async function peers(alpn: string, timed = false) {
 		track,
 		remote,
 		fetches,
+		// The publisher's end of the transport, for steering delivery.
+		server: pair.server,
 		close() {
 			remote.close();
 			requests.close();
@@ -119,8 +125,8 @@ async function idle(clock: Manual, reader: Subscriber): Promise<boolean> {
 
 // Groups 0 to 4, one per second: a group is as old as the start of the one after it, so a
 // reader with a half-second budget starts at group 3, on lite-06 and later.
-const NARROW: Subscription = { delay: { max: Duration.millis(500) } };
-const WIDE: Subscription = { delay: { max: null }, order: "ascending" };
+const NARROW: Subscription = withMax({ delay: { max: Duration.millis(500) } });
+const WIDE: Subscription = withMax({ delay: { max: null }, order: "ascending" });
 
 function populate(track: Producer): void {
 	for (let key = 0n; key < 5n; key++) write(track.createGroup(key), key, "live");
@@ -155,7 +161,7 @@ test("copy fill: lite-07 fills below a start resolved from the budget, as far as
 
 // A live join `ms` behind the newest frame, read in order.
 function joining(ms: number): Subscription {
-	return { delay: { max: null }, order: "ascending", ranges: [{ start: { live: Duration.millis(ms) } }] };
+	return { order: "ascending", ranges: [{ start: { live: { min: Duration.millis(ms), max: null } } }] };
 }
 
 // Groups starting at 0 to 4 seconds, each keyed by the millisecond it starts at, as a timed
@@ -209,9 +215,9 @@ test("copy fill: lite-07 asks upstream for a live join reaching back past what t
 		const far = peer.remote.track("video").subscribe(joining(2500));
 		expect(sorted(await take(far, 4))).toEqual(timed(1_000n));
 		const asked = peer.track.subscription.peek()?.ranges ?? [];
-		expect(asked.some((range) => typeof range.start === "object" && range.start.live.asMillis() === 2500)).toBe(
-			true,
-		);
+		expect(
+			asked.some((range) => typeof range.start === "object" && range.start.live.min?.asMillis() === 2500),
+		).toBe(true);
 		const origin = peer.track.subscribe(joining(2500));
 		expect(sorted(await take(origin, 4))).toEqual(timed(1_000n));
 		near.close();
@@ -232,7 +238,7 @@ test("copy fill: lite-07 ends a live join answered empty", async () => {
 		// 1 s behind the newest frame at 4 s is 3 s, past the range's end at 1 s.
 		const bounded = (): Subscription => ({
 			...joining(1000),
-			ranges: [{ start: { live: Duration.millis(1000) }, end: 1_000n }],
+			ranges: [{ start: { live: { min: Duration.millis(1000), max: null } }, end: 1_000n }],
 		});
 		const origin = peer.track.subscribe(bounded());
 		expect(sorted(await take(origin, 1))).toEqual([]);
@@ -305,11 +311,11 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const installed = clock.install();
 		const peer = await peers(alpn);
 		try {
-			const history: Subscription = {
+			const history: Subscription = withMax({
 				ranges: [{ start: 0n }],
 				delay: { max: null },
 				order: "ascending",
-			};
+			});
 			const first = peer.remote.track("video").subscribe(history);
 			for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
 			// Before lite-07 a subscription carries no order and is served newest first, so only
@@ -323,8 +329,10 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			expect((await first.recvGroup())?.start).toBe(4n);
 			const before = peer.fetches();
 
-			// The same ranges, so nothing changes upstream: only a fill brings what the copy lost, a
-			// FETCH per group, or on lite-07 one SUBSCRIBE for the run, its groups and its miss.
+			// The same ranges, so nothing changes upstream: only a fill brings what the copy lost, on
+			// lite-07 one SUBSCRIBE for the run, its groups and its miss. Before lite-07 a SUBSCRIBE
+			// waits only for the group it starts at, so at most one per group the run holds: how many
+			// depends on what lands before its range is capped there.
 			const again = peer.remote.track("video").subscribe(history);
 			const got = await take(again, 4);
 			expect(sorted(got)).toEqual([
@@ -333,7 +341,8 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 				[3n, "old 3"],
 				[4n, "live 4"],
 			]);
-			expect(peer.fetches()).toBe(before + (alpn === Lite.ALPN_07_WIP ? 1 : 4));
+			if (alpn === Lite.ALPN_07_WIP) expect(peer.fetches()).toBe(before + 1);
+			else expect(peer.fetches()).toBeLessThanOrEqual(before + 3);
 			first.close();
 			again.close();
 		} finally {
@@ -342,6 +351,58 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		}
 	},
 );
+
+// The publisher finishes the track while a lite-05/06 copy still recovers a run it evicted, on a
+// subscription of its own: the copy's subscription FINs, but the copy stays open until upstream
+// answered the run, even once that run's FIN beats its group streams, so the reader still gets it.
+// Mirrors the Rust
+// `lite06_fill_walk::a_recovery_outlives_the_finished_subscription`.
+test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s recovers a run past the track's finish", async (alpn) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	let answer = () => {};
+	const peer = await peers(
+		alpn,
+		false,
+		new Promise<void>((resolve) => {
+			answer = resolve;
+		}),
+	);
+	try {
+		const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
+		const first = peer.remote.track("video").subscribe(history);
+		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
+
+		// Both caches age out what nobody touched; only the live edge stays.
+		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
+		write(peer.track.createGroup(4n), 4n, "live");
+		expect((await first.recvGroup())?.start).toBe(4n);
+
+		// The run goes out on a recovery the archive holds, and the publisher ends the track.
+		const again = peer.remote.track("video").subscribe({ ...history, ranges: [{ start: 2n, end: 3n }] });
+		const got = take(again, 2);
+		await clock.advance(Duration.millis(100));
+		peer.track.finish();
+		await clock.advance(Duration.secs(60));
+
+		// Upstream answers and, the track being over, FINs the run's subscription before its group
+		// streams land, as QUIC may deliver them, within the grace.
+		peer.server.holdUnis();
+		answer();
+		await clock.advance(Duration.millis(500));
+		while (peer.server.heldUnis() > 0) peer.server.releaseOldestUni();
+		expect(sorted(await got)).toEqual([
+			[2n, "old 2"],
+			[3n, "old 3"],
+		]);
+		first.close();
+		again.close();
+	} finally {
+		peer.close();
+		installed.close();
+	}
+});
 
 // Resolve once nobody reads `group` any more.
 async function unwanted(group: { demand(): { wanted: { peek(): boolean; changed(): Promise<boolean> } } }) {
@@ -374,7 +435,9 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 	try {
 		// A live reader keeps the copy up, and has read past group 0 before it lands. It never
 		// reads again, so the copy it still buffers is all that is left of it.
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: Duration.ZERO } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		expect((await reader.ordered().nextGroup())?.start).toBe(1n);
 		const history = remote.track("video").subscribe({ ...WIDE, ranges: [{ start: 0n, end: 0n }] });
 		const group = await history.recvGroup();
@@ -436,7 +499,9 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		// A live reader keeps the copy up. It reads in order, so it lets go of what it passes.
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: Duration.ZERO } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		const live = reader.ordered();
 		expect((await live.nextGroup())?.start).toBe(1n);
 		const history = remote.track("video").subscribe({ ...WIDE, ranges: [{ start: 0n, end: 0n }] });
@@ -506,7 +571,9 @@ test("copy fill: a group reset to make room ends", async () => {
 	})();
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { live: Duration.ZERO } }] });
+		const reader = remote
+			.track("video")
+			.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }] });
 		const live = await reader.ordered().nextGroup();
 		expect(live?.start).toBe(2n);
 		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 2");
@@ -613,7 +680,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const remote = wireOf(client).consume(Path.from("room"));
 		try {
 			// Reads from the oldest group, so a bounded reader widens nothing.
-			const open = remote.track("video").subscribe({ delay: { max: null } });
+			const open = remote.track("video").subscribe(withMax({ delay: { max: null } }));
 			expect((await open.recvGroup())?.start).toBe(3n);
 			if (!copy) throw new Error("no copy");
 			const tail = hooks.receiveGroup(copy, { start: 2n, offset: 3 });
@@ -623,10 +690,12 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			archived = true;
 			const before = fetched.length;
 
-			const bounded = remote.track("video").subscribe({
-				ranges: [{ start: 2n, end: 2n }],
-				delay: { max: null },
-			});
+			const bounded = remote.track("video").subscribe(
+				withMax({
+					ranges: [{ start: 2n, end: 2n }],
+					delay: { max: null },
+				}),
+			);
 			const group = await bounded.recvGroup();
 			if (!group) throw new Error("no group");
 			const got: string[] = [];
@@ -720,11 +789,13 @@ test.each([
 		})();
 		const remote = wireOf(client).consume(Path.from("room"));
 		try {
-			const reader = remote.track("video").subscribe({
-				ranges: [{ start: 2n }],
-				delay: { max: null },
-				order: "ascending",
-			});
+			const reader = remote.track("video").subscribe(
+				withMax({
+					ranges: [{ start: 2n }],
+					delay: { max: null },
+					order: "ascending",
+				}),
+			);
 			const ordered = reader.ordered();
 			const got: [bigint, string[]][] = [];
 			for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
@@ -746,5 +817,91 @@ test.each([
 			server.abort();
 			origin.close();
 		}
+	}
+});
+
+// A lite-06 copy of a timestamp-keyed track whose publisher never says which keys between its
+// group starts are empty, and resets its first groups as stale after their headers went out: an
+// ordered reader reaches the later groups, and the copy asks upstream about the keys between group
+// starts once per run, not a FETCH per key. Mirrors the Rust `lite06_fill_walk`. The ordered reader
+// alone, from the first group; then behind a live reader holding the copy, joining once the resets
+// are over.
+test.each([
+	[false, 0],
+	[true, 4],
+] as const)("copy fill: lite-06 asks a run of undeclared keys once (live %p)", async (live, join) => {
+	// One group per second of media, keyed by its start in microseconds; the first three reset.
+	const GROUP = 1_000_000;
+	const FRAME = 33_333;
+	const FRAMES = 30;
+	const GROUPS = 8;
+	const RESET = 3;
+	const clock = new Manual();
+	const installed = clock.install();
+	const pair = createMockTransportPair(Lite.ALPN_06);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client }),
+		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
+	]);
+	const publication = origin.route(Path.from("room"));
+	const track = defined(
+		publication.broadcast.createTrack("video", { timescale: Timescale.MICRO, maxAge: Duration.secs(30) }),
+	);
+	const remote = wireOf(client).consume(Path.from("room"));
+	// Every FETCH and SUBSCRIBE the copy sends opens a bidi stream of its own.
+	const requests = () => pair.client.sendStreams.bidi.length;
+	const held = live ? remote.track("video").subscribe() : undefined;
+	try {
+		let read: Promise<bigint[]> | undefined;
+		let before = 0;
+		for (let index = 0; index < GROUPS; index++) {
+			if (index === join) {
+				before = requests();
+				const reader = remote
+					.track("video")
+					.subscribe(withMax({ delay: { max: Duration.secs(30) } }))
+					.ordered();
+				read = (async () => {
+					const keys: bigint[] = [];
+					for (let group = await reader.nextGroup(); group; group = await reader.nextGroup()) {
+						// A group reset as stale ends its read with that error.
+						while (await group.readFrame().catch(() => undefined)) {}
+						keys.push(group.start);
+						if (group.start === BigInt((GROUPS - 1) * GROUP)) break;
+					}
+					return keys;
+				})();
+			}
+			// Created rather than appended: like a publisher that cannot say, the track never
+			// declares the keys between its group starts skipped.
+			const start = index * GROUP;
+			const group = track.createGroup(BigInt(start));
+			for (let frame = 0; frame < FRAMES; frame++) {
+				group.writeFrame({
+					payload: enc.encode("frame"),
+					timestamp: Timestamp.fromMicros(start + frame * FRAME),
+				});
+				await clock.advance(Duration.micros(FRAME));
+			}
+			if (index < RESET) group.abort(new StreamError(StreamCode.Old, { message: "old" }));
+			else group.finish();
+		}
+		let done: bigint[] | undefined;
+		void read?.then((keys) => {
+			done = keys;
+		});
+		for (let waited = 0; done === undefined && waited < 120; waited++) await clock.advance(Duration.secs(1));
+		expect(done?.at(-1)).toBe(BigInt((GROUPS - 1) * GROUP));
+		// At most one request per group: never one per key between them.
+		expect(requests() - before).toBeLessThanOrEqual(GROUPS);
+	} finally {
+		held?.close();
+		remote.close();
+		publication.broadcast.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		installed.close();
 	}
 });

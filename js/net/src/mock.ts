@@ -316,9 +316,14 @@ export class MockTransport implements WebTransport {
 		this.#held.queue ??= [];
 	}
 
-	/** Deliver what {@link hold} stalled, in the order it was written, and stop holding. */
+	/**
+	 * Deliver what {@link hold} and {@link holdUnis} stalled, each stream's in
+	 * the order it was written, and stop holding.
+	 */
 	release(): void {
 		deliver(this.#held);
+		for (const held of this.#heldUnis?.splice(0) ?? []) deliver(held);
+		this.#heldUnis = undefined;
 	}
 
 	/**

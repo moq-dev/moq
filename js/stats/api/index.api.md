@@ -26,6 +26,8 @@ export const BucketFrameSchema: ZodMiniObject<{
 			credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
 			credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
 			credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
+			cwnd_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			pacing_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
 			received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			requests: ZodMiniDefault<ZodMiniNumber<number>>;
 			routes: ZodMiniPrefault<ZodMiniObject<{
@@ -34,7 +36,6 @@ export const BucketFrameSchema: ZodMiniObject<{
 					malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 					other: ZodMiniDefault<ZodMiniNumber<number>>;
 					overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-					regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 					role: ZodMiniDefault<ZodMiniNumber<number>>;
 					stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 					unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -73,6 +74,7 @@ export const BucketFrameSchema: ZodMiniObject<{
 			}, $strip>>;
 			sessions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 			subscriptions_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+			wire_lost: ZodMiniDefault<ZodMiniNumber<number>>;
 			wire_rx: ZodMiniDefault<ZodMiniNumber<number>>;
 			wire_tx: ZodMiniDefault<ZodMiniNumber<number>>;
 		}, $strip>>>>;
@@ -144,6 +146,8 @@ export const BucketFrameSchema: ZodMiniObject<{
 			credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
 			credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
 			credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
+			cwnd_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			pacing_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
 			received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			requests: ZodMiniDefault<ZodMiniNumber<number>>;
 			routes: ZodMiniPrefault<ZodMiniObject<{
@@ -152,7 +156,6 @@ export const BucketFrameSchema: ZodMiniObject<{
 					malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 					other: ZodMiniDefault<ZodMiniNumber<number>>;
 					overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-					regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 					role: ZodMiniDefault<ZodMiniNumber<number>>;
 					stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 					unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -191,6 +194,7 @@ export const BucketFrameSchema: ZodMiniObject<{
 			}, $strip>>;
 			sessions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 			subscriptions_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+			wire_lost: ZodMiniDefault<ZodMiniNumber<number>>;
 			wire_rx: ZodMiniDefault<ZodMiniNumber<number>>;
 			wire_tx: ZodMiniDefault<ZodMiniNumber<number>>;
 		}, $strip>>;
@@ -229,6 +233,8 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 		credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
+		cwnd_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		pacing_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
 		routes: ZodMiniPrefault<ZodMiniObject<{
@@ -237,7 +243,6 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 				other: ZodMiniDefault<ZodMiniNumber<number>>;
 				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 				role: ZodMiniDefault<ZodMiniNumber<number>>;
 				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -276,6 +281,7 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 		}, $strip>>;
 		sessions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 		subscriptions_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		wire_lost: ZodMiniDefault<ZodMiniNumber<number>>;
 		wire_rx: ZodMiniDefault<ZodMiniNumber<number>>;
 		wire_tx: ZodMiniDefault<ZodMiniNumber<number>>;
 	}, $strip>>>>;
@@ -347,6 +353,8 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 		credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
+		cwnd_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		pacing_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
 		routes: ZodMiniPrefault<ZodMiniObject<{
@@ -355,7 +363,6 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 				other: ZodMiniDefault<ZodMiniNumber<number>>;
 				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 				role: ZodMiniDefault<ZodMiniNumber<number>>;
 				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -394,6 +401,7 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 		}, $strip>>;
 		sessions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 		subscriptions_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		wire_lost: ZodMiniDefault<ZodMiniNumber<number>>;
 		wire_rx: ZodMiniDefault<ZodMiniNumber<number>>;
 		wire_tx: ZodMiniDefault<ZodMiniNumber<number>>;
 	}, $strip>>;
@@ -733,6 +741,8 @@ export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPr
 	credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
 	credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
 	credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
+	cwnd_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	pacing_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
 	received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	requests: ZodMiniDefault<ZodMiniNumber<number>>;
 	routes: ZodMiniPrefault<ZodMiniObject<{
@@ -741,7 +751,6 @@ export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPr
 			malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 			other: ZodMiniDefault<ZodMiniNumber<number>>;
 			overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-			regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 			role: ZodMiniDefault<ZodMiniNumber<number>>;
 			stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 			unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -780,6 +789,7 @@ export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPr
 	}, $strip>>;
 	sessions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 	subscriptions_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+	wire_lost: ZodMiniDefault<ZodMiniNumber<number>>;
 	wire_rx: ZodMiniDefault<ZodMiniNumber<number>>;
 	wire_tx: ZodMiniDefault<ZodMiniNumber<number>>;
 }, $strip>>>;
@@ -790,6 +800,8 @@ export const PresenceSchema: ZodMiniPrefault<ZodMiniObject<{
 	credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
 	credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
 	credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
+	cwnd_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	pacing_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
 	received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	requests: ZodMiniDefault<ZodMiniNumber<number>>;
 	routes: ZodMiniPrefault<ZodMiniObject<{
@@ -798,7 +810,6 @@ export const PresenceSchema: ZodMiniPrefault<ZodMiniObject<{
 			malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 			other: ZodMiniDefault<ZodMiniNumber<number>>;
 			overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-			regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 			role: ZodMiniDefault<ZodMiniNumber<number>>;
 			stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 			unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -837,6 +848,7 @@ export const PresenceSchema: ZodMiniPrefault<ZodMiniObject<{
 	}, $strip>>;
 	sessions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 	subscriptions_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+	wire_lost: ZodMiniDefault<ZodMiniNumber<number>>;
 	wire_rx: ZodMiniDefault<ZodMiniNumber<number>>;
 	wire_tx: ZodMiniDefault<ZodMiniNumber<number>>;
 }, $strip>>;
@@ -863,7 +875,6 @@ export const RouteClosesSchema: ZodMiniPrefault<ZodMiniObject<{
 	malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 	other: ZodMiniDefault<ZodMiniNumber<number>>;
 	overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-	regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 	role: ZodMiniDefault<ZodMiniNumber<number>>;
 	stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 	unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -885,7 +896,6 @@ export const RoutesSchema: ZodMiniPrefault<ZodMiniObject<{
 		malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 		other: ZodMiniDefault<ZodMiniNumber<number>>;
 		overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-		regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 		role: ZodMiniDefault<ZodMiniNumber<number>>;
 		stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 		unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -937,6 +947,8 @@ export const TotalsFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPref
 		credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
+		cwnd_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		pacing_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
 		routes: ZodMiniPrefault<ZodMiniObject<{
@@ -945,7 +957,6 @@ export const TotalsFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPref
 				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 				other: ZodMiniDefault<ZodMiniNumber<number>>;
 				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 				role: ZodMiniDefault<ZodMiniNumber<number>>;
 				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -984,6 +995,7 @@ export const TotalsFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPref
 		}, $strip>>;
 		sessions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 		subscriptions_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		wire_lost: ZodMiniDefault<ZodMiniNumber<number>>;
 		wire_rx: ZodMiniDefault<ZodMiniNumber<number>>;
 		wire_tx: ZodMiniDefault<ZodMiniNumber<number>>;
 	}, $strip>>;
@@ -1036,6 +1048,8 @@ export const TotalsSchema: ZodMiniPrefault<ZodMiniObject<{
 		credit_held_readers_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
+		cwnd_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		pacing_blocked_us: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
 		routes: ZodMiniPrefault<ZodMiniObject<{
@@ -1044,7 +1058,6 @@ export const TotalsSchema: ZodMiniPrefault<ZodMiniObject<{
 				malformed: ZodMiniDefault<ZodMiniNumber<number>>;
 				other: ZodMiniDefault<ZodMiniNumber<number>>;
 				overrun: ZodMiniDefault<ZodMiniNumber<number>>;
-				regressed: ZodMiniDefault<ZodMiniNumber<number>>;
 				role: ZodMiniDefault<ZodMiniNumber<number>>;
 				stalled: ZodMiniDefault<ZodMiniNumber<number>>;
 				unasked: ZodMiniDefault<ZodMiniNumber<number>>;
@@ -1083,6 +1096,7 @@ export const TotalsSchema: ZodMiniPrefault<ZodMiniObject<{
 		}, $strip>>;
 		sessions_started: ZodMiniDefault<ZodMiniNumber<number>>;
 		subscriptions_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		wire_lost: ZodMiniDefault<ZodMiniNumber<number>>;
 		wire_rx: ZodMiniDefault<ZodMiniNumber<number>>;
 		wire_tx: ZodMiniDefault<ZodMiniNumber<number>>;
 	}, $strip>>;

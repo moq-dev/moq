@@ -249,11 +249,12 @@ try {
 				}
 				console.error("fetch clean group=1 frames=3 bytes=196608");
 			} else {
-				// `late` names no start, joining the latest group as a player does: group 0, whose
+				// `late` joins the latest group as a player does: group 0, whose
 				// head predates the subscription.
 				const track = broadcast.track("tail").subscribe({
-					delay: { max: Duration.millis(drop ? 60_000 : 5000) },
-					...(late ? {} : { ranges: [{ start: 0n }] }),
+					ranges: [
+						late ? { start: { live: { min: Duration.ZERO, max: Duration.millis(5000) } } } : { start: 0n },
+					],
 				});
 				if (compress)
 					assert.equal((await track.info()).compression, version === "moq-lite-07-wip" ? "deflate" : "none");

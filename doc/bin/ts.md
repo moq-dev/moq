@@ -112,8 +112,13 @@ wrap (every 26.5 hours), so a jump of more than half a wrap reads as a rewind.
 ### Export
 
 The export rebuilds PES headers, packets, the PCR (on the first video PID, else
-audio, else a PCR-only PID), and PAT/PMT, every 500 ms and at each keyframe,
-with SI at the DVB maxima. It pads to the source's constant mux rate when the
+audio, else a PCR-only PID), and PAT/PMT, every 100 ms while media flows and at
+each keyframe, with each SI table at half its DVB maximum, so the gaps an analyser
+measures stay inside TR 101 290's limits. Padded, a copy adds no packets while
+the same tables are still in the receiver's 1,536-byte system buffer, so frequent
+keyframes cost nothing extra, and PAT and PMT of more than two packets together
+repeat only on the 500 ms and keyframe cadence, since a revision must wait for a
+repeat still in that buffer. It pads to the source's constant mux rate when the
 catalog recorded one, or to `--mux-rate`, on a schedule an IRD or groomer can
 lock to, with each PCR within 500 ns of its byte position. A variable-rate
 source exports unpadded, with no mux-rate or system-buffer claim.
@@ -145,7 +150,15 @@ unlocked encoders, is spliced instead: the timestamps carry on from where the
 clock was, and the bytes still go out unchanged, step and all.
 
 `export ts --passthrough` writes each run `--delay` after its time on the
-source clock, so two exporters emit the same bytes. It takes no `--mux-rate`.
+source clock, spread evenly up to the next run's time seven packets (a UDP
+datagram) at a time, so the output keeps the source's rate and two exporters
+that each receive every run before it comes due emit the same bytes. A run
+whose successor has not arrived when it comes due, follows a loss,
+or is more than 100 ms on, goes out whole, so the timing matches between
+exporters only where each had the successor: a `--delay` longer than the
+arrival jitter by a PCR interval. Runs that come due while stdout blocks go
+out together once it drains, so a stalled reader sees a burst whatever the
+delay. It takes no `--mux-rate`.
 `--follow` and `--stitch` carry it across the broadcast's returns and
 replacements: a restarted import is a new publisher instance, so `--stitch`
 writes its packets verbatim from the first group its live subscription delivers,
@@ -257,7 +270,7 @@ details each grader and its negative controls.
 | Scrambled input groups and paces like its clear twin | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_scrambled_twin_groups_and_paces_the_same` | PR |
 | `randomAccess` false for several programs or video streams | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `two_programs_on_one_clock_publish_no_random_access`, `two_video_streams_in_one_program_publish_no_random_access` | PR |
 | Clock: wrap, flagged jump, steps spliced, 192/204-byte packets refused | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) | PR |
-| Export releases each run byte-identical on its own PCR, whatever the delivery skew | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_capture_is_released_byte_identical_on_its_own_pcr`, `releases_fed_with_different_skew_write_the_same_bytes` | PR |
+| Export releases each run byte-identical on its own PCR, whatever the delivery skew while each run arrives before it comes due, spread across its PCR interval where the next is buffered within 100 ms | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_capture_is_released_byte_identical_on_its_own_pcr`, `releases_fed_with_different_skew_write_the_same_bytes`, `an_object_is_spread_across_its_pcr_interval`, `runs_written_in_one_burst_fail_the_grade` | PR |
 
 ### Acquisition and loss
 

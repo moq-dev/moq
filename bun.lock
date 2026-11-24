@@ -207,7 +207,6 @@
         "uuid": "^14.0.3",
       },
       "devDependencies": {
-        "@moq/clock": "workspace:^",
         "@types/bun": "^1.4.4",
         "typescript": "7.0.2",
       },

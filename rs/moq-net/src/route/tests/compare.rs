@@ -59,7 +59,8 @@ impl Arm {
 		claimed: true,
 		epoch: false,
 	});
-	/// [`Self::LEAN`], with the floor kept per pair of relays: what the bake-off recommends.
+	/// [`Self::LEAN`], with the floor kept per pair of relays: what the bake-off recommended
+	/// while a Node ID carried a Start. The router keys its floors by Relay ID alone.
 	pub const KEPT: Self = Self::Multi(Self::TUNE);
 	/// The prototype's settings under [`Self::KEPT`]: floor, epoch, batch, drain, and claimed.
 	pub const TUNE: Tune = Tune {

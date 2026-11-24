@@ -847,12 +847,15 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce,
+			..
 		} => (announce, false),
 		moq_net::origin::RouteEvent {
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce,
+			..
 		} => (announce, true),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }
 
@@ -1125,8 +1128,7 @@ async fn broadcast_route_migration() {
 
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
-		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(1))])
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(1))]);
 	let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
@@ -1262,8 +1264,12 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
-	let budget = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100)));
+	let budget = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::from_millis(100)),
+			max: Some(Duration::from_millis(100)),
+		},
+	)]);
 	async fn recv(sub: &mut moq_net::track::Subscriber, version: &str) -> u64 {
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
@@ -3623,5 +3629,6 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Present(route) => Some((route, true)),
 		moq_net::announce::Event::Absent(route) => Some((route, false)),
+		event => panic!("unexpected announce event {event:?}"),
 	}
 }

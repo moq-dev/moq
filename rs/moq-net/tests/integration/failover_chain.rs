@@ -9,6 +9,7 @@
 //! handed out. Then `A`'s session to `E` dies with an older group half read, so `E` fetches
 //! the rest of that group from `B`, whose subscription never asked for it.
 
+use crate::WithMax as _;
 use crate::route_change::{link, payload, priced_link, produce_origin, settle, timed};
 use crate::support::harness::MockPair;
 
@@ -80,8 +81,7 @@ impl Chain {
 			.await
 			.unwrap()
 			.unwrap();
-		let prefs =
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+		let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
 		let mut group0 = track.append_next().unwrap();

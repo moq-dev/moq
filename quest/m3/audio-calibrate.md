@@ -4,8 +4,8 @@
 
 `test/audio-quality/budgets.json` carries every browser and native row's
 ceilings re-measured, by the rule in its note, from seven scheduled Nightly
-runs on a `main` that includes the whole
-[audio playout](/quest/m2/audio-playout/README.md) epic. The rows budget
+runs on a `main` that includes the whole audio playout epic, finished by
+[moq-dev/moq#9475](https://github.com/moq-dev/moq/pull/9475). The rows budget
 steady-state lag, the time audio takes to return to the clock after a
 disturbance, the player's own trims and skips, and underruns as measured,
 and the note says the rule is in them.
@@ -21,7 +21,8 @@ one after [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308).
 Moved 2026-11-13 (maintainer, /quest-plan) to m3 behind the epic: ✅ the cut
 waits on the playout rule, not on a week of Nightlies to re-budget ceilings
 that ship nothing (rejected: calibrating in m2 with the epic). Nights before
-the epic's last child merges do not count; this supersedes the same day's
+[moq-dev/moq#9475](https://github.com/moq-dev/moq/pull/9475), which finishes
+the epic, merges do not count; this supersedes the same day's
 decision to wait only for the congestion fix.
 
 Carried decisions:
@@ -51,12 +52,8 @@ Native rows stay report-only; enforcing them belongs to
 
 ## Waiting
 
-- moq-dev/moq: seven scheduled Nightly runs on `main` after the epic's last
-  child merges. Find them with `gh run list --workflow nightly.yml --event
+- moq-dev/moq: seven scheduled Nightly runs on `main` after
+  [moq-dev/moq#9475](https://github.com/moq-dev/moq/pull/9475) merges. Find them with `gh run list --workflow nightly.yml --event
   schedule` and download each with `gh run download <id> -n
   audio-quality-run` as it lands, since artifacts expire after 7 days. Never
   dispatch the nightly by hand.
-
-## Required
-
-- [Audio playout](/quest/m2/audio-playout/README.md) - the rule whose rows these ceilings budget

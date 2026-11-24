@@ -63,6 +63,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 					old.abort();
 				}
 			}
+			_ => {}
 		}
 	}
 	anyhow::bail!("origin closed")
@@ -113,14 +114,16 @@ async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 	// Subscribe to the video track. No min delay, since this plays nothing out: a missing group is
 	// waited for the whole latency budget.
 	let latency = Duration::from_millis(500);
-	let track_consumer = broadcast
-		.track(hang::catalog::Reference::track(config, name))?
-		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_priority(1)
-				.with_delay(moq_net::track::Delay::default().with_max(latency)),
-		)
-		.await?;
+	let track_consumer =
+		broadcast
+			.track(hang::catalog::Reference::track(config, name))?
+			.subscribe(moq_net::track::Subscription::default().with_priority(1).with_ranges([
+				moq_net::track::Range::from(moq_net::track::Start::Live {
+					min: Some(latency),
+					max: Some(latency),
+				}),
+			]))
+			.await?;
 	let mut ordered =
 		moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::try_from(config)?);
 

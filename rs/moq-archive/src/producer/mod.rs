@@ -2,9 +2,9 @@
 //!
 //! A [`Producer`] lists the broadcast's tracks (TRACKS, [`broadcast::Consumer::tracks`]) and
 //! records each through its own ascending SUBSCRIBE, so it holds what the publisher's cache
-//! stops serving: a group still missing once the subscription's max delay passes is a gap, never
-//! a stall. TRACKS lists stream tracks only, so a datagram track, which is live-only, is never
-//! recorded. The host picks the key prefix, per broadcast path and instance say, and runs one
+//! stops serving. It asks for history, so a missing group is waited for only until the publisher
+//! drops it or its max age passes, then is a gap, never a stall. TRACKS lists stream tracks only,
+//! so a datagram track, which is live-only, is never recorded. The host picks the key prefix, per broadcast path and instance say, and runs one
 //! producer per broadcast; the producer stores no instance. See the [crate docs](crate#layout) for
 //! what it writes.
 //!
@@ -57,10 +57,6 @@ pub struct Config {
 	/// The object is cut there, mid-group if need be. Keep it above [`Self::duration`], or
 	/// objects are cut by it instead.
 	pub flush: Duration,
-	/// How far newer content may run ahead of a group the track still owes before it is given up
-	/// as a gap, capping the publisher's max age. The frames behind it wait for that verdict. A
-	/// group the publisher skipped or dropped is never waited for.
-	pub max_delay: Duration,
 	/// Prune old objects (a DVR), or keep everything when `None` (an archive).
 	pub dvr: Option<Dvr>,
 }
@@ -70,7 +66,6 @@ impl Default for Config {
 		Self {
 			duration: Duration::from_secs(2),
 			flush: Duration::from_secs(4),
-			max_delay: Duration::from_secs(10),
 			dvr: None,
 		}
 	}
@@ -86,12 +81,6 @@ impl Config {
 	/// Set [`flush`](Self::flush).
 	pub fn with_flush(mut self, flush: Duration) -> Self {
 		self.flush = flush;
-		self
-	}
-
-	/// Set [`max_delay`](Self::max_delay).
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
 		self
 	}
 
@@ -185,6 +174,7 @@ impl<S: ObjectStore> Producer<S> {
 				Event::Listed(Ok(Some(TracksEvent::Added {
 					name,
 					info: Listed::Track(info),
+					..
 				}))) => {
 					let queue = queues.entry(name.to_string()).or_insert_with(|| {
 						let queue = kio::Queue::new();
@@ -203,16 +193,9 @@ impl<S: ObjectStore> Producer<S> {
 					// Only fails once closed, which happens when the listing ends.
 					let _ = queue.try_push(info);
 				}
-				// A datagram track is never cached, so there is nothing of it to archive.
-				Event::Listed(Ok(Some(
-					TracksEvent::Added {
-						info: Listed::Datagrams(_),
-						..
-					}
-					| TracksEvent::Synced
-					| TracksEvent::Removed { .. }
-					| TracksEvent::Finished { .. },
-				))) => {}
+				// A datagram track is never cached, so there is nothing of it to archive, nor of
+				// a listing change that is not a track of groups.
+				Event::Listed(Ok(Some(_))) => {}
 				Event::Listed(Ok(None)) => {
 					listing = None;
 					for queue in queues.values() {

@@ -16,7 +16,7 @@ Moved to m3 2026-11-12 (maintainer, /quest-audit): nothing left in it breaks, it
 
 The estimators stop learning once a connection is app-limited. moq-quic's
 BBR3 only raises `max_bw` from an app-limited sample above its current value;
-while app-limited it ages its window every 3 s, so the estimate falls to what
+while app-limited the estimate it reports ages every 3 s, so it falls to what
 the flow still delivers but never rises past it (`update_max_bw` in
 `rs/moq-congestion/src/bbr3/mod.rs`). Chromium's QUICHE gates its BBR2 filter
 the same way without the aging, and its Cubic estimate stops growing while the

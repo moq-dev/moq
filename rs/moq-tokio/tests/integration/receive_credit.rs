@@ -16,10 +16,7 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use moq_net::{
-	Timestamp, frame,
-	track::{Delay, Subscription},
-};
+use moq_net::{Timestamp, frame, track::Subscription};
 use moq_tokio::quic::{driver, web};
 use tokio::io::AsyncWriteExt;
 
@@ -676,8 +673,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	let mut requests = setup.broadcast.broadcast().requests();
 	let every = Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
-		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))])
-		.with_delay(Delay::default().with_max(Duration::from_secs(60)));
+		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
 	let waiting = tokio::spawn({
 		let remote = setup.remote.clone();
 		async move { remote.track("parked").unwrap().subscribe(every).await }
@@ -733,7 +729,14 @@ async fn groups_waiting_for_track_info_give_way_first() {
 #[tokio::test]
 async fn a_header_still_arriving_outlasts_group_streams() {
 	let setup = reversed("moq-lite-07-wip").await;
-	let (_track, mut sub) = setup.subscribe("video", 0).await;
+	let _track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
+	// History: the publisher's own track never gets a frame to place a live join at, and the
+	// raw streams below carry every group.
+	let history = Subscription::default().with_ranges([moq_net::track::Range::ALL]);
+	let mut sub = kio::clock::timeout(TIMEOUT, setup.remote.track("video").unwrap().subscribe(history))
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe");
 
 	// Subscription 0's group 100, cut after the first byte of its header.
 	let whole = group_stream(0, 100, 16);
@@ -1100,7 +1103,11 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 			.create_track(name.as_str(), timed().with_max_age(None))
 			.unwrap();
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.
-		let subscription = Subscription::default().with_delay(Delay::default().with_max(TIMEOUT));
+		let subscription =
+			Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(TIMEOUT),
+				max: Some(TIMEOUT),
+			})]);
 		let sub = kio::clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")
@@ -1386,7 +1393,12 @@ async fn join(bits_per_second: u64, stream_window: u64) -> Joined {
 	};
 	let setup = setup_served("moq-lite-06", transport, Some(profile), quic).await;
 	// Groups in flight fall behind the live edge, so a zero budget would skip them.
-	let subscription = || Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60)));
+	let subscription = || {
+		Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(60)),
+			max: Some(Duration::from_secs(60)),
+		})])
+	};
 
 	// Warm the link with 1 MiB groups, which overflow a slower bottleneck's queue as a
 	// sender's startup does.

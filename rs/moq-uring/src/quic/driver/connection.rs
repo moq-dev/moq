@@ -372,10 +372,8 @@ pub(crate) fn launch(
 	conn: moq_quic::connection::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
 	// The handshake's first datagrams arrived before this driver existed.
-	let stats = conn.stats();
 	let wire = moq_net::transport::Wire::new();
-	wire.set_sent_bytes(stats.udp_tx.bytes);
-	wire.set_received_bytes(stats.udp_rx.bytes);
+	record(&wire, &conn.stats());
 	let probe = conn.congestion_state().probes().then(moq_net::transport::Probe::new);
 	let shared = Rc::new(Inner {
 		wire,
@@ -738,13 +736,9 @@ impl Driver {
 				return Poll::Pending;
 			}
 			self.shared.conn.borrow_mut().handle_timeout(self.shared.owner.now());
-			// A timeout accrues a blocked write's wait or a held receive window, and an idle
-			// one ends the connection with no transmit left to publish it.
-			let stats = self.shared.conn.borrow().stats();
-			let credit = stats.send_credit;
-			self.shared.wire.set_credit_stalls(credit.stalls, credit.stalled);
-			let held = stats.credit.held;
-			self.shared.wire.set_credit_held(held.readers, held.evicted);
+			// A timeout accrues a wait or a held receive window, and declares losses, and an
+			// idle one ends the connection with no transmit left to publish them.
+			record(&self.shared.wire, &self.shared.conn.borrow().stats());
 		}
 	}
 
@@ -861,13 +855,8 @@ impl Driver {
 			let Poll::Ready(transmit) = conn.poll_transmit(waiter, self.shared.owner.now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
-			let stats = conn.stats();
-			self.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
-			// A transmit dates a blocked write's wait and a held receive window.
-			let credit = stats.send_credit;
-			self.shared.wire.set_credit_stalls(credit.stalls, credit.stalled);
-			let held = stats.credit.held;
-			self.shared.wire.set_credit_held(held.readers, held.evicted);
+			// A transmit dates a wait and a held receive window.
+			record(&self.shared.wire, &conn.stats());
 			// This transmit carries the CONNECTION_CLOSE the loss owed.
 			(transmit, owed && !conn.owes_close())
 		};
@@ -891,6 +880,18 @@ impl Driver {
 		}
 		Poll::Ready(Ok(()))
 	}
+}
+
+/// Copy the connection's cumulative counters to its wire, which stats read without polling it.
+pub(crate) fn record(wire: &moq_net::transport::Wire, stats: &moq_quic::connection::Stats) {
+	wire.set_sent_bytes(stats.udp_tx.bytes);
+	wire.set_received_bytes(stats.udp_rx.bytes);
+	wire.set_lost_bytes(stats.path.lost_bytes);
+	let credit = stats.send_credit;
+	wire.set_credit_stalls(credit.stalls, credit.stalled);
+	let held = stats.credit.held;
+	wire.set_credit_held(held.readers, held.evicted);
+	wire.set_congestion_blocked(stats.path.cwnd_blocked, stats.path.pacing_blocked);
 }
 
 #[cfg(test)]

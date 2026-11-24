@@ -320,6 +320,8 @@ export class Producer {
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
 		hooks.groupWholeEnd = (group) => (group.#state.closed.peek() === null ? group.#state.end : undefined);
+		hooks.groupUnplacedFrom = (group) => (group.#state.closed.peek() === null ? undefined : group.#highest());
+		hooks.groupWrites = (group) => group.#state.total;
 		hooks.groupHeadless = (group) => group.#state.index > 0 || headShed(group.#state.frames.peek().first);
 		hooks.holdGroup = (group) => {
 			group.#holds++;
@@ -1137,7 +1139,7 @@ export class Consumer {
 	}
 
 	/**
-	 * Settles with a `StreamError` of code `Old` once the subscription's `delay.max` gives up
+	 * Settles with a `StreamError` of code `Old` once the subscription's live max gives up
 	 * on this group, even after every frame was read or the group closed: a publisher still
 	 * writing or draining it races its writes against this, and against {@link closed}
 	 * settling with an error, and abandons the stream once either does. Peek it synchronously
@@ -1249,6 +1251,9 @@ export class Consumer {
 			group.#state.unverified = true;
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
+		hooks.skipGroupFrames = (group) => {
+			while (!group.#verdict.peek() && group.#readBufferedFrame(false, "stream")) {}
+		};
 		hooks.groupIndex = (group) => group.#index();
 		hooks.groupFirstFrame = (group) => group.#state.offset;
 		hooks.groupStarted = (group) =>

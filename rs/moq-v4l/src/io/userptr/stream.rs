@@ -1,4 +1,3 @@
-use std::convert::TryInto;
 use std::time::Duration;
 use std::{io, mem, sync::Arc};
 
@@ -51,6 +50,12 @@ impl Stream {
 	pub fn with_buffers(dev: &Device, buf_type: Type, buf_count: u32) -> io::Result<Self> {
 		let mut arena = Arena::new(dev.handle(), buf_type);
 		let count = arena.allocate(buf_count)?;
+		if count == 0 {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"the driver granted no buffers",
+			));
+		}
 		let mut buf_meta = Vec::new();
 		buf_meta.resize(count as usize, Metadata::default());
 
@@ -72,7 +77,7 @@ impl Stream {
 
 	/// Sets a timeout of the v4l file handle.
 	pub fn set_timeout(&mut self, duration: Duration) {
-		self.timeout = Some(duration.as_millis().try_into().unwrap());
+		self.timeout = Some(crate::io::timeout_ms(duration));
 	}
 
 	/// Clears the timeout of the v4l file handle.
@@ -91,19 +96,8 @@ impl Stream {
 
 impl Drop for Stream {
 	fn drop(&mut self) {
-		if let Err(e) = self.stop() {
-			if let Some(code) = e.raw_os_error() {
-				// ENODEV means the file descriptor wrapped in the handle became invalid, most
-				// likely because the device was unplugged or the connection (USB, PCI, ..)
-				// broke down. Handle this case gracefully by ignoring it.
-				if code == 19 {
-					/* ignore */
-					return;
-				}
-			}
-
-			panic!("{:?}", e)
-		}
+		// Fails once the device is gone (ENODEV), which stops the queue anyway.
+		let _ = self.stop();
 	}
 }
 
@@ -123,7 +117,7 @@ impl StreamTrait for Stream {
 		// STREAMON on a streaming queue does nothing, and leaves a dequeued
 		// buffer with userspace.
 		if let State::Stopped = self.state {
-			self.state = State::Streaming { held: false };
+			self.state = State::Started;
 		}
 		Ok(())
 	}
@@ -200,11 +194,11 @@ impl<'a> CaptureStream<'a> for Stream {
 
 	fn next(&'a mut self) -> io::Result<(&'a Self::Item, &'a Metadata)> {
 		match self.state {
-			State::Stopped => {
-				// Enqueue all buffers once on stream start. A start that fails
-				// partway hands back what it queued, which STREAMOFF does even on a
-				// queue that never streamed, so the next call starts from the same
-				// place rather than queueing a buffer twice.
+			State::Stopped | State::Started => {
+				// Hand the driver every buffer once per start, however it started. A
+				// start that fails partway hands back what it queued, which STREAMOFF
+				// does even on a queue that never streamed, so the next call starts
+				// from the same place rather than queueing a buffer twice.
 				let started = (0..self.arena.bufs.len())
 					.try_for_each(|index| self.queue(index))
 					.and_then(|()| self.start());
@@ -212,6 +206,7 @@ impl<'a> CaptureStream<'a> for Stream {
 					self.stop()?;
 					return Err(err);
 				}
+				self.state = State::Streaming { held: false };
 			}
 			State::Streaming { held: true } => {
 				// After a timed-out dequeue the driver already holds every buffer, and

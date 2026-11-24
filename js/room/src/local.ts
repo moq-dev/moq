@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { Duration } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, type Getter, type GetterInit, getter, Signal } from "@moq/signals";
@@ -27,11 +28,18 @@ export interface LocalProps {
 	microphone?: {
 		/** Capture the microphone. Pass a Signal to share it with the app. Defaults to false. */
 		enabled?: GetterInit<boolean>;
+		/** The time between the microphone's audio join points; see {@link Publish.Audio.Encoder.join}. Defaults to 20 ms. */
+		join?: Duration | Signal<Duration>;
 	};
 	/** The screen share's switch. */
 	screen?: {
 		/** Prompt for and capture a screen; turns off when the share ends. Pass a Signal to share it with the app. Defaults to false. */
 		enabled?: GetterInit<boolean>;
+		/** The share's audio. */
+		audio?: {
+			/** The time between the share audio's join points; see {@link Publish.Audio.Encoder.join}. Defaults to 20 ms. */
+			join?: Duration | Signal<Duration>;
+		};
 	};
 	/** Seed the published user.json fields. */
 	user?: UserProps;
@@ -215,6 +223,7 @@ export class Local {
 			capture: microphoneCapture,
 			muted: microphoneMuted,
 			bandwidth,
+			join: props.microphone?.join,
 		});
 		this.#signals.cleanup(() => microphoneAudio.close());
 
@@ -247,6 +256,7 @@ export class Local {
 			capture: screenAudioCapture,
 			enabled: this.#screenPublished,
 			bandwidth,
+			join: props.screen?.audio?.join,
 		});
 		this.#signals.cleanup(() => screenAudio.close());
 
@@ -255,6 +265,7 @@ export class Local {
 			enabled: microphoneEnabled,
 			source: mic,
 			volume: microphoneAudio.volume,
+			join: microphoneAudio.join,
 			root: microphoneCapture.out.root,
 		};
 		this.screen = {
@@ -262,7 +273,7 @@ export class Local {
 			source: share,
 			capture: screenCapture,
 			broadcast: screenBroadcast,
-			audio: { root: screenAudioCapture.out.root },
+			audio: { root: screenAudioCapture.out.root, join: screenAudio.join },
 		};
 
 		this.#signals.run((effect) => {
@@ -324,6 +335,8 @@ export namespace Local {
 		readonly source: Publish.Source.Microphone;
 		/** Linear gain applied before encoding, where 1 is unity. */
 		readonly volume: Signal<number>;
+		/** The time between join points of the microphone's audio; see {@link Publish.Audio.Encoder.join}. */
+		readonly join: Signal<Duration>;
 		/** Raw microphone graph while capture is running; its context may render silently. */
 		readonly root: Getter<AudioNode | undefined>;
 	}
@@ -342,6 +355,8 @@ export namespace Local {
 		readonly audio: {
 			/** Raw screen audio graph while capture is running; its context may render silently. */
 			readonly root: Getter<AudioNode | undefined>;
+			/** The time between join points of the share's audio; see {@link Publish.Audio.Encoder.join}. */
+			readonly join: Signal<Duration>;
 		};
 	}
 }

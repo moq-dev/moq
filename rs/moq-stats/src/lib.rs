@@ -229,16 +229,19 @@ pub(crate) async fn listed_bucket_track(broadcast: &moq_net::broadcast::Consumer
 				TracksEvent::Added {
 					name,
 					info: Listed::Track(_),
+					..
 				} if parse_bucket_track(&name).is_some_and(|(b, _)| b == *bucket) => {
 					listed = Some(name.to_string());
 				}
 				TracksEvent::Removed {
 					kind: Kind::Track,
 					name,
+					..
 				}
 				| TracksEvent::Finished {
 					kind: Kind::Track,
 					name,
+					..
 				} if listed.as_deref() == Some(&*name) => {
 					listed = None;
 				}

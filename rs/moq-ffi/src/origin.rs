@@ -224,16 +224,18 @@ pub enum MoqAnnounceEvent {
 	},
 }
 
-impl From<moq_net::announce::Event> for MoqAnnounceEvent {
-	fn from(event: moq_net::announce::Event) -> Self {
+impl MoqAnnounceEvent {
+	/// The event as bindings see it, or `None` for one they have no variant for.
+	fn new(event: moq_net::announce::Event) -> Option<Self> {
 		use moq_net::announce::Event;
 		match event {
-			Event::Present(announce) => Self::Present {
+			Event::Present(announce) => Some(Self::Present {
 				announce: announce.into(),
-			},
-			Event::Absent(announce) => Self::Absent {
+			}),
+			Event::Absent(announce) => Some(Self::Absent {
 				announce: announce.into(),
-			},
+			}),
+			_ => None,
 		}
 	}
 }
@@ -711,7 +713,18 @@ impl MoqAnnounceConsumer {
 	/// Get the next announce event. Returns `None` when the origin is closed.
 	pub async fn next(&self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
 		self.reads
-			.wait(|announced, waiter| Poll::Ready(Ok(ready!(announced.poll_next(waiter)).map(Into::into))))
+			.wait(|announced, waiter| {
+				loop {
+					match ready!(announced.poll_next(waiter)) {
+						Some(event) => {
+							if let Some(event) = MoqAnnounceEvent::new(event) {
+								return Poll::Ready(Ok(Some(event)));
+							}
+						}
+						None => return Poll::Ready(Ok(None)),
+					}
+				}
+			})
 			.await
 	}
 

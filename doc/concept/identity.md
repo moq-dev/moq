@@ -82,10 +82,11 @@ A route resolving a path is chosen in this order:
    identified chain
    over an anonymous one, then the lowest cost, then a broadcast published on
    this origin, then the shortest hop chain, then a hash of the full requested
-   path with the route's origin node, which moq-lite 07 carries, or else with
-   the instance. Relays agree on the hash only where routes carry a consistent
-   origin node, which takes moq-lite 07 on every hop, and it spreads a pool's paths
-   over its hosts. A route that entered a node for exactly the
+   path with the instance, which spreads a pool's paths over its hosts. Relays
+   agree on the hash only where every hop carries the instance, which takes
+   moq-lite 07. A route a relay learned over an older wire, and holds as no
+   moq-lite 07 claim, is not hashed, since that relay minted its instance: the
+   route in use keeps the tie. A route that entered a node for exactly the
    requested path is not hashed: the newest one wins, so a restarted publisher
    takes over from its lingering session at once.
 
@@ -259,15 +260,15 @@ Within one stream, recovery is about which groups are still worth having.
   after a route change within its instance, continues from the first frame it
   lacks. A fetch asks for one group by its start, which a relay fills upstream
   when its cache misses. Both are bound to the instance they resolved.
-- **Publisher max age bounds freshness; reader max delay bounds interest.** A
+- **Publisher max age bounds freshness; a live join's max bounds interest.** A
   track's `max_age` (`maxAge` in JavaScript, `--max-age` on `moq import`) is the
   longest a non-latest group stays fresh at any hop for late joiners, fetches,
   and recovery; a relay may cap it lower, and its cache may reclaim the bytes
-  sooner. A reader's `delay.max` is how long a non-latest group
+  sooner. A live join's `max` is how long a non-latest group it reaches
   stays worth delivering to that reader. It can tighten the publisher's bound,
-  never relax it. Both age a group from its successor's arrival and never make
-  the newest group stale. Not every wire carries a reader's max delay on every request; see
-  [subscriptions](/concept/moq-lite#subscriptions).
+  never relax it, and a range asking for history has none. Both age a group from
+  its successor's arrival and never make the newest group stale. Not every wire
+  carries a join's max; see [subscriptions](/concept/moq-lite#subscriptions).
 - **Arrivals are unordered.** Each group is its own stream, so a lower group
   can land after a higher one, and is still delivered if the reader's range and
   budget cover it. Group order chooses what is sent first, not what is skipped.
@@ -283,8 +284,7 @@ Within one stream, recovery is about which groups are still worth having.
   [moq-lite draft](/draft/moq-lite) lists which versions report drops and why.
 
 moq-transport's FETCH `FILL_TIMEOUT` bounds how long a hop waits on upstream,
-not how old the content it returns may be, so it is no substitute for max age
-or max delay. Support differs by library; see
+not how old the content it returns may be, so it is no substitute for max age. Support differs by library; see
 [moq-transport compatibility](/concept/standard).
 
 ## Relays

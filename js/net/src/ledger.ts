@@ -10,11 +10,11 @@ const compare = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
  *
  * A group reset before its header arrived leaves no trace, and QUIC does not order streams,
  * so a stream opened before the end can still be in flight after it. This bounds the wait on
- * IETF, and on moq-lite when the subscription has no max delay to bound it with.
+ * IETF, and on moq-lite when the subscription has no budget to bound it with.
  */
 export const GRACE = Duration.millis(1000);
 
-/** The grace for a subscription with `delay.max`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
+/** The grace for a staleness budget of `maxDelay`: how long it was willing to wait for a late group anyway, or {@link GRACE} for zero. */
 export function grace(maxDelay: Duration): Duration {
 	return maxDelay.isZero() ? GRACE : maxDelay;
 }

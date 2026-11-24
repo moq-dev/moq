@@ -450,6 +450,9 @@ struct Relay {
 	wire: Option<Wire>,
 	// The terminal object, learned at the stream tail.
 	end_object: Option<Arc<super::object::Fields>>,
+	// The newest object ID before the terminal object, which a publisher's Largest names
+	// instead of the terminal object it sends past it.
+	last_before_end: Option<u64>,
 	// Heap charged for this box, its frames' fields, and the terminal object.
 	bytes: u64,
 }
@@ -1336,6 +1339,22 @@ impl GroupState {
 			true => Poll::Ready(Ok(self.wire().cloned())),
 			false => Poll::Pending,
 		}
+	}
+
+	/// The first time the group can't yet place: none once finished, else its newest frame's
+	/// timestamp, or 0 with no timed frame. A frame past a time puts the group's End past it
+	/// too, and an aborted copy may have lost the End its group was sent with.
+	fn unplaced_from(&self) -> Option<u64> {
+		match (self.poll_outcome(), &self.timeline) {
+			(Poll::Ready(Ok(())), _) => None,
+			(_, Timeline::Timed { latest, .. }) => Some(latest.value()),
+			_ => Some(0),
+		}
+	}
+
+	/// Whether the group places `time`; see [`Self::unplaced_from`].
+	fn places(&self, time: u64) -> bool {
+		self.unplaced_from().is_none_or(|from| time < from)
 	}
 
 	/// The group's outcome once final: `Ok` once finished, which a later abort only frees
@@ -2625,6 +2644,7 @@ impl Handle {
 		let relay = state.relay();
 		relay.bytes += bytes;
 		if let Some(wire) = &mut relay.wire {
+			relay.last_before_end = wire.last;
 			wire.last = Some(fields.id);
 		}
 		relay.end_object = Some(Arc::new(fields));
@@ -2905,10 +2925,16 @@ impl Handle {
 			(timeline, _) => timeline,
 		};
 		state.adopted = Some(head.first_object);
-		if let Some(wire) = state.wire_mut() {
+		if let Some(relay) = state.relay.as_mut()
+			&& let Some(wire) = &mut relay.wire
+		{
 			wire.first_object = head.first_object;
 			wire.first_id = head.start as u64;
 			wire.last = wire.last.or(Some(offset as u64 - 1));
+			// A terminal object held before any frame leaves the head's last as the newest data.
+			if relay.end_object.is_some() {
+				relay.last_before_end = relay.last_before_end.or(Some(offset as u64 - 1));
+			}
 		}
 		let extra = metadata + growth + if state.content.is_none() { payload } else { 0 };
 		Some(Adopted {
@@ -2944,11 +2970,15 @@ impl Handle {
 	}
 
 	/// The newest object's ID, by its moq-transport object ID when the group carries one,
-	/// else its frame index; `None` before the first frame.
-	pub(crate) fn last_object(&self) -> Option<u64> {
+	/// else its frame index; `None` before the first frame. A terminal object does not
+	/// count: a publisher's Largest never names the END_OF_GROUP it sends past the last.
+	pub(crate) fn last_data_object(&self) -> Option<u64> {
 		let state = self.state.read();
 		match state.wire() {
-			Some(wire) => wire.last,
+			Some(wire) => match state.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
+				Some(relay) => relay.last_before_end,
+				None => wire.last,
+			},
 			None => (state.next_index as u64).checked_sub(1),
 		}
 	}
@@ -3388,6 +3418,30 @@ impl Handle {
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		settle(self.state.poll_ref(waiter, |state| state.poll_outcome()))
+	}
+
+	/// Poll until the group places `time` (see [`Self::unplaced_from`]): a frame past the time
+	/// puts its End past the time too, so it contains the time whatever it ends at. Fails with
+	/// the abort when the group aborts first, which proves nothing of where it ends.
+	pub(crate) fn poll_past(&self, waiter: &kio::Waiter, time: u64) -> Poll<Result<()>> {
+		let placed = |state: &GroupState| match state.places(time) {
+			true => Poll::Ready(Ok(())),
+			false => state.poll_outcome(),
+		};
+		Poll::Ready(match ready!(self.state.poll_ref(waiter, |state| placed(state))) {
+			Ok(outcome) => outcome,
+			Err(closed) => match placed(&closed) {
+				Poll::Ready(outcome) => outcome,
+				Poll::Pending => Err(Error::Dropped),
+			},
+		})
+	}
+
+	/// The first time the group can't place now, `None` once it finished: it places a time
+	/// it holds a timed frame past, which puts its End past the time too. An aborted copy
+	/// proves nothing of where its group ends.
+	pub(crate) fn unplaced_from(&self) -> Option<u64> {
+		self.state.read().unplaced_from()
 	}
 
 	/// Poll until the group is aborted, including by eviction and after it finished; ready
@@ -4118,7 +4172,6 @@ impl Consumer {
 		self.expiry.as_ref().map_or(
 			super::track::Asking {
 				priority: 0,
-				max_delay: None,
 				order: super::subscription::Order::Ascending,
 			},
 			|expiry| expiry.asking(),
@@ -4345,8 +4398,8 @@ impl Consumer {
 	/// once it does.
 	///
 	/// A publisher still writing the group polls this while it waits on its own transport,
-	/// which the group's reads cannot see: once the subscription's
-	/// [`Delay::max`](crate::track::Delay::max) expires the group, it abandons
+	/// which the group's reads cannot see: once the `max` of the live joins reaching it
+	/// ([`Start::Live`](crate::track::Start::Live)) expires the group, it abandons
 	/// the stream, even with every frame already read off. It abandons it too once
 	/// [`Self::poll_finished`] fails. Stays `true` once set.
 	#[cfg(any(feature = "async", test))]
@@ -5414,12 +5467,6 @@ pub struct Fetch {
 	/// Delivery priority for the fetched group's stream, higher first. Defaults to 0.
 	pub priority: i8,
 
-	/// Maximum age behind the live edge this caller accepts.
-	///
-	/// `None` applies only the publisher's max age. An explicit value can
-	/// tighten, but never relax, that bound.
-	pub max_delay: Option<std::time::Duration>,
-
 	/// Index of the first frame to fetch within the group. Defaults to 0, the whole group.
 	///
 	/// Only a route change sets it, filling the hole after a head another route already
@@ -5435,12 +5482,6 @@ impl Fetch {
 	/// Set the delivery priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
-		self
-	}
-
-	/// Limit how far behind the live edge the fetched group may fall.
-	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
-		self.max_delay = Some(max_delay);
 		self
 	}
 }
@@ -5930,10 +5971,8 @@ mod test {
 	fn draining_a_parked_group_does_not_lock_the_backlog() {
 		let broadcast = super::super::broadcast::Producer::new(Default::default());
 		let track = broadcast.create_track("parked", track::Info::timed()).unwrap();
-		let mut subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
-		);
+		let mut subscriber =
+			track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
 		let groups: Vec<_> = (0..3)
 			.map(|key| {
 				let mut group = track.create_group(Info { start: key }).unwrap();
@@ -6280,6 +6319,46 @@ mod test {
 				"a reader keeps its place"
 			);
 		}
+	}
+
+	/// A head adopted into a copy that already holds its terminal object, and no frame,
+	/// leaves the head's last object as the newest data object, not the terminal one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_adopted_head_below_a_terminal_object_is_the_last_data() {
+		let head = Head {
+			content: None,
+			start: 0,
+			first_object: true,
+			entries: vec![
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"a")).into(), 0),
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"b")).into(), 0),
+			],
+			compressed: false,
+		};
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
+		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		tail.start_at(2).unwrap();
+		tail.set_wire(Wire {
+			sparse: false,
+			first_object: false,
+			first_id: 2,
+			extensions: false,
+			has_end: true,
+			fetchable: true,
+			last: None,
+		})
+		.unwrap();
+		tail.set_end_object(super::super::object::Fields {
+			id: 2,
+			properties: Default::default(),
+		})
+		.unwrap();
+		assert_eq!(tail.handle.last_data_object(), None, "no data object yet");
+		tail.handle.adopt_head(&head);
+		assert_eq!(tail.handle.state.read().offset, 0, "the head is adopted");
+		assert_eq!(tail.handle.last_data_object(), Some(1));
 	}
 
 	#[test]
@@ -6635,6 +6714,35 @@ mod test {
 			assert_eq!(frame.payload, Bytes::from(vec![i as u8; 4]));
 		}
 		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A group places a time once it holds a frame past it or finishes, never by aborting: an
+	/// aborted copy may have lost the End its group was sent with.
+	#[test]
+	fn a_group_places_a_time_only_once_it_passes_it_or_finishes() {
+		let frame = |producer: &mut Producer, millis| {
+			producer
+				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from_static(b"x"))
+				.unwrap();
+		};
+		let mut open = Info { start: 1000 }.produce();
+		assert_eq!(open.handle().unplaced_from(), Some(0), "no frame");
+		frame(&mut open, 1000);
+		assert_eq!(open.handle().unplaced_from(), Some(1000));
+		frame(&mut open, 1800);
+		assert_eq!(open.handle().unplaced_from(), Some(1800), "places 1700, not 1800");
+
+		let mut aborted = Info { start: 1000 }.produce();
+		frame(&mut aborted, 1000);
+		let handle = aborted.handle();
+		aborted.abort(Error::Cancel).unwrap();
+		assert_eq!(handle.unplaced_from(), Some(1000), "aborted");
+
+		let mut finished = Info { start: 1000 }.produce();
+		frame(&mut finished, 1000);
+		let handle = finished.handle();
+		drop(finished.finish().unwrap());
+		assert_eq!(handle.unplaced_from(), None, "finished");
 	}
 
 	/// A finished group is still aborted once its frames are released to free memory (the
@@ -8013,7 +8121,6 @@ mod test {
 		fn asking(&self) -> crate::model::track::Asking {
 			crate::model::track::Asking {
 				priority: 0,
-				max_delay: None,
 				order: crate::model::subscription::Order::Ascending,
 			}
 		}

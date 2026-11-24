@@ -10,6 +10,7 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, manual, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Tail } from "./tail.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Ordered } from "./track.ts";
@@ -34,7 +35,7 @@ async function session(protocol: string) {
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote
 		.track("video")
-		.subscribe({ delay: { max: MAX_DELAY } })
+		.subscribe(withMax({ delay: { max: MAX_DELAY } }))
 		.ordered();
 
 	return {
@@ -58,7 +59,7 @@ async function readAll(reader: Ordered): Promise<string[]> {
 	}
 }
 
-// moq-lite carries the end in SUBSCRIBE_FINISH as soon as it is declared, so a subscriber
+// moq-lite carries the end in SUBSCRIBE_END as soon as it is declared, so a subscriber
 // learns it while the last group is still to come.
 test.each([Lite.ALPN_05, Lite.ALPN_06])(
 	"%s: an end declared ahead of the live edge reaches the subscriber",

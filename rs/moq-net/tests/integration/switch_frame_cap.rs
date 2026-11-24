@@ -5,6 +5,7 @@
 //! up to, and caps its subscription through `A` at that same frame, so neither link carries a
 //! frame of group 0 the other does, and `E`'s reader gets each frame once.
 
+use crate::WithMax as _;
 use crate::route_change::{link, payload, priced_link, produce_origin, settle, timed};
 use crate::support::harness::MockPair;
 
@@ -52,7 +53,7 @@ async fn a_switch_mid_group_sends_each_frame_over_one_route() {
 		.await
 		.unwrap()
 		.unwrap();
-	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+	let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 	let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
 	let mut group0 = track.append_next().unwrap();

@@ -1,14 +1,16 @@
 import { Container } from "@moq/hang";
 import type * as Moq from "@moq/net";
 import { Error as NetError } from "@moq/net";
-import type { Effect, Getter } from "@moq/signals";
+import { type Effect, type Getter, type GetterInit, getter } from "@moq/signals";
 
 /**
- * Open a media subscription, joining live at its min delay, with its delay on the initial request
- * and its max on every update. The serving hop starts the live join that far behind the live edge,
- * so a cold join, a replacement, or a fallback arrives with its buffer full rather than replaying
- * the retained backlog. An update keeps the ranges first subscribed: a changed range resolves
- * again, which would place the join anew and skip media buffered behind it.
+ * Open a media subscription, joining live at its min delay, with its priority and delay on the
+ * initial request, and its priority and max on every update. The serving hop starts the live join
+ * that far behind the live edge, so a cold join, a replacement, or a fallback arrives with its buffer
+ * full rather than replaying the retained backlog. An update keeps each live join's lag and retunes
+ * only its max (see `Container.update`): a changed lag resolves again, which would place the join
+ * anew and skip media
+ * buffered behind it.
  *
  * @internal
  */
@@ -17,22 +19,21 @@ export function subscribeMedia(
 	props: {
 		broadcast: Moq.Broadcast.Consumer;
 		track: string;
-		priority: number;
+		priority: GetterInit<number>;
 		delay: Getter<Container.Delay>;
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
-	const { ranges } = Container.subscription(props.delay.peek());
-	const subscription = (delay: Container.Delay) => ({
-		priority: props.priority,
-		delay: Container.subscription(delay).delay,
-		ranges,
-	});
-	const subscriber = props.broadcast.track(props.track).subscribe(subscription(props.delay.peek()));
+	const priority = getter(props.priority);
+	const subscriber = props.broadcast
+		.track(props.track)
+		.subscribe(Container.subscription(props.delay.peek(), { priority: priority.peek() }));
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		subscriber.update(subscription(inner.get(props.delay)));
+		const asked = { priority: inner.get(priority) };
+		const delay = inner.get(props.delay);
+		subscriber.update(Container.update(delay, subscriber.subscription.peek() ?? {}, asked));
 	});
 
 	return subscriber;
