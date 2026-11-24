@@ -8,8 +8,7 @@
 diff --git a/rs/moq-net/src/reconnect.rs b/rs/moq-net/src/reconnect.rs
 --- a/rs/moq-net/src/reconnect.rs
 +++ b/rs/moq-net/src/reconnect.rs
-@@ -1309,8 +1309,9 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
- 	fn closed(&mut self, now: Instant, err: Error, healthy: bool, url: &Url) {
+@@ -1310,7 +1310,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
  		let err = E::from(err);
  		self.failure = Some(err.clone());
  		// Connecting once, the session ending ends the policy with its close reason.
