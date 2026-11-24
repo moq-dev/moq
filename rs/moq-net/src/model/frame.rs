@@ -1546,8 +1546,8 @@ pub struct Consumer {
 enum Resume {
 	/// Nothing: a failure ends the read.
 	None,
-	/// Handed out still arriving as frame `frame` of group `key`, which a flight of the group
-	/// from it continues once the pool evicts the copy.
+	/// Handed out still arriving as frame `frame` of group `key`, or read through a front whose
+	/// copy the pool evicted, which a flight of the group from it continues.
 	Arriving { key: u64, frame: u64 },
 	/// A front's logical track, across route changes, with this frame's index in its group.
 	Route(Box<(super::resume::Recover, u64)>),
@@ -1630,11 +1630,21 @@ impl Consumer {
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
+			let evicted = failed.is_some() && self.evicted();
 			let (route, frame, index) = match &mut self.resume {
 				Resume::None => return res,
 				Resume::Route(route) => {
 					let (recover, index) = &mut **route;
 					if !recover.wants(failed.as_ref(), waiter) {
+						// The pool's eviction is no route's doing, so a flight continues the frame,
+						// as it does one read off its own track.
+						if evicted {
+							self.resume = Resume::Arriving {
+								key: recover.key(),
+								frame: *index,
+							};
+							continue;
+						}
 						return res;
 					}
 					if self.state.read().sparse() {
@@ -1664,14 +1674,9 @@ impl Consumer {
 						Poll::Pending => return self.poll_expired_or(waiter, Poll::Pending),
 					}
 				}
-				// Only the pool's eviction: any other failure is the group's own. A flight asks
-				// from the frame's ordinal, which names the frame only on a dense copy.
+				// Only the pool's eviction: any other failure is the group's own.
 				Resume::Arriving { .. } | Resume::Flight(_) => {
-					let evicted = {
-						let state = self.state.read();
-						state.outcome.evicted() && !state.sparse()
-					};
-					if failed.is_none() || !evicted || flown {
+					if !evicted || flown {
 						return res;
 					}
 					let Some(refly) = self.flight() else {
@@ -1705,6 +1710,13 @@ impl Consumer {
 			self.state = frame.state;
 			self.source = frame.source;
 		}
+	}
+
+	/// Whether the pool evicted this frame's copy, which a flight continues only when dense:
+	/// a flight asks from the frame's ordinal, which names the frame only on a dense copy.
+	fn evicted(&self) -> bool {
+		let state = self.state.read();
+		state.outcome.evicted() && !state.sparse()
 	}
 
 	/// `Old` once the drift budget gives up on a stalled read, else `res`.

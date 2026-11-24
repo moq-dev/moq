@@ -3665,6 +3665,11 @@ impl Clone for Recover {
 }
 
 impl Recover {
+	/// The group it carries.
+	pub(super) fn key(&self) -> u64 {
+		self.key
+	}
+
 	/// Whether to look past the copy being read: it stalled, closed short, or failed with a
 	/// verdict on the group while a newer route serves, or it failed delivering the group, or
 	/// it closed short on a route that failed since, which the front is to replace. A route
@@ -4586,6 +4591,61 @@ mod test {
 			sub.poll_finished(&kio::Waiter::noop()).map(|result| result.unwrap()),
 			Poll::Ready(end)
 		);
+	}
+
+	/// A frame read through a front, still arriving when the pool evicts the serving copy,
+	/// reads the rest of its bytes from a flight of the group from that frame: the eviction is
+	/// no route's doing, so no route continues it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_routed_frame_evicted_while_arriving_resumes_on_a_flight() {
+		let noop = kio::Waiter::noop();
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let source = copy();
+		let requests = source.requests();
+		routes.serve(source.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let live = source.create_group(group::Info { start: 0 }).unwrap();
+		let handle = live.handle();
+		let payload = bytes::Bytes::from(vec![7; 16]);
+		let info = crate::frame::Info {
+			size: payload.len() as u64,
+			timestamp: ts(0),
+		};
+		let mut arriving = live.create_frame(info).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		let mut group = recv(&mut sub);
+		let Poll::Ready(Ok(Some(mut frame))) = group.poll_next_frame(&noop) else {
+			panic!("the arriving frame");
+		};
+		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(chunk))) if chunk == payload[..2]));
+		handle.shed_all();
+
+		let res = frame.poll_read_chunk(&noop);
+		assert!(
+			res.is_pending(),
+			"boarding a flight: {:?}",
+			res.map(|res| res.map(|_| ()))
+		);
+		let fill = match requests.poll_requested_fill(&noop) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("a flight is asked"),
+		};
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
+		let flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		let mut flying = flight.create_frame(info).unwrap();
+		flying.write(payload.clone()).unwrap();
+		let mut rest = Vec::new();
+		loop {
+			match frame.poll_read_chunk(&noop) {
+				Poll::Ready(Ok(Some(chunk))) => rest.extend_from_slice(&chunk),
+				Poll::Ready(Ok(None)) => break,
+				other => panic!("the rest of the frame: {:?}", other.map(|res| res.map(|_| ()))),
+			}
+		}
+		assert_eq!(rest, payload[2..], "past the bytes already read");
+		drop(arriving);
 	}
 
 	/// The serving copy failing to deliver is no verdict on the track's end: the end waits for
